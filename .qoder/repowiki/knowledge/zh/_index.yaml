@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-07-29T15:00:31Z"
+exported_at: "2026-07-30T02:39:30Z"
 modules:
     "":
-        dir_name: YawnBot 机器人项目根配置
-        title: YawnBot 机器人项目根配置
+        dir_name: YawnBot 项目根目录与构建配置
+        title: YawnBot 项目根目录与构建配置
         scope:
             - .env.dev
             - .env.prod
