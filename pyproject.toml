@@ -14,6 +14,7 @@ dependencies = [
     "nonebot-plugin-alconna>=0.62.1",
     "nonebot-plugin-orm[sqlite]>=0.8.3",
     "nonebot-plugin-htmlkit>=0.1.0rc5",
+    "openai>=2.50.0",
 ]
 
 [project.optional-dependencies]
