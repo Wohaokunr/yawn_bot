@@ -2,11 +2,11 @@ schema_version: 1
 module_path: ""
 title: YawnBot 机器人项目根配置
 scope:
-    - README.md
-    - pyproject.toml
-    - .gitignore
     - .env.dev
     - .env.prod
+    - .gitignore
+    - README.md
+    - pyproject.toml
     - uv.lock
 source_files: []
 depends_on: []

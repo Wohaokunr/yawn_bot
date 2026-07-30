@@ -3,17 +3,17 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-07-29T12:19:40Z"
+exported_at: "2026-07-29T15:00:31Z"
 modules:
     "":
         dir_name: YawnBot 机器人项目根配置
         title: YawnBot 机器人项目根配置
         scope:
-            - README.md
-            - pyproject.toml
-            - .gitignore
             - .env.dev
             - .env.prod
+            - .gitignore
+            - README.md
+            - pyproject.toml
             - uv.lock
         source_files: []
         children: []
