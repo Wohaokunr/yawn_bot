@@ -3,15 +3,22 @@
 存储每一轮对话中的用户消息与 AI 回复。
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from nonebot_plugin_orm import Model
-from sqlalchemy import BigInteger, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
     from .chat_session import ChatSession
+
+_BJ_TZ = timezone(timedelta(hours=8))
+
+
+def _now_bj() -> datetime:
+    """返回当前北京时间（naive），与项目时间约定一致。"""
+    return datetime.now(_BJ_TZ).replace(tzinfo=None)
 
 
 class ChatMessage(Model):
@@ -37,9 +44,7 @@ class ChatMessage(Model):
     # 消息正文
     content: Mapped[str] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(),
-    )
+    created_at: Mapped[datetime] = mapped_column(default=_now_bj)
 
     # 软删除标记
     is_deleted: Mapped[bool] = mapped_column(default=False)

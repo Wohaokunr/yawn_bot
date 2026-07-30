@@ -5,7 +5,9 @@
 - [README.md](file://README.md)
 - [pyproject.toml](file://pyproject.toml)
 - [__init__.py](file://src/plugins/yawn_core/__init__.py)
-- [ai_call.py](file://src/plugins/yawn_core/ai_call.py)
+- [ai_chat.py](file://src/plugins/yawn_core/ai_chat.py)
+- [chat_manage.py](file://src/plugins/yawn_core/chat_manage.py)
+- [permission.py](file://src/plugins/yawn_core/permission.py)
 - [checkin.py](file://src/plugins/yawn_core/checkin.py)
 - [friend_approve.py](file://src/plugins/yawn_core/friend_approve.py)
 - [info.py](file://src/plugins/yawn_core/info.py)
@@ -16,7 +18,17 @@
 - [checkin_record.py](file://src/plugins/yawn_core/data_models/checkin_record.py)
 - [checkin_user.py](file://src/plugins/yawn_core/data_models/checkin_user.py)
 - [friend_request.py](file://src/plugins/yawn_core/data_models/friend_request.py)
+- [chat_message.py](file://src/plugins/yawn_core/data_models/chat_message.py)
+- [chat_session.py](file://src/plugins/yawn_core/data_models/chat_session.py)
 </cite>
+
+## 更新摘要
+**所做更改**   
+- 将AI调用模块从简单的ai_call.py重构为完整的ai_chat.py系统
+- 新增流式响应处理和多轮对话支持
+- 新增会话管理和交互式聊天界面（chat_manage.py）
+- 新增数据模型：ChatMessage和ChatSession
+- 原ai_call.py已被删除，新功能提供更强大的AI对话能力
 
 ## 目录
 1. [简介](#简介)
@@ -31,14 +43,15 @@
 10. [附录](#附录)
 
 ## 简介
-本项目是基于 NoneBot2 的机器人插件集合，围绕“签到、好友申请审批、用户信息展示、在线状态追踪”等能力构建。其中 AI 能力通过 OpenAI SDK 接入第三方兼容接口，用于对话与响应生成。当前仓库已包含 AI 调用入口与示例代码，同时具备完善的数据模型与 ORM 支持，便于后续扩展更多 AI 驱动的功能（如智能回复、自动摘要、意图识别等）。
+本项目是基于 NoneBot2 的机器人插件集合，围绕"签到、好友申请审批、用户信息展示、在线状态追踪"等能力构建。其中 AI 能力通过 OpenAI SDK 接入小米 MiMo 模型服务，提供完整的对话系统，包括流式响应处理、多轮对话支持、会话管理和交互式聊天界面。当前仓库已包含完整的 AI 对话系统与示例代码，同时具备完善的数据模型与 ORM 支持，便于后续扩展更多 AI 驱动的功能（如智能回复、自动摘要、意图识别等）。
 
 ## 项目结构
 - 插件根目录：src/plugins/yawn_core
   - 模块入口：__init__.py 负责加载子模块
-  - AI 调用：ai_call.py 封装 OpenAI 客户端与示例调用
+  - **AI对话系统**：ai_chat.py 封装完整的对话功能，支持流式响应和多轮对话
+  - **聊天管理**：chat_manage.py 提供交互式对话管理界面
   - 业务模块：checkin.py、friend_approve.py、info.py、presence.py
-  - 数据模型：data_models 下定义 ORM 实体与关系
+  - 数据模型：data_models 下定义 ORM 实体与关系，新增 chat_message.py 和 chat_session.py
 - 配置与依赖：pyproject.toml 声明 nonebot2 生态与 openai 依赖
 - 运行说明：README.md 提供基础启动流程
 
@@ -49,32 +62,42 @@ B --> C["签到 checkin.py"]
 B --> D["好友审批 friend_approve.py"]
 B --> E["个人信息 info.py"]
 B --> F["在线追踪 presence.py"]
-B --> G["AI 调用 ai_call.py"]
-C --> H["数据模型 data_models/*"]
-D --> H
-E --> H
-F --> H
-G --> I["OpenAI SDK"]
+B --> G["AI对话 ai_chat.py"]
+B --> H["聊天管理 chat_manage.py"]
+C --> I["数据模型 data_models/*"]
+D --> I
+E --> I
+F --> I
+G --> J["OpenAI SDK"]
+G --> K["SQLite数据库"]
+H --> K
 ```
 
 **图表来源** 
-- [__init__.py:1-5](file://src/plugins/yawn_core/__init__.py#L1-L5)
-- [checkin.py:1-147](file://src/plugins/yawn_core/checkin.py#L1-L147)
-- [friend_approve.py:1-152](file://src/plugins/yawn_core/friend_approve.py#L1-L152)
-- [info.py:1-40](file://src/plugins/yawn_core/info.py#L1-L40)
-- [presence.py:1-103](file://src/plugins/yawn_core/presence.py#L1-L103)
-- [ai_call.py:1-57](file://src/plugins/yawn_core/ai_call.py#L1-L57)
+- [__init__.py:1-25](file://src/plugins/yawn_core/__init__.py#L1-L25)
+- [ai_chat.py:1-350](file://src/plugins/yawn_core/ai_chat.py#L1-L350)
+- [chat_manage.py:1-535](file://src/plugins/yawn_core/chat_manage.py#L1-L535)
 
 **章节来源**
 - [README.md:1-13](file://README.md#L1-L13)
 - [pyproject.toml:1-124](file://pyproject.toml#L1-L124)
-- [__init__.py:1-5](file://src/plugins/yawn_core/__init__.py#L1-L5)
+- [__init__.py:1-25](file://src/plugins/yawn_core/__init__.py#L1-L25)
 
 ## 核心组件
-- AI 调用模块（ai_call.py）
-  - 使用 OpenAI SDK 初始化客户端，指向兼容 v1 接口的服务地址
-  - 提供一次对话请求示例，并预留 responses API 的注释用法
-  - 可作为后续业务模块的统一 AI 调用入口
+- **AI对话模块（ai_chat.py）**
+  - 基于小米 MiMo 模型的完整对话系统
+  - 支持流式接收 AI 回复并分段发送
+  - 多轮对话（自动加载历史上下文）
+  - 对话记录持久化至 SQLite
+  - 预留群聊接口（group_id 字段）
+- **聊天管理模块（chat_manage.py）**
+  - 交互式对话管理面板
+  - 查看历史对话、删除对话/消息
+  - 普通用户管理自己的对话记录
+  - 超级管理员可查看、删除、修改任意用户的聊天记录
+- **权限控制模块（permission.py）**
+  - 功能注册表与权限解析链
+  - 支持用户级、群组级和全局功能开关
 - 签到模块（checkin.py）
   - 基于命令触发，记录用户签到历史、累计天数、连续天数与积分
   - 使用数据库唯一约束防止重复签到
@@ -86,194 +109,150 @@ G --> I["OpenAI SDK"]
   - 事件预处理，自动维护用户与群组的首次/最后交互时间，必要时拉取群名
 
 **章节来源**
-- [ai_call.py:1-57](file://src/plugins/yawn_core/ai_call.py#L1-L57)
+- [ai_chat.py:1-350](file://src/plugins/yawn_core/ai_chat.py#L1-L350)
+- [chat_manage.py:1-535](file://src/plugins/yawn_core/chat_manage.py#L1-L535)
+- [permission.py:1-226](file://src/plugins/yawn_core/permission.py#L1-L226)
 - [checkin.py:1-147](file://src/plugins/yawn_core/checkin.py#L1-L147)
 - [friend_approve.py:1-152](file://src/plugins/yawn_core/friend_approve.py#L1-L152)
 - [info.py:1-40](file://src/plugins/yawn_core/info.py#L1-L40)
 - [presence.py:1-103](file://src/plugins/yawn_core/presence.py#L1-L103)
 
 ## 架构总览
-整体采用“事件驱动 + ORM 数据层 + 外部 AI 服务”的分层架构：
+整体采用"事件驱动 + ORM 数据层 + 外部 AI 服务"的分层架构：
 - 事件层：OneBot V11 消息与请求事件进入 NoneBot 路由
 - 处理层：各模块 on_command/on_request/event_preprocessor 处理器执行业务逻辑
 - 数据层：SQLAlchemy 模型与 nonebot-plugin-orm 会话管理
-- 外部服务：OpenAI 兼容接口进行文本生成
+- 外部服务：小米 MiMo 兼容接口进行文本生成
 
 ```mermaid
 sequenceDiagram
 participant U as "用户"
 participant OB as "OneBot 适配器"
 participant NB as "NoneBot 框架"
-participant P as "插件处理器<br/>presence/checkin/friend_approve/info"
+participant AC as "AI对话处理器"
+participant CM as "聊天管理处理器"
 participant DB as "ORM 会话/数据库"
-participant AI as "OpenAI 兼容服务"
-U->>OB : 发送消息/发起好友申请
+participant AI as "小米 MiMo 服务"
+U->>OB : 发送 /对话 <内容>
 OB->>NB : 事件分发
-NB->>P : 匹配处理器
-P->>DB : 读取/写入用户与群组数据
-alt 需要AI能力
-P->>AI : 构造请求并获取响应
-AI-->>P : 返回文本结果
-end
-P-->>U : 回复消息/完成操作
+NB->>AC : 匹配对话处理器
+AC->>DB : 获取/创建会话
+AC->>DB : 保存用户消息
+AC->>DB : 加载历史消息
+AC->>AI : 构造请求并获取流式响应
+AI-->>AC : 返回分段内容
+AC->>DB : 保存AI回复
+AC-->>U : 分段发送回复
+U->>OB : 发送 /聊天管理
+OB->>NB : 事件分发
+NB->>CM : 匹配管理处理器
+CM->>DB : 查询会话和消息
+CM-->>U : 展示管理界面
 ```
 
 **图表来源** 
-- [presence.py:16-103](file://src/plugins/yawn_core/presence.py#L16-L103)
-- [checkin.py:22-147](file://src/plugins/yawn_core/checkin.py#L22-L147)
-- [friend_approve.py:23-152](file://src/plugins/yawn_core/friend_approve.py#L23-L152)
-- [info.py:8-40](file://src/plugins/yawn_core/info.py#L8-L40)
-- [ai_call.py:1-57](file://src/plugins/yawn_core/ai_call.py#L1-L57)
+- [ai_chat.py:217-296](file://src/plugins/yawn_core/ai_chat.py#L217-L296)
+- [chat_manage.py:150-184](file://src/plugins/yawn_core/chat_manage.py#L150-L184)
 
 ## 详细组件分析
 
-### AI 调用模块（ai_call.py）
-- 设计要点
-  - 集中管理 OpenAI 客户端实例，统一 base_url 与 api_key
-  - 提供一次对话的示例调用，便于快速验证连通性
-  - 预留 responses API 的注释用法，为后续多轮记忆与结构化输出做准备
-- 使用建议
-  - 将 client 暴露为模块级单例，供其他模块复用
-  - 对网络异常与超时进行捕获与重试
-  - 根据业务需求选择 completions 或 responses 接口
+### AI对话模块（ai_chat.py）
+- **设计要点**
+  - 集中管理 AsyncOpenAI 客户端实例，指向小米 MiMo 服务地址
+  - 实现流式响应处理，支持长文本分段发送
+  - 多轮对话支持，自动加载最近20条消息作为历史上下文
+  - 会话管理，支持私聊场景（群聊预留）
+  - 软删除机制，支持重置对话
+- **核心功能**
+  - 流式接收 AI 回复并分段发送（每段不超过1500字符）
+  - 自动会话创建和历史消息加载
+  - 错误处理和重试机制
+  - 权限控制集成
 
 ```mermaid
 classDiagram
-class OpenAIClient {
+class AsyncOpenAIClient {
 +base_url : string
 +api_key : string
-+completions.create()
-+responses.create()
++chat.completions.create()
 }
-class YawnBotAI {
-+client : OpenAIClient
-+call(messages)
-+call_responses(input, previous_id)
+class YawnChatSystem {
++_client : AsyncOpenAIClient
++_MAX_HISTORY_MESSAGES : int
++_SEGMENT_CHAR_LIMIT : int
++_SYSTEM_PROMPT : string
++handle_ai_chat(event, session, args)
++handle_new_session(event, session)
++_get_or_create_session(session, user_id, group_id)
++_load_history(session, session_id)
++_stream_chat(history)
++_split_message(text)
 }
-YawnBotAI --> OpenAIClient : "使用"
+YawnChatSystem --> AsyncOpenAIClient : "使用"
 ```
 
 **图表来源** 
-- [ai_call.py:1-57](file://src/plugins/yawn_core/ai_call.py#L1-L57)
+- [ai_chat.py:41-44](file://src/plugins/yawn_core/ai_chat.py#L41-L44)
+- [ai_chat.py:217-296](file://src/plugins/yawn_core/ai_chat.py#L217-L296)
 
 **章节来源**
-- [ai_call.py:1-57](file://src/plugins/yawn_core/ai_call.py#L1-L57)
+- [ai_chat.py:1-350](file://src/plugins/yawn_core/ai_chat.py#L1-L350)
 
-### 签到模块（checkin.py）
-- 业务流程
-  - 解析时间与随机奖励
-  - 确保 BotUser/BotGroup/UserGroup 存在并更新活跃时间
-  - 插入签到记录，利用唯一约束避免重复
-  - 更新 CheckinUser 汇总（总天数、连续天数、积分）
-- 关键特性
-  - 时区：中国标准时间
-  - 幂等：同一用户同群同日仅能签到一次
-  - 反馈：返回成功信息与统计结果
+### 聊天管理模块（chat_manage.py）
+- **功能特性**
+  - 交互式管理面板，支持会话列表查看和消息详情浏览
+  - 会话删除和单条消息删除功能
+  - 权限分级：普通用户管理自己的记录，超管管理任意用户记录
+  - 友好的命令行界面，支持序号操作和快捷指令
+- **交互流程**
+  - 主菜单显示所有会话列表
+  - 输入序号进入对话详情视图
+  - 支持删除指定消息或返回上级菜单
+  - 超管命令支持查看和删除任意用户数据
 
 ```mermaid
 flowchart TD
-Start(["开始"]) --> Tz["获取当前时间(北京时间)"]
-Tz --> Rand["随机奖励 5~15"]
-Rand --> EnsureUsers["确保用户/群组/关系存在"]
-EnsureUsers --> InsertRecord["插入签到记录"]
-InsertRecord --> UniqueCheck{"是否重复?"}
-UniqueCheck --> |是| Rollback["回滚并提示已签到"]
-UniqueCheck --> |否| UpdateStats["更新签到汇总"]
-UpdateStats --> Finish["返回成功信息"]
-Rollback --> End(["结束"])
-Finish --> End
+Start(["开始"]) --> Menu["显示会话列表"]
+Menu --> Choice{"用户选择"}
+Choice --> |序号| Detail["进入对话详情"]
+Choice --> |删除| Delete["删除会话"]
+Choice --> |取消| Exit["退出"]
+Detail --> MsgChoice{"消息操作"}
+MsgChoice --> |删除消息| DelMsg["删除指定消息"]
+MsgChoice --> |返回| Back["返回列表"]
+MsgChoice --> |取消| Exit
+Delete --> Confirm["确认删除"]
+Confirm --> Done["完成"]
+Back --> Menu
+Exit --> End(["结束"])
+Done --> End
 ```
 
 **图表来源** 
-- [checkin.py:22-147](file://src/plugins/yawn_core/checkin.py#L22-L147)
+- [chat_manage.py:150-184](file://src/plugins/yawn_core/chat_manage.py#L150-L184)
+- [chat_manage.py:225-308](file://src/plugins/yawn_core/chat_manage.py#L225-L308)
 
 **章节来源**
-- [checkin.py:1-147](file://src/plugins/yawn_core/checkin.py#L1-L147)
+- [chat_manage.py:1-535](file://src/plugins/yawn_core/chat_manage.py#L1-L535)
 
-### 好友审批模块（friend_approve.py）
-- 事件与命令
-  - 监听好友申请事件，持久化 flag、comment、status
-  - 提供 /approve、/reject、/pending 三个命令
-- 权限控制
-  - 仅超级用户可执行审批与列表命令
-- 数据流
-  - 申请记录覆盖更新，保证每个用户只有一条待处理记录
-
-```mermaid
-sequenceDiagram
-participant U as "用户"
-participant OB as "OneBot"
-participant FA as "好友审批处理器"
-participant DB as "数据库"
-participant SU as "超级用户"
-U->>OB : 添加好友申请
-OB->>FA : 触发 on_request
-FA->>DB : 写入/更新申请记录
-FA-->>SU : 私聊通知待审批
-SU->>FA : /approve 或 /reject
-FA->>DB : 更新状态为 approved/rejected
-FA-->>SU : 返回处理结果
-```
-
-**图表来源** 
-- [friend_approve.py:23-152](file://src/plugins/yawn_core/friend_approve.py#L23-L152)
+### 权限控制模块（permission.py）
+- **权限体系**
+  - 功能注册表：统一管理所有可用功能及其显示名称
+  - 三级权限检查：超级管理员 > 用户级覆盖 > 群组设置 > 默认开启
+  - 支持私聊和群聊不同场景的权限控制
+- **核心功能**
+  - require_feature 装饰器用于权限验证
+  - 动态功能开关，支持运行时配置
+  - 权限状态查询和管理命令支持
 
 **章节来源**
-- [friend_approve.py:1-152](file://src/plugins/yawn_core/friend_approve.py#L1-L152)
-
-### 个人信息模块（info.py）
-- 功能
-  - 聚合 BotUser 与 UserGroup 的信息，包括昵称、好感度、经验、金币、首次/最后活跃时间
-- 数据来源
-  - 直接查询 ORM 模型，无额外网络请求
-
-```mermaid
-flowchart TD
-A["收到 /info 命令"] --> B["查询 BotUser"]
-B --> C["查询 UserGroup"]
-C --> D["拼接展示文本"]
-D --> E["返回消息"]
-```
-
-**图表来源** 
-- [info.py:8-40](file://src/plugins/yawn_core/info.py#L8-L40)
-
-**章节来源**
-- [info.py:1-40](file://src/plugins/yawn_core/info.py#L1-L40)
-
-### 在线追踪模块（presence.py）
-- 功能
-  - 事件预处理，自动创建/更新用户与群组记录
-  - 首次见到群组时尝试拉取群名
-- 关键点
-  - 区分私聊与群聊场景
-  - 失败容错：拉取群名失败不影响主流程
-
-```mermaid
-flowchart TD
-S["事件预处理"] --> Type{"是否消息事件?"}
-Type --> |否| Exit["退出"]
-Type --> |是| EnsureUser["确保 BotUser 存在"]
-EnsureUser --> GroupCheck{"是否群消息?"}
-GroupCheck --> |否| Commit["提交事务"]
-GroupCheck --> |是| EnsureGroup["确保 BotGroup 存在"]
-EnsureGroup --> FetchName{"是否需要拉取群名?"}
-FetchName --> |是| CallAPI["调用 get_group_info"]
-CallAPI --> UpdateName["更新群名"]
-FetchName --> |否| EnsureUserGroup["确保 UserGroup 存在"]
-UpdateName --> EnsureUserGroup
-EnsureUserGroup --> Commit
-Commit --> Exit
-```
-
-**图表来源** 
-- [presence.py:16-103](file://src/plugins/yawn_core/presence.py#L16-L103)
-
-**章节来源**
-- [presence.py:1-103](file://src/plugins/yawn_core/presence.py#L1-L103)
+- [permission.py:1-226](file://src/plugins/yawn_core/permission.py#L1-L226)
 
 ### 数据模型（data_models/*）
-- 实体关系概览
+- **新增对话相关模型**
+  - ChatSession：对话会话实体，支持标题、时间戳和软删除
+  - ChatMessage：对话消息实体，支持角色标记和内容存储
+- **现有模型保持不变**
   - BotUser：全局用户
   - BotGroup：群组
   - UserGroup：用户与群组的关系（含群内属性）
@@ -289,6 +268,23 @@ string nickname
 datetime first_interaction_at
 datetime last_interaction_at
 int affinity
+}
+CHATSESSION {
+int id PK
+bigint user_id
+bigint group_id
+string title
+datetime created_at
+datetime updated_at
+boolean is_deleted
+}
+CHATMESSAGE {
+int id PK
+bigint session_id FK
+string role
+text content
+datetime created_at
+boolean is_deleted
 }
 BOTGROUP {
 bigint group_id PK
@@ -331,6 +327,8 @@ string status
 datetime created_at
 datetime processed_at
 }
+BOTUSER ||--o{ CHATSESSION : "拥有"
+CHATSESSION ||--o{ CHATMESSAGE : "包含"
 BOTUSER ||--o{ USERGROUP : "拥有"
 BOTGROUP ||--o{ USERGROUP : "包含"
 USERGROUP ||--o{ CHECKINRECORD : "产生"
@@ -338,6 +336,8 @@ USERGROUP ||--o| CHECKINUSER : "汇总"
 ```
 
 **图表来源** 
+- [chat_session.py:18-58](file://src/plugins/yawn_core/data_models/chat_session.py#L18-L58)
+- [chat_message.py:17-50](file://src/plugins/yawn_core/data_models/chat_message.py#L17-L50)
 - [bot_user.py:12-32](file://src/plugins/yawn_core/data_models/bot_user.py#L12-L32)
 - [bot_group.py:12-29](file://src/plugins/yawn_core/data_models/bot_group.py#L12-L29)
 - [user_group.py:15-61](file://src/plugins/yawn_core/data_models/user_group.py#L15-L61)
@@ -346,6 +346,8 @@ USERGROUP ||--o| CHECKINUSER : "汇总"
 - [friend_request.py:9-36](file://src/plugins/yawn_core/data_models/friend_request.py#L9-L36)
 
 **章节来源**
+- [chat_session.py:1-59](file://src/plugins/yawn_core/data_models/chat_session.py#L1-L59)
+- [chat_message.py:1-51](file://src/plugins/yawn_core/data_models/chat_message.py#L1-L51)
 - [bot_user.py:1-32](file://src/plugins/yawn_core/data_models/bot_user.py#L1-L32)
 - [bot_group.py:1-29](file://src/plugins/yawn_core/data_models/bot_group.py#L1-L29)
 - [user_group.py:1-61](file://src/plugins/yawn_core/data_models/user_group.py#L1-L61)
@@ -356,7 +358,7 @@ USERGROUP ||--o| CHECKINUSER : "汇总"
 ## 依赖关系分析
 - 运行时依赖
   - nonebot2 生态：onebot 适配器、ORM、APScheduler、LocalStore、Alconna、HTMLKit、Status、Sentry
-  - openai：用于调用兼容 v1 的 AI 服务
+  - openai>=2.50.0：用于调用小米 MiMo 兼容 v1 接口的 AI 服务
 - 插件加载
   - pyproject.toml 中声明插件目录与内置插件
   - 插件入口 __init__.py 显式导入子模块以触发注册
@@ -371,34 +373,45 @@ NB --> ALCONNA["nonebot-plugin-alconna"]
 NB --> HTML["nonebot-plugin-htmlkit"]
 NB --> STATUS["nonebot-plugin-status"]
 NB --> SENTRY["nonebot-plugin-sentry"]
-APP["YawnBot 插件"] --> OPENAI["openai"]
+APP["YawnBot 插件"] --> OPENAI["openai>=2.50.0"]
+APP --> SQLITE["sqlite3"]
 ```
 
 **图表来源** 
-- [pyproject.toml:1-124](file://pyproject.toml#L1-L124)
+- [pyproject.toml:7-18](file://pyproject.toml#L7-L18)
 
 **章节来源**
 - [pyproject.toml:1-124](file://pyproject.toml#L1-L124)
-- [__init__.py:1-5](file://src/plugins/yawn_core/__init__.py#L1-L5)
+- [__init__.py:1-25](file://src/plugins/yawn_core/__init__.py#L1-L25)
 
 ## 性能考虑
 - 数据库层面
   - 使用唯一约束与外键约束保障一致性与完整性
   - 签到记录按天唯一，避免重复写入
+  - 对话消息使用索引优化查询性能
 - 网络层面
-  - AI 调用应增加超时与重试策略，避免阻塞事件处理
-  - 批量操作尽量合并事务提交，减少 IO 次数
+  - AI 调用使用流式响应，减少内存占用
+  - 长文本分段发送，避免消息过长
+  - 增加超时与重试策略，避免阻塞事件处理
 - 并发与异步
   - 所有处理器均为异步，注意避免在回调中进行同步阻塞操作
   - 对高频事件（如 presence）保持轻量逻辑，避免复杂计算
-
-[本节为通用指导，不直接分析具体文件]
+  - 会话管理采用懒加载，减少不必要的数据库查询
 
 ## 故障排查指南
 - AI 调用失败
-  - 检查 base_url 与 api_key 是否正确
+  - 检查 base_url 与 api_key 是否正确配置
   - 查看网络连通性与代理设置
   - 捕获异常并记录日志，定位错误码与消息
+  - 确认小米 MiMo 服务可用性
+- 对话功能异常
+  - 检查会话创建和消息存储是否正常
+  - 确认权限配置是否正确
+  - 验证数据库连接与会话生命周期
+- 聊天管理无效
+  - 确认用户权限和操作范围
+  - 检查会话ID和消息ID的有效性
+  - 验证软删除标记的状态
 - 签到重复
   - 确认数据库唯一约束生效
   - 检查事务提交与回滚路径
@@ -410,18 +423,19 @@ APP["YawnBot 插件"] --> OPENAI["openai"]
   - 检查数据库连接与会话生命周期
 
 **章节来源**
-- [ai_call.py:1-57](file://src/plugins/yawn_core/ai_call.py#L1-L57)
+- [ai_chat.py:263-271](file://src/plugins/yawn_core/ai_chat.py#L263-L271)
+- [chat_manage.py:243-266](file://src/plugins/yawn_core/chat_manage.py#L243-L266)
 - [checkin.py:100-147](file://src/plugins/yawn_core/checkin.py#L100-L147)
 - [friend_approve.py:66-152](file://src/plugins/yawn_core/friend_approve.py#L66-L152)
 - [presence.py:16-103](file://src/plugins/yawn_core/presence.py#L16-L103)
 
 ## 结论
-本仓库已具备完善的机器人插件骨架与数据模型，AI 能力通过 OpenAI SDK 接入，便于后续扩展智能对话、自动化任务与数据分析等功能。建议在现有基础上：
-- 将 ai_call.py 抽象为统一的 AI 服务层，提供重试、缓存与限流
+本仓库已具备完善的机器人插件骨架与数据模型，AI 能力通过 OpenAI SDK 接入小米 MiMo 服务，提供了完整的对话系统，包括流式响应、多轮对话、会话管理和交互式界面。建议在现有基础上：
+- 将 ai_chat.py 抽象为统一的 AI 服务层，提供重试、缓存与限流
 - 结合 presence 与 info 模块，实现个性化 AI 回复与上下文感知
 - 引入定时任务（APScheduler）进行数据清理与报表生成
-
-[本节为总结性内容，不直接分析具体文件]
+- 扩展群聊对话功能，支持多用户协作场景
+- 增加对话质量评估和用户反馈机制
 
 ## 附录
 - 启动与开发
@@ -429,6 +443,8 @@ APP["YawnBot 插件"] --> OPENAI["openai"]
   - 在 src/plugins 下编写插件，nb run --reload 启动调试
 - 文档参考
   - NoneBot 官方文档：https://nonebot.dev/
+  - OpenAI SDK 文档：https://platform.openai.com/docs
+  - 小米 MiMo API 文档：https://token-plan-cn.xiaomimimo.com/v1
 
 **章节来源**
 - [README.md:1-13](file://README.md#L1-L13)

@@ -4,15 +4,22 @@
 每个用户在同一场景下可拥有多个会话。
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
 from nonebot_plugin_orm import Model
-from sqlalchemy import BigInteger, String, func
+from sqlalchemy import BigInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
     from .chat_message import ChatMessage
+
+_BJ_TZ = timezone(timedelta(hours=8))
+
+
+def _now_bj() -> datetime:
+    """返回当前北京时间（naive），与项目时间约定一致。"""
+    return datetime.now(_BJ_TZ).replace(tzinfo=None)
 
 
 class ChatSession(Model):
@@ -40,9 +47,7 @@ class ChatSession(Model):
         nullable=True,
     )
 
-    created_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(),
-    )
+    created_at: Mapped[datetime] = mapped_column(default=_now_bj)
     updated_at: Mapped[Optional[datetime]] = mapped_column(
         nullable=True,
     )

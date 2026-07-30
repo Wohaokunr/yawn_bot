@@ -10,13 +10,47 @@ from nonebot.adapters.onebot.v11 import (
 )
 from nonebot.log import logger
 from nonebot.params import CommandArg
-from nonebot.plugin import on_command, on_request
+from nonebot.plugin import PluginMetadata, on_command, on_request
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import select
 
 from .data_models.friend_request import FriendRequest
 
 _CST = timezone(timedelta(hours=8))
+
+__plugin_meta__ = PluginMetadata(
+    name="好友审批",
+    description="好友申请审批管理",
+    usage="发送 /pending 查看待审批列表",
+    extra={
+        "commands": [
+            {
+                "name": "approve",
+                "aliases": ["同意"],
+                "description": "同意好友申请",
+                "feature": None,
+                "scope": "all",
+                "superuser": True,
+            },
+            {
+                "name": "reject",
+                "aliases": ["拒绝"],
+                "description": "拒绝好友申请",
+                "feature": None,
+                "scope": "all",
+                "superuser": True,
+            },
+            {
+                "name": "pending",
+                "aliases": ["待审批"],
+                "description": "查看待审批好友申请列表",
+                "feature": None,
+                "scope": "all",
+                "superuser": True,
+            },
+        ],
+    },
+)
 
 superusers = get_driver().config.superusers
 num = int(next(iter(superusers)))

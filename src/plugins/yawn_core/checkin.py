@@ -8,7 +8,7 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     MessageSegment,
 )
-from nonebot.dependencies import Dependent
+from nonebot.plugin import PluginMetadata
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy.exc import IntegrityError
 
@@ -18,6 +18,24 @@ from .data_models.checkin_record import CheckinRecord
 from .data_models.checkin_user import CheckinUser
 from .data_models.user_group import UserGroup
 from .permission import require_feature
+
+__plugin_meta__ = PluginMetadata(
+    name="签到",
+    description="每日签到获取积分",
+    usage="发送 /签到",
+    extra={
+        "commands": [
+            {
+                "name": "签到",
+                "aliases": [],
+                "description": "每日签到获取积分",
+                "feature": "checkin",
+                "scope": "group",
+                "superuser": False,
+            },
+        ],
+    },
+)
 
 logger.info("签到模块已加载")
 
@@ -41,10 +59,10 @@ def _get_group_nickname(event: GroupMessageEvent) -> Optional[str]:
 
 
 @checkin.handle()
-async def handle_checkin(
+async def handle_checkin(  # noqa: PLR0915
     event: GroupMessageEvent,
     session: async_scoped_session,
-    _perm: Dependent = require_feature("checkin"),
+    _perm: None = require_feature("checkin"),
 ) -> None:
     now = datetime.now(CHECKIN_TIMEZONE)
     today = now.date()
@@ -137,13 +155,20 @@ async def handle_checkin(
         checkin_user.streak_days = 1
     checkin_user.last_checkin_date = today
 
+    # commit 前缓存显示值，避免 commit 后访问 ORM 属性触发 MissingGreenlet
+    total_days = checkin_user.total_days
+    streak_days = checkin_user.streak_days
+    points = checkin_user.points
+
+    await session.commit()
+
     logger.info(
         f"用户 {event.user_id} 在群 {event.group_id} 签到成功，获得 {reward} 积分"
     )
     await checkin.finish(
         MessageSegment.at(event.user_id)
         + f"签到成功！你今天获得了 {reward} 积分~\n"
-        + f"累计签到 {checkin_user.total_days} 天，"
-        + f"连续签到 {checkin_user.streak_days} 天，"
-        + f"当前积分 {checkin_user.points}。"
+        + f"累计签到 {total_days} 天，"
+        + f"连续签到 {streak_days} 天，"
+        + f"当前积分 {points}。"
     )
