@@ -78,22 +78,16 @@ async def check_feature_permission(
     """检查用户是否有权使用指定功能。
 
     群聊解析链（优先级从高到低）：
-      1. 超级管理员 → 始终放行
-      2. UserFeature（群内用户级覆盖）→ 有记录则按其 enabled 值
-      3. GroupFeature（群级别开关）→ 有记录则按其 enabled 值
-      4. 无记录 → 默认放行
+      1. UserFeature（群内用户级覆盖）→ 有记录则按其 enabled 值
+      2. GroupFeature（群级别开关）→ 有记录则按其 enabled 值
+      3. 无记录 → 默认放行
 
     私聊解析链：
-      1. 超级管理员 → 始终放行
-      2. GlobalUserFeature（全局用户开关）→ 有记录则按其 enabled 值
-      3. 无记录 → 默认放行
-    """
-    from nonebot import get_driver
+      1. GlobalUserFeature（全局用户开关）→ 有记录则按其 enabled 值
+      2. 无记录 → 默认放行
 
-    # 超级管理员始终放行
-    superusers = get_driver().config.superusers
-    if str(user_id) in superusers:
-        return True
+    注意：超级管理员同样受功能开关约束。
+    """
 
     if group_id is not None:
         # 群聊：先查用户级覆盖
@@ -139,9 +133,12 @@ def require_feature(feature: str) -> Dependent:
         async def handler(
             event: GroupMessageEvent,
             session: async_scoped_session,
-            _=require_feature("checkin"),
+            _perm: None = require_feature("checkin"),
         ) -> None:
             ...
+
+    注意：类型注解必须为 None（checker 返回值），
+    不可使用 Dependent，否则 Pydantic 校验会报错。
     """
 
     async def _checker(
@@ -176,18 +173,9 @@ async def get_user_feature_status(
     返回 [(feature_key, display_name, enabled, source), ...]
     source 取值：用户覆盖 / 群设置 / 默认开启 / 全局设置
     """
-    from nonebot import get_driver
-
-    superusers = get_driver().config.superusers
-    is_su = str(user_id) in superusers
-
     results: list[tuple[str, str, bool, str]] = []
 
     for feat_key, display in FEATURE_REGISTRY.items():
-        if is_su:
-            results.append((feat_key, display, True, "超级管理员"))
-            continue
-
         source = "默认开启"
         enabled = True
 

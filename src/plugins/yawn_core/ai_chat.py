@@ -4,43 +4,109 @@
 - 流式接收 AI 回复并分段发送
 - 多轮对话（自动加载历史上下文）
 - 对话记录持久化至 SQLite
+- 对话模式：持续聊天，无需重复输入命令
 - 预留群聊接口（group_id 字段）
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Union
 
-from nonebot import logger
+from nonebot import get_plugin_config, logger
 from nonebot.adapters.onebot.v11 import (
+    Bot,
     GroupMessageEvent,
     Message,
     MessageEvent,
     MessageSegment,
 )
-from nonebot.dependencies import Dependent
 from nonebot.params import CommandArg
-from nonebot.plugin import on_command
-from nonebot_plugin_orm import async_scoped_session
+from nonebot.plugin import PluginMetadata, on_command, on_message
+from nonebot.rule import Rule
+from nonebot_plugin_orm import async_scoped_session, get_session
 from openai import AsyncOpenAI, OpenAIError
+from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import async_scoped_session as _sa_scoped_session
 
+from .chat_state import (
+    ensure_worker,
+    enter_mode,
+    exit_mode,
+    get_state,
+    is_in_mode,
+    stop_worker,
+)
 from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
-from .permission import require_feature
+from .permission import check_feature_permission, require_feature
+from .reply_chain import (
+    format_chain_for_prompt,
+    resolve_reply_chain,
+)
+
+# handler 的 DI 注入 scoped session，worker 用 get_session() 得普通会话；
+# 辅助函数两者皆收
+_DbSession = Union[AsyncSession, _sa_scoped_session[AsyncSession]]
+
+__plugin_meta__ = PluginMetadata(
+    name="Yawn对话",
+    description="基于 AI 的智能对话",
+    usage=(
+        "发送 /对话 进入对话模式，直接聊天；"
+        "发送 /退出 退出对话。"
+        "也可 /对话 <内容> 一次性对话"
+    ),
+    extra={
+        "commands": [
+            {
+                "name": "Yawn对话",
+                "aliases": ["对话", "ai对话", "AI对话"],
+                "description": "AI智能对话",
+                "feature": "ai_chat",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
+                "name": "新对话",
+                "aliases": ["新建对话", "重置对话"],
+                "description": "重置对话上下文",
+                "feature": "ai_chat",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
+                "name": "退出",
+                "aliases": ["退出对话", "结束对话"],
+                "description": "退出对话模式",
+                "feature": "ai_chat",
+                "scope": "private",
+                "superuser": False,
+            },
+        ],
+    },
+)
 
 logger.info("Yawn对话模块已加载")
 
 # ── AI 客户端配置 ─────────────────────────────────────────
 
-_AI_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
-_AI_API_KEY = (
-    "REDACTED"
-)
-_AI_MODEL = "mimo-v2.5-pro"
+
+class AIChatConfig(BaseModel):
+    """AI 服务配置，字段从 .env / 环境变量读取。"""
+
+    ai_api_key: str  # 必填，缺失时启动即报错
+    ai_base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
+    ai_model: str = "mimo-v2.5-pro"
+    ai_max_tokens: int = 1024  # 单次生成的最大 token 数
+
+
+_ai_config = get_plugin_config(AIChatConfig)
 
 _client = AsyncOpenAI(
-    api_key=_AI_API_KEY,
-    base_url=_AI_BASE_URL,
+    api_key=_ai_config.ai_api_key,
+    base_url=_ai_config.ai_base_url,
 )
 
 # ── 对话参数 ──────────────────────────────────────────────
@@ -49,11 +115,16 @@ _client = AsyncOpenAI(
 _MAX_HISTORY_MESSAGES = 20
 # 单条消息最大字符数（超出则分段发送）
 _SEGMENT_CHAR_LIMIT = 1500
+# 流式分段发送：已生成文本达到该长度且段落/整句成型即发出
+_STREAM_FLUSH_MIN = 200
+# 流式读取空闲超时（秒）：超过该时长无新分块则中止
+_STREAM_IDLE_TIMEOUT = 60
 # 系统提示词
 _SYSTEM_PROMPT = (
-    "你是 YawnBot，一个友好、有趣的 QQ 聊天机器人。"
-    "请用简洁自然的中文回复用户。"
+    "你是 YawnBot，一个友好、有趣的 QQ 聊天机器人。请用简洁自然的中文回复用户。"
 )
+# 时间间隔阈值（秒），超过此值在提示词中注入时间
+_GAP_THRESHOLD = 20 * 60  # 20 分钟
 
 # ── 北京时间工具 ──────────────────────────────────────────
 
@@ -81,6 +152,13 @@ new_session_cmd = on_command(
     block=True,
 )
 
+exit_mode_cmd = on_command(
+    "退出",
+    aliases={"退出对话", "结束对话"},
+    priority=5,
+    block=True,
+)
+
 
 # ── 辅助函数 ──────────────────────────────────────────────
 
@@ -103,9 +181,7 @@ def _split_message(text: str) -> list[str]:
         if cut <= 0:
             # 其次在句号/问号/感叹号处切割
             for sep in ("。", "！", "？", ".", "!", "?"):
-                cut = remaining.rfind(
-                    sep, 0, _SEGMENT_CHAR_LIMIT
-                )
+                cut = remaining.rfind(sep, 0, _SEGMENT_CHAR_LIMIT)
                 if cut > 0:
                     cut += 1  # 包含分隔符
                     break
@@ -114,13 +190,13 @@ def _split_message(text: str) -> list[str]:
             cut = _SEGMENT_CHAR_LIMIT
 
         segments.append(remaining[:cut])
-        remaining = remaining[cut:]
+        remaining = remaining[cut:].lstrip("\n")
 
     return segments
 
 
 async def _get_or_create_session(
-    session: async_scoped_session,
+    session: _DbSession,
     user_id: int,
     group_id: Optional[int] = None,
 ) -> ChatSession:
@@ -148,21 +224,17 @@ async def _get_or_create_session(
         session.add(chat_session)
         # 仅 flush 获取自增 id，最终由 handler 统一 commit
         await session.flush()
-        logger.info(
-            f"为用户 {user_id} 创建新对话会话 "
-            f"#{chat_session.id}"
-        )
+        logger.info(f"为用户 {user_id} 创建新对话会话 #{chat_session.id}")
 
     return chat_session
 
 
 async def _load_history(
-    session: async_scoped_session,
+    session: _DbSession,
     session_id: int,
+    time_prefix: str = "",
 ) -> list[dict[str, str]]:
     """加载会话历史消息，构建 OpenAI messages 格式。"""
-    # 依赖 SQLAlchemy autoflush：刚 add 的用户消息
-    # 会在执行 select 前自动 flush，从而包含在结果中
     stmt = (
         select(ChatMessage)
         .where(
@@ -177,78 +249,185 @@ async def _load_history(
 
     # 反转为时间正序
     messages = list(reversed(messages))
-
-    history: list[dict[str, str]] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-    ]
-    history.extend(
-        {"role": msg.role, "content": msg.content}
-        for msg in messages
+    # 截断后首条可能是 assistant 消息，部分 API 会拒绝
+    # 非 user 开头的对话，丢弃前导非 user 消息
+    first_user = next(
+        (i for i, msg in enumerate(messages) if msg.role == "user"),
+        None,
     )
+    messages = messages[first_user:] if first_user is not None else []
+
+    system_content = _SYSTEM_PROMPT
+    if time_prefix:
+        system_content = f"{time_prefix}\n{system_content}"
+    history: list[dict[str, str]] = [
+        {"role": "system", "content": system_content},
+    ]
+    history.extend({"role": msg.role, "content": msg.content} for msg in messages)
     return history
 
 
-async def _stream_chat(
-    history: list[dict[str, str]],
-) -> str:
-    """调用 AI 接口（流式），返回完整回复文本。"""
-    chunks: list[str] = []
-
-    stream = await _client.chat.completions.create(
-        model=_AI_MODEL,
-        messages=history,  # type: ignore[arg-type]
-        stream=True,
-    )
-
-    async for chunk in stream:
-        # 部分兼容 API 在流结束时发送空 choices chunk
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta.content:
-            chunks.append(delta.content)
-
-    return "".join(chunks)
-
-
-# ── 事件处理 ──────────────────────────────────────────────
-
-
-@ai_chat_cmd.handle()
-async def handle_ai_chat(
+async def _stream_and_send(  # noqa: C901, PLR0912, PLR0915
+    bot: Bot,
     event: MessageEvent,
-    session: async_scoped_session,
-    args: Message = CommandArg(),
-    _perm: Dependent = require_feature("ai_chat"),
+    history: list[dict[str, str]],
+) -> Optional[str]:
+    """流式调用 AI，边生成边发送已完成段落，返回完整回复文本。
+
+    段落/整句成型即发送，用户无需等待全文生成。
+    无有效内容（调用失败或超时且无任何生成）时发送致歉提示并返回 None。
+    致歉提示仅发送、不持久化，避免污染对话上下文。
+    """
+
+    async def _flush(piece: str) -> None:
+        piece = piece.strip()
+        if not piece:
+            return
+        for seg in _split_message(piece):
+            await bot.send(event, MessageSegment.text(seg))
+
+    full: list[str] = []  # 全量文本，用于持久化
+    pending = ""  # 已生成但尚未发送的文本
+    timed_out = False
+
+    try:
+        stream = await _client.chat.completions.create(
+            model=_ai_config.ai_model,
+            messages=history,  # type: ignore[arg-type]
+            stream=True,
+            max_tokens=_ai_config.ai_max_tokens,
+        )
+    except OpenAIError as e:
+        logger.error(f"AI 调用失败: {e}")
+        await bot.send(
+            event,
+            MessageSegment.text("抱歉，AI 服务暂时不可用，请稍后再试~"),
+        )
+        return None
+
+    try:
+        chunk_iter = stream.__aiter__()
+        while True:
+            try:
+                # 逐分块空闲超时：卡死可及时发现，长回复不受总时长误杀
+                chunk = await asyncio.wait_for(
+                    chunk_iter.__anext__(),
+                    timeout=_STREAM_IDLE_TIMEOUT,
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.error("AI 流式响应超时（无新分块）")
+                timed_out = True
+                break
+
+            # 部分兼容 API 在流结束时发送空 choices chunk
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if not delta.content:
+                continue
+
+            full.append(delta.content)
+            pending += delta.content
+
+            # 段落成型（出现空行且已有足够长度）→ 立即发送
+            idx = pending.rfind("\n\n")
+            if idx != -1 and idx + 2 >= _STREAM_FLUSH_MIN:
+                await _flush(pending[: idx + 2])
+                pending = pending[idx + 2 :]
+            elif len(pending) >= _SEGMENT_CHAR_LIMIT:
+                # 硬上限兜底
+                await _flush(pending)
+                pending = ""
+            elif len(pending) >= _STREAM_FLUSH_MIN and pending[-1] in "。！？!?":
+                # 整句成型即发送
+                await _flush(pending)
+                pending = ""
+    except OpenAIError as e:
+        logger.error(f"AI 流中断: {e}")
+    finally:
+        await stream.close()
+
+    # 发送剩余尾部文本
+    await _flush(pending)
+
+    text = "".join(full).strip()
+    if not text:
+        await bot.send(
+            event,
+            MessageSegment.text(
+                "抱歉，AI 响应超时了，请稍后再试~"
+                if timed_out
+                else "抱歉，AI 服务暂时不可用，请稍后再试~"
+            ),
+        )
+        return None
+    if timed_out:
+        await bot.send(event, MessageSegment.text("（生成超时，以上为部分内容）"))
+    return text
+
+
+# ── 核心处理函数 ──────────────────────────────────────────
+
+
+async def _process_chat(
+    bot: Bot,
+    event: MessageEvent,
+    user_id: int,
+    session: _DbSession,
+    user_input: str,
 ) -> None:
-    """处理用户对话请求。"""
-    # 群聊中暂不可用（预留）
+    """处理一次对话：保存消息、调用 AI、流式发送回复。"""
+    # 群聊拦截
     if isinstance(event, GroupMessageEvent):
-        await ai_chat_cmd.finish(
-            "群聊对话功能即将上线，请先在私聊中使用~"
+        await bot.send(
+            event,
+            MessageSegment.text("群聊对话功能即将上线，请先在私聊中使用~"),
         )
+        return
 
-    user_input = args.extract_plain_text().strip()
+    # 非文本消息（图片/语音等）守卫：
+    # 避免空内容入库并发送给 AI
     if not user_input:
-        await ai_chat_cmd.finish(
-            "用法：/对话 <你想说的话>\n"
-            "例如：/对话 今天天气怎么样？\n"
-            "发送 /新对话 可重置对话上下文"
-        )
-
-    user_id = int(event.get_user_id())
-    group_id: Optional[int] = None
+        await bot.send(event, MessageSegment.text("暂时只能处理文本消息哦~"))
+        return
 
     # 获取或创建会话
-    chat_session = await _get_or_create_session(
-        session, user_id, group_id
-    )
+    chat_session = await _get_or_create_session(session, user_id, None)
 
-    # 保存用户消息
+    # 时间间隔检测
+    time_prefix = ""
+    if chat_session.updated_at:
+        gap = (_now_bj() - chat_session.updated_at).total_seconds()
+        if gap > _GAP_THRESHOLD:
+            now = _now_bj()
+            time_prefix = (
+                f"[系统提示：当前时间为 "
+                f"{now:%Y-%m-%d %H:%M}，"
+                f"距离上一次对话已超过{_GAP_THRESHOLD // 60}分钟]"
+            )
+
+    # 解析 reply 链
+    reply_context = ""
+    try:
+        nodes = await resolve_reply_chain(bot, event)
+        if nodes:
+            reply_context = format_chain_for_prompt(nodes)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"reply 链解析失败: {e}")
+
+    # 构建增强内容
+    enhanced_content = user_input
+    if reply_context:
+        enhanced_content = f"{reply_context}\n\n[用户当前消息]: {user_input}"
+
+    # 保存用户消息并先行提交：
+    # 即使后续 AI 调用失败或被取消，用户消息也不丢失
     user_msg = ChatMessage(
         session_id=chat_session.id,
         role="user",
-        content=user_input,
+        content=enhanced_content,
         created_at=_now_bj(),
     )
     session.add(user_msg)
@@ -257,42 +436,85 @@ async def handle_ai_chat(
     if chat_session.title is None:
         chat_session.title = user_input[:50]
 
-    # 加载历史并调用 AI
-    history = await _load_history(session, chat_session.id)
-
-    try:
-        reply_text = await _stream_chat(history)
-    except OpenAIError as e:
-        # OpenAIError 覆盖 SDK 所有异常，包括网络超时
-        # （内部包装为 APIConnectionError，是 OpenAIError 子类）
-        logger.error(f"AI 调用失败: {e}")
-        await ai_chat_cmd.finish(
-            "抱歉，AI 服务暂时不可用，请稍后再试~"
-        )
-
-    if not reply_text.strip():
-        reply_text = "（AI 未返回有效回复）"
-
-    # 保存 AI 回复
-    ai_msg = ChatMessage(
-        session_id=chat_session.id,
-        role="assistant",
-        content=reply_text,
-        created_at=_now_bj(),
-    )
-    session.add(ai_msg)
-
     # 更新会话时间
     chat_session.updated_at = _now_bj()
     await session.commit()
 
-    # 分段发送回复
-    segments = _split_message(reply_text)
-    for seg in segments:
-        await ai_chat_cmd.send(
-            MessageSegment.text(seg)
+    # 加载历史并流式调用 AI（边生成边发送）
+    history = await _load_history(session, chat_session.id, time_prefix)
+    reply_text = await _stream_and_send(bot, event, history)
+
+    # 仅持久化有效回复；致歉提示不入库，避免污染上下文
+    if reply_text:
+        ai_msg = ChatMessage(
+            session_id=chat_session.id,
+            role="assistant",
+            content=reply_text,
+            created_at=_now_bj(),
+        )
+        session.add(ai_msg)
+        await session.commit()
+
+
+async def _worker_process_chat(
+    bot: Bot,
+    event: MessageEvent,
+    user_id: int,
+    override_text: Optional[str] = None,
+) -> None:
+    """Worker 回调：使用独立 DB 会话处理消息。
+
+    override_text 非 None 时作为用户输入
+    （命令事件的纯文本含命令前缀，需覆盖）。
+    """
+    async with get_session() as session:
+        if override_text is not None:
+            user_input = override_text
+        else:
+            user_input = event.get_plaintext().strip()
+        await _process_chat(bot, event, user_id, session, user_input)
+
+
+# ── 事件处理 ──────────────────────────────────────────────
+
+
+@ai_chat_cmd.handle()
+async def handle_ai_chat(
+    bot: Bot,
+    event: MessageEvent,
+    session: async_scoped_session,
+    args: Message = CommandArg(),
+    _perm: None = require_feature("ai_chat"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """处理对话命令：进入模式或一次性对话。"""
+    if isinstance(event, GroupMessageEvent):
+        await ai_chat_cmd.finish("群聊对话功能即将上线，请先在私聊中使用~")
+
+    user_id = int(event.get_user_id())
+    user_input = args.extract_plain_text().strip()
+
+    if not user_input:
+        # 无参数 → 进入对话模式
+        if is_in_mode(user_id):
+            await ai_chat_cmd.finish(
+                "你已经在对话模式中啦~\n直接发消息即可聊天\n发送 /退出 退出对话模式"
+            )
+        enter_mode(user_id)
+        ensure_worker(user_id, _worker_process_chat)
+        await ai_chat_cmd.finish(
+            "已进入对话模式，直接发消息即可聊天~\n发送 /退出 退出对话模式"
         )
 
+    # 有参数且已在对话模式 → 投入 worker 队列串行处理，
+    # 避免与在途消息并发写同一会话
+    state = get_state(user_id)
+    if state is not None and state.in_mode:
+        await state.queue.put((bot, event, user_input))
+        ensure_worker(user_id, _worker_process_chat)
+        await ai_chat_cmd.finish()
+
+    # 有参数且非模式 → 一次性对话（向后兼容）
+    await _process_chat(bot, event, user_id, session, user_input)
     await ai_chat_cmd.finish()
 
 
@@ -300,15 +522,16 @@ async def handle_ai_chat(
 async def handle_new_session(
     event: MessageEvent,
     session: async_scoped_session,
-    _perm: Dependent = require_feature("ai_chat"),
+    _perm: None = require_feature("ai_chat"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     """重置对话：将当前会话标记删除并新建。"""
     if isinstance(event, GroupMessageEvent):
-        await new_session_cmd.finish(
-            "群聊对话功能即将上线，请先在私聊中使用~"
-        )
+        await new_session_cmd.finish("群聊对话功能即将上线，请先在私聊中使用~")
 
     user_id = int(event.get_user_id())
+
+    # 先停掉 worker，避免在途消息写进即将软删除的会话
+    await stop_worker(user_id)
 
     # 软删除当前会话
     stmt = (
@@ -340,10 +563,82 @@ async def handle_new_session(
     new_sess_id = new_sess.id
     await session.commit()
 
-    logger.info(
-        f"用户 {user_id} 重置了对话，新会话 #{new_sess_id}"
-    )
+    logger.info(f"用户 {user_id} 重置了对话，新会话 #{new_sess_id}")
+
+    # 仍在对话模式则重启 worker：
+    # 队列剩余消息在新会话上继续处理
+    if is_in_mode(user_id):
+        ensure_worker(user_id, _worker_process_chat)
+
     await new_session_cmd.finish(
         "已开启全新对话，之前的上下文已清除~\n"
-        "发送 /对话 <内容> 开始聊天吧！"
+        "发送 /对话 进入对话模式，或 /对话 <内容> 聊天！"
     )
+
+
+@exit_mode_cmd.handle()
+async def handle_exit_mode(
+    event: MessageEvent,
+) -> None:
+    """退出对话模式。"""
+    # 退出是无害操作，不受功能开关约束：
+    # 被禁用的用户也必须能退出对话模式
+    if isinstance(event, GroupMessageEvent):
+        await exit_mode_cmd.finish("群聊对话功能即将上线，请先在私聊中使用~")
+    user_id = int(event.get_user_id())
+    if exit_mode(user_id):
+        await exit_mode_cmd.finish(
+            "已退出对话模式~\n对话记录已保存，下次 /对话 继续聊！"
+        )
+    await exit_mode_cmd.finish("你当前不在对话模式中哦~")
+
+
+# ── 对话模式消息监听 ─────────────────────────────────────
+
+
+async def _is_chat_mode_msg(
+    event: MessageEvent,
+) -> bool:
+    """判断是否为对话模式下的普通消息。"""
+    if isinstance(event, GroupMessageEvent):
+        return False
+    user_id = int(event.get_user_id())
+    if not is_in_mode(user_id):
+        return False
+    # 命令消息不拦截
+    text = event.get_plaintext().strip()
+    return not text.startswith("/")
+
+
+chat_mode_listener = on_message(
+    rule=Rule(_is_chat_mode_msg),
+    priority=0,
+    block=True,
+)
+
+
+@chat_mode_listener.handle()
+async def _handle_chat_mode_msg(
+    bot: Bot,
+    event: MessageEvent,
+    session: async_scoped_session,
+) -> None:
+    """对话模式下将普通消息投入队列。"""
+    user_id = int(event.get_user_id())
+
+    # 权限检查：功能关闭时自动退出模式，
+    # 防止绕过功能开关持续消耗 AI
+    if not await check_feature_permission(user_id, None, "ai_chat", session):
+        exit_mode(user_id)
+        logger.info(f"用户 {user_id} 无 ai_chat 权限，已自动退出对话模式")
+        await bot.send(
+            event,
+            MessageSegment.text("功能「Yawn对话」当前未开启哦~ 已为你退出对话模式"),
+        )
+        return
+
+    state = get_state(user_id)
+    if state is None:
+        return
+    await state.queue.put((bot, event, None))
+    ensure_worker(user_id, _worker_process_chat)

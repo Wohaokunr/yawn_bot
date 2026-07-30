@@ -1,9 +1,11 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from nonebot import get_bot, logger
 from nonebot.adapters import Event
 from nonebot.message import event_preprocessor
 from nonebot_plugin_orm import async_scoped_session
+from sqlalchemy.exc import OperationalError
 
 from .data_models.bot_group import BotGroup
 from .data_models.bot_user import BotUser
@@ -99,4 +101,16 @@ async def track_user(event: Event, session: async_scoped_session):
             if nickname:
                 user_group.group_nickname = nickname
 
-    await session.commit()
+    # 重试提交，防止 SQLite 并发写锁导致 OperationalError
+    for attempt in range(3):
+        try:
+            await session.commit()
+            break
+        except OperationalError:
+            await session.rollback()
+            if attempt == 2:
+                logger.warning(
+                    f"track_user: 数据库写入失败(用户 {user_id})，已跳过"
+                )
+                return
+            await asyncio.sleep(0.1 * (attempt + 1))
