@@ -8,6 +8,7 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     MessageSegment,
 )
+from nonebot.dependencies import Dependent
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy.exc import IntegrityError
 
@@ -16,6 +17,7 @@ from .data_models.bot_user import BotUser
 from .data_models.checkin_record import CheckinRecord
 from .data_models.checkin_user import CheckinUser
 from .data_models.user_group import UserGroup
+from .permission import require_feature
 
 logger.info("签到模块已加载")
 
@@ -42,6 +44,7 @@ def _get_group_nickname(event: GroupMessageEvent) -> Optional[str]:
 async def handle_checkin(
     event: GroupMessageEvent,
     session: async_scoped_session,
+    _perm: Dependent = require_feature("checkin"),
 ) -> None:
     now = datetime.now(CHECKIN_TIMEZONE)
     today = now.date()

@@ -1,9 +1,11 @@
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
+from nonebot.dependencies import Dependent
 from nonebot_plugin_orm import async_scoped_session
 
 from .data_models.bot_user import BotUser
 from .data_models.user_group import UserGroup
+from .permission import require_feature
 
 info = on_command(
     "info", aliases={"个人信息", "我的信息", "用户信息"}, priority=5, block=True
@@ -11,7 +13,11 @@ info = on_command(
 
 
 @info.handle()
-async def handle_info(event: GroupMessageEvent, session: async_scoped_session) -> None:
+async def handle_info(
+    event: GroupMessageEvent,
+    session: async_scoped_session,
+    _perm: Dependent = require_feature("info"),
+) -> None:
     user_id = event.user_id
     group_id = event.group_id
 
