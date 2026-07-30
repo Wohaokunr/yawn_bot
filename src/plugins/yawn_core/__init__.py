@@ -1,5 +1,7 @@
 from . import (
     admin,
+    ai_chat,
+    chat_manage,
     checkin,
     friend_approve,
     info,
@@ -10,6 +12,8 @@ from . import (
 
 __all__ = [
     "admin",
+    "ai_chat",
+    "chat_manage",
     "checkin",
     "friend_approve",
     "info",

@@ -1,6 +1,8 @@
 from . import (
     bot_group,
     bot_user,
+    chat_message,
+    chat_session,
     checkin_record,
     checkin_user,
     friend_request,
@@ -13,6 +15,8 @@ from . import (
 __all__ = [
     "bot_group",
     "bot_user",
+    "chat_message",
+    "chat_session",
     "checkin_record",
     "checkin_user",
     "friend_request",
