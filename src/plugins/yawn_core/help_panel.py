@@ -87,15 +87,11 @@ def _collect_plugin_metadata() -> list[PluginMetadata]:
     from . import __path__ as pkg_path
 
     result: list[PluginMetadata] = []
-    for _importer, modname, ispkg in pkgutil.iter_modules(
-        pkg_path
-    ):
-        if ispkg:
-            continue  # 跳过 data_models 等子包
+    for _importer, modname, ispkg in pkgutil.iter_modules(pkg_path):
+        if ispkg and modname == "data_models":
+            continue  # 跳过内部子包；业务子包（如 yawn_werewolf）参与收集
         try:
-            mod = importlib.import_module(
-                f".{modname}", pkg_name
-            )
+            mod = importlib.import_module(f".{modname}", pkg_name)
         except Exception:  # noqa: BLE001
             continue
         meta = getattr(mod, "__plugin_meta__", None)
@@ -114,9 +110,7 @@ async def handle_help(
 ) -> None:
     """处理 /help 命令，展示当前用户可用的命令列表。"""
     user_id = int(event.get_user_id())
-    group_id: Optional[int] = getattr(
-        event, "group_id", None
-    )
+    group_id: Optional[int] = getattr(event, "group_id", None)
     if group_id is not None:
         group_id = int(group_id)
 
@@ -124,12 +118,8 @@ async def handle_help(
     is_su = str(user_id) in superusers
 
     # 1. 获取当前用户的功能权限状态
-    statuses = await get_user_feature_status(
-        user_id, group_id, session
-    )
-    enabled_features = {
-        key for key, _, enabled, _ in statuses if enabled
-    }
+    statuses = await get_user_feature_status(user_id, group_id, session)
+    enabled_features = {key for key, _, enabled, _ in statuses if enabled}
 
     # 2. 扫描包内子模块的 PluginMetadata，收集命令
     commands: list[dict] = []
