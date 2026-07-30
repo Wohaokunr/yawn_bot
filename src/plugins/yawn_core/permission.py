@@ -33,6 +33,7 @@ FEATURE_REGISTRY: dict[str, str] = {
     "checkin": "签到",
     "info": "个人信息",
     "ai_chat": "Yawn对话",
+    "werewolf": "狼人杀",
 }
 
 
