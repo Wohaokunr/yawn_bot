@@ -1,0 +1,186 @@
+# 入门模组「雨夜旧宅」：CoC 7版风格，1-6 人，时长约 30-60 分钟。
+# 调查员受遗嘱来信邀约，雨夜造访沈家旧宅，查明这家人失踪的真相。
+# 模组数据是 KP 工具调用的边界：KP 只能在本文件定义的场景/线索/
+# NPC/怪物/结局范围内行动，骰子与数值始终由系统结算。
+
+id: yuzhai_old_house
+name: 雨夜旧宅
+description: 一封来信将你们引向雨夜的沈家旧宅。这家人三个月前凭空消失，只有年迈的管家还守在宅中。
+min_players: 1
+max_players: 6
+difficulty: 入门
+
+opening: |
+  三周前，你们各自收到一封没有署名的信：「沈宅之事，非外人可解。雨夜候君，共窥真相。」信纸泛黄，带着一股霉味。
+  今夜大雨如注，你们沿着泥泞的山路，终于站在了沈家旧宅的门廊下。宅子黑洞洞的，只有门缝里透出一线昏黄的灯光。
+
+start_scene: porch
+
+scenes:
+  - id: porch
+    name: 门廊
+    narration: |
+      门廊的木柱已经朽烂，雨水顺着瓦当连成水帘。大门虚掩着，门缝里的灯光忽明忽暗。
+      门环上缠着一条褪色的白布——像是某种丧仪的遗留。
+    idle_narration: 雨声敲打门廊，宅子里静得能听见自己的心跳。
+    exits:
+      - to_scene: living_room
+        auto: true
+        narration: 你们推门而入，腐朽的门轴发出刺耳的呻吟。
+
+  - id: living_room
+    name: 客厅
+    narration: |
+      客厅比想象中宽敞。一位老人提着油灯迎上来——他是这宅子的管家周伯。
+      墙上挂着一幅巨大的全家福画像，画中人面目模糊，唯独站在角落的少年目光清晰得刺眼。
+      壁炉里还有余烬的微光，似乎不久前烧过什么东西。
+    idle_narration: 周伯提着油灯站在一旁，欲言又止。
+    npcs: [butler]
+    checks:
+      - id: portrait_san
+        skill: san
+        san_loss: "1/1d6"
+        once: true
+        priority: 1
+        triggers: [画像, 肖像, 全家福, 画]
+        success_text: 你们细看那幅全家福：画中每个人的脸都被针尖刺过，只剩少年的眼睛完好无损。一阵寒意爬上脊背，但你们稳住了心神。
+        failure_text: 你们细看那幅全家福：画中每个人的脸都被针尖刺过，只剩少年的眼睛完好无损——那双眼睛似乎正跟着你们转动。
+      - id: fireplace_search
+        skill: spot_hidden
+        difficulty: regular
+        once: true
+        triggers: [壁炉, 灰烬, 余烬, 炉灰, 烧]
+        success_text: 你们用火钳拨开灰烬，找到一角没有烧尽的纸页，上面的字迹还能辨认。
+        failure_text: 灰烬里只剩焦黑的碎屑，什么也没能找出来。
+        clue: torn_diary
+    exits:
+      - to_scene: study
+        keywords: [书房]
+        narration: 你们穿过客厅，推开侧面的书房门。
+      - to_scene: basement
+        keywords: [地下室, 地窖]
+        condition: clue:brass_key
+        narration: 黄铜钥匙在锁孔里艰涩地转了一圈，地下室的门开了。一股腐臭扑面而来。
+
+  - id: study
+    name: 书房
+    narration: |
+      书房里堆满了发霉的书册。书桌的抽屉上了锁，桌面的墨水瓶翻倒，墨迹像血一样淌了半张桌子。
+      邻居林女士不知何时跟了进来，站在门口不敢靠近：「我、我就是不放心你们……」
+    idle_narration: 窗外的雨更大了，书房里只有翻动书页的声音。
+    npcs: [neighbor]
+    checks:
+      - id: desk_search
+        skill: library
+        difficulty: regular
+        once: true
+        triggers: [书桌, 抽屉, 锁, 桌子, 书]
+        success_text: 你们撬开抽屉：里面有一把沉甸甸的黄铜钥匙，钥匙上刻着一个「窖」字。
+        failure_text: 抽屉锁得很结实，撬了半天纹丝不动。
+        clue: brass_key
+    exits:
+      - to_scene: living_room
+        keywords: [客厅]
+        narration: 你们回到客厅。
+
+  - id: basement
+    name: 地下室
+    narration: |
+      石阶又湿又滑，通向地下的黑暗。油灯的光照出满地啃噬过的碎骨，角落里蜷伏着一个佝偻的身影——
+      那东西缓缓转过头来：灰白的皮肤、没有嘴唇的牙床。是一只食尸鬼。
+    idle_narration: 食尸鬼在角落里低声嘶吼，指甲刮擦着石板。
+    monsters: [ghoul]
+    checks:
+      - id: basement_san
+        skill: san
+        san_loss: "1/1d8"
+        once: true
+        priority: 1
+        triggers: [食尸鬼, 尸体, 碎骨, 怪物, 看]
+        success_text: 眼前的怪物超出了常理的范畴，但你们强迫自己冷静下来，握紧了手中的武器。
+        failure_text: 眼前的怪物超出了常理的范畴，理智在腐臭与恐惧中剧烈动摇。
+      - id: rotten_stairs
+        skill: dodge
+        difficulty: hard
+        once: true
+        triggers: [楼梯, 木阶, 台阶]
+        success_text: 朽烂的木阶在脚下断裂，你们堪堪抓住了扶手。
+        failure_text: 朽烂的木阶在脚下断裂，你们摔了下去，被碎木划得鲜血淋漓。
+        damage_on_fail: "1d3"
+    exits:
+      - to_scene: living_room
+        keywords: [客厅, 上楼, 回去]
+        narration: 你们退回客厅，带上了地下室的门。
+
+npcs:
+  - id: butler
+    name: 周伯
+    public_desc: 年迈的管家，神情躲闪，一提到地下室就岔开话题。
+    persona: |
+      你是周伯，沈家旧宅的老管家，伺候沈家四十年。你忠厚、胆小、说话吞吞吐吐，
+      对沈家少爷怀有愧疚与怜悯。你希望来人能查明真相，又害怕他们真的下到地下室。
+      回复简短，像个受惊的老人，常以省略号开头。
+    knows:
+      - 沈家三个月前一夜之间全部失踪，只留下老爷临终前的一封信，信上让管家「候有缘人」。
+      - 地下室夜里总有奇怪的啃噬声，你从来不敢下去看。
+      - 老爷生前把地下室的钥匙看得比命重，那是一把黄铜钥匙，平日收在书房。
+      - 少爷病了很多年，老爷为了给他治病，往宅子里带过不少「古怪的东西」。
+    secrets:
+      - 你其实知道地下室里有一只食尸鬼，这三个月一直是你在偷偷喂它，因为它身上戴着少爷的长命锁。
+    fallback_line: ……老了，记不清了。
+
+  - id: neighbor
+    name: 林女士
+    public_desc: 住在旧宅隔壁的邻居，热心又紧张，说话总压低声音。
+    persona: |
+      你是林女士，沈家旧宅隔壁的住户。你热心、爱操心、胆子小，提起旧宅就压低声音。
+      你知道的不多，但都是亲眼所见。回复简短、絮叨，常自我怀疑。
+    knows:
+      - 沈家从前待人和气，少爷病重之后，老爷就变得神神叨叨，宅子里整夜整夜地亮灯。
+      - 夜里有时能听见旧宅地下传来拖拽和啃咬的声音，像野兽，又不完全像。
+      - 沈家失踪那晚下着大雨，你看见老爷书房的灯亮到天明，却没听见一点人声。
+    secrets: []
+    fallback_line: 这个我也不太清楚……
+
+monsters:
+  - id: ghoul
+    name: 食尸鬼
+    hp: 12
+    attack_skill: 60
+    attack_name: 利爪
+    damage: 1d6+1
+    dodge: 30
+    on_death_clue: truth
+    on_death_text: |
+      食尸鬼轰然倒地。你们在它颈间发现一枚长命锁——正是全家福里少年戴着的那枚。
+      它身下的石板缝里，塞着一本完整的日记。
+
+clues:
+  - id: torn_diary
+    name: 撕碎的日记页
+    text: |
+      「……实验失败了。那东西吃光了一切活物，却独独认得阿衡的锁。我不能让它出去，只能把它锁在下面……若有人读到这页纸，钥匙在书房。」
+  - id: brass_key
+    name: 黄铜钥匙
+    text: 一把沉甸甸的黄铜钥匙，齿纹磨得发亮，柄上刻着一个「窖」字。
+  - id: truth
+    name: 地窖真相
+    text: |
+      完整的日记拼出了真相：沈家少爷阿衡病死后，沈老爷用秘术想让他复生，却造出了这只食尸鬼。
+      它只认少爷的长命锁，老爷只好把它锁在地下室，用自己的血肉喂养它，直到油尽灯枯。
+
+endings:
+  - id: truth_revealed
+    condition: monster_dead:ghoul & clue:truth
+    text: |
+      ═══ 结局 · 真相大白 ═══
+      你们带着日记与长命锁走出旧宅时，雨已经停了。沈家父子的悲剧随晨光一同摊开在你们面前——
+      这世上有些门，推开之后便再也关不上。但今夜，至少真相没有继续烂在地下。
+    outcome: good
+  - id: buried_in_house
+    condition: all_players_incapped
+    text: |
+      ═══ 结局 · 葬身旧宅 ═══
+      视线归于黑暗。油灯摔碎在地，火光熄灭前，你们最后看见的是食尸鬼没有嘴唇的笑。
+      旧宅重归寂静，只有雨还在下。来年的某一日，或许还会有人收到一封没有署名的信。
+    outcome: bad

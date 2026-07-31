@@ -22,7 +22,7 @@ There is no test suite.
 
 **数据库迁移一律由用户手动执行，Claude 不要运行 `nb orm revision/upgrade/downgrade`。** 模型变更后只需提醒用户生成并应用迁移。
 
-The SQLite database lives at `data/nonebot_plugin_orm/db.sqlite3` (`LOCALSTORE_USE_CWD=true` keeps data under the repo). Canonical migrations are in `data/nonebot_plugin_orm/migrations/yawn_core/`, with the werewolf sub-plugin (`bind_key=yawn_werewolf`) nested under `data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf/` (the copies under `src/plugins/yawn_core/migrations/` and `src/plugins/yawn_core/yawn_werewolf/migrations/` are duplicates — do not edit those).
+The SQLite database lives at `data/nonebot_plugin_orm/db.sqlite3` (`LOCALSTORE_USE_CWD=true` keeps data under the repo). Canonical migrations are in `data/nonebot_plugin_orm/migrations/yawn_core/`, with the game sub-plugins nested per bind_key (`data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf/`, `.../yawn_rpg/`) (the copies under `src/plugins/yawn_core/*/migrations/` are duplicates — do not edit those).
 
 ```bash
 uv run nb orm revision -m "description"   # generate from model changes (autogenerate by default; --sql to disable)
@@ -36,7 +36,7 @@ Notes: `nb orm revision` generates into a temp dir first and only syncs back to 
 
 ### Plugin loading
 
-`src/plugins/yawn_core/__init__.py` explicitly imports every feature module (`ai_chat`, `checkin`, `friend_approve`, `help_panel`, `panel`, `permission`, `presence`) — **a new module is not loaded until it is imported there**. The werewolf sub-plugin (`yawn_werewolf/`) is different: it is loaded dynamically by `_load_sub_plugins()` via `nonebot.load_plugin`, and a load failure is logged and skipped without taking down the other features. `__init__.py` also registers an `on_startup` hook that enables SQLite WAL mode + busy_timeout on all sqlite engines.
+`src/plugins/yawn_core/__init__.py` explicitly imports every feature module (`ai_chat`, `checkin`, `friend_approve`, `help_panel`, `panel`, `permission`, `presence`) — **a new module is not loaded until it is imported there**. The game sub-plugins (`yawn_werewolf/`, `yawn_rpg/`) are different: they are loaded dynamically by `_load_sub_plugins()` (iterating a known name list) via `nonebot.load_plugin`, and a load failure is logged and skipped without taking down the other features. `__init__.py` also registers an `on_startup` hook that enables SQLite WAL mode + busy_timeout on all sqlite engines.
 
 Third-party nonebot plugins must be declared in `pyproject.toml` under `[tool.nonebot.plugins]` (package → module mapping); adapters under `[tool.nonebot.adapters]`.
 
@@ -74,6 +74,10 @@ Private-chat-only conversational mode built on an OpenAI-compatible API (Xiaomi 
 ### Werewolf sub-plugin (`yawn_werewolf/`)
 
 Group-chat werewolf game (预女猎白 board, 9–12 players) with LLM-driven AI players. Two asyncio tasks per game: the **engine** (`engine.py`, `run_game`) is the sole owner of state mutation and group broadcast, while the **AI driver** (`ai_player.py`) consumes sync engine hooks (DM prompts, announcements, captured speeches), calls `llm.complete()`, parses replies through the shared command DSL (`dsl.py`), and injects `Action`s into `game.action_queue` — the engine treats AI and human actions identically. Command matchers (`commands.py`) only validate and enqueue. Every failure (LLM timeout, invalid target) degrades to a safe default (abstain/pass) and never stalls a game. See `yawn_werewolf/CLAUDE.md` for the module map, write-ownership rules, and AI timing conventions.
+
+### RPG sub-plugin (`yawn_rpg/`)
+
+Group-chat CoC 7e TRPG with an AI game master (KP). One asyncio task per game: the **engine** (`engine.py`, `run_game`) is again the sole owner of state mutation and group broadcast. Unlike werewolf there is **no separate AI driver task** — the KP is a single narrator, so the engine runs an inline tool-calling agent loop (`run_kp_turn`): it calls `llm.complete_with_tools()` (shared client, added for this plugin), and **every AI↔system interaction goes through tool_calls** (`request_check`, `san_check`, `transition_scene`, `grant_clue`, `speak_as_npc`, `monster_attack`, `end_session`, …) which the engine's `execute_tool` fully validates against the scenario module before executing — the AI never touches state, and all dice/HP/SAN are resolved by the system (`dice.py`). Game logic is driven by pre-configured YAML scenario modules (`modules/*.yaml`, validated by `module_schema.py`) that bound what the KP may do; KP prompts only ever see spoiler-free current-scene data. Character sheets are system-generated and tweaked by players in private chat during `CHAR_CREATE`. Degradation: `RPG_AI_ENABLED=false` or any LLM failure falls back to deterministic keyword-triggered checks + canned module text, so a game never stalls. See `yawn_rpg/CLAUDE.md` for the tool catalog, validation rules, and the anti-spoiler prompt boundary.
 
 ## Conventions
 

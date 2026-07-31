@@ -1,0 +1,149 @@
+"""YawnBot 跑团子插件：CoC 7版群聊 TRPG，AI 主持人(KP)主持。
+
+作为 yawn_core 的可选子插件加载（父插件不硬依赖本包）：
+群内 `/跑团` 开房选模组，人物卡系统生成、私聊微调，局内
+自由发言交给 KP 叙述；KP 通过 tool_call 驱动系统判定与
+剧情分支，引擎验证并执行每一次工具调用（骰子与数值始终
+由系统掌控）。命令元数据由父插件 help_panel 扫描。
+"""
+
+from nonebot import get_plugin_config, logger
+from nonebot.plugin import PluginMetadata
+
+from . import commands, models  # noqa: F401
+from .config import Config
+
+__plugin_meta__ = PluginMetadata(
+    name="跑团",
+    description="CoC 7版群聊跑团：AI 主持人主持，按模组推进剧情",
+    usage="发送 /跑团 开房，/选择模组 N 选定剧本，/报名 加入，开局后私聊调整角色卡",
+    config=Config,
+    extra={
+        "commands": [
+            {
+                "name": "跑团",
+                "aliases": ["开团", "TRPG"],
+                "description": "开设跑团房间（房主自动报名）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "模组列表",
+                "aliases": ["模组"],
+                "description": "列出可选剧本模组",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "选择模组",
+                "aliases": ["选模组"],
+                "description": "报名阶段选定剧本（选择模组 N，房主/群管/超管）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "报名",
+                "aliases": ["上车", "加一"],
+                "description": "报名加入跑团",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "退报名",
+                "aliases": ["下车"],
+                "description": "退出跑团报名",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "查看报名",
+                "aliases": ["报名情况"],
+                "description": "查看报名名单",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "开始游戏",
+                "aliases": ["发车"],
+                "description": "开始游戏（房主/群管/超管）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "结束游戏",
+                "aliases": ["解散团"],
+                "description": "结束跑团（房主/群管/超管）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "检定",
+                "aliases": ["rc"],
+                "description": "局内显式技能检定（检定 技能名，可带难度）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "对话",
+                "aliases": ["询问"],
+                "description": "与在场 NPC 交谈（对话 NPC名 内容）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "攻击",
+                "aliases": ["打"],
+                "description": "攻击场景中的怪物（攻击 怪物名）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "前往",
+                "aliases": ["去"],
+                "description": "经出口切换场景（前往 地点名）",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "状态",
+                "aliases": ["我的状态"],
+                "description": "查看自己的 HP/SAN/属性",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "技能",
+                "aliases": ["技能列表"],
+                "description": "查看自己的技能值",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "线索",
+                "aliases": ["已发现线索"],
+                "description": "列出已发现的线索",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+        ],
+    },
+)
+
+config = get_plugin_config(Config)
+
+logger.info("跑团子插件已加载")
