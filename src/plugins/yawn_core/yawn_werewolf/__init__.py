@@ -51,6 +51,22 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
+                "name": "添加AI",
+                "aliases": ["加AI", "补人"],
+                "description": "报名阶段添加 AI 玩家（添加AI N，房主/群管/超管）",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "移除AI",
+                "aliases": ["减AI"],
+                "description": "报名阶段移除 AI 玩家（移除AI N，房主/群管/超管）",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
                 "name": "开始游戏",
                 "aliases": ["发车"],
                 "description": "开始游戏（房主/群管/超管）",

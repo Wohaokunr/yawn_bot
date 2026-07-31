@@ -12,7 +12,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
-from nonebot import get_plugin_config, logger
+from nonebot import logger
 from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
@@ -24,8 +24,7 @@ from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata, on_command, on_message
 from nonebot.rule import Rule
 from nonebot_plugin_orm import async_scoped_session, get_session
-from openai import AsyncOpenAI, OpenAIError
-from pydantic import BaseModel
+from openai import OpenAIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_scoped_session as _sa_scoped_session
@@ -40,6 +39,8 @@ from .chat_state import (
 )
 from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
+from .llm import ai_config as _ai_config
+from .llm import client as _client
 from .permission import check_feature_permission, require_feature
 from .reply_chain import (
     format_chain_for_prompt,
@@ -91,23 +92,8 @@ __plugin_meta__ = PluginMetadata(
 logger.info("Yawn对话模块已加载")
 
 # ── AI 客户端配置 ─────────────────────────────────────────
-
-
-class AIChatConfig(BaseModel):
-    """AI 服务配置，字段从 .env / 环境变量读取。"""
-
-    ai_api_key: str  # 必填，缺失时启动即报错
-    ai_base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
-    ai_model: str = "mimo-v2.5-pro"
-    ai_max_tokens: int = 1024  # 单次生成的最大 token 数
-
-
-_ai_config = get_plugin_config(AIChatConfig)
-
-_client = AsyncOpenAI(
-    api_key=_ai_config.ai_api_key,
-    base_url=_ai_config.ai_base_url,
-)
+# 配置（AIChatConfig）与 AsyncOpenAI 客户端单例由 llm.py 统一管理，
+# 与狼人杀 AI 共用；此处以原名 _ai_config/_client 引用。
 
 # ── 对话参数 ──────────────────────────────────────────────
 

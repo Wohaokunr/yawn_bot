@@ -19,7 +19,7 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
-from . import api
+from . import ai_player, api
 from .config import Config
 from .models import WerewolfGame, WerewolfPlayer
 from .roles import (
@@ -39,6 +39,7 @@ from .state import (
     Phase,
     PlayerState,
     discard_game,
+    is_ai_uid,
 )
 
 if TYPE_CHECKING:
@@ -118,14 +119,19 @@ async def _get_action(game: Game, step: float) -> Optional[Action]:
 
 
 async def _announce(game: Game, text: Union[str, "Message"]) -> None:
-    """群播报；机器人缺失时静默。"""
+    """群播报；机器人缺失时静默。同时抄送 AI 驱动的公共记录。"""
     if game.bot is None:
         return
     await api.safe_group_msg(game.bot, game.group_id, text)
+    ai_player.on_announce(game, str(text))
 
 
 async def _dm(game: Game, player: PlayerState, text: str) -> bool:
     """私聊玩家；首次失败时群内 @ 提示并标记 dm_ok=False。"""
+    if player.is_ai:
+        # AI 玩家不发真实私聊，提示词记入其座位上下文（ai_player 消费）
+        ai_player.on_dm(game, player, text)
+        return True
     if game.bot is None:
         return False
     ok = await api.send_dm(game.bot, player.user_id, text)
@@ -141,13 +147,17 @@ async def _dm(game: Game, player: PlayerState, text: str) -> bool:
 
 
 async def _ban(game: Game, user_id: int, duration: int) -> None:
-    """禁言群成员（duration=0 解除）。"""
+    """禁言群成员（duration=0 解除）；AI 合成 ID 无群成员，跳过。"""
+    if is_ai_uid(user_id):
+        return
     if game.bot is not None:
         await api.safe_ban(game.bot, game.group_id, user_id, duration)
 
 
 async def _unban(game: Game, user_id: int) -> None:
-    """解除群成员禁言。"""
+    """解除群成员禁言；AI 合成 ID 无群成员，跳过。"""
+    if is_ai_uid(user_id):
+        return
     if game.bot is not None:
         await api.safe_unban(game.bot, game.group_id, user_id)
 
@@ -456,21 +466,28 @@ async def _last_words(game: Game, cfg: Config, player: PlayerState) -> None:
     """遗言环节：群内限时发言，可被狼人自爆打断。"""
     game.phase = Phase.LAST_WORDS
     await _unban(game, player.user_id)
-    await _announce(
-        game,
-        f"请 {player.seat}号 发表遗言"
-        f"（{cfg.ww_last_words_timeout} 秒，发送 /过 结束遗言）",
-    )
-    timer = _Timer(_loop_time() + cfg.ww_last_words_timeout)
-    while timer.remaining() > 0:
-        action = await timer.next_action(game)
-        if action is None:
-            continue
-        det = _as_detonation(game, action)
-        if det is not None:
-            raise _DetonatedError(det)
-        if action.actor_user_id == player.user_id and action.kind is ActionKind.SKIP:
-            break
+    game.current_speaker = player.seat
+    try:
+        await _announce(
+            game,
+            f"请 {player.seat}号 发表遗言"
+            f"（{cfg.ww_last_words_timeout} 秒，发送 /过 结束遗言）",
+        )
+        timer = _Timer(_loop_time() + cfg.ww_last_words_timeout)
+        while timer.remaining() > 0:
+            action = await timer.next_action(game)
+            if action is None:
+                continue
+            det = _as_detonation(game, action)
+            if det is not None:
+                raise _DetonatedError(det)
+            if (
+                action.actor_user_id == player.user_id
+                and action.kind is ActionKind.SKIP
+            ):
+                break
+    finally:
+        game.current_speaker = None
     await _ban(game, player.user_id, 1800)
 
 
@@ -619,31 +636,36 @@ async def _speech_rotation(  # noqa: C901,PLR0912,PLR0913
         if allow_withdraw and not speaker.sheriff_candidate:
             continue
         await _unban(game, speaker.user_id)
-        await _announce(
-            game,
-            f"请 {speaker.seat}号 发言（{timeout} 秒，发送 /过 结束发言）",
-        )
-        timer = _Timer(_loop_time() + timeout)
-        while timer.remaining() > 0:
-            action = await timer.next_action(game)
-            if action is None:
-                continue
-            det = _as_detonation(game, action)
-            if det is not None:
-                raise _DetonatedError(det)
-            if allow_withdraw and action.kind is ActionKind.WITHDRAW:
-                wd = game.player_by_user(action.actor_user_id)
-                if wd is not None and wd.sheriff_candidate:
-                    wd.sheriff_candidate = False
-                    await _announce(game, f"{wd.seat}号 退水")
-                    if wd.user_id == speaker.user_id:
-                        break
-                continue
-            if (
-                action.actor_user_id == speaker.user_id
-                and action.kind is ActionKind.SKIP
-            ):
-                break
+        # current_speaker 供 AI 驱动识别发言窗口；try/finally 防自爆中断遗留
+        game.current_speaker = speaker.seat
+        try:
+            await _announce(
+                game,
+                f"请 {speaker.seat}号 发言（{timeout} 秒，发送 /过 结束发言）",
+            )
+            timer = _Timer(_loop_time() + timeout)
+            while timer.remaining() > 0:
+                action = await timer.next_action(game)
+                if action is None:
+                    continue
+                det = _as_detonation(game, action)
+                if det is not None:
+                    raise _DetonatedError(det)
+                if allow_withdraw and action.kind is ActionKind.WITHDRAW:
+                    wd = game.player_by_user(action.actor_user_id)
+                    if wd is not None and wd.sheriff_candidate:
+                        wd.sheriff_candidate = False
+                        await _announce(game, f"{wd.seat}号 退水")
+                        if wd.user_id == speaker.user_id:
+                            break
+                    continue
+                if (
+                    action.actor_user_id == speaker.user_id
+                    and action.kind is ActionKind.SKIP
+                ):
+                    break
+        finally:
+            game.current_speaker = None
         await _ban(game, speaker.user_id, 1800)
     await _unban_all_players(game)
 
@@ -711,6 +733,9 @@ async def _collect_votes(
 ) -> dict[int, Optional[int]]:
     """收票：返回 {投票者QQ: 目标座位或None(弃票)}。"""
     game.phase = phase
+    # 合法投票目标供 AI 驱动校验/构建提示词
+    game.vote_targets = list(target_seats)
+    game.vote_exclude = tuple(exclude_seats)
     await _unban_all_players(game)
     votes: dict[int, Optional[int]] = {}
     eligible = [
@@ -1081,6 +1106,7 @@ async def _persist_start(game: Game) -> None:
                         seat=p.seat,
                         role=p.role.value,
                         faction=p.faction.value,
+                        is_ai=p.is_ai,
                     )
                 )
             await session.commit()
@@ -1191,9 +1217,13 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
                 seat=idx + 1,
                 role=role,
                 faction=ROLE_FACTION[role],
+                is_ai=is_ai_uid(uid),
+                display_name=game.ai_names.get(uid),
             )
             for idx, (uid, role) in enumerate(zip(game.signup_user_ids, deck))
         ]
+        # 身份卡私聊之前启动 AI 驱动，使卡片文本落入 AI 座位上下文
+        ai_player.start_driver(game)
         for p in game.players:
             await _dm(
                 game,
@@ -1237,7 +1267,10 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
             await _announce(game, "游戏引擎发生异常，本局已结束")
     finally:
         game.phase = Phase.ENDED
+        await ai_player.stop_driver(game)
         user_ids = [p.user_id for p in game.players] or list(game.signup_user_ids)
+        # AI 合成 ID 无群成员，禁言恢复只对真人调用
+        user_ids = [uid for uid in user_ids if not is_ai_uid(uid)]
         if game.bot is not None:
             await api.cleanup_group(
                 game.bot,

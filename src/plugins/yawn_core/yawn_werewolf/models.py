@@ -72,8 +72,11 @@ class WerewolfPlayer(Model):
         index=True,
     )
 
-    # 玩家 QQ 号（逻辑引用 yawn_core_botuser.user_id）
+    # 玩家 QQ 号（逻辑引用 yawn_core_botuser.user_id；AI 玩家为负数合成 ID）
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+
+    # 是否为 AI 玩家（战绩统计据此过滤）
+    is_ai: Mapped[bool] = mapped_column(default=False)
 
     seat: Mapped[int]
 
