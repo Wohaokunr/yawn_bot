@@ -103,9 +103,9 @@ scenes:
         skill: dodge
         difficulty: hard
         once: true
-        triggers: [楼梯, 木阶, 台阶]
-        success_text: 朽烂的木阶在脚下断裂，你们堪堪抓住了扶手。
-        failure_text: 朽烂的木阶在脚下断裂，你们摔了下去，被碎木划得鲜血淋漓。
+        triggers: [楼梯, 石阶, 台阶]
+        success_text: 湿滑的石阶在脚下一空，你们堪堪抓住了扶手。
+        failure_text: 湿滑的石阶突然塌陷，你们跌跌撞撞摔了下去，被碎石划得鲜血淋漓。
         damage_on_fail: "1d3"
     exits:
       - to_scene: living_room

@@ -25,8 +25,8 @@ from ..llm import complete  # noqa: TID252
 from . import api
 from .config import Config
 from .dsl import parse_dm_action
-from .roles import Faction, Role, build_role_card
-from .state import Action, ActionKind, Game, Phase, PlayerState
+from .roles import BOARDS, Faction, Role, build_role_card
+from .state import DUEL_PHASES, Action, ActionKind, Game, Phase, PlayerState
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -52,9 +52,11 @@ _TICK_INTERVAL = 0.75
 _SPEECH_LINGER = 3.0
 
 _PHASE_DESC: dict[Phase, str] = {
+    Phase.NIGHT_HALFBLOOD: "夜晚-混血儿认主",
     Phase.NIGHT_WOLVES: "夜晚-狼人行动",
     Phase.NIGHT_WITCH: "夜晚-女巫行动",
     Phase.NIGHT_SEER: "夜晚-预言家行动",
+    Phase.NIGHT_ELDER: "夜晚-长老禁言",
     Phase.DAY_ANNOUNCE: "白天-死讯播报",
     Phase.LAST_WORDS: "遗言环节",
     Phase.HUNTER_SHOT: "猎人开枪决策",
@@ -336,6 +338,59 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                     fallback=None,  # 不查验等价于超时，阶段自然结束
                 )
         return
+    if phase is Phase.NIGHT_HALFBLOOD:
+        halfbloods = [
+            p
+            for p in game.alive_players_of_role(Role.HALFBLOOD)
+            if p.is_ai and p.owner_seat is None
+        ]
+        if halfbloods:
+            halfblood = halfbloods[0]
+            key = (round_no, phase, halfblood.seat)
+            if key not in driver.handled and _has_phase_dm(
+                driver, halfblood.seat, phase
+            ):
+                driver.handled.add(key)
+                await asyncio.sleep(_SETTLE_DELAY)
+                others = [
+                    p.seat for p in game.alive_players() if p.seat != halfblood.seat
+                ]
+                await _simple_decide(
+                    driver,
+                    halfblood,
+                    f"第一夜认主：可选玩家 {_fmt_seats(others)}。"
+                    "选择一位主人（回复 认主N）——你不知道 TA 的身份，"
+                    "本局你的胜负随主人所在阵营。",
+                    fallback=None,  # 未认主由引擎随机指定
+                )
+        return
+    if phase is Phase.NIGHT_ELDER:
+        elders = [p for p in game.alive_players_of_role(Role.SILENT_ELDER) if p.is_ai]
+        if elders:
+            elder = elders[0]
+            key = (round_no, phase, elder.seat)
+            if key not in driver.handled and _has_phase_dm(driver, elder.seat, phase):
+                driver.handled.add(key)
+                await asyncio.sleep(_SETTLE_DELAY)
+                others = [
+                    p.seat
+                    for p in game.alive_players()
+                    if p.seat not in (elder.seat, elder.elder_last_target)
+                ]
+                repeat_note = (
+                    f"昨晚你禁言了 {elder.elder_last_target}号，今晚不可连续选 TA。"
+                    if elder.elder_last_target is not None
+                    else ""
+                )
+                await _simple_decide(
+                    driver,
+                    elder,
+                    f"可选禁言目标：{_fmt_seats(others)}。{repeat_note}"
+                    "结合场上局势选择今晚禁言谁（回复 禁言N），"
+                    "也可以回复 过 放弃。",
+                    fallback=ActionKind.SKIP,
+                )
+        return
 
     # ── 猎人 / 警徽：DM 提示驱动 ──
     if phase is Phase.HUNTER_SHOT:
@@ -387,6 +442,9 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
 
     # ── 警长定序窗口（与发言轮换同 phase，以 current_speaker 区分）──
     if phase is Phase.DAY_SPEECH:
+        # 骑士决斗后台决策：引擎在发言轮换开始后才 DM 骑士，
+        # _has_phase_dm 门保证定序窗口期间不会误派
+        _maybe_spawn_knight(driver)
         sheriff = game.sheriff()
         if (
             sheriff is not None
@@ -403,6 +461,11 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                 "或 排序N逆（N号起逆时针）。",
                 fallback=None,  # 不定序则引擎随机决定
             )
+        return
+
+    # ── PK 发言：骑士同样可以翻牌决斗 ──
+    if phase is Phase.PK_SPEECH:
+        _maybe_spawn_knight(driver)
         return
 
     # ── 投票阶段：并发决策（后台任务；PK 发言窗口紧随投票，同样不可阻塞）──
@@ -504,6 +567,45 @@ async def _run_decide(driver: AIDriver, player: PlayerState) -> None:
         )
 
 
+def _maybe_spawn_knight(driver: AIDriver) -> None:
+    """发言阶段派发骑士决斗后台决策（_spawn 不阻塞发言窗口）。"""
+    game = driver.game
+    phase = game.phase
+    for knight in game.alive_players_of_role(Role.KNIGHT):
+        if not knight.is_ai:
+            continue
+        key = (game.round_no, phase, knight.seat, "duel")
+        if key in driver.handled or not _has_phase_dm(driver, knight.seat, phase):
+            continue
+        driver.handled.add(key)
+        _spawn(driver, _knight_decide(driver, knight))
+
+
+async def _knight_decide(driver: AIDriver, knight: PlayerState) -> None:
+    """骑士决斗决策：有把握才决斗，否则不行动（不决斗）。"""
+    game = driver.game
+    targets = [p.seat for p in game.alive_players() if p.seat != knight.seat]
+    instruction = (
+        f"你是骑士，本发言阶段可以翻牌决斗：可决斗目标 {_fmt_seats(targets)}。"
+        "结合[对局记录]中的发言判断是否有把握决斗到狼人——"
+        "决斗到狼人则其立即死亡并直接进入黑夜；决斗到好人则你死亡。"
+        "有把握就回复 决斗N，没有把握就回复 过（不决斗）。"
+    )
+    await asyncio.sleep(_SETTLE_DELAY)
+    action = await _llm_decide(
+        driver,
+        knight,
+        instruction,
+        # 发言窗口有限，夹取到更短的超时；迟到的决斗会被引擎阶段门
+        # 安全丢弃，等价于不决斗
+        timeout=config.ww_ai_discuss_timeout,
+    )
+    if action is not None and action.kind is ActionKind.DUEL:
+        game.action_queue.put_nowait(action)
+    else:
+        logger.info(f"狼人杀群 {game.group_id} {knight.seat}号 AI 骑士决定不决斗")
+
+
 async def _vote_decide(driver: AIDriver, player: PlayerState) -> None:
     """投票决策：失败兜底弃票。"""
     game = driver.game
@@ -570,7 +672,7 @@ async def _llm_decide(
     return None
 
 
-def _is_valid_action(  # noqa: C901,PLR0911
+def _is_valid_action(  # noqa: C901,PLR0911,PLR0912
     game: Game,
     player: PlayerState,
     action: Action,
@@ -596,6 +698,23 @@ def _is_valid_action(  # noqa: C901,PLR0911
         return target is not None and target.alive and target.seat != player.seat
     if kind is ActionKind.SHOOT:
         return target is not None and target.alive
+    if kind is ActionKind.CHOOSE_OWNER:
+        return target is not None and target.alive and target.seat != player.seat
+    if kind is ActionKind.SILENCE:
+        return (
+            target is not None
+            and target.alive
+            and target.seat not in (player.seat, player.elder_last_target)
+        )
+    if kind is ActionKind.DUEL:
+        return (
+            game.phase in DUEL_PHASES
+            and player.role is Role.KNIGHT
+            and player.alive
+            and target is not None
+            and target.alive
+            and target.seat != player.seat
+        )
     if kind in (ActionKind.NO_SHOOT, ActionKind.SKIP, ActionKind.ABSTAIN):
         return True
     if kind is ActionKind.RUN:
@@ -719,18 +838,46 @@ def _identity_prompt(
     `with_action_rules=False` 省略【行动规则】指令契约：发言调用专用，
     避免与【发言规则】「不要输出任何指令」自相矛盾。
     """
-    faction_goal = (
-        "你的阵营是狼人阵营：夜间与队友配合刀人，白天伪装成好人发言、"
-        "带节奏引开放逐好人。胜利条件：神职全灭或村民全灭。"
-        if player.faction is Faction.WOLF
-        else "你的阵营是好人阵营：通过白天发言与投票找出狼人并放逐。"
-        "胜利条件：狼人全部出局。"
+    if player.role is Role.HALFBLOOD and player.owner_seat is not None:
+        faction_goal = (
+            f"你是混血儿，你的主人是 {player.owner_seat}号"
+            "（你不知道 TA 的身份，TA 也不知道你选了 TA）。"
+            "你的胜利条件只有一个：主人所在阵营获胜。"
+            "从发言和局势推断主人的身份倾向并暗中帮 TA——"
+            "主人像狼人你就帮狼队带节奏，主人像好人你就帮好人找狼。"
+        )
+    elif player.role is Role.HALFBLOOD:
+        faction_goal = (
+            "你是混血儿，第一夜将率先选择一位主人（认主N）。"
+            "你的胜利条件只有一个：主人所在阵营获胜。"
+        )
+    elif player.faction is Faction.WOLF:
+        faction_goal = (
+            "你的阵营是狼人阵营：夜间与队友配合刀人，白天伪装成好人发言、"
+            "带节奏引开放逐好人。胜利条件：神职全灭或村民全灭。"
+        )
+    else:
+        faction_goal = (
+            "你的阵营是好人阵营：通过白天发言与投票找出狼人并放逐。"
+            "胜利条件：狼人全部出局。"
+        )
+    role_card = build_role_card(
+        player.seat,
+        player.role,
+        len(game.players),
+        silence_mode=BOARDS[game.board].silence_mode,
     )
-    role_card = build_role_card(player.seat, player.role, len(game.players))
+    role_commands = ""
+    if player.role is Role.HALFBLOOD:
+        role_commands = "认主5 / "
+    elif player.role is Role.SILENT_ELDER:
+        role_commands = "禁言5 / "
+    elif player.role is Role.KNIGHT:
+        role_commands = "决斗5（群命令 /决斗5 翻牌）/ "
     action_rules = (
         "【行动规则】决策环节回复且仅回复一条指令（如 刀3 / 查验5 / 救 / "
-        "毒3 / 过 / 投票2 / 弃票 / 上警 / 排序5顺 / 移交警徽3 / 撕警徽 / "
-        "开枪4 / 不开枪），不要输出解释或多余文字。\n"
+        f"毒3 / 过 / {role_commands}投票2 / 弃票 / 上警 / 排序5顺 / "
+        "移交警徽3 / 撕警徽 / 开枪4 / 不开枪），不要输出解释或多余文字。\n"
         if with_action_rules
         else ""
     )

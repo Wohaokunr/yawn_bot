@@ -25,6 +25,9 @@ _DM_PATTERNS: list[tuple[str, ActionKind, bool]] = [
     (r"退水", ActionKind.WITHDRAW, False),
     (r"移交警徽\s*(\d+)\s*号?", ActionKind.PASS_BADGE, True),
     (r"撕警徽", ActionKind.TEAR_BADGE, False),
+    (r"(?:认主|选主)\s*(\d+)\s*号?", ActionKind.CHOOSE_OWNER, True),
+    (r"(?:禁言|禁票)\s*(\d+)\s*号?", ActionKind.SILENCE, True),
+    (r"决斗\s*(\d+)\s*号?", ActionKind.DUEL, True),
 ]
 
 # 仅 AI 驱动启用（allow_votes=True）：投票阶段行动
@@ -36,6 +39,7 @@ _VOTE_PATTERNS: list[tuple[str, ActionKind, bool]] = [
 _DM_HINT = (
     "无法识别的指令。可用格式：\n"
     "刀N / 查验N / 救 / 毒N / 开枪N / 不开枪 / 过\n"
+    "认主N / 禁言N（禁票N）/ 决斗N\n"
     "自爆 / 上警 / 退水 / 移交警徽N / 撕警徽\n"
     "说XXX（狼人讨论，转发给队友）"
 )

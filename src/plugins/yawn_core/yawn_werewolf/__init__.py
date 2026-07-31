@@ -1,4 +1,4 @@
-"""YawnBot 狼人杀子插件：经典预女猎白群聊小游戏。
+"""YawnBot 狼人杀子插件：群聊狼人杀（预女猎白 / 预女猎白混 / 禁言骑士 / 禁票骑士）。
 
 作为 yawn_core 的可选子插件加载（父插件不硬依赖本包）：
 群内报名匹配，夜间私聊下达行动，群禁言控制发言秩序，
@@ -13,8 +13,8 @@ from .config import Config
 
 __plugin_meta__ = PluginMetadata(
     name="狼人杀",
-    description="经典预女猎白群聊狼人杀：群内报名、私聊行动、禁言控场",
-    usage="发送 /狼人杀 开房，/报名 加入，夜间按私聊提示行动",
+    description="群聊狼人杀（预女猎白/预女猎白混/禁言骑士/禁票骑士）：群内报名、私聊行动、禁言控场",
+    usage="发送 /狼人杀 开房，/板子 切换板子，/报名 加入，夜间按私聊提示行动",
     config=Config,
     extra={
         "commands": [
@@ -46,6 +46,14 @@ __plugin_meta__ = PluginMetadata(
                 "name": "查看报名",
                 "aliases": ["报名情况"],
                 "description": "查看报名名单",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "板子",
+                "aliases": ["选板子", "换板子"],
+                "description": "查看可选板子；切换板子（板子 名称，房主/群管/超管）",
                 "feature": "werewolf",
                 "scope": "group",
                 "superuser": False,
@@ -139,6 +147,22 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
+                "name": "认主",
+                "aliases": ["选主"],
+                "description": "首夜混血儿选择主人（私聊，认主N）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
+                "name": "禁言",
+                "aliases": ["禁票"],
+                "description": "夜晚禁言长老禁言/禁票玩家（私聊，禁言N；过=放弃）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
                 "name": "上警",
                 "aliases": ["竞选"],
                 "description": "报名竞选警长",
@@ -182,6 +206,14 @@ __plugin_meta__ = PluginMetadata(
                 "name": "自爆",
                 "aliases": [],
                 "description": "狼人白天自爆，立即进入夜晚",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "决斗",
+                "aliases": [],
+                "description": "骑士发言阶段翻牌决斗（决斗 N）",
                 "feature": "werewolf",
                 "scope": "group",
                 "superuser": False,

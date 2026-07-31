@@ -258,7 +258,8 @@ def _find_module(text: str) -> Optional["ModuleDef"]:
     """按序号或 id 查找模组。"""
     modules = list_modules()
     s = text.strip()
-    if s.isdigit():
+    # isdigit 对 Unicode 数字（如 ²）为真而 int() 拒绝，会抛 ValueError
+    if s.isascii() and s.isdigit():
         idx = int(s)
         if 1 <= idx <= len(modules):
             return modules[idx - 1]
@@ -417,6 +418,8 @@ async def apply_heal(game: Game, player: PlayerState, amount: int) -> None:
         return
     before = player.hp
     player.hp = min(player.hp + amount, player.sheet.max_hp)
+    if player.hp == before:
+        return  # 已满血：不播报"恢复了 0 点"
     name = player.sheet.name
     await _announce(game, f"{name} 恢复了 {player.hp - before} 点生命")
 
@@ -839,7 +842,7 @@ async def _fallback_narrate(game: Game, text: str) -> None:
     await _announce(game, _GENERIC_IDLE)
 
 
-async def run_kp_turn(  # noqa: C901, PLR0912
+async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
     game: Game,
     cfg: Config,
     actor: Optional[PlayerState],
@@ -870,68 +873,76 @@ async def run_kp_turn(  # noqa: C901, PLR0912
     logger.debug(f"跑团群 {game.group_id} KP 提示词：{user_content}")
     turn_deadline = _loop_time() + cfg.rpg_ai_turn_timeout
     final_text: Optional[str] = None
-    for _ in range(cfg.rpg_ai_max_tool_rounds):
-        if game.phase is not Phase.PLAY:
-            return
-        remain = turn_deadline - _loop_time()
-        if remain <= 1:
-            break
-        timeout = min(cfg.rpg_kp_timeout, remain)
-        if game.tools_broken:
-            final_text = await complete(
+    try:
+        for _ in range(cfg.rpg_ai_max_tool_rounds):
+            if game.phase is not Phase.PLAY:
+                return
+            remain = turn_deadline - _loop_time()
+            if remain <= 1:
+                break
+            timeout = min(cfg.rpg_kp_timeout, remain)
+            if game.tools_broken:
+                final_text = await complete(
+                    messages,
+                    max_tokens=cfg.rpg_kp_max_tokens,
+                    temperature=cfg.rpg_kp_temperature,
+                    timeout=timeout,
+                )
+                break
+            msg = await complete_with_tools(
                 messages,
+                ai_kp.build_tools(game),
                 max_tokens=cfg.rpg_kp_max_tokens,
                 temperature=cfg.rpg_kp_temperature,
                 timeout=timeout,
             )
-            break
-        msg = await complete_with_tools(
-            messages,
-            ai_kp.build_tools(game),
-            max_tokens=cfg.rpg_kp_max_tokens,
-            temperature=cfg.rpg_kp_temperature,
-            timeout=timeout,
-        )
-        if msg is None:
-            # 工具调用失败：降级为纯叙述再试一次，并记住本局不再用工具
-            if not game.tools_broken:
-                game.tools_broken = True
-                logger.warning(
-                    f"跑团群 {game.group_id} KP 工具调用失败，本局降级为纯叙述模式"
+            if msg is None:
+                # 工具调用失败：降级为纯叙述再试一次，并记住本局不再用工具
+                if not game.tools_broken:
+                    game.tools_broken = True
+                    logger.warning(
+                        f"跑团群 {game.group_id} KP 工具调用失败，本局降级为纯叙述模式"
+                    )
+                # complete_with_tools 可能已耗掉大部分预算，重新计算剩余
+                remain = turn_deadline - _loop_time()
+                final_text = await complete(
+                    messages,
+                    max_tokens=cfg.rpg_kp_max_tokens,
+                    temperature=cfg.rpg_kp_temperature,
+                    timeout=max(remain - 1, 1),
                 )
-            final_text = await complete(
-                messages,
-                max_tokens=cfg.rpg_kp_max_tokens,
-                temperature=cfg.rpg_kp_temperature,
-                timeout=max(remain - 1, 1),
-            )
-            break
-        messages.append(msg)  # pyright: ignore[reportArgumentType]
-        if not msg.tool_calls:
-            final_text = msg.content
-            break
-        for tc in msg.tool_calls:
-            result = await execute_tool(game, cfg, actor, tc)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                }
-            )
-            if game.phase is not Phase.PLAY:
-                return
-    else:
-        # 工具轮数用尽：强制收尾
-        messages.append({"role": "user", "content": ai_kp.FINAL_NUDGE})
-        remain = turn_deadline - _loop_time()
-        if remain > 1:
-            final_text = await complete(
-                messages,
-                max_tokens=cfg.rpg_kp_max_tokens,
-                temperature=cfg.rpg_kp_temperature,
-                timeout=min(cfg.rpg_kp_timeout, remain),
-            )
+                break
+            messages.append(msg)  # pyright: ignore[reportArgumentType]
+            if not msg.tool_calls:
+                final_text = msg.content
+                break
+            for tc in msg.tool_calls:
+                result = await execute_tool(game, cfg, actor, tc)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }
+                )
+                if game.phase is not Phase.PLAY:
+                    return
+        else:
+            # 工具轮数用尽：强制收尾
+            messages.append({"role": "user", "content": ai_kp.FINAL_NUDGE})
+            remain = turn_deadline - _loop_time()
+            if remain > 1:
+                final_text = await complete(
+                    messages,
+                    max_tokens=cfg.rpg_kp_max_tokens,
+                    temperature=cfg.rpg_kp_temperature,
+                    timeout=min(cfg.rpg_kp_timeout, remain),
+                )
+    except Exception:  # noqa: BLE001
+        # LLM 层可能抛出 OpenAIError 以外的异常（SDK 类型错误等）：
+        # 落到尾部兜底叙述，而不是让 run_game 结束整局
+        logger.exception(f"跑团群 {game.group_id} KP 回合异常，降级兜底叙述")
+        final_text = None
     game.last_kp_at = _loop_time()
     if game.phase is not Phase.PLAY:
         return
@@ -968,27 +979,34 @@ async def execute_tool(  # noqa: C901, PLR0911, PLR0912
     module = game.module
     if module is None:
         return "对局未就绪。"
-    if name == "request_check":
-        return await _tool_request_check(game, args, actor)
-    if name == "san_check":
-        return await _tool_san_check(game, cfg, args, actor)
-    if name == "deal_damage":
-        return await _tool_damage(game, cfg, args, actor, heal=False)
-    if name == "heal":
-        return await _tool_damage(game, cfg, args, actor, heal=True)
-    if name == "transition_scene":
-        return await _tool_transition(game, args)
-    if name == "grant_clue":
-        return await _tool_grant_clue(game, args)
-    if name == "speak_as_npc":
-        return await _tool_speak_as_npc(game, args)
-    if name == "monster_attack":
-        return await _tool_monster_attack(game, args, actor)
-    if name == "end_session":
-        return await _tool_end_session(game, args)
-    if name == "get_situation":
-        return ai_kp.build_situation(game)
-    return f"未知工具 {name}。"
+    try:
+        if name == "request_check":
+            return await _tool_request_check(game, args, actor)
+        if name == "san_check":
+            return await _tool_san_check(game, cfg, args, actor)
+        if name == "deal_damage":
+            return await _tool_damage(game, cfg, args, actor, heal=False)
+        if name == "heal":
+            return await _tool_damage(game, cfg, args, actor, heal=True)
+        if name == "transition_scene":
+            return await _tool_transition(game, args)
+        if name == "grant_clue":
+            return await _tool_grant_clue(game, args)
+        if name == "speak_as_npc":
+            return await _tool_speak_as_npc(game, args)
+        if name == "monster_attack":
+            return await _tool_monster_attack(game, args)
+        if name == "end_session":
+            return await _tool_end_session(game, args)
+        if name == "get_situation":
+            return ai_kp.build_situation(game)
+    except Exception:  # noqa: BLE001
+        # 工具处理器的一切异常都转化为错误回执，供 KP 自我纠正；
+        # 向上抛只会让 run_game 兜底整局结束，违背"任何失败不卡局"
+        logger.exception(f"跑团群 {game.group_id} 工具 {name} 执行异常")
+        return "工具执行出现异常，请改用其他方式推进剧情。"
+    else:
+        return f"未知工具 {name}。"
 
 
 def _difficulty_arg(args: dict[str, object]) -> CheckDifficulty:
@@ -1047,7 +1065,7 @@ async def _tool_san_check(
     return f"理智检定已结算：{'成功' if ok else '失败'}，损失已被系统钳制。"
 
 
-async def _tool_damage(
+async def _tool_damage(  # noqa: PLR0911
     game: Game,
     cfg: Config,
     args: dict[str, object],
@@ -1069,6 +1087,10 @@ async def _tool_damage(
     if heal:
         await apply_heal(game, player, amount)
         name = player.sheet.name if player.sheet else "目标"
+        if player.incapped:
+            return (
+                f"已为 {name} 治疗（上限 {amount}），但其已失去行动能力，仍无法行动。"
+            )
         return f"已为 {name} 治疗（上限 {amount}）。"
     if player.incapped:
         return "目标已失去行动能力，无需再造成伤害。"
@@ -1090,7 +1112,8 @@ async def _tool_transition(game: Game, args: dict[str, object]) -> str:
         return "目标不是当前场景的出口，不能切换。"
     target = game.module.scene(target_id)
     if evaluate_condition(chosen.condition, game.condition_context()):
-        await enter_scene(game, target_id, transition=chosen.narration)
+        if not await enter_scene(game, target_id, transition=chosen.narration):
+            return "场景切换失败（目标场景缺失），请重新查询局面。"
         name = target.name if target is not None else target_id
         return f"已切换到场景「{name}」，转场文案已播报。"
     name = target.name if target is not None else target_id
@@ -1110,6 +1133,8 @@ async def _tool_grant_clue(game: Game, args: dict[str, object]) -> str:
     clue_id = str(args.get("clue_id", ""))
     grantable = {cp.clue for cp in scene.checks if cp.clue}
     for mid in scene.monsters:
+        if mid not in game.dead_monsters:
+            continue  # 死亡奖励线索只能在怪物死后授予，否则提前剧透
         monster = game.module.monster(mid)
         if monster is not None and monster.on_death_clue:
             grantable.add(monster.on_death_clue)
@@ -1138,7 +1163,7 @@ async def _tool_speak_as_npc(game: Game, args: dict[str, object]) -> str:
         return "台词为空。"
     if len(text) > _NPC_LINE_MAX:
         text = text[:_NPC_LINE_MAX].rstrip() + "……"
-    game.group_log.append(f"【{npc.name}】{text}")
+    # _announce 已记入群聊记录，无需重复 append
     await _announce(game, f"【{npc.name}】{text}")
     return f"已以 {npc.name} 名义播报。"
 
@@ -1146,7 +1171,6 @@ async def _tool_speak_as_npc(game: Game, args: dict[str, object]) -> str:
 async def _tool_monster_attack(
     game: Game,
     args: dict[str, object],
-    actor: Optional[PlayerState],
 ) -> str:
     """monster_attack：怪物在场存活校验 + 对抗结算。"""
     if game.module is None or game.current_scene is None:
@@ -1163,7 +1187,8 @@ async def _tool_monster_attack(
     target = _resolve_player_arg(game, _opt_str(args.get("target")), None)
     if target is not None and target not in game.active_players():
         target = None
-    return await do_monster_attack(game, monster, target or actor)
+    # target 缺省传 None → 引擎随机选取，与工具 schema"缺省随机"一致
+    return await do_monster_attack(game, monster, target)
 
 
 async def _tool_end_session(game: Game, args: dict[str, object]) -> str:
@@ -1336,7 +1361,7 @@ async def _process_action(
         await _do_move(game, player, action.aux or "")
 
 
-async def _run_play(game: Game, cfg: Config) -> None:
+async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
     """PLAY 主循环：结局安全网 → 自动出口 → 取行动 → 处理。"""
     _enter_phase(game, Phase.PLAY)
     if game.module is None:
@@ -1349,7 +1374,15 @@ async def _run_play(game: Game, cfg: Config) -> None:
             return
         auto = _try_auto_exit(game)
         if auto is not None:
-            await enter_scene(game, auto.to_scene, transition=auto.narration)
+            if not await enter_scene(game, auto.to_scene, transition=auto.narration):
+                # 条件恒真的自动出口 + 切换失败会构成无 await 忙环，
+                # 冻死整个事件循环；正常模组经加载校验不可达，此处兜底
+                logger.error(
+                    f"跑团群 {game.group_id} 自动出口 {auto.to_scene} "
+                    "切换失败（目标场景缺失），本局结束"
+                )
+                await _announce(game, "场景数据异常，本局无法继续~")
+                return
             continue
         action = game.pending
         game.pending = None
@@ -1361,8 +1394,15 @@ async def _run_play(game: Game, cfg: Config) -> None:
         player = game.player_by_user(action.actor_user_id)
         if player is None:
             continue
-        if player.incapped and action.kind is ActionKind.SAY:
-            continue  # 倒地玩家的发言忽略（其余行动由处理器校验）
+        if player.incapped:
+            if action.kind is ActionKind.SAY:
+                continue  # 倒地玩家的发言静默忽略
+            # 命令层不校验在局状态与是否倒地，由引擎统一拦截
+            await _announce(
+                game,
+                MessageSegment.at(player.user_id) + " 你已失去行动能力，无法行动。",
+            )
+            continue
         await _process_action(game, cfg, action, player)
 
 
@@ -1388,8 +1428,11 @@ async def _get_action_idle(game: Game, cfg: Config) -> Optional[Action]:
                 max(remaining - cfg.rpg_idle_warn_remain, 0.5),
             )
         action = await _get_action(game, step)
-        if action is not None:
-            return action
+        if action is None:
+            continue
+        if game.player_by_user(action.actor_user_id) is None:
+            continue  # 局外人的命令不重置空闲计时（否则可无限续命）
+        return action
 
 
 # ── 持久化 ────────────────────────────────────────────────

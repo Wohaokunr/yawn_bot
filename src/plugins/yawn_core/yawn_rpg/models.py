@@ -69,9 +69,10 @@ class RPGPlayer(Model):
         autoincrement=True,
     )
 
-    # 同 bind 内外键，迁移安全
+    # 同 bind 内外键，迁移安全。类型须与 RPGGame.id（自增 Integer
+    # 主键）一致：BigInteger 引用 Integer 会被 PostgreSQL / MySQL
+    # 以"外键列类型不兼容"拒绝建表
     game_id: Mapped[int] = mapped_column(
-        BigInteger,
         ForeignKey(
             "yawn_rpg_rpggame.id",
             ondelete="CASCADE",

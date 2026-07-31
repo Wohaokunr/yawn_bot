@@ -17,6 +17,12 @@ from .module_schema import CheckDifficulty
 _DICE_RE = re.compile(r"(\d+)d(\d+)([+-]\d+)?")
 _INT_RE = re.compile(r"\d+")
 
+# 骰数与面数上限：AI 工具参数与模组数据都不被信任，
+# 1d0 会让 randint 抛错、999999999d6 会同步冻死事件循环
+# （与 module_schema 的同名常量保持一致）
+_MAX_DICE_COUNT = 100
+_MAX_DICE_SIDES = 1000
+
 # 大失败判定的技能分界线：技能≥50 时 96-100 为大失败，否则仅 100
 _FUMBLE_SKILL_THRESHOLD = 50
 
@@ -121,10 +127,18 @@ def skill_check(
     )
 
 
+def _dice_in_bounds(count: str, sides: str) -> bool:
+    """骰数 / 面数是否在安全范围内。"""
+    return 1 <= int(count) <= _MAX_DICE_COUNT and 1 <= int(sides) <= _MAX_DICE_SIDES
+
+
 def is_valid_dice_expr(text: str) -> bool:
-    """是否为合法骰表达式（NdM±K 或纯整数）。"""
+    """是否为合法骰表达式（NdM±K 或纯整数；骰数 / 面数有上限）。"""
     s = text.strip()
-    return _DICE_RE.fullmatch(s) is not None or _INT_RE.fullmatch(s) is not None
+    if _INT_RE.fullmatch(s) is not None:
+        return True
+    match = _DICE_RE.fullmatch(s)
+    return match is not None and _dice_in_bounds(match.group(1), match.group(2))
 
 
 def roll_dice(expr: str) -> int:
@@ -137,6 +151,9 @@ def roll_dice(expr: str) -> int:
         msg = f"非法骰表达式：{expr!r}"
         raise ValueError(msg)
     count, sides, modifier = match.groups()
+    if not _dice_in_bounds(count, sides):
+        msg = f"骰表达式超出范围：{expr!r}"
+        raise ValueError(msg)
     total = sum(random.randint(1, int(sides)) for _ in range(int(count)))
     if modifier:
         total += int(modifier)

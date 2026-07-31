@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from nonebot import (
+    get_bot,
     get_driver,
     get_plugin_config,
     logger,
@@ -65,6 +66,32 @@ def _signup_cap(game_module_max: int | None) -> int:
     return min(config.rpg_max_players, game_module_max)
 
 
+def _rpg_game_in_group(event: MessageEvent) -> bool:
+    """规则：群消息 ∧ 本群有跑团对局。
+
+    与 priority=4 配合做注册表门控：报名 / 开始游戏 等命令
+    与狼人杀子插件同名，本插件先加载的狼人杀匹配器会无条件
+    finish() 把它们全部遮蔽。门控后群里有跑团局时 RPG 先接
+    （优先级数值更小者先检查）；没有时规则不通过，同名狼人杀
+    命令照常接管，两边 UX 都不受影响。
+    """
+    if not isinstance(event, GroupMessageEvent):
+        return False
+    return get_game(int(event.group_id)) is not None
+
+
+def _rpg_game_in_play(event: MessageEvent) -> bool:
+    """规则：群消息 ∧ 跑团对局进行中（PLAY）。
+
+    /对话 与 ai_chat 的同名别名冲突（ai_chat 先注册），仅在对局
+    内接管，其余情况放行给 ai_chat。
+    """
+    if not isinstance(event, GroupMessageEvent):
+        return False
+    game = get_game(int(event.group_id))
+    return game is not None and game.phase is Phase.PLAY
+
+
 # ── 开房与报名 ────────────────────────────────────────────
 
 rpg_open = on_command(
@@ -89,6 +116,10 @@ async def handle_open(
         await rpg_open.finish("你已经在其他对局中，无法开房~")
     if not list_modules():
         await rpg_open.finish("当前没有可用的剧本模组，无法开团~")
+    try:
+        get_bot()
+    except ValueError:
+        await rpg_open.finish("机器人连接未就绪，请稍后重试~")
     game = create_game(group_id, user_id)
     if game is None:
         await rpg_open.finish("开房失败，请稍后重试")
@@ -144,7 +175,8 @@ async def handle_select_module(
 signup_cmd = on_command(
     "报名",
     aliases={"上车", "加一"},
-    priority=5,
+    rule=Rule(_rpg_game_in_group),
+    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
     block=True,
 )
 
@@ -176,7 +208,8 @@ async def handle_signup(
 leave_cmd = on_command(
     "退报名",
     aliases={"下车"},
-    priority=5,
+    rule=Rule(_rpg_game_in_group),
+    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
     block=True,
 )
 
@@ -195,13 +228,10 @@ async def handle_leave(
         await leave_cmd.finish("你还没有报名~")
     logger.info(f"跑团群 {int(event.group_id)} {user_id} 退报名")
     if not game.signup_user_ids:
-        # 空房：直接取消引擎任务。阶段置 ENDED 后命令层自播"房间已解散"，
-        # 引擎取消分支见到 ENDED 不再重复播报"对局已被强制结束"
-        game.phase = Phase.ENDED
-        task = game.worker
-        game.worker = None
-        if task is not None and not task.done():
-            task.cancel()
+        # 空房：复用 stop_game（ENDED + cancel + await 引擎 finally 清理），
+        # 避免未等待清理完成时新开房撞到残留注册项。引擎取消分支见到
+        # ENDED 不再重复播报"对局已被强制结束"，解散文案由命令层自播
+        await stop_game(game)
         logger.info(f"跑团群 {int(event.group_id)} 空房解散")
         await leave_cmd.finish("房间已解散")
     if game.host_user_id == user_id:
@@ -213,7 +243,8 @@ async def handle_leave(
 view_cmd = on_command(
     "查看报名",
     aliases={"报名情况"},
-    priority=5,
+    rule=Rule(_rpg_game_in_group),
+    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
     block=True,
 )
 
@@ -244,7 +275,8 @@ async def handle_view(
 start_cmd = on_command(
     "开始游戏",
     aliases={"发车"},
-    priority=5,
+    rule=Rule(_rpg_game_in_group),
+    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
     block=True,
 )
 
@@ -272,7 +304,8 @@ async def handle_start(
 end_cmd = on_command(
     "结束游戏",
     aliases={"解散团"},
-    priority=5,
+    rule=Rule(_rpg_game_in_group),
+    priority=4,  # 先于狼人杀同名命令（其无局分支会全员解禁）；规则不通过时放行
     block=True,
 )
 
@@ -317,7 +350,13 @@ async def handle_check(
     await check_cmd.finish()
 
 
-talk_cmd = on_command("对话", aliases={"询问"}, priority=5, block=True)
+talk_cmd = on_command(
+    "对话",
+    aliases={"询问"},
+    rule=Rule(_rpg_game_in_play),
+    priority=4,  # 先于 ai_chat 的 /对话 别名；非对局期放行给 ai_chat
+    block=True,
+)
 
 
 @talk_cmd.handle()
@@ -479,7 +518,12 @@ async def _is_char_create_dm(event: MessageEvent) -> bool:
 
 private_listener = on_message(
     rule=Rule(_is_char_create_dm),
-    priority=0,
+    # 必须抢先于 ai_chat 的对话模式监听器（同 block=True、priority=0
+    # 但注册更早）：否则处于 /对话 模式的用户发来的建卡指令会被当成
+    # 闲聊吃掉，角色卡只能等超时自动确认。负优先级保证本监听器在
+    # CHAR_CREATE 期先于一切私聊拦截器运行（规则已把范围收窄到
+    # 建卡期在局玩家，不影响其余私聊）。
+    priority=-1,
     block=True,
 )
 
