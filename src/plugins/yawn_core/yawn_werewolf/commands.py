@@ -9,7 +9,13 @@ import asyncio
 import re
 from typing import Optional
 
-from nonebot import get_driver, get_plugin_config, on_command, on_message
+from nonebot import (
+    get_driver,
+    get_plugin_config,
+    logger,
+    on_command,
+    on_message,
+)
 from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
@@ -99,6 +105,7 @@ async def handle_open(
     if game is None:
         await wolf_open.finish("开房失败，请稍后重试")
     game.worker = asyncio.create_task(engine.run_game(game))
+    logger.info(f"狼人杀群 {group_id} 由 {user_id} 开房")
     await wolf_open.finish("狼人杀房间已创建，房主已自动报名~")
 
 
@@ -123,6 +130,10 @@ async def handle_signup(
         await signup_cmd.finish("报名已满员，等待开局~")
     if not join_signup(game, int(event.get_user_id())):
         await signup_cmd.finish("你已在局中，无需重复报名~")
+    logger.info(
+        f"狼人杀群 {int(event.group_id)} {int(event.get_user_id())} 报名"
+        f"（{len(game.signup_user_ids)}/{config.ww_max_players}）"
+    )
     await signup_cmd.finish(
         MessageSegment.at(event.user_id)
         + f"报名成功！当前 {len(game.signup_user_ids)}"
@@ -151,15 +162,18 @@ async def handle_leave(
         await leave_cmd.finish("本群当前没有报名中的狼人杀对局")
     if not leave_signup(game, user_id):
         await leave_cmd.finish("你还没有报名~")
+    logger.info(f"狼人杀群 {int(event.group_id)} {user_id} 退报名")
     # 只剩 AI 视同空房：AI 无法主持对局
     humans = [uid for uid in game.signup_user_ids if not is_ai_uid(uid)]
     if not humans:
-        # 空房：直接取消引擎任务（报名阶段取消不广播）
+        # 空房：直接取消引擎任务。阶段置 ENDED 后命令层自播"房间已解散"，
+        # 引擎取消分支见到 ENDED 不再重复播报"对局已被强制结束"
         game.phase = Phase.ENDED
         task = game.worker
         game.worker = None
         if task is not None and not task.done():
             task.cancel()
+        logger.info(f"狼人杀群 {int(event.group_id)} 空房解散")
         await leave_cmd.finish("房间已解散")
     if game.host_user_id == user_id:
         game.host_user_id = humans[0]
@@ -236,6 +250,10 @@ async def handle_add_ai(  # noqa: C901
         added += 1
     if added == 0:
         await add_ai_cmd.finish("添加失败：房间已满或 AI 人数已达上限")
+    logger.info(
+        f"狼人杀群 {int(event.group_id)} {user_id} 添加 {added} 名 AI"
+        f"（{len(game.signup_user_ids)}/{config.ww_max_players}）"
+    )
     await add_ai_cmd.finish(
         f"已添加 {added} 名玩家！当前 {len(game.signup_user_ids)}"
         f"/{config.ww_max_players} 人"
@@ -277,6 +295,10 @@ async def handle_remove_ai(
         removed += 1
     if removed == 0:
         await remove_ai_cmd.finish("当前没有可移除的玩家~")
+    logger.info(
+        f"狼人杀群 {int(event.group_id)} {user_id} 移除 {removed} 名 AI"
+        f"（{len(game.signup_user_ids)}/{config.ww_max_players}）"
+    )
     await remove_ai_cmd.finish(
         f"已移除 {removed} 名玩家，当前 {len(game.signup_user_ids)}"
         f"/{config.ww_max_players} 人"
@@ -314,6 +336,10 @@ async def handle_start(
                 break
             filled += 1
     game.action_queue.put_nowait(Action(ActionKind.START_GAME, user_id))
+    logger.info(
+        f"狼人杀群 {int(event.group_id)} {user_id} 请求开始游戏"
+        f"（{len(game.signup_user_ids)} 人，AI 补位 {filled}）"
+    )
     if filled:
         await start_cmd.finish(
             f"已自动补足 {filled} 人，"
@@ -347,6 +373,10 @@ async def handle_end(
         await end_cmd.finish("已执行恢复操作：关闭全员禁言并解禁全体群成员")
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await end_cmd.finish("只有房主、群管理员或超管可以结束游戏~")
+    logger.info(
+        f"狼人杀群 {group_id} {user_id} 强制结束对局"
+        f"（阶段 {game.phase.value}，第 {game.round_no} 回合）"
+    )
     await stop_game(game)
     await end_cmd.finish("对局已结束")
 
@@ -701,9 +731,18 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
     game = game_of_user(user_id)
     if game is None:
         return
-    action = parse_dm_action(event.get_plaintext(), user_id)
+    text = event.get_plaintext()
+    action = parse_dm_action(text, user_id)
     if action is None:
+        logger.info(f"狼人杀群 {game.group_id} {user_id} 私聊无法解析：{text!r}")
         await private_listener.finish(_DM_HINT)
+    actor = game.player_by_user(user_id)
+    seat_desc = f"{actor.seat}号" if actor is not None else str(user_id)
+    target_desc = f"→{action.value}号" if action.value else ""
+    logger.info(
+        f"狼人杀群 {game.group_id} {seat_desc} 私聊行动："
+        f"{action.kind.value}{target_desc}（原文 {text!r}）"
+    )
     game.action_queue.put_nowait(action)
     await private_listener.finish()
 

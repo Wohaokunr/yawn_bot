@@ -20,15 +20,19 @@ class Config(BaseModel):
     # 报名窗口剩余多少秒时提醒一次
     ww_signup_warn_remain: int = 60
 
-    # 每个夜间行动阶段的时长（秒）
+    # 女巫 / 预言家夜间行动阶段的时长（秒）：二者收到有效行动即提前
+    # 结束，只有彻底无行动才会等满窗口
     ww_night_timeout: int = 60
+    # 狼人阶段专属时长（秒）：两段式狼队讨论 + 串行出刀需要更长窗口，
+    # 与女巫/预言家解耦，避免把后两者也拖长
+    ww_wolf_timeout: int = 180
     # 夜间阶段剩余多少秒时提醒一次
     ww_night_warn_remain: int = 30
 
     # 每人发言时长（秒），竞选发言与 PK 发言同样使用
-    ww_speech_timeout: int = 90
+    ww_speech_timeout: int = 120
     # 投票阶段时长（秒），警长投票 / 放逐投票 / PK 投票同样使用
-    ww_vote_timeout: int = 60
+    ww_vote_timeout: int = 90
 
     # 猎人开枪决策时长（秒）
     ww_hunter_timeout: int = 60
@@ -47,7 +51,24 @@ class Config(BaseModel):
     ww_ai_autofill: bool = True
     # 单局 AI 玩家数量上限
     ww_ai_max: int = 11
-    # AI 单次决策（非发言）的 LLM 调用超时（秒）
-    ww_ai_decision_timeout: float = 15.0
-    # AI 发言的 LLM 调用超时（秒）
-    ww_ai_speech_timeout: float = 20.0
+    # AI 单次决策（非发言）的 LLM 调用超时（秒）。
+    # 推理模型非流式补全须等整段推理完成才有响应，需与各阶段
+    # 窗口对齐，过短会导致 AI 全程超时托管。
+    ww_ai_decision_timeout: float = 90.0
+    # AI 发言的 LLM 调用超时（秒），对齐发言窗口
+    ww_ai_speech_timeout: float = 90.0
+    # AI 决策（非发言）单次生成的最大 token 数。推理模型会把大量
+    # token 耗在内部推理上，预算不足会被截断（finish_reason=length）
+    # 返回空内容而全程托管，故给足余量
+    ww_ai_max_tokens: int = 4096
+    # AI 发言单次生成的最大 token 数（同样需覆盖推理开销）
+    ww_ai_speech_max_tokens: int = 2048
+    # 狼队是否进行两段式讨论：先各自 说XXX 提议并互看，再统一 刀N。
+    # 关闭则退回单段直接出刀
+    ww_ai_wolf_discuss: bool = True
+    # 狼队讨论阶段（提议）的 LLM 调用超时（秒）：短于决策超时，
+    # 给随后的刀口阶段留出窗口时间
+    ww_ai_discuss_timeout: float = 45.0
+    # 有 AI 参与时警长竞选报名窗口的延长量（秒）：
+    # 给 AI 的竞选决策留出 LLM 调用时间，避免迟到的上警被丢弃
+    ww_ai_register_buffer: int = 15

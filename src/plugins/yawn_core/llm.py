@@ -7,7 +7,7 @@ ai_chat 的流式对话与 yawn_werewolf 的 AI 玩家共用同一客户端与
 """
 
 import asyncio
-from typing import Optional
+from typing import Any, Optional
 
 from nonebot import get_plugin_config, logger
 from openai import AsyncOpenAI, OpenAIError
@@ -43,6 +43,11 @@ async def complete(
     timeout: float = 25.0,
 ) -> Optional[str]:
     """非流式补全：返回完整回复文本；失败/超时/空回复返回 None。"""
+    # 部分 OpenAI 兼容端点会把显式 null 的 temperature 拒成 400，
+    # 仅在调用方显式给值时才加入请求参数
+    extra: dict[str, Any] = {}
+    if temperature is not None:
+        extra["temperature"] = temperature
     async with _COMPLETION_CONCURRENCY:
         try:
             response = await asyncio.wait_for(
@@ -55,14 +60,28 @@ async def complete(
                         if max_tokens is not None
                         else ai_config.ai_max_tokens
                     ),
-                    temperature=temperature,
+                    **extra,
                 ),
                 timeout=timeout,
             )
         except (OpenAIError, asyncio.TimeoutError):
-            logger.warning("LLM 非流式补全失败", exc_info=True)
+            logger.warning(
+                f"LLM 非流式补全失败（model={ai_config.ai_model}, timeout={timeout}s）",
+                exc_info=True,
+            )
             return None
     if not response.choices:
+        logger.warning(f"LLM 未返回任何 choice（model={ai_config.ai_model}）")
         return None
-    content = (response.choices[0].message.content or "").strip()
-    return content or None
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    if not content:
+        # 推理模型可能把 token 全部耗在 reasoning 上，或被 max_tokens
+        # 截断（finish_reason="length"）：留下诊断信息而不是静默 None
+        logger.warning(
+            f"LLM 返回空内容"
+            f"（model={ai_config.ai_model}, finish_reason={choice.finish_reason}）"
+        )
+        return None
+    logger.debug(f"LLM 补全成功（model={ai_config.ai_model}, 长度={len(content)}）")
+    return content
