@@ -28,8 +28,9 @@ from ..permission import (  # noqa: TID252
     is_group_admin,
     require_feature,
 )
-from . import api, engine
+from . import ai_player, api, engine
 from .config import Config
+from .dsl import _DM_HINT, parse_dm_action
 from .models import WerewolfPlayer
 from .roles import Role
 from .state import (
@@ -37,11 +38,15 @@ from .state import (
     Action,
     ActionKind,
     Phase,
+    add_ai_signup,
+    count_ai_signup,
     create_game,
     game_of_user,
     get_game,
+    is_ai_uid,
     join_signup,
     leave_signup,
+    remove_ai_signup,
     stop_game,
 )
 
@@ -146,7 +151,9 @@ async def handle_leave(
         await leave_cmd.finish("本群当前没有报名中的狼人杀对局")
     if not leave_signup(game, user_id):
         await leave_cmd.finish("你还没有报名~")
-    if not game.signup_user_ids:
+    # 只剩 AI 视同空房：AI 无法主持对局
+    humans = [uid for uid in game.signup_user_ids if not is_ai_uid(uid)]
+    if not humans:
         # 空房：直接取消引擎任务（报名阶段取消不广播）
         game.phase = Phase.ENDED
         task = game.worker
@@ -155,7 +162,7 @@ async def handle_leave(
             task.cancel()
         await leave_cmd.finish("房间已解散")
     if game.host_user_id == user_id:
-        game.host_user_id = game.signup_user_ids[0]
+        game.host_user_id = humans[0]
         await leave_cmd.finish(f"已退报名，房主移交给 {game.host_user_id}")
     await leave_cmd.finish("已退出报名~")
 
@@ -178,13 +185,102 @@ async def handle_view(
     if game is None or game.phase is not Phase.SIGNUP:
         await view_cmd.finish("本群当前没有报名中的狼人杀对局")
     lines = ["═══ 狼人杀 · 报名名单 ═══"]
-    lines += [f"{idx}. {uid}" for idx, uid in enumerate(game.signup_user_ids, start=1)]
+    for idx, uid in enumerate(game.signup_user_ids, start=1):
+        name = game.ai_names.get(uid)
+        lines.append(f"{idx}. {name}" if name is not None else f"{idx}. {uid}")
     lines.append("──────────────")
     lines.append(
         f"当前 {len(game.signup_user_ids)}/{config.ww_max_players} 人，"
         f"至少 {config.ww_min_players} 人开局"
     )
     await view_cmd.finish("\n".join(lines))
+
+
+add_ai_cmd = on_command(
+    "添加AI",
+    aliases={"加AI", "补人"},
+    priority=5,
+    block=True,
+)
+
+
+@add_ai_cmd.handle()
+async def handle_add_ai(  # noqa: C901
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """报名阶段添加 AI 玩家（房主/群管/超管）。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.SIGNUP:
+        await add_ai_cmd.finish("本群当前没有报名中的狼人杀对局")
+    user_id = int(event.get_user_id())
+    if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
+        await add_ai_cmd.finish("只有房主、群管理员或超管可以添加玩家~")
+    if not config.ww_ai_enabled:
+        await add_ai_cmd.finish("本群未启用 AI 玩家~")
+    text = str(arg).strip()
+    count = 1
+    if text:
+        if not text.isdigit() or int(text) < 1:
+            await add_ai_cmd.finish("格式：/添加AI N（N 为人数）")
+        count = int(text)
+    added = 0
+    for _ in range(count):
+        if len(game.signup_user_ids) >= config.ww_max_players:
+            break
+        if count_ai_signup(game) >= config.ww_ai_max:
+            break
+        if add_ai_signup(game) is None:
+            break
+        added += 1
+    if added == 0:
+        await add_ai_cmd.finish("添加失败：房间已满或 AI 人数已达上限")
+    await add_ai_cmd.finish(
+        f"已添加 {added} 名玩家！当前 {len(game.signup_user_ids)}"
+        f"/{config.ww_max_players} 人"
+        f"（至少 {config.ww_min_players} 人开局）"
+    )
+
+
+remove_ai_cmd = on_command(
+    "移除AI",
+    aliases={"减AI"},
+    priority=5,
+    block=True,
+)
+
+
+@remove_ai_cmd.handle()
+async def handle_remove_ai(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """报名阶段移除已添加的 AI 玩家（房主/群管/超管）。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.SIGNUP:
+        await remove_ai_cmd.finish("本群当前没有报名中的狼人杀对局")
+    user_id = int(event.get_user_id())
+    if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
+        await remove_ai_cmd.finish("只有房主、群管理员或超管可以移除玩家~")
+    text = str(arg).strip()
+    count = 1
+    if text:
+        if not text.isdigit() or int(text) < 1:
+            await remove_ai_cmd.finish("格式：/移除AI N（N 为人数）")
+        count = int(text)
+    removed = 0
+    for _ in range(count):
+        if not remove_ai_signup(game):
+            break
+        removed += 1
+    if removed == 0:
+        await remove_ai_cmd.finish("当前没有可移除的玩家~")
+    await remove_ai_cmd.finish(
+        f"已移除 {removed} 名玩家，当前 {len(game.signup_user_ids)}"
+        f"/{config.ww_max_players} 人"
+    )
 
 
 start_cmd = on_command(
@@ -207,7 +303,22 @@ async def handle_start(
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await start_cmd.finish("只有房主、群管理员或超管可以开始游戏~")
+    # 人数不足时用 AI 自动补位到最低开局数
+    filled = 0
+    if config.ww_ai_enabled and config.ww_ai_autofill:
+        while (
+            len(game.signup_user_ids) < config.ww_min_players
+            and count_ai_signup(game) < config.ww_ai_max
+        ):
+            if add_ai_signup(game) is None:
+                break
+            filled += 1
     game.action_queue.put_nowait(Action(ActionKind.START_GAME, user_id))
+    if filled:
+        await start_cmd.finish(
+            f"已自动补足 {filled} 人，"
+            f"当前 {len(game.signup_user_ids)} 人，游戏即将开始~"
+        )
     await start_cmd.finish("已请求开始游戏~")
 
 
@@ -573,59 +684,7 @@ async def _is_in_game_dm(event: MessageEvent) -> bool:
         )
 
 
-_DM_PATTERNS: list[tuple[str, ActionKind, bool]] = [
-    # (正则, 行动类型, 是否需要座位参数)
-    (r"刀\s*(\d+)\s*号?", ActionKind.KILL, True),
-    (r"(?:查验|验)\s*(\d+)\s*号?", ActionKind.CHECK, True),
-    (r"救", ActionKind.SAVE, False),
-    (r"毒\s*(\d+)\s*号?", ActionKind.POISON, True),
-    (r"(?:开枪|带)\s*(\d+)\s*号?", ActionKind.SHOOT, True),
-    (r"(?:不开枪|压枪)", ActionKind.NO_SHOOT, False),
-    (r"(?:过|跳过)", ActionKind.SKIP, False),
-    (r"自爆", ActionKind.SELF_DETONATE, False),
-    (r"(?:上警|竞选)", ActionKind.RUN, False),
-    (r"退水", ActionKind.WITHDRAW, False),
-    (r"移交警徽\s*(\d+)\s*号?", ActionKind.PASS_BADGE, True),
-    (r"撕警徽", ActionKind.TEAR_BADGE, False),
-]
-
-_DM_HINT = (
-    "无法识别的指令。可用格式：\n"
-    "刀N / 查验N / 救 / 毒N / 开枪N / 不开枪 / 过\n"
-    "自爆 / 上警 / 退水 / 移交警徽N / 撕警徽\n"
-    "说XXX（狼人讨论，转发给队友）"
-)
-
-
-def _parse_dm_action(text: str, user_id: int) -> Optional[Action]:
-    """解析私聊自由文本为行动；无法解析返回 None。"""
-    text = text.lstrip("/").strip()
-    if not text:
-        return None
-    order_match = re.fullmatch(r"排序\s*(\d+)\s*号?\s*(顺|逆)?", text)
-    if order_match is not None:
-        aux = "ccw" if order_match.group(2) == "逆" else "cw"
-        return Action(
-            ActionKind.ORDER,
-            user_id,
-            int(order_match.group(1)),
-            aux,
-        )
-    say_match = re.fullmatch(r"(?:说|发言|讨论)\s*(.+)", text, re.DOTALL)
-    if say_match is not None:
-        return Action(
-            ActionKind.SAY,
-            user_id,
-            None,
-            say_match.group(1).strip(),
-        )
-    for pattern, kind, need_seat in _DM_PATTERNS:
-        match = re.fullmatch(pattern, text)
-        if match is None:
-            continue
-        seat = int(match.group(1)) if need_seat else None
-        return Action(kind, user_id, seat)
-    return None
+# 私聊行动 DSL（模式表与解析函数）见 dsl.py，与 ai_player 共用
 
 
 private_listener = on_message(
@@ -642,11 +701,57 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
     game = game_of_user(user_id)
     if game is None:
         return
-    action = _parse_dm_action(event.get_plaintext(), user_id)
+    action = parse_dm_action(event.get_plaintext(), user_id)
     if action is None:
         await private_listener.finish(_DM_HINT)
     game.action_queue.put_nowait(action)
     await private_listener.finish()
+
+
+# ── 群发言捕获（供 AI 驱动听取发言）──────────────────────
+
+_SPEECH_CAPTURE_PHASES: frozenset[Phase] = frozenset(
+    {
+        Phase.LAST_WORDS,
+        Phase.SHERIFF_SPEECH,
+        Phase.SHERIFF_REVOTE,
+        Phase.DAY_SPEECH,
+        Phase.PK_SPEECH,
+    }
+)
+
+
+async def _is_game_speech(event: MessageEvent) -> bool:
+    """规则：群消息 ∧ 发言阶段 ∧ 发送者是当前发言者。"""
+    if not isinstance(event, GroupMessageEvent):
+        return False
+    game = get_game(int(event.group_id))
+    if game is None or game.phase not in _SPEECH_CAPTURE_PHASES:
+        return False
+    if game.current_speaker is None:
+        return False
+    player = game.player_by_user(int(event.get_user_id()))
+    return player is not None and player.seat == game.current_speaker
+
+
+speech_listener = on_message(
+    rule=Rule(_is_game_speech),
+    priority=0,
+    block=False,  # 不阻断命令匹配；仅旁路记录发言
+)
+
+
+@speech_listener.handle()
+async def handle_game_speech(event: GroupMessageEvent) -> None:
+    """记录当前发言者的群发言到 AI 公共记录。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.current_speaker is None:
+        return
+    text = event.get_plaintext().strip()
+    # 空消息与命令（/过 等）不算发言
+    if not text or text.startswith("/"):
+        return
+    ai_player.record_speech(game, game.current_speaker, text)
 
 
 # ── 战绩 ──────────────────────────────────────────────────
@@ -680,7 +785,10 @@ async def handle_record(
             if not ats[0].isdigit():
                 await record_cmd.finish("无法查询全体成员的战绩~")
             target = int(ats[0])
-    stmt = select(WerewolfPlayer).where(WerewolfPlayer.user_id == target)
+    stmt = select(WerewolfPlayer).where(
+        WerewolfPlayer.user_id == target,
+        WerewolfPlayer.is_ai == False,  # noqa: E712  # AI 战绩不计入真人
+    )
     rows = (await session.execute(stmt)).scalars().all()
     finished = [r for r in rows if r.is_winner is not None]
     if not finished:

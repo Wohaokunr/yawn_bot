@@ -98,6 +98,10 @@ class PlayerState:
     alive: bool = True
     death_round: Optional[int] = None
     death_cause: Optional[DeathCause] = None
+    # AI 玩家：user_id 为负数合成 ID，不发私聊/禁言 API
+    is_ai: bool = False
+    # AI 伪装昵称（报名名单与代发发言显示用；人类玩家为 None）
+    display_name: Optional[str] = None
     # 女巫药剂状态
     save_used: bool = False
     poison_used: bool = False
@@ -131,6 +135,14 @@ class Game:
     game_row_id: Optional[int] = None
     # 携带 onebot v11 Bot 实例；用 Any 避免 nonebot 基类与适配器类型冲突
     bot: Any = None
+    # ── 引擎 → AI 驱动的只读信号（仅引擎写入）──
+    # 当前发言者座位（发言轮换 / 遗言期间），None=无
+    current_speaker: Optional[int] = None
+    # 当前投票阶段的合法目标座位 / 被排除座位（_collect_votes 写入）
+    vote_targets: list[int] = field(default_factory=list)
+    vote_exclude: tuple[int, ...] = ()
+    # AI 玩家昵称分配表（AI user_id -> 伪装昵称）
+    ai_names: dict[int, str] = field(default_factory=dict)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -174,6 +186,83 @@ class Game:
                 self.action_queue.task_done()
             except asyncio.QueueEmpty:  # noqa: PERF203
                 break
+
+
+# ── AI 玩家合成身份 ───────────────────────────────────────
+
+# 负数 user_id 永不与真实 QQ 号冲突；_user_index 保证跨局唯一在局
+AI_UID_BASE = -10000
+_ai_uid_counter = 0
+
+# AI 伪装昵称池（普通群昵称风格，不透露 AI 身份）
+AI_NICKNAMES: tuple[str, ...] = (
+    "阿宝",
+    "小鱼",
+    "团子",
+    "栗子",
+    "年糕",
+    "布丁",
+    "奶茶",
+    "土豆",
+    "花生",
+    "芝麻",
+    "汤圆",
+    "橘子",
+    "海苔",
+    "麻薯",
+    "柚子",
+    "豆浆",
+    "核桃",
+    "樱桃",
+    "麦兜",
+    "胖虎",
+)
+
+
+def new_ai_uid() -> int:
+    """分配一个新的 AI 合成 user_id（负数）。"""
+    global _ai_uid_counter  # noqa: PLW0603
+    _ai_uid_counter += 1
+    return AI_UID_BASE - _ai_uid_counter
+
+
+def is_ai_uid(user_id: int) -> bool:
+    """判断 user_id 是否为 AI 合成 ID。"""
+    return user_id < 0
+
+
+def pick_ai_name(game: Game) -> str:
+    """为本局新 AI 玩家取一个不重复的伪装昵称。"""
+    used = set(game.ai_names.values())
+    for name in AI_NICKNAMES:
+        if name not in used:
+            return name
+    return f"玩家{len(game.ai_names) + 1}"
+
+
+def add_ai_signup(game: Game) -> Optional[int]:
+    """为当前对局报名一个 AI 玩家；返回其 user_id，失败返回 None。"""
+    uid = new_ai_uid()
+    if not join_signup(game, uid):
+        return None
+    game.ai_names[uid] = pick_ai_name(game)
+    return uid
+
+
+def remove_ai_signup(game: Game) -> bool:
+    """移除最近加入的一个 AI 报名者；无 AI 返回 False。"""
+    for uid in reversed(game.signup_user_ids):
+        if not is_ai_uid(uid):
+            continue
+        if leave_signup(game, uid):
+            game.ai_names.pop(uid, None)
+            return True
+    return False
+
+
+def count_ai_signup(game: Game) -> int:
+    """统计当前报名中的 AI 数量。"""
+    return sum(1 for uid in game.signup_user_ids if is_ai_uid(uid))
 
 
 # ── 注册表 ────────────────────────────────────────────────

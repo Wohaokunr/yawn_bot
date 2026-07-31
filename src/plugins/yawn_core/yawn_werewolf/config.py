@@ -39,3 +39,15 @@ class Config(BaseModel):
     ww_sheriff_register_timeout: int = 30
     # 移交警徽决策时长（秒）
     ww_badge_timeout: int = 30
+
+    # ── AI 玩家 ──
+    # AI 玩家总开关
+    ww_ai_enabled: bool = True
+    # /开始游戏 人数不足时自动用 AI 补位到最低开局数
+    ww_ai_autofill: bool = True
+    # 单局 AI 玩家数量上限
+    ww_ai_max: int = 11
+    # AI 单次决策（非发言）的 LLM 调用超时（秒）
+    ww_ai_decision_timeout: float = 15.0
+    # AI 发言的 LLM 调用超时（秒）
+    ww_ai_speech_timeout: float = 20.0
