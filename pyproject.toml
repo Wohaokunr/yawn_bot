@@ -15,6 +15,7 @@ dependencies = [
     "nonebot-plugin-orm[sqlite]>=0.8.3",
     "nonebot-plugin-htmlkit>=0.1.0rc5",
     "openai>=2.50.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -105,7 +106,7 @@ ignore = [
     "COM812",  # missing-trailing-comma
     "PLC0415", # import-outside-top-level
 ]
-allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、"]
+allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "｜", "×"]
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
@@ -120,4 +121,5 @@ typeCheckingMode = "standard"
 dev = [
     "pyright>=1.1.411",
     "ruff>=0.16.0",
+    "types-PyYAML>=6.0",
 ]
