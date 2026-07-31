@@ -24,6 +24,7 @@ from .config import Config
 from .models import WerewolfGame, WerewolfPlayer
 from .roles import (
     GOD_ROLES,
+    ROLE_COMPOSITION,
     ROLE_FACTION,
     DeathCause,
     Faction,
@@ -50,7 +51,7 @@ config = get_plugin_config(Config)
 _BJ_TZ = timezone(timedelta(hours=8))
 
 # 警长平票终辩的固定时长（秒）
-_FINAL_SPEECH_TIMEOUT = 30
+_FINAL_SPEECH_TIMEOUT = 60
 
 
 def _now_bj() -> datetime:
@@ -118,12 +119,22 @@ async def _get_action(game: Game, step: float) -> Optional[Action]:
     return action
 
 
+def _enter_phase(game: Game, phase: Phase) -> None:
+    """切换阶段并记日志；同阶段重复赋值不重复记录。"""
+    if game.phase is phase:
+        return
+    logger.info(
+        f"狼人杀群 {game.group_id} 进入阶段 {phase.value}（第 {game.round_no} 回合）"
+    )
+    game.phase = phase
+
+
 async def _announce(game: Game, text: Union[str, "Message"]) -> None:
-    """群播报；机器人缺失时静默。同时抄送 AI 驱动的公共记录。"""
+    """群播报；机器人缺失时群侧静默，但始终抄送 AI 驱动的公共记录。"""
+    ai_player.on_announce(game, str(text))
     if game.bot is None:
         return
     await api.safe_group_msg(game.bot, game.group_id, text)
-    ai_player.on_announce(game, str(text))
 
 
 async def _dm(game: Game, player: PlayerState, text: str) -> bool:
@@ -197,6 +208,10 @@ def _kill(game: Game, player: PlayerState, cause: DeathCause) -> None:
     player.alive = False
     player.death_cause = cause
     player.death_round = game.round_no
+    logger.info(
+        f"狼人杀群 {game.group_id} {player.seat}号 死亡"
+        f"（{player.role.value}，死因 {cause.value}，第 {game.round_no} 回合）"
+    )
 
 
 def _as_detonation(
@@ -257,7 +272,7 @@ async def _phase_wolves(  # noqa: C901,PLR0912
     cfg: Config,
 ) -> Optional[int]:
     """狼人阶段：私聊征刀、多数决；返回刀口座位（None=空刀）。"""
-    game.phase = Phase.NIGHT_WOLVES
+    _enter_phase(game, Phase.NIGHT_WOLVES)
     wolves = game.alive_players_of_role(Role.WEREWOLF)
     if not wolves:
         return None
@@ -273,7 +288,7 @@ async def _phase_wolves(  # noqa: C901,PLR0912
     votes: dict[int, int] = {}
     submitted: dict[int, int] = {}  # 狼人QQ -> 已确定的刀口座位
     timer = _Timer(
-        _loop_time() + cfg.ww_night_timeout,
+        _loop_time() + cfg.ww_wolf_timeout,
         cfg.ww_night_warn_remain,
         f"狼人行动还剩 {cfg.ww_night_warn_remain} 秒",
     )
@@ -330,10 +345,14 @@ async def _phase_wolves(  # noqa: C901,PLR0912
                 f"当前刀型：{tally}（已提交 {len(submitted)}/{len(wolves)}）",
             )
     if not votes:
+        logger.info(f"狼人杀群 {game.group_id} 狼人空刀（无人提交刀口）")
         return None
     max_count = max(votes.values())
     top = [seat for seat, count in votes.items() if count == max_count]
-    return random.choice(top)
+    kill_seat = random.choice(top)
+    tie_note = f"（平票 {top} 随机选定）" if len(top) > 1 else ""
+    logger.info(f"狼人杀群 {game.group_id} 狼人刀口：{kill_seat}号{tie_note}")
+    return kill_seat
 
 
 async def _phase_witch(  # noqa: C901
@@ -342,7 +361,7 @@ async def _phase_witch(  # noqa: C901
     kill_seat: Optional[int],
 ) -> tuple[bool, Optional[int]]:
     """女巫阶段：返回 (是否使用解药, 毒杀座位)。"""
-    game.phase = Phase.NIGHT_WITCH
+    _enter_phase(game, Phase.NIGHT_WITCH)
     witches = game.alive_players_of_role(Role.WITCH)
     if not witches:
         return False, None
@@ -374,6 +393,10 @@ async def _phase_witch(  # noqa: C901
         if action.kind is ActionKind.SAVE:
             if can_save:
                 witch.save_used = True
+                logger.info(
+                    f"狼人杀群 {game.group_id} 女巫 {witch.seat}号 "
+                    f"使用解药救活 {kill_seat}号"
+                )
                 await _dm(game, witch, f"已使用解药救活 {kill_seat}号")
                 return True, None
             await _dm(
@@ -390,18 +413,24 @@ async def _phase_witch(  # noqa: C901
                 and target.seat != witch.seat
             ):
                 witch.poison_used = True
+                logger.info(
+                    f"狼人杀群 {game.group_id} 女巫 {witch.seat}号 "
+                    f"使用毒药毒杀 {target.seat}号"
+                )
                 await _dm(game, witch, f"已使用毒药毒杀 {target.seat}号")
                 return False, target.seat
             await _dm(game, witch, "目标无效或毒药已用，请重新选择")
         elif action.kind is ActionKind.SKIP:
+            logger.info(f"狼人杀群 {game.group_id} 女巫 {witch.seat}号 选择不使用药剂")
             await _dm(game, witch, "选择不使用药剂")
             return False, None
+    logger.info(f"狼人杀群 {game.group_id} 女巫 {witch.seat}号 超时未用药")
     return False, None
 
 
 async def _phase_seer(game: Game, cfg: Config) -> None:
     """预言家阶段：查验结果私聊反馈。"""
-    game.phase = Phase.NIGHT_SEER
+    _enter_phase(game, Phase.NIGHT_SEER)
     seers = game.alive_players_of_role(Role.SEER)
     if not seers:
         return
@@ -433,8 +462,13 @@ async def _phase_seer(game: Game, cfg: Config) -> None:
             )
             continue
         identity = "狼人" if target.role is Role.WEREWOLF else "好人"
+        logger.info(
+            f"狼人杀群 {game.group_id} 预言家 {seer.seat}号 "
+            f"查验 {target.seat}号 → {identity}"
+        )
         await _dm(game, seer, f"查验结果：{target.seat}号 是 {identity}")
         return
+    logger.info(f"狼人杀群 {game.group_id} 预言家 {seer.seat}号 超时未查验")
 
 
 async def _run_night(game: Game, cfg: Config) -> list[PlayerState]:
@@ -464,7 +498,7 @@ async def _run_night(game: Game, cfg: Config) -> list[PlayerState]:
 
 async def _last_words(game: Game, cfg: Config, player: PlayerState) -> None:
     """遗言环节：群内限时发言，可被狼人自爆打断。"""
-    game.phase = Phase.LAST_WORDS
+    _enter_phase(game, Phase.LAST_WORDS)
     await _unban(game, player.user_id)
     game.current_speaker = player.seat
     try:
@@ -497,7 +531,7 @@ async def _hunter_prompt(
     hunter: PlayerState,
 ) -> Optional[int]:
     """询问猎人是否开枪；返回带走座位（None=不开枪）。"""
-    game.phase = Phase.HUNTER_SHOT
+    _enter_phase(game, Phase.HUNTER_SHOT)
     await _unban(game, hunter.user_id)
     await _announce(
         game,
@@ -558,7 +592,7 @@ async def _badge_transfer(
     sheriff: PlayerState,
 ) -> None:
     """警徽移交环节：超时视为撕警徽。"""
-    game.phase = Phase.BADGE_TRANSFER
+    _enter_phase(game, Phase.BADGE_TRANSFER)
     await _unban(game, sheriff.user_id)
     await _announce(
         game,
@@ -622,7 +656,7 @@ async def _speech_rotation(  # noqa: C901,PLR0912,PLR0913
     speech_timeout: Optional[int] = None,
 ) -> None:
     """单人禁言轮换发言；可被狼人自爆打断。"""
-    game.phase = phase
+    _enter_phase(game, phase)
     timeout = speech_timeout or cfg.ww_speech_timeout
     ban_total = timeout * max(len(order), 1) + 600
     for p in game.alive_players():
@@ -644,6 +678,7 @@ async def _speech_rotation(  # noqa: C901,PLR0912,PLR0913
                 f"请 {speaker.seat}号 发言（{timeout} 秒，发送 /过 结束发言）",
             )
             timer = _Timer(_loop_time() + timeout)
+            window_done = False  # 发言者主动结束（SKIP/退水），区别于超时
             while timer.remaining() > 0:
                 action = await timer.next_action(game)
                 if action is None:
@@ -657,13 +692,18 @@ async def _speech_rotation(  # noqa: C901,PLR0912,PLR0913
                         wd.sheriff_candidate = False
                         await _announce(game, f"{wd.seat}号 退水")
                         if wd.user_id == speaker.user_id:
+                            window_done = True
                             break
                     continue
                 if (
                     action.actor_user_id == speaker.user_id
                     and action.kind is ActionKind.SKIP
                 ):
+                    window_done = True
                     break
+            if not window_done:
+                # 窗口超时：给一个可见交代，避免"请 N号 发言"后一片死寂
+                await _announce(game, f"{speaker.seat}号 超时未发言")
         finally:
             game.current_speaker = None
         await _ban(game, speaker.user_id, 1800)
@@ -678,7 +718,7 @@ async def _decide_speech_order(
     alive = game.alive_players()
     sheriff = game.sheriff()
     if sheriff is not None and sheriff.alive:
-        game.phase = Phase.DAY_SPEECH
+        _enter_phase(game, Phase.DAY_SPEECH)
         await _unban(game, sheriff.user_id)
         await _announce(
             game,
@@ -732,7 +772,7 @@ async def _collect_votes(
     exclude_seats: tuple[int, ...] = (),
 ) -> dict[int, Optional[int]]:
     """收票：返回 {投票者QQ: 目标座位或None(弃票)}。"""
-    game.phase = phase
+    _enter_phase(game, phase)
     # 合法投票目标供 AI 驱动校验/构建提示词
     game.vote_targets = list(target_seats)
     game.vote_exclude = tuple(exclude_seats)
@@ -773,6 +813,18 @@ async def _collect_votes(
         elif action.kind is ActionKind.ABSTAIN:
             votes[actor.user_id] = None
             await _announce(game, f"{actor.seat}号 弃票")
+    detail_parts: list[str] = []
+    for uid, seat in votes.items():
+        actor = game.player_by_user(uid)
+        if actor is None:
+            continue
+        detail_parts.append(
+            f"{actor.seat}号→{f'{seat}号' if seat is not None else '弃票'}"
+        )
+    logger.info(
+        f"狼人杀群 {game.group_id} {phase.value} 收票结束"
+        f"（{len(votes)}/{len(eligible)} 人）：{'、'.join(detail_parts) or '无'}"
+    )
     return votes
 
 
@@ -818,14 +870,19 @@ async def _sheriff_campaign(  # noqa: C901,PLR0912,PLR0915
     cfg: Config,
 ) -> None:
     """警长竞选（仅第 1 天）；可被 _DetonatedError 打断。"""
-    game.phase = Phase.SHERIFF_REGISTER
+    _enter_phase(game, Phase.SHERIFF_REGISTER)
+    # 有 AI 参与时延长报名窗口：AI 的竞选决策是一次 LLM 调用，
+    # 不延长则迟到的上警会落进发言阶段被丢弃，AI 连候选人都当不上
+    register_timeout = cfg.ww_sheriff_register_timeout + (
+        cfg.ww_ai_register_buffer if any(p.is_ai for p in game.alive_players()) else 0
+    )
     await _announce(
         game,
         "警长竞选开始：想竞选的玩家请发送 /上警"
-        f"（{cfg.ww_sheriff_register_timeout} 秒），"
+        f"（{register_timeout} 秒），"
         "竞选期间可发送 /退水 退出竞选",
     )
-    timer = _Timer(_loop_time() + cfg.ww_sheriff_register_timeout)
+    timer = _Timer(_loop_time() + register_timeout)
     while timer.remaining() > 0:
         action = await timer.next_action(game)
         if action is None:
@@ -840,6 +897,23 @@ async def _sheriff_campaign(  # noqa: C901,PLR0912,PLR0915
             if not player.sheriff_candidate:
                 player.sheriff_candidate = True
                 await _announce(game, f"{player.seat}号 上警")
+        elif action.kind is ActionKind.WITHDRAW and player.sheriff_candidate:
+            player.sheriff_candidate = False
+            await _announce(game, f"{player.seat}号 退水")
+    # 报名窗口关闭时队列里可能仍有压线到达的行动（多为 AI 决策），
+    # 全部取出按报名规则处理，避免被后续发言阶段无声丢弃
+    while not game.action_queue.empty():
+        action = game.action_queue.get_nowait()
+        game.action_queue.task_done()
+        player = game.player_by_user(action.actor_user_id)
+        if player is None or not player.alive:
+            continue
+        if action.kind is ActionKind.RUN and not player.sheriff_candidate:
+            player.sheriff_candidate = True
+            logger.info(
+                f"狼人杀群 {game.group_id} {player.seat}号 压线上警（报名窗口刚关闭）"
+            )
+            await _announce(game, f"{player.seat}号 上警")
         elif action.kind is ActionKind.WITHDRAW and player.sheriff_candidate:
             player.sheriff_candidate = False
             await _announce(game, f"{player.seat}号 退水")
@@ -1001,7 +1075,7 @@ async def _run_day(  # noqa: C901,PLR0912
     night_deaths: list[PlayerState],
 ) -> Optional[Faction]:
     """白天完整流程；返回获胜阵营或 None；可能抛出 _DetonatedError。"""
-    game.phase = Phase.DAY_ANNOUNCE
+    _enter_phase(game, Phase.DAY_ANNOUNCE)
     await _whole_ban(game, enable=False)
     await _unban_all_players(game)
     if night_deaths:
@@ -1155,11 +1229,18 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
     game: Game,
 ) -> None:
     """引擎主任务：报名 → 发牌 → 昼夜循环 → 终局。"""
-    game.bot = get_bot()
     cfg = config
+    logger.info(f"狼人杀群 {game.group_id} 引擎启动（房主 {game.host_user_id}）")
     try:
+        try:
+            game.bot = get_bot()
+        except ValueError:
+            # 无机器人连接：此前命令层已回复"房间已创建"，
+            # 必须明确记日志，否则房间会无声消失
+            logger.error(f"狼人杀群 {game.group_id} 无可用机器人连接，对局取消")
+            return
         # ── 报名阶段 ──
-        game.phase = Phase.SIGNUP
+        _enter_phase(game, Phase.SIGNUP)
         await _announce(
             game,
             "\n".join(
@@ -1209,6 +1290,21 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
             )
             return
         # ── 发牌 ──
+        if len(game.signup_user_ids) not in ROLE_COMPOSITION:
+            # 配置的人数区间超出板子支持范围（改 WW_MIN/MAX_PLAYERS 所致），
+            # 提前拦截，避免 build_role_deck 抛 KeyError 炸掉引擎任务
+            supported = "、".join(str(n) for n in sorted(ROLE_COMPOSITION))
+            logger.error(
+                f"狼人杀群 {game.group_id} 开局人数 "
+                f"{len(game.signup_user_ids)} 无匹配角色配置"
+                f"（支持 {supported} 人），流局"
+            )
+            await _announce(
+                game,
+                f"当前人数（{len(game.signup_user_ids)}）没有匹配的角色配置"
+                f"（支持 {supported} 人），本局流局~",
+            )
+            return
         deck = build_role_deck(len(game.signup_user_ids))
         random.shuffle(deck)
         game.players = [
@@ -1222,6 +1318,12 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
             )
             for idx, (uid, role) in enumerate(zip(game.signup_user_ids, deck))
         ]
+        deal_desc = "、".join(
+            f"{p.seat}号={p.role.value}"
+            + (f"(AI {p.display_name or '?'})" if p.is_ai else f"({p.user_id})")
+            for p in game.players
+        )
+        logger.info(f"狼人杀群 {game.group_id} 发牌：{deal_desc}")
         # 身份卡私聊之前启动 AI 驱动，使卡片文本落入 AI 座位上下文
         ai_player.start_driver(game)
         for p in game.players:
@@ -1256,17 +1358,19 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
                 winner = _check_winner(game)
         await _finish(game, winner)
     except asyncio.CancelledError:
-        # 报名阶段被取消（如空房解散）不广播强制结束
-        if game.phase is not Phase.SIGNUP:
+        # 常规取消路径（空房解散 / /结束游戏）由命令层自行播报，
+        # 并已把阶段置为 ENDED；仅对意外取消兜底播报
+        if game.phase not in (Phase.SIGNUP, Phase.ENDED):
             with contextlib.suppress(Exception):
                 await _announce(game, "对局已被强制结束")
+        logger.info(f"狼人杀群 {game.group_id} 引擎任务被取消")
         raise
     except Exception:  # noqa: BLE001
         logger.exception(f"狼人杀群 {game.group_id} 引擎异常")
         with contextlib.suppress(Exception):
             await _announce(game, "游戏引擎发生异常，本局已结束")
     finally:
-        game.phase = Phase.ENDED
+        _enter_phase(game, Phase.ENDED)
         await ai_player.stop_driver(game)
         user_ids = [p.user_id for p in game.players] or list(game.signup_user_ids)
         # AI 合成 ID 无群成员，禁言恢复只对真人调用
@@ -1283,8 +1387,12 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
 
 async def _finish(game: Game, winner: Faction) -> None:
     """终局播报 + 写库。"""
-    game.phase = Phase.ENDED
+    _enter_phase(game, Phase.ENDED)
     winner_name = "狼人阵营" if winner is Faction.WOLF else "好人阵营"
+    logger.info(
+        f"狼人杀群 {game.group_id} 对局结束："
+        f"{winner_name}获胜（第 {game.round_no} 回合）"
+    )
     lines = [
         "═══ 游戏结束 ═══",
         f"获胜阵营：{winner_name}",

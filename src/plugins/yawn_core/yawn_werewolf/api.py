@@ -19,12 +19,15 @@ async def safe_group_msg(
     bot: Bot,
     group_id: int,
     message: Union[str, "Message"],
-) -> None:
-    """发送群消息；失败仅记录日志。"""
+) -> bool:
+    """发送群消息，返回是否投递成功；失败仅记录日志。"""
     try:
         await bot.send_group_msg(group_id=group_id, message=message)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"狼人杀群 {group_id} 发送群消息失败: {e!r}")
+        return False
+    else:
+        return True
 
 
 async def safe_ban(

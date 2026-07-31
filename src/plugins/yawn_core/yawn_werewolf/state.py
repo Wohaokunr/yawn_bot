@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
@@ -338,5 +337,6 @@ async def stop_game(game: Game) -> None:
     game.worker = None
     if task is not None and not task.done():
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+        # wait() 不抛出被取消任务的 CancelledError（引擎 finally 里的
+        # 清理因此不会被打断），而外部对本协程的取消照常传播
+        await asyncio.wait([task])
