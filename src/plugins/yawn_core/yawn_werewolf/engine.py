@@ -1324,7 +1324,8 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
             for p in game.players
         )
         logger.info(f"狼人杀群 {game.group_id} 发牌：{deal_desc}")
-        # 身份卡私聊之前启动 AI 驱动，使卡片文本落入 AI 座位上下文
+        # 身份卡私聊之前启动 AI 驱动（AI 座位身份由驱动的 system 提示
+        # 承载，卡片 DM 不再记入其私聊上下文，见 ai_player.on_dm）
         ai_player.start_driver(game)
         for p in game.players:
             await _dm(
