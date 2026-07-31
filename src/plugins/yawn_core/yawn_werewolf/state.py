@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
+from .roles import DEFAULT_BOARD_KEY
+
 if TYPE_CHECKING:
     from .roles import DeathCause, Faction, Role
 
@@ -20,9 +22,11 @@ class Phase(str, Enum):
     """游戏阶段。"""
 
     SIGNUP = "SIGNUP"  # 报名
+    NIGHT_HALFBLOOD = "NIGHT_HALFBLOOD"  # 混血儿认主（仅首夜，率先睁眼）
     NIGHT_WOLVES = "NIGHT_WOLVES"  # 狼人行动
     NIGHT_WITCH = "NIGHT_WITCH"  # 女巫行动
     NIGHT_SEER = "NIGHT_SEER"  # 预言家行动
+    NIGHT_ELDER = "NIGHT_ELDER"  # 禁言长老行动
     DAY_ANNOUNCE = "DAY_ANNOUNCE"  # 白天死讯播报
     LAST_WORDS = "LAST_WORDS"  # 遗言
     HUNTER_SHOT = "HUNTER_SHOT"  # 猎人开枪决策
@@ -53,6 +57,14 @@ SELF_DETONATE_PHASES: frozenset[Phase] = frozenset(
     }
 )
 
+# 允许骑士 /决斗 翻牌的白天子阶段（放逐投票前的发言阶段）
+DUEL_PHASES: frozenset[Phase] = frozenset(
+    {
+        Phase.DAY_SPEECH,
+        Phase.PK_SPEECH,
+    }
+)
+
 
 class ActionKind(str, Enum):
     """玩家行动类型。"""
@@ -74,6 +86,9 @@ class ActionKind(str, Enum):
     SELF_DETONATE = "self_detonate"  # 狼人自爆
     SAY = "say"  # 狼人讨论发言（aux=文本，由引擎转发给其他狼人）
     START_GAME = "start_game"  # 房主/管理员手动开局（报名阶段）
+    CHOOSE_OWNER = "choose_owner"  # 混血儿认主（value=主人座位）
+    SILENCE = "silence"  # 禁言长老禁言（value=目标座位）
+    DUEL = "duel"  # 骑士决斗（value=目标座位）
 
 
 @dataclass
@@ -111,6 +126,10 @@ class PlayerState:
     sheriff_candidate: bool = False
     is_sheriff: bool = False
     was_sheriff: bool = False  # 曾经担任警长（战绩统计用）
+    # 混血儿认主状态（主人座位；胜负随主人阵营）
+    owner_seat: Optional[int] = None
+    # 禁言长老上一晚的实际禁言目标（连续两晚不可同人；放弃后清空）
+    elder_last_target: Optional[int] = None
     # 身份卡私聊是否投递成功
     dm_ok: bool = True
 
@@ -123,6 +142,10 @@ class Game:
     host_user_id: int
     phase: Phase = Phase.SIGNUP
     round_no: int = 0
+    # 板子键名（roles.BOARDS 的键；报名阶段可由房主 /板子 切换）
+    board: str = DEFAULT_BOARD_KEY
+    # 禁言长老当夜禁言的座位（次日发言/投票限制用；每晚进入长老阶段时清空）
+    silenced_seat: Optional[int] = None
     # 发牌后填充
     players: list[PlayerState] = field(default_factory=list)
     # 报名顺序（退报名移除）

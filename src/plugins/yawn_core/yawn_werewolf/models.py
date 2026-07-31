@@ -35,6 +35,9 @@ class WerewolfGame(Model):
     # 房主 QQ 号（逻辑引用 yawn_core_botuser.user_id）
     host_user_id: Mapped[int] = mapped_column(BigInteger)
 
+    # 板子键名（roles.BOARDS 的键，如 "预女猎白混"）；旧记录为 None
+    board: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+
     player_count: Mapped[int]
 
     started_at: Mapped[datetime] = mapped_column(default=_now_bj)
@@ -95,7 +98,7 @@ class WerewolfPlayer(Model):
     death_round: Mapped[Optional[int]] = mapped_column(nullable=True)
 
     # 死因（DeathCause.value）：WOLF_KILL / WITCH_POISON / VOTED /
-    # HUNTER_SHOT / SELF_DETONATION；存活为 None
+    # HUNTER_SHOT / SELF_DETONATION / KNIGHT_KILL / KNIGHT_DEATH；存活为 None
     death_cause: Mapped[Optional[str]] = mapped_column(
         String(16),
         nullable=True,

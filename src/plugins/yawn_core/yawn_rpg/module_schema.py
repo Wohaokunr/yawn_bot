@@ -19,8 +19,21 @@ import yaml
 from nonebot import logger
 from pydantic import BaseModel, model_validator
 
+from .charsheet import SKILLS
+
 # 骰表达式：NdM(±K) 或纯整数，如 1d6 / 1d6+1 / 3
-_DICE_EXPR_RE = re.compile(r"\d+d\d+([+-]\d+)?|\d+")
+_DICE_EXPR_RE = re.compile(r"(\d+)d(\d+)([+-]\d+)?|\d+")
+
+# 骰数与面数上限（与 dice.py 的同名常量保持一致）：
+# 坏模组写 1d0 / 巨骰会在运行时崩溃或冻死事件循环
+_MAX_DICE_COUNT = 100
+_MAX_DICE_SIDES = 1000
+
+# 检定点可用技能：san（理智检定）或技能表 key
+_VALID_CHECK_SKILLS = frozenset({"san", *(s.key for s in SKILLS)})
+
+# 结局倾向的合法取值（models.RPGGame.outcome 仅 String(8)）
+_VALID_OUTCOMES = ("good", "bad", "neutral")
 
 
 class CheckDifficulty(str, Enum):
@@ -69,8 +82,16 @@ class CheckPoint(BaseModel):
 
 
 def _is_dice_expr(text: str) -> bool:
-    """是否为合法骰表达式（NdM±K 或整数）。"""
-    return _DICE_EXPR_RE.fullmatch(text.strip()) is not None
+    """是否为合法骰表达式（NdM±K 或整数；骰数 / 面数有上限）。"""
+    match = _DICE_EXPR_RE.fullmatch(text.strip())
+    if match is None:
+        return False
+    if match.group(1) is None:  # 命中纯整数分支
+        return True
+    return (
+        1 <= int(match.group(1)) <= _MAX_DICE_COUNT
+        and 1 <= int(match.group(2)) <= _MAX_DICE_SIDES
+    )
 
 
 def _is_san_loss(text: str) -> bool:
@@ -79,6 +100,47 @@ def _is_san_loss(text: str) -> bool:
     if not sep:
         return False
     return all(p.strip() and _is_dice_expr(p.strip()) for p in (left, right))
+
+
+def _validate_condition(  # noqa: C901,PLR0911,PLR0912
+    condition: Optional[str],
+    scenes: set[str],
+    monsters: set[str],
+    clues: set[str],
+) -> Optional[str]:
+    """校验条件表达式内的引用；合法返回 None，否则返回错误描述。
+
+    与 evaluate_condition 的语法保持一致：把悬空引用拦在加载期，
+    避免运行时保守判 False 造成无诊断的永久软锁。
+    """
+    if not condition:
+        return None
+    for part in condition.split("&"):
+        term = part.strip()
+        if term in ("", "always", "all_players_incapped"):
+            continue
+        kind, sep, value = term.partition(":")
+        if not sep or not value:
+            return f"词条格式非法：{term!r}"
+        if kind == "clue":
+            if value not in clues:
+                return f"引用了未定义的线索 {value!r}"
+        elif kind == "clues":
+            parts = [v for v in value.split("+") if v]
+            if not parts:
+                return f"clues 至少需要一个线索：{term!r}"
+            missing = [v for v in parts if v not in clues]
+            if missing:
+                return f"引用了未定义的线索 {'、'.join(missing)}"
+        elif kind == "monster_dead":
+            if value not in monsters:
+                return f"引用了未定义的怪物 {value!r}"
+        elif kind == "scene":
+            if value not in scenes:
+                return f"引用了未定义的场景 {value!r}"
+        else:
+            return f"未知的条件词条：{term!r}"
+    return None
 
 
 class Exit(BaseModel):
@@ -152,6 +214,13 @@ class Monster(BaseModel):
     on_death_clue: Optional[str] = None
     on_death_text: str = ""
 
+    @model_validator(mode="after")
+    def _check_damage(self) -> "Monster":
+        if not _is_dice_expr(self.damage):
+            msg = f"怪物 {self.id}：damage 骰表达式非法：{self.damage!r}"
+            raise ValueError(msg)
+        return self
+
 
 class Clue(BaseModel):
     """线索：name 进 KP 提示词，text 仅发现时由引擎播报。"""
@@ -169,6 +238,16 @@ class Ending(BaseModel):
     text: str
     # good | bad | neutral
     outcome: str = "neutral"
+
+    @model_validator(mode="after")
+    def _check_outcome(self) -> "Ending":
+        if self.outcome not in _VALID_OUTCOMES:
+            msg = (
+                f"结局 {self.id}：outcome 只能是 "
+                f"{'/'.join(_VALID_OUTCOMES)}，收到 {self.outcome!r}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class ModuleDef(BaseModel):
@@ -189,8 +268,14 @@ class ModuleDef(BaseModel):
     endings: list[Ending] = []
 
     @model_validator(mode="after")
-    def _check_refs(self) -> "ModuleDef":  # noqa: C901,PLR0912
+    def _check_refs(self) -> "ModuleDef":  # noqa: C901,PLR0912,PLR0915
         """交叉引用校验：任何悬空引用都让模组在加载时被跳过。"""
+        if self.min_players > self.max_players:
+            msg = (
+                f"min_players({self.min_players}) 不能大于 "
+                f"max_players({self.max_players})"
+            )
+            raise ValueError(msg)
         scene_ids = [s.id for s in self.scenes]
         npc_ids = [n.id for n in self.npcs]
         monster_ids = [m.id for m in self.monsters]
@@ -212,6 +297,7 @@ class ModuleDef(BaseModel):
         npcs = set(npc_ids)
         monsters = set(monster_ids)
         clues = set(clue_ids)
+        check_ids: list[str] = []
         for scene in self.scenes:
             for npc_id in scene.npcs:
                 if npc_id not in npcs:
@@ -222,6 +308,13 @@ class ModuleDef(BaseModel):
                     msg = f"场景 {scene.id} 引用了未定义的怪物 {mid!r}"
                     raise ValueError(msg)
             for cp in scene.checks:
+                check_ids.append(cp.id)
+                if cp.skill not in _VALID_CHECK_SKILLS:
+                    msg = (
+                        f"场景 {scene.id} 检定点 {cp.id} 使用了未知技能 "
+                        f"{cp.skill!r}（应为 san 或技能表 key）"
+                    )
+                    raise ValueError(msg)
                 if cp.clue is not None and cp.clue not in clues:
                     msg = (
                         f"场景 {scene.id} 检定点 {cp.id} 奖励了未定义的线索 {cp.clue!r}"
@@ -231,9 +324,24 @@ class ModuleDef(BaseModel):
                 if ex.to_scene not in scenes:
                     msg = f"场景 {scene.id} 出口指向未定义的场景 {ex.to_scene!r}"
                     raise ValueError(msg)
+                err = _validate_condition(ex.condition, scenes, monsters, clues)
+                if err is not None:
+                    msg = f"场景 {scene.id} 出口条件非法：{err}"
+                    raise ValueError(msg)
+        dup_checks = {i for i in check_ids if check_ids.count(i) > 1}
+        if dup_checks:
+            # fired_checks 是全局集合：id 撞车会让后一个场景的 once
+            # 检定点被前一个场景的触发永久禁用
+            msg = f"检定点 id 重复：{'、'.join(sorted(dup_checks))}"
+            raise ValueError(msg)
         for monster in self.monsters:
             if monster.on_death_clue and monster.on_death_clue not in clues:
                 msg = f"怪物 {monster.id} 死亡奖励了未定义的线索"
+                raise ValueError(msg)
+        for ending in self.endings:
+            err = _validate_condition(ending.condition, scenes, monsters, clues)
+            if err is not None:
+                msg = f"结局 {ending.id} 条件非法：{err}"
                 raise ValueError(msg)
         return self
 
@@ -295,7 +403,9 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
             if value not in ctx.clues:
                 return False
         elif kind == "clues" and value:
-            if not all(v in ctx.clues for v in value.split("+") if v):
+            parts = [v for v in value.split("+") if v]
+            # 要求至少一个非空词条：否则 "clues:+" 会因 all([]) 恒真
+            if not parts or not all(v in ctx.clues for v in parts):
                 return False
         elif kind == "monster_dead" and value:
             if value not in ctx.dead_monsters:

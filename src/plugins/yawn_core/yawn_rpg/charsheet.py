@@ -241,10 +241,10 @@ class CharacterSheet:
 
 
 def random_char_name(used: set[str]) -> str:
-    """从名字池取一个未使用的角色名。"""
-    for name in CHAR_NAMES:
-        if name not in used:
-            return name
+    """从名字池随机取一个未使用的角色名。"""
+    unused = [name for name in CHAR_NAMES if name not in used]
+    if unused:
+        return random.choice(unused)
     return f"调查员{len(used) + 1}"
 
 

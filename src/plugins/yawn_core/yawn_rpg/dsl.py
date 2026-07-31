@@ -21,10 +21,11 @@ _DM_HINT = (
 )
 
 _CONFIRM_RE = re.compile(r"确认|确定|ok", re.IGNORECASE)
-_ADD_CMD_RE = re.compile(r"加点\s*(\S+?)\s+(\d+)")
-_SUB_CMD_RE = re.compile(r"减点\s*(\S+?)\s+(\d+)")
-_ADD_SHORT_RE = re.compile(r"(\S+?)\+(\d+)")
-_SUB_SHORT_RE = re.compile(r"(\S+?)-(\d+)")
+# 技能名与点数之间允许无空格（"加点侦查20"）；短格式兼容全角符号
+_ADD_CMD_RE = re.compile(r"加点\s*(\S+?)\s*(\d+)")
+_SUB_CMD_RE = re.compile(r"减点\s*(\S+?)\s*(\d+)")
+_ADD_SHORT_RE = re.compile(r"(\S+?)[+＋](\d+)")
+_SUB_SHORT_RE = re.compile(r"(\S+?)[-－](\d+)")
 
 
 def _skill_action(

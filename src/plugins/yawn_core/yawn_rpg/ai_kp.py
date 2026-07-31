@@ -16,14 +16,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from nonebot import get_plugin_config
+
 from .charsheet import SKILLS
+from .config import Config
 from .module_schema import evaluate_condition
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionToolParam
 
-    from .config import Config
     from .state import Game, PlayerState
+
+config = get_plugin_config(Config)
 
 # 工具调用轮数用尽后的收尾指令
 FINAL_NUDGE = "停止调用工具，立即输出最终旁白文本（不得再调用任何工具）。"
@@ -115,10 +119,10 @@ def build_situation(game: "Game") -> str:
         for p in game.players
     ]
     lines.append(f"[调查员状态] {'；'.join(status)}")
-    # 近期群聊记录
+    # 近期群聊记录（只取尾部 N 行，避免提示词膨胀）
     if game.group_log:
         lines.append("[近期群聊]")
-        lines.extend(list(game.group_log))
+        lines.extend(list(game.group_log)[-config.rpg_max_context_lines :])
     return "\n".join(lines)
 
 
@@ -126,7 +130,8 @@ def build_tools(game: "Game") -> list[ChatCompletionToolParam]:
     """按当前局面动态生成工具 schema（枚举约束 AI 选择范围）。"""
     module = game.module
     player_names = [p.sheet.name for p in game.players if p.sheet is not None]
-    player_enum = {"type": "string", "enum": player_names}
+    # 空 enum 会被多数 OpenAI 兼容端点拒绝，导致整局工具降级
+    player_enum = {"type": "string", "enum": player_names or ["_no_player"]}
     skill_names = [s.name for s in SKILLS if s.key != "cthulhu_mythos"]
     scene = (
         module.scene(game.current_scene)
@@ -140,10 +145,13 @@ def build_tools(game: "Game") -> list[ChatCompletionToolParam]:
     if module is not None and scene is not None:
         exit_ids = [ex.to_scene for ex in scene.exits]
         grantable_clues = [cp.clue for cp in scene.checks if cp.clue]
+        # 死亡奖励线索只在怪物死后进入枚举，否则 KP 战前即可剧透结局
         grantable_clues += [
             m.on_death_clue
             for mid in scene.monsters
-            if (m := module.monster(mid)) is not None and m.on_death_clue
+            if mid in game.dead_monsters
+            and (m := module.monster(mid)) is not None
+            and m.on_death_clue
         ]
         present_npcs = list(scene.npcs)
         live_monsters = [mid for mid in scene.monsters if mid not in game.dead_monsters]
@@ -288,7 +296,8 @@ def build_tools(game: "Game") -> list[ChatCompletionToolParam]:
             {
                 "ending_id": {
                     "type": "string",
-                    "enum": [e.id for e in module.endings] if module else [],
+                    "enum": ([e.id for e in module.endings] if module else [])
+                    or ["_no_ending"],
                     "description": "结局 id",
                 },
             },

@@ -38,11 +38,13 @@ from . import ai_player, api, engine
 from .config import Config
 from .dsl import _DM_HINT, parse_dm_action
 from .models import WerewolfPlayer
-from .roles import Role
+from .roles import BOARDS, Role
 from .state import (
+    DUEL_PHASES,
     SELF_DETONATE_PHASES,
     Action,
     ActionKind,
+    Game,
     Phase,
     add_ai_signup,
     count_ai_signup,
@@ -71,6 +73,15 @@ _VOTE_PHASES: frozenset[Phase] = frozenset(
 def _is_su(user_id: int) -> bool:
     """是否为超级用户。"""
     return str(user_id) in get_driver().config.superusers
+
+
+def _eff_limits(game: Game) -> tuple[int, int]:
+    """报名阶段的有效人数区间（配置项与板子支持人数的交集）。"""
+    board = BOARDS[game.board]
+    return (
+        max(config.ww_min_players, min(board.counts)),
+        min(config.ww_max_players, max(board.counts)),
+    )
 
 
 def _parse_seat(text: object) -> Optional[int]:
@@ -126,19 +137,20 @@ async def handle_signup(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.SIGNUP:
         await signup_cmd.finish("本群当前没有报名中的狼人杀对局（发送 /狼人杀 开房）")
-    if len(game.signup_user_ids) >= config.ww_max_players:
+    eff_min, eff_max = _eff_limits(game)
+    if len(game.signup_user_ids) >= eff_max:
         await signup_cmd.finish("报名已满员，等待开局~")
     if not join_signup(game, int(event.get_user_id())):
         await signup_cmd.finish("你已在局中，无需重复报名~")
     logger.info(
         f"狼人杀群 {int(event.group_id)} {int(event.get_user_id())} 报名"
-        f"（{len(game.signup_user_ids)}/{config.ww_max_players}）"
+        f"（{len(game.signup_user_ids)}/{eff_max}）"
     )
     await signup_cmd.finish(
         MessageSegment.at(event.user_id)
         + f"报名成功！当前 {len(game.signup_user_ids)}"
-        + f"/{config.ww_max_players} 人"
-        + f"（至少 {config.ww_min_players} 人开局）"
+        + f"/{eff_max} 人"
+        + f"（至少 {eff_min} 人开局）"
     )
 
 
@@ -198,16 +210,71 @@ async def handle_view(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.SIGNUP:
         await view_cmd.finish("本群当前没有报名中的狼人杀对局")
-    lines = ["═══ 狼人杀 · 报名名单 ═══"]
+    eff_min, eff_max = _eff_limits(game)
+    lines = [
+        "═══ 狼人杀 · 报名名单 ═══",
+        f"板子：{game.board}（房主可发 /板子 切换）",
+    ]
     for idx, uid in enumerate(game.signup_user_ids, start=1):
         name = game.ai_names.get(uid)
         lines.append(f"{idx}. {name}" if name is not None else f"{idx}. {uid}")
     lines.append("──────────────")
     lines.append(
-        f"当前 {len(game.signup_user_ids)}/{config.ww_max_players} 人，"
-        f"至少 {config.ww_min_players} 人开局"
+        f"当前 {len(game.signup_user_ids)}/{eff_max} 人，至少 {eff_min} 人开局"
     )
     await view_cmd.finish("\n".join(lines))
+
+
+board_cmd = on_command(
+    "板子",
+    aliases={"选板子", "换板子"},
+    priority=5,
+    block=True,
+)
+
+
+@board_cmd.handle()
+async def handle_board(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """报名阶段查看可选板子；房主/群管/超管可切换。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.SIGNUP:
+        await board_cmd.finish("本群当前没有报名中的狼人杀对局")
+    text = str(arg).strip()
+    if not text:
+        lines = ["═══ 狼人杀 · 可选板子 ═══"]
+        for spec in BOARDS.values():
+            marker = "（当前）" if spec.key == game.board else ""
+            lines.append(
+                f"· {spec.key}{marker}：{spec.roles_summary()}，"
+                f"支持 {spec.counts_summary()} 人"
+            )
+        lines.append("──────────────")
+        lines.append("房主发送 /板子 名称 切换（如 /板子 预女猎白混）")
+        await board_cmd.finish("\n".join(lines))
+    user_id = int(event.get_user_id())
+    if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
+        await board_cmd.finish("只有房主、群管理员或超管可以切换板子~")
+    if text not in BOARDS:
+        keys = "、".join(BOARDS)
+        await board_cmd.finish(f"没有名为「{text}」的板子。可选：{keys}")
+    game.board = text
+    spec = BOARDS[text]
+    current = len(game.signup_user_ids)
+    note = (
+        f"\n提示：当前已报名 {current} 人，不在该板子支持的人数范围"
+        f"（{spec.counts_summary()} 人），开局前请用 /添加AI 或 /退报名 调整"
+        if current not in spec.counts
+        else ""
+    )
+    logger.info(f"狼人杀群 {int(event.group_id)} {user_id} 切换板子为 {text}")
+    await board_cmd.finish(
+        f"已切换板子：{text}（{spec.roles_summary()}，"
+        f"支持 {spec.counts_summary()} 人）{note}"
+    )
 
 
 add_ai_cmd = on_command(
@@ -239,9 +306,10 @@ async def handle_add_ai(  # noqa: C901
         if not text.isdigit() or int(text) < 1:
             await add_ai_cmd.finish("格式：/添加AI N（N 为人数）")
         count = int(text)
+    eff_min, eff_max = _eff_limits(game)
     added = 0
     for _ in range(count):
-        if len(game.signup_user_ids) >= config.ww_max_players:
+        if len(game.signup_user_ids) >= eff_max:
             break
         if count_ai_signup(game) >= config.ww_ai_max:
             break
@@ -252,12 +320,12 @@ async def handle_add_ai(  # noqa: C901
         await add_ai_cmd.finish("添加失败：房间已满或 AI 人数已达上限")
     logger.info(
         f"狼人杀群 {int(event.group_id)} {user_id} 添加 {added} 名 AI"
-        f"（{len(game.signup_user_ids)}/{config.ww_max_players}）"
+        f"（{len(game.signup_user_ids)}/{eff_max}）"
     )
     await add_ai_cmd.finish(
         f"已添加 {added} 名玩家！当前 {len(game.signup_user_ids)}"
-        f"/{config.ww_max_players} 人"
-        f"（至少 {config.ww_min_players} 人开局）"
+        f"/{eff_max} 人"
+        f"（至少 {eff_min} 人开局）"
     )
 
 
@@ -295,13 +363,13 @@ async def handle_remove_ai(
         removed += 1
     if removed == 0:
         await remove_ai_cmd.finish("当前没有可移除的玩家~")
+    _, eff_max = _eff_limits(game)
     logger.info(
         f"狼人杀群 {int(event.group_id)} {user_id} 移除 {removed} 名 AI"
-        f"（{len(game.signup_user_ids)}/{config.ww_max_players}）"
+        f"（{len(game.signup_user_ids)}/{eff_max}）"
     )
     await remove_ai_cmd.finish(
-        f"已移除 {removed} 名玩家，当前 {len(game.signup_user_ids)}"
-        f"/{config.ww_max_players} 人"
+        f"已移除 {removed} 名玩家，当前 {len(game.signup_user_ids)}/{eff_max} 人"
     )
 
 
@@ -325,11 +393,17 @@ async def handle_start(
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await start_cmd.finish("只有房主、群管理员或超管可以开始游戏~")
-    # 人数不足时用 AI 自动补位到最低开局数
+    # 人数不足时用 AI 自动补位：目标取板子支持人数中
+    # 不低于「配置最低人数与当前人数之较大者」的最小值
+    board = BOARDS[game.board]
+    eff_min, _ = _eff_limits(game)
+    current = len(game.signup_user_ids)
+    targets = [n for n in board.counts if n >= max(eff_min, current)]
+    target = min(targets) if targets else current
     filled = 0
     if config.ww_ai_enabled and config.ww_ai_autofill:
         while (
-            len(game.signup_user_ids) < config.ww_min_players
+            len(game.signup_user_ids) < target
             and count_ai_signup(game) < config.ww_ai_max
         ):
             if add_ai_signup(game) is None:
@@ -631,6 +705,28 @@ async def handle_detonate(
         Action(ActionKind.SELF_DETONATE, int(event.get_user_id()))
     )
     await detonate_cmd.finish()
+
+
+duel_cmd = on_command("决斗", priority=5, block=True)
+
+
+@duel_cmd.handle()
+async def handle_duel(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """骑士白天翻牌决斗（发言阶段）。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase not in DUEL_PHASES:
+        await duel_cmd.finish("现在不是可以决斗的发言阶段")
+    seat = _parse_seat(arg)
+    if seat is None:
+        await duel_cmd.finish("格式：/决斗 N（N 为目标座位号）")
+    game.action_queue.put_nowait(
+        Action(ActionKind.DUEL, int(event.get_user_id()), seat)
+    )
+    await duel_cmd.finish()
 
 
 vote_cmd = on_command("投票", aliases={"票"}, priority=5, block=True)
