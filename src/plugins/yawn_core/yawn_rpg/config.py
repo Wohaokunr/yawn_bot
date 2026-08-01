@@ -45,6 +45,10 @@ class Config(BaseModel):
     rpg_kp_max_batch_lines: int = 6
     # 局面上下文（群聊记录）保留行数
     rpg_max_context_lines: int = 40
+    # /等待 缺省等待分钟数
+    rpg_wait_default: int = 30
+    # /等待 单次最大分钟数（钳制上限）
+    rpg_wait_max: int = 120
 
     # ── AI 主持人（KP）──
     # AI 总开关：关闭后全程确定性模式（关键词自动检定 + 固定文案）

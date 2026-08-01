@@ -18,7 +18,7 @@ from .module_schema import ConditionContext
 
 if TYPE_CHECKING:
     from .charsheet import CharacterSheet
-    from .module_schema import ModuleDef
+    from .module_schema import NPC, ModuleDef
 
 
 class Phase(str, Enum):
@@ -40,6 +40,7 @@ class ActionKind(str, Enum):
     TALK_NPC = "talk_npc"  # 与 NPC 交谈（aux="npc_id|发言内容"）
     ATTACK = "attack"  # 攻击怪物（aux=怪物 id）
     MOVE = "move"  # 前往出口（aux=关键词/场景名）
+    WAIT = "wait"  # 原地等待（value=分钟数）
     # ── 建卡期私聊行动 ──
     REROLL = "reroll"  # 整卡重掷
     ADD_SKILL = "add_skill"  # 加点（aux=技能 key，value=点数）
@@ -115,6 +116,18 @@ class Game:
     # 怪物当前 HP（出场时由引擎按模组初始化）
     monster_hp: dict[str, int] = field(default_factory=dict)
     dead_monsters: set[str] = field(default_factory=set)
+    # NPC 当前 HP（在场解析命中时幂等初始化，见 npcs_in_scene）
+    npc_hp: dict[str, int] = field(default_factory=dict)
+    dead_npcs: set[str] = field(default_factory=set)
+    # 对调查员怀有敌意的 NPC（被攻击而未死）
+    npc_hostile: set[str] = field(default_factory=set)
+    # ── 游戏内时钟与事件标记（仅引擎写入）────────────────
+    # 开局游戏内起始时刻（自 0:00 起的分钟数；引擎按 module.time.start 初始化）
+    clock_start_minutes: int = 0
+    # 自开局已流逝的游戏内分钟数（每个行动 tick 推进）
+    elapsed_minutes: int = 0
+    # 事件标记（名称 → 累计次数；供条件词条 flag: 与通用结局升级使用）
+    flags: dict[str, int] = field(default_factory=dict)
     # 群聊记录（KP 上下文与播报存档）
     group_log: deque[str] = field(default_factory=lambda: deque(maxlen=200))
     # ── KP 智能体循环状态 ──
@@ -124,6 +137,8 @@ class Game:
     tools_broken: bool = False
     # 最近一次 KP 调用的事件循环时刻（防刷屏限速）
     last_kp_at: float = 0.0
+    # 工具 schema 缓存（schema 全静态，整局只构建一次，见 ai_kp.build_tools）
+    tools_cache: Optional[Any] = None
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -152,6 +167,28 @@ class Game:
         """是否全体失去行动能力（坏结局条件）。"""
         return bool(self.players) and all(p.incapped for p in self.players)
 
+    # ── 游戏内时钟 ────────────────────────────────────
+
+    @property
+    def clock_minutes(self) -> int:
+        """自第 1 天 0:00 起的绝对分钟数（起始时刻 + 已流逝）。"""
+        return self.clock_start_minutes + self.elapsed_minutes
+
+    @property
+    def time_of_day(self) -> int:
+        """游戏内时钟（自当日 0:00 起的分钟数，0-1439）。"""
+        return self.clock_minutes % 1440
+
+    @property
+    def day_number(self) -> int:
+        """游戏内天数（1 起，跨午夜递增）。"""
+        return 1 + self.clock_minutes // 1440
+
+    def clock_text(self) -> str:
+        """时钟文案，如「第 1 天 21:35」（命令层 / 引擎 / 提示词共用）。"""
+        tod = self.time_of_day
+        return f"第 {self.day_number} 天 {tod // 60:02d}:{tod % 60:02d}"
+
     def condition_context(self) -> ConditionContext:
         """组装条件求值所需的事实快照（供出口/结局判定）。"""
         return ConditionContext(
@@ -159,7 +196,41 @@ class Game:
             dead_monsters=set(self.dead_monsters),
             current_scene=self.current_scene or "",
             all_incapped=self.all_incapped(),
+            time_of_day=self.time_of_day,
+            flags=dict(self.flags),
         )
+
+    # ── NPC 在场解析（死亡过滤 + HP 幂等初始化的包装层）──────
+
+    def npcs_in_scene(self, scene_id: str) -> list[tuple["NPC", str]]:
+        """当前时刻存活于给定场景的 NPC（按模组声明序）。
+
+        每个元素为 (NPC, activity)。模组层解析器不感知死亡，
+        过滤在此处统一进行；命中者顺手初始化 npc_hp（幂等，
+        仿 enter_scene 对怪物 HP 的处理）。
+        """
+        if self.module is None:
+            return []
+        found: list[tuple[NPC, str]] = []
+        for npc, activity in self.module.npcs_in_scene(
+            scene_id,
+            self.time_of_day,
+            self.condition_context(),
+        ):
+            if npc.id in self.dead_npcs:
+                continue
+            self.npc_hp.setdefault(npc.id, npc.hp)
+            found.append((npc, activity))
+        return found
+
+    def npc_present(self, npc_id: str) -> Optional[tuple["NPC", str]]:
+        """NPC 当前时刻是否存活于当前场景；是则返回 (NPC, activity)。"""
+        if self.current_scene is None:
+            return None
+        for npc, activity in self.npcs_in_scene(self.current_scene):
+            if npc.id == npc_id:
+                return npc, activity
+        return None
 
     def drain_actions(self) -> None:
         """非阻塞清空行动队列（场景切换时防上一场景指令泄漏）。"""

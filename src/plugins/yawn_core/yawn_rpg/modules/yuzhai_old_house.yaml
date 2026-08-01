@@ -10,6 +10,12 @@ min_players: 1
 max_players: 6
 difficulty: 入门
 
+# 游戏内时钟 21:00 起始；各行动按引擎默认分钟数推进（costs 可覆写）
+time:
+  start: "21:00"
+# 启用系统级通用结局（谋杀 / 纵火等极端行为的兜底结局）
+generic_endings: true
+
 opening: |
   三周前，你们各自收到一封没有署名的信：「沈宅之事，非外人可解。雨夜候君，共窥真相。」信纸泛黄，带着一股霉味。
   今夜大雨如注，你们沿着泥泞的山路，终于站在了沈家旧宅的门廊下。宅子黑洞洞的，只有门缝里透出一线昏黄的灯光。
@@ -128,6 +134,31 @@ npcs:
     secrets:
       - 你其实知道地下室里有一只食尸鬼，这三个月一直是你在偷偷喂它，因为它身上戴着少爷的长命锁。
     fallback_line: ……老了，记不清了。
+    # 行程（声明序=匹配优先级；时段为 [from, to) 半开区间，支持跨午夜）
+    schedule:
+      - from: "21:00"
+        to: "23:30"
+        scene: living_room
+        activity: 守着油灯，欲言又止
+      # 23:30 后若食尸鬼已死，独自下地下室对着空笼子发呆（事件条件示范）
+      - from: "23:30"
+        to: "05:00"
+        scene: basement
+        condition: monster_dead:ghoul
+        activity: 在空荡荡的地下室里发呆
+      # 兜底：食尸鬼未死时不敢下去，留在客厅守灯打盹
+      - from: "23:30"
+        to: "05:00"
+        scene: living_room
+        activity: 守着灯打盹，一点动静就惊醒
+    # 战斗数值（刻意弱小：杀害他很容易，后果很严重——murder 标记触发通用逮捕结局）
+    hp: 8
+    attack_skill: 30
+    attack_name: 油灯
+    damage: "1d2"
+    dodge: 20
+    on_death_text: |
+      周伯倒在血泊里，油灯摔碎在地，火苗挣扎了几下熄灭了。这个守了沈家四十年的老人，至死都没能发出一声呼救。
 
   - id: neighbor
     name: 林女士
@@ -141,6 +172,24 @@ npcs:
       - 沈家失踪那晚下着大雨，你看见老爷书房的灯亮到天明，却没听见一点人声。
     secrets: []
     fallback_line: 这个我也不太清楚……
+    schedule:
+      # 调查员的暴力行为会把她立刻吓跑（首条优先；from==to 为全天窗口，flag 条件示范）
+      - from: "00:00"
+        to: "00:00"
+        away: true
+        condition: flag:assault
+        activity: 吓得跑回了家
+      - from: "21:00"
+        to: "23:59"
+        scene: study
+        activity: 站在门口不敢靠近
+    hp: 9
+    attack_skill: 25
+    attack_name: 抓挠
+    damage: "1d2"
+    dodge: 25
+    on_death_text: |
+      林女士倒在门口，手里还攥着那把用来给你们壮胆的扫帚。窗外的雨声盖住了一切，这宅子里发生的命案，没有第三个活人知道。
 
 monsters:
   - id: ghoul
@@ -184,3 +233,12 @@ endings:
       视线归于黑暗。油灯摔碎在地，火光熄灭前，你们最后看见的是食尸鬼没有嘴唇的笑。
       旧宅重归寂静，只有雨还在下。来年的某一日，或许还会有人收到一封没有署名的信。
     outcome: bad
+  # 时间条件结局示范（声明在最后，不遮蔽前面的模组结局）
+  - id: dawn_breaks
+    condition: time_after:06:00
+    text: |
+      ═══ 结局 · 雨停天明 ═══
+      不知不觉间雨停了，天边泛起的鱼肚白爬上窗棂。旧宅在晨光里安静下来，
+      所有的秘密都随着退去的夜色缩回了黑暗里。你们决定先离开这里，改日再来——
+      有些真相，不必急在这一夜揭开。
+    outcome: neutral

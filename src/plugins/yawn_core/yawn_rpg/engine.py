@@ -46,7 +46,9 @@ from .dice import (
 )
 from .models import RPGGame, RPGPlayer
 from .module_schema import (
+    NPC,
     CheckDifficulty,
+    Ending,
     evaluate_condition,
     list_modules,
     load_modules,
@@ -67,7 +69,8 @@ if TYPE_CHECKING:
         ChatCompletionMessageToolCallUnion,
     )
 
-    from .module_schema import CheckPoint, Ending, Exit, ModuleDef, Monster
+    from .dice import CheckResult
+    from .module_schema import CheckPoint, Exit, ModuleDef, Monster
 
 config = get_plugin_config(Config)
 
@@ -90,6 +93,43 @@ _TIER_RANK: dict[CheckTier, int] = {
 }
 
 _GENERIC_IDLE = "（四周一片沉寂，只有你们自己的呼吸声。）"
+
+# 各行动类型默认消耗的游戏内分钟数（模组 time.costs 可按键覆写）。
+# 只有成功路径消耗时间：被拒绝的移动、落空的攻击目标不 tick。
+_DEFAULT_TIME_COSTS: dict[str, int] = {
+    "say": 5,
+    "talk": 10,
+    "check": 10,
+    "move": 10,
+    "attack": 5,
+    "wait": 0,
+}
+
+# ── 违规行为检测（发言关键词扫描）────────────────────────
+# 紧的多字词组降低误报（单字"杀/烧"误报率高）；命中只记 flag，
+# 是否结局由通用结局阈值决定，单次命中仅偏置 KP 反应指令。
+_ARSON_KW = ("放火", "烧了", "点火", "汽油", "烧死", "一把火")
+_THREAT_KW = ("恐吓", "威胁", "杀了", "弄死")
+_DESTROY_KW = ("砸了", "砸烂", "烧毁", "拆了")
+
+# 类别 → 面向 KP 的中文描述
+_OFFENSE_LABELS = {
+    "arson": "纵火",
+    "threat": "暴力威胁",
+    "destroy": "打砸破坏",
+}
+
+
+def _scan_offense(text: str) -> Optional[str]:
+    """扫描发言中的违规行为关键词；命中返回类别，否则 None。"""
+    lowered = text.casefold()
+    if any(kw in lowered for kw in _ARSON_KW):
+        return "arson"
+    if any(kw in lowered for kw in _THREAT_KW):
+        return "threat"
+    if any(kw in lowered for kw in _DESTROY_KW):
+        return "destroy"
+    return None
 
 
 def _now_bj() -> datetime:
@@ -532,6 +572,10 @@ async def resolve_check_point(
         await apply_damage(game, player, amount, source=cp.id)
     if cp.once:
         game.fired_checks.add(cp.id)
+    # 检定结算消耗时间（检定点 time_cost 覆写 > 引擎 check 默认；
+    # 降级模式的关键词自动检定走这里，时间照常流动）
+    cost = cp.time_cost if cp.time_cost is not None else _time_cost(game, "check")
+    await _tick_time(game, cost)
 
 
 async def _roll_san(
@@ -605,8 +649,8 @@ async def enter_scene(  # noqa: C901
         lines.append(transition)
     lines.append(f"═══ {scene.name} ═══")
     lines.append(scene.narration.strip())
-    npcs = [game.module.npc(nid) for nid in scene.npcs]
-    npc_names = [n.name for n in npcs if n is not None]
+    # 在场 NPC 由时间 + 行程解析（死亡过滤 + HP 幂等初始化在包装层）
+    npc_names = [npc.name for npc, _ in game.npcs_in_scene(scene_id)]
     if npc_names:
         lines.append(f"在场：{'、'.join(npc_names)}")
     monsters = [
@@ -678,7 +722,69 @@ async def _transition_exit(game: Game, player: PlayerState, ex: "Exit") -> bool:
     if ok:
         name = player.sheet.name if player.sheet else str(player.seat)
         logger.info(f"跑团群 {game.group_id} {name} 前往 {target_name}")
+        cost = ex.time_cost if ex.time_cost is not None else _time_cost(game, "move")
+        await _tick_time(game, cost)
     return ok
+
+
+# ── 游戏内时钟与 NPC 在场变化 ────────────────────────────
+
+
+def _time_cost(game: Game, kind: str) -> int:
+    """行动消耗分钟数：模组 time.costs 覆写 > 引擎默认。"""
+    if game.module is not None:
+        cost = game.module.time.costs.get(kind)
+        if cost is not None:
+            return max(cost, 0)
+    return _DEFAULT_TIME_COSTS.get(kind, 0)
+
+
+def format_clock(game: Game) -> str:
+    """渲染游戏内时钟，如「第 1 天 21:35」。"""
+    return game.clock_text()
+
+
+async def _tick_time(game: Game, minutes: int) -> None:
+    """推进时钟 minutes 分钟，并播报当前场景的 NPC 进出。
+
+    时间推进只发生在成功路径（调用方负责）；结局无需在此另查——
+    _run_play 循环顶部每轮都会跑 check_endings，时间 / 标记触发的
+    结局自然在下一轮点火。进出 diff 仅针对当前场景，合并为一条
+    消息，避免刷屏；刚死亡的 NPC 已由死亡文案播报，不再重复离场。
+    """
+    if minutes <= 0 or game.module is None or game.current_scene is None:
+        return
+    module = game.module
+    scene = module.scene(game.current_scene)
+    scene_name = scene.name if scene is not None else game.current_scene
+    before = {npc.id for npc, _ in game.npcs_in_scene(game.current_scene)}
+    game.elapsed_minutes += minutes
+    logger.info(
+        f"跑团群 {game.group_id} 时间推进 {minutes} 分钟 → {format_clock(game)}"
+    )
+    after: dict[str, str] = {
+        npc.id: activity for npc, activity in game.npcs_in_scene(game.current_scene)
+    }
+    ctx = game.condition_context()
+    lines: list[str] = []
+    for npc_id in sorted(set(after) - before):
+        npc = module.npc(npc_id)
+        if npc is None:
+            continue
+        flavor = f"（{after[npc_id]}）" if after[npc_id] else ""
+        lines.append(f"{npc.name} 来到了{scene_name}{flavor}")
+    for npc_id in sorted(before - set(after)):
+        if npc_id in game.dead_npcs:
+            continue  # 死亡已另行播报
+        npc = module.npc(npc_id)
+        if npc is None:
+            continue
+        # 离场去向的 activity（如 away 条目的「吓得跑回了家」）作 flavor
+        entry = module.npc_schedule_match(npc_id, game.time_of_day, ctx)
+        flavor = f"（{entry.activity}）" if entry is not None and entry.activity else ""
+        lines.append(f"{npc.name} 离开了{scene_name}{flavor}")
+    if lines:
+        await _announce(game, "\n".join(lines))
 
 
 # ── 战斗（确定性结算）────────────────────────────────────
@@ -696,8 +802,27 @@ def _roll_db(player: PlayerState) -> int:
     return 0
 
 
-def _find_scene_monster(game: Game, text: str) -> Optional[Monster]:
-    """按名称在当前场景查找存活怪物。"""
+def _opposed_dodge(atk: "CheckResult", dodge_value: Optional[int]) -> bool:
+    """防守方闪避对抗：True 表示躲开（平手防方胜）。
+
+    dodge_value 为假值（None/0）视为无法闪避。玩家攻击怪物、
+    怪物/NPC 袭击玩家、玩家攻击 NPC 共用这一份语义。
+    """
+    if not dodge_value:
+        return False
+    res = skill_check(dodge_value)
+    return res.success and _TIER_RANK[res.tier] >= _TIER_RANK[atk.tier]
+
+
+def _find_attack_target(
+    game: Game,
+    text: str,
+) -> Optional[Union["Monster", NPC]]:
+    """按名称在当前场景查找存活攻击目标：怪物优先于 NPC。
+
+    怪物优先保证旧行为逐字节兼容（/攻击 食尸鬼 的匹配不受
+    NPC 分支影响）；NPC 经时间/行程解析的在场集合查找。
+    """
     if game.module is None or game.current_scene is None:
         return None
     scene = game.module.scene(game.current_scene)
@@ -710,6 +835,9 @@ def _find_scene_monster(game: Game, text: str) -> Optional[Monster]:
         monster = game.module.monster(mid)
         if monster is not None and (needle in monster.name or needle == mid):
             return monster
+    for npc, _ in game.npcs_in_scene(game.current_scene):
+        if needle in npc.name or needle == npc.id:
+            return npc
     return None
 
 
@@ -732,11 +860,9 @@ async def do_player_attack(game: Game, player: PlayerState, monster: Monster) ->
     if not atk.success:
         await _announce(game, f"{name} 的攻击落空了。")
         return
-    if monster.dodge:
-        dodge_res = skill_check(monster.dodge)
-        if dodge_res.success and _TIER_RANK[dodge_res.tier] >= _TIER_RANK[atk.tier]:
-            await _announce(game, f"{monster.name} 躲开了 {name} 的攻击！")
-            return
+    if _opposed_dodge(atk, monster.dodge):
+        await _announce(game, f"{monster.name} 躲开了 {name} 的攻击！")
+        return
     damage = max(roll_dice("1d3") + _roll_db(player), 0)
     remaining = game.monster_hp.get(monster.id, monster.hp) - damage
     game.monster_hp[monster.id] = remaining
@@ -771,28 +897,158 @@ async def do_monster_attack(
     if not atk.success:
         await _announce(game, f"{monster.name} 扑了个空。")
         return f"{monster.name} 的攻击失手了。"
-    dodge = _player_skill(victim, "dodge") or 0
-    if dodge > 0:
-        dodge_res = skill_check(dodge)
-        if dodge_res.success and _TIER_RANK[dodge_res.tier] >= _TIER_RANK[atk.tier]:
-            await _announce(game, f"{vname} 闪身躲开了 {monster.name}！")
-            return f"{vname} 躲开了攻击。"
+    if _opposed_dodge(atk, _player_skill(victim, "dodge")):
+        await _announce(game, f"{vname} 闪身躲开了 {monster.name}！")
+        return f"{vname} 躲开了攻击。"
     damage = roll_dice(monster.damage)
     await apply_damage(game, victim, damage, source=monster.name)
     return f"{vname} 受到了 {monster.name} 的 {damage} 点伤害。"
 
 
+async def do_player_attack_npc(game: Game, player: PlayerState, npc: NPC) -> None:
+    """玩家主动攻击 NPC：攻击检定 → 闪避对抗 → 伤害（镜像怪物流程）。"""
+    name = player.sheet.name if player.sheet else str(player.seat)
+    brawl = _player_skill(player, "brawl") or 25
+    atk = skill_check(brawl)
+    await _announce(game, atk.describe(f"{name} 的斗殴"))
+    if not atk.success:
+        await _announce(game, f"{name} 的攻击落空了。")
+        return
+    if _opposed_dodge(atk, npc.dodge):
+        await _announce(game, f"{npc.name} 躲开了 {name} 的攻击！")
+        return
+    damage = max(roll_dice("1d3") + _roll_db(player), 0)
+    remaining = game.npc_hp.get(npc.id, npc.hp) - damage
+    game.npc_hp[npc.id] = remaining
+    logger.info(f"跑团群 {game.group_id} {name} 对 {npc.name} 造成 {damage} 伤害")
+    if remaining <= 0:
+        await _announce(game, f"{name} 对 {npc.name} 造成了 {damage} 点伤害——")
+        await _kill_npc(game, npc)
+    else:
+        await _announce(
+            game,
+            f"{name} 对 {npc.name} 造成了 {damage} 点伤害（剩余 {remaining} 点生命）",
+        )
+
+
+async def _kill_npc(game: Game, npc: NPC) -> None:
+    """NPC 死亡结算：播报 + 死亡线索 + 事件标记（镜像怪物）。"""
+    game.dead_npcs.add(npc.id)
+    logger.info(f"跑团群 {game.group_id} NPC {npc.name} 死亡")
+    if npc.on_death_text:
+        await _announce(game, npc.on_death_text)
+    if npc.on_death_clue:
+        await discover_clue(game, npc.on_death_clue)
+    # 谋杀标记：通用结局安全网在下一轮循环点火
+    raise_flag(game, f"npc_dead:{npc.id}")
+    raise_flag(game, "murder")
+
+
+async def do_npc_attack(
+    game: Game,
+    npc: NPC,
+    target: Optional[PlayerState],
+) -> str:
+    """NPC 袭击玩家（被攻击后的确定性反击）。返回结算摘要。"""
+    actives = game.active_players()
+    if not actives:
+        return "没有可袭击的目标。"
+    victim = target if target in actives else random.choice(actives)
+    vname = victim.sheet.name if victim.sheet else str(victim.seat)
+    atk = skill_check(npc.attack_skill)
+    await _announce(
+        game,
+        f"{npc.name} 向 {vname} 发起攻击！{atk.describe(npc.attack_name)}",
+    )
+    if not atk.success:
+        await _announce(game, f"{npc.name} 的攻击落了空。")
+        return f"{npc.name} 的攻击失手了。"
+    if _opposed_dodge(atk, _player_skill(victim, "dodge")):
+        await _announce(game, f"{vname} 闪身躲开了 {npc.name}！")
+        return f"{vname} 躲开了攻击。"
+    damage = roll_dice(npc.damage)
+    await apply_damage(game, victim, damage, source=npc.name)
+    return f"{vname} 受到了 {npc.name} 的 {damage} 点伤害。"
+
+
+def raise_flag(game: Game, name: str) -> int:
+    """记录事件标记（计数累加）并返回新计数。flag 的唯一写入口。"""
+    count = game.flags.get(name, 0) + 1
+    game.flags[name] = count
+    logger.info(f"跑团群 {game.group_id} 标记 {name}={count}")
+    return count
+
+
 # ── 结局 ──────────────────────────────────────────────────
+
+# 系统级通用结局的升级阈值（单次轻微违规只偏置 NPC 反应，累计才结局）
+_GENERIC_ENDING_ARSON_EGG = 4  # 纵火 ≥4 次 → 彩蛋结局
+_GENERIC_ENDING_ARSON = 2  # 纵火 ≥2 次 → 火灾坏结局
+_GENERIC_ENDING_ASSAULT = 3  # 袭击 ≥3 次 → 被制服坏结局
+
+# 模组无需编写即可生效的兜底结局（module.generic_endings 可关）。
+# 声明序即优先级：最具体的在前（纵火 4 次先于 2 次命中）；模组
+# 结局永远优先于通用结局（作者手写的谋杀结局压过通用逮捕）。
+_GENERIC_ENDINGS: tuple[Ending, ...] = (
+    Ending(
+        id="generic_arson_egg",
+        condition=f"flag:arson>={_GENERIC_ENDING_ARSON_EGG}",
+        text=(
+            "═══ 结局 · 纵火狂 ═══\n"
+            "火焰吞噬了一切——证据、线索、真相，连同这夜所有的秘密，都在冲天火光里化为灰烬。\n"
+            "你们站在火场前放声大笑。有些调查员，查着查着就成了故事里最可怕的那一章。"
+        ),
+        outcome="neutral",
+    ),
+    Ending(
+        id="generic_fire",
+        condition=f"flag:arson>={_GENERIC_ENDING_ARSON}",
+        text=(
+            "═══ 结局 · 怒火焚宅 ═══\n"
+            "火势蔓延得比想象中更快。等救火的人赶来，只剩下焦黑的残垣。\n"
+            "真相被永远埋在了瓦砾之下，你们也为鲁莽付出了代价。"
+        ),
+        outcome="bad",
+    ),
+    Ending(
+        id="generic_arrest",
+        condition="flag:murder",
+        text=(
+            "═══ 结局 · 锒铛入狱 ═══\n"
+            "人命关天，警察的哨声很快从远处逼近——无论你们挥刀的理由是什么，\n"
+            "接下来都只能在铁窗里慢慢讲了。调查员的身份救不了你们，本团到此结束。"
+        ),
+        outcome="bad",
+    ),
+    Ending(
+        id="generic_subdued",
+        condition=f"flag:assault>={_GENERIC_ENDING_ASSAULT}",
+        text=(
+            "═══ 结局 · 群起而攻 ═══\n"
+            "一而再的暴行耗尽了所有人的耐心与善意。闻声赶来的人一拥而上，\n"
+            "把你们死死按在地上。再没有人愿意听调查员解释，本团到此结束。"
+        ),
+        outcome="bad",
+    ),
+)
 
 
 def check_endings(game: Game) -> Optional[Ending]:
-    """按模组声明序扫描结局条件（确定性安全网）。"""
+    """按模组声明序扫描结局条件（确定性安全网）。
+
+    模组结局之后扫描系统通用结局（模组 generic_endings 开启时）：
+    时间 / 标记驱动的结局在 _run_play 循环顶每轮复检，无需另设检查点。
+    """
     if game.module is None:
         return None
     ctx = game.condition_context()
     for ending in game.module.endings:
         if evaluate_condition(ending.condition, ctx):
             return ending
+    if game.module.generic_endings:
+        for ending in _GENERIC_ENDINGS:
+            if evaluate_condition(ending.condition, ctx):
+                return ending
     return None
 
 
@@ -889,9 +1145,16 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
                     timeout=timeout,
                 )
                 break
+            if game.tools_cache is None:
+                # 工具 schema 全静态：整局惰性构建一次后复用，
+                # 使 wire 前缀（tools + 系统提示词）逐字节稳定
+                player_names = [
+                    p.sheet.name for p in game.players if p.sheet is not None
+                ]
+                game.tools_cache = ai_kp.build_tools(game.module, player_names)
             msg = await complete_with_tools(
                 messages,
-                ai_kp.build_tools(game),
+                game.tools_cache,
                 max_tokens=cfg.rpg_kp_max_tokens,
                 temperature=cfg.rpg_kp_temperature,
                 timeout=timeout,
@@ -1147,7 +1410,9 @@ async def _tool_grant_clue(game: Game, args: dict[str, object]) -> str:
     return "线索不存在。"
 
 
-async def _tool_speak_as_npc(game: Game, args: dict[str, object]) -> str:
+async def _tool_speak_as_npc(  # noqa: PLR0911
+    game: Game, args: dict[str, object]
+) -> str:
     """speak_as_npc：NPC 在场校验 + 格式化播报。"""
     if game.module is None or game.current_scene is None:
         return "当前不在场景中。"
@@ -1156,7 +1421,11 @@ async def _tool_speak_as_npc(game: Game, args: dict[str, object]) -> str:
         return "当前场景缺失。"
     npc_id = str(args.get("npc_id", ""))
     npc = game.module.npc(npc_id)
-    if npc is None or npc_id not in scene.npcs:
+    if npc is None:
+        return "该 NPC 不存在。"
+    if npc_id in game.dead_npcs:
+        return "该 NPC 已经死了，无法开口。"
+    if game.npc_present(npc_id) is None:
         return "该 NPC 不在当前场景。"
     text = str(args.get("text", "")).strip().lstrip("/").strip()
     if not text:
@@ -1242,11 +1511,14 @@ async def _collect_say_batch(
     return batch
 
 
-async def _handle_say(game: Game, cfg: Config, first: Action) -> None:
-    """处理自由发言：合批 → 触发提示 → KP 智能体循环。"""
+async def _handle_say(  # noqa: C901, PLR0912
+    game: Game, cfg: Config, first: Action
+) -> None:
+    """处理自由发言：合批 → 违规扫描 → 触发提示 → KP 智能体循环。"""
     batch = await _collect_say_batch(game, cfg, first)
     lines: list[str] = []
     hint = ""
+    offenses: list[str] = []
     for action in batch:
         player = game.player_by_user(action.actor_user_id)
         if player is not None and player.sheet is not None:
@@ -1262,12 +1534,39 @@ async def _handle_say(game: Game, cfg: Config, first: Action) -> None:
         lines.append(f"{name}：{text}")
         if not hint:
             hint = _trigger_hint(game, text)
+        offense = _scan_offense(text)
+        if offense is not None and offense not in offenses:
+            offenses.append(offense)
     if not lines:
         return
+    # 违规标记先于 tick 记录：flag 驱动的行程变化（如 NPC 吓跑）
+    # 能在本次 tick 的进出 diff 里立即体现
+    for category in offenses:
+        raise_flag(game, category)
+    # 每批发言整体消耗一次时间（在 KP 回合之前 tick，让局面反映最新时刻）
+    await _tick_time(game, _time_cost(game, "say"))
     speaker = game.player_by_user(first.actor_user_id)
     instruction = (
         "调查员的发言如下：\n" + "\n".join(lines) + "\n请即兴续写氛围或 NPC 反应。"
     )
+    if offenses:
+        labels = "、".join(_OFFENSE_LABELS[c] for c in offenses)
+        if cfg.rpg_ai_enabled:
+            instruction += (
+                f"\n【世界反应】调查员刚才尝试{labels}。在场 NPC 必须按其人格"
+                "立即反应（阻止/呼救/逃跑/敌视），世界必须有回应，不得无视。"
+            )
+        else:
+            # 降级模式：NPC 反应同样不依赖 AI（确定性罐头台词）
+            present = game.npcs_in_scene(game.current_scene or "")
+            if present:
+                npc = present[0][0]
+                await _announce(
+                    game,
+                    f"【{npc.name}】住手！你们这是要干什么！来人啊！",
+                )
+            else:
+                await _announce(game, "你们的举动引起了周围极大的恐慌。")
     await run_kp_turn(game, cfg, speaker, instruction, hint=hint)
 
 
@@ -1290,10 +1589,13 @@ async def _handle_explicit_check(game: Game, player: PlayerState, aux: str) -> N
         return
     if skill.key == "san":
         await _roll_san(game, player, "1/1d6", source="显式检定")
+        await _tick_time(game, _time_cost(game, "check"))
         return
     success = await do_skill_check(game, player, skill.key, difficulty)
     if success is None:
         await _announce(game, f"你的角色卡上没有「{skill.name}」这项技能~")
+        return
+    await _tick_time(game, _time_cost(game, "check"))
 
 
 async def _handle_talk_npc(
@@ -1316,26 +1618,49 @@ async def _handle_talk_npc(
         await _announce(game, "格式：/对话 NPC名 要说的话")
         return
     npc = None
-    for nid in scene.npcs:
-        cand = module.npc(nid)
-        if cand is not None and npc_name in cand.name:
+    for cand, _ in game.npcs_in_scene(game.current_scene):
+        if npc_name in cand.name:
             npc = cand
             break
     if npc is None:
-        await _announce(game, f"{npc_name} 不在这个场景里。")
+        # 区分"死了"与"不在场"：对尸体搭话也给明确回应
+        dead_match = next(
+            (
+                cand
+                for cand in (module.npc(nid) for nid in game.dead_npcs)
+                if cand is not None and npc_name in cand.name
+            ),
+            None,
+        )
+        if dead_match is not None:
+            await _announce(game, f"……{dead_match.name} 已经死了。")
+        else:
+            await _announce(game, f"{npc_name} 不在这个场景里。")
         return
+    await _tick_time(game, _time_cost(game, "talk"))
     pname = player.sheet.name if player.sheet else str(player.seat)
     game.group_log.append(f"【{pname}→{npc.name}】{text}")
     if not cfg.rpg_ai_enabled:
         line = npc.fallback_line or "（对方似乎不想多说。）"
         await _announce(game, f"【{npc.name}】{line}")
         return
+    # 扮演规则系统提示词与工具 description 已说明，指令只给事实
     instruction = (
-        f"调查员 {pname} 正在与 {npc.name} 交谈，{pname} 说：「{text}」\n"
-        f"请通过 speak_as_npc 工具以 {npc.name} 的身份回应"
-        "（符合其人格与所知信息），并可附带少量环境描写。"
+        f"调查员 {pname} 对 {npc.name} 说：「{text}」\n"
+        f"请以 {npc.name} 的身份回应，可附少量环境描写。"
     )
     await run_kp_turn(game, cfg, player, instruction)
+
+
+async def _handle_wait(game: Game, minutes: int) -> None:
+    """/等待：固定文案 + 时间推进。
+
+    不走 KP 回合（等待是廉价操作，防刷屏）；时间流逝带来的
+    世界反应由 _tick_time 的 NPC 进出播报承担。
+    """
+    minutes = max(minutes, 1)
+    await _announce(game, f"（你们等待了 {minutes} 分钟……）")
+    await _tick_time(game, minutes)
 
 
 async def _process_action(
@@ -1352,13 +1677,25 @@ async def _process_action(
     elif action.kind is ActionKind.TALK_NPC:
         await _handle_talk_npc(game, cfg, player, action.aux or "")
     elif action.kind is ActionKind.ATTACK:
-        monster = _find_scene_monster(game, action.aux or "")
-        if monster is None:
+        target = _find_attack_target(game, action.aux or "")
+        if target is None:
             await _announce(game, "这个场景里没有你说的目标。")
+        elif isinstance(target, NPC):
+            await _tick_time(game, _time_cost(game, "attack"))
+            # 攻击 NPC 是暴力行为：记 assault 标记（累计触发通用
+            # 结局），幸存的 NPC 立即确定性反击（镜像怪物行为）
+            raise_flag(game, "assault")
+            game.npc_hostile.add(target.id)
+            await do_player_attack_npc(game, player, target)
+            if target.id not in game.dead_npcs:
+                await do_npc_attack(game, target, player)
         else:
-            await do_player_attack(game, player, monster)
+            await _tick_time(game, _time_cost(game, "attack"))
+            await do_player_attack(game, player, target)
     elif action.kind is ActionKind.MOVE:
         await _do_move(game, player, action.aux or "")
+    elif action.kind is ActionKind.WAIT:
+        await _handle_wait(game, action.value or cfg.rpg_wait_default)
 
 
 async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
@@ -1366,6 +1703,8 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
     _enter_phase(game, Phase.PLAY)
     if game.module is None:
         return
+    # 游戏内时钟按模组起始时刻初始化（默认 20:00）
+    game.clock_start_minutes = game.module.time.start_minutes
     await enter_scene(game, game.module.start_scene, opening=True)
     while game.phase is Phase.PLAY:
         ending = check_endings(game)
