@@ -422,6 +422,47 @@ async def handle_move(
     await move_cmd.finish()
 
 
+time_cmd = on_command("时间", aliases={"时辰"}, priority=5, block=True)
+
+
+@time_cmd.handle()
+async def handle_time(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """查看游戏内时钟（只读直答，不消耗时间）。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await time_cmd.finish("现在不在跑团进行中")
+    await time_cmd.finish(f"现在是 {engine.format_clock(game)}")
+
+
+wait_cmd = on_command("等待", aliases={"休息"}, priority=5, block=True)
+
+
+@wait_cmd.handle()
+async def handle_wait(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """原地等待 N 分钟（缺省 rpg_wait_default，钳制 rpg_wait_max）。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await wait_cmd.finish("现在不在跑团进行中")
+    text = str(arg).strip()
+    if text:
+        if not (text.isascii() and text.isdigit()):
+            await wait_cmd.finish("格式：/等待 分钟数（如 /等待 90）")
+        minutes = max(1, min(int(text), config.rpg_wait_max))
+    else:
+        minutes = config.rpg_wait_default
+    game.action_queue.put_nowait(
+        Action(ActionKind.WAIT, int(event.get_user_id()), value=minutes)
+    )
+    await wait_cmd.finish()
+
+
 status_cmd = on_command("状态", aliases={"我的状态"}, priority=5, block=True)
 
 

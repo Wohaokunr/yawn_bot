@@ -17,7 +17,7 @@ from typing import Optional
 
 import yaml
 from nonebot import logger
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .charsheet import SKILLS
 
@@ -66,6 +66,8 @@ class CheckPoint(BaseModel):
     san_loss: Optional[str] = None
     # 失败伤害骰表达式，如 "1d3"
     damage_on_fail: Optional[str] = None
+    # 本检定点结算消耗的游戏内分钟数（缺省用引擎的 check 默认值）
+    time_cost: Optional[int] = None
 
     @model_validator(mode="after")
     def _check_fields(self) -> "CheckPoint":
@@ -100,6 +102,32 @@ def _is_san_loss(text: str) -> bool:
     if not sep:
         return False
     return all(p.strip() and _is_dice_expr(p.strip()) for p in (left, right))
+
+
+# HH:MM 时刻（允许单位小时，如 6:00）
+_HHMM_RE = re.compile(r"([01]?\d|2[0-3]):([0-5]\d)")
+
+
+def _parse_hhmm(text: str) -> Optional[int]:
+    """解析 HH:MM 为自当日 0:00 起的分钟数；非法返回 None。"""
+    match = _HHMM_RE.fullmatch(text.strip())
+    if match is None:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _in_window(t: int, frm: int, to: int) -> bool:
+    """判断时刻 t 是否落在 [frm, to) 时段内（自 0:00 起的分钟数）。
+
+    支持跨午夜（frm > to，如 23:00-02:00）；含起点不含终点；
+    frm == to 视为全天窗口。行程时段与 time_between 条件词
+    共用这一份实现，避免两处各写一套跨午夜逻辑。
+    """
+    if frm == to:
+        return True
+    if frm < to:
+        return frm <= t < to
+    return t >= frm or t < to
 
 
 def _validate_condition(  # noqa: C901,PLR0911,PLR0912
@@ -138,6 +166,24 @@ def _validate_condition(  # noqa: C901,PLR0911,PLR0912
         elif kind == "scene":
             if value not in scenes:
                 return f"引用了未定义的场景 {value!r}"
+        elif kind in ("time_after", "time_before"):
+            if _parse_hhmm(value) is None:
+                return f"时间格式应为 HH:MM：{term!r}"
+        elif kind == "time_between":
+            left, tsep, right = value.partition("-")
+            if (
+                not tsep
+                or _parse_hhmm(left.strip()) is None
+                or _parse_hhmm(right.strip()) is None
+            ):
+                return f"time_between 格式应为 HH:MM-HH:MM：{term!r}"
+        elif kind == "flag":
+            # flag 是开放的运行时集合，只做语法校验
+            name, ge, num = value.partition(">=")
+            if not name:
+                return f"flag 词条缺少名称：{term!r}"
+            if ge and not (num.isascii() and num.isdigit()):
+                return f"flag 计数阈值必须是整数：{term!r}"
         else:
             return f"未知的条件词条：{term!r}"
     return None
@@ -155,6 +201,8 @@ class Exit(BaseModel):
     auto: bool = False
     # 切景时引擎播报的固定转场文案
     narration: str = ""
+    # 走这条出口消耗的游戏内分钟数（缺省用引擎的 move 默认值）
+    time_cost: Optional[int] = None
 
 
 class Scene(BaseModel):
@@ -172,8 +220,69 @@ class Scene(BaseModel):
     idle_narration: Optional[str] = None
 
 
+class ScheduleEntry(BaseModel):
+    """NPC 行程条目：[from, to) 时段内 NPC 身在何处、在做何事。
+
+    窗口支持跨午夜（from > to，如 23:00-02:00）；from == to
+    视为全天窗口。同一 NPC 的条目按声明序匹配，第一条"条件
+    成立且时钟落在窗口"的条目生效——作者需自行保证优先级。
+    """
+
+    # YAML 里写作 from:（from 是 Python 关键字，字段名用 frm）
+    model_config = ConfigDict(populate_by_name=True)
+
+    frm: str = Field(alias="from")
+    to: str
+    # NPC 所在场景 id；away=False 时必填
+    scene: Optional[str] = None
+    # NPC 正在做的事（公开 flavor，进 KP 局面提示）
+    activity: str = ""
+    # 条目生效条件（见 evaluate_condition）；空=始终生效
+    condition: str = ""
+    # True 表示外出（不在任何场景）；此时无需 scene
+    away: bool = False
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "ScheduleEntry":
+        if _parse_hhmm(self.frm) is None:
+            msg = f"行程 from 时间格式非法：{self.frm!r}（应为 HH:MM）"
+            raise ValueError(msg)
+        if _parse_hhmm(self.to) is None:
+            msg = f"行程 to 时间格式非法：{self.to!r}（应为 HH:MM）"
+            raise ValueError(msg)
+        if not self.away and not self.scene:
+            msg = "行程条目未标记 away 时必须给出 scene"
+            raise ValueError(msg)
+        return self
+
+
+class TimeConfig(BaseModel):
+    """游戏内时钟配置：起始时刻 + 各行动类型耗时覆写。"""
+
+    # 开局游戏内时刻 HH:MM
+    start: str = "20:00"
+    # 按行动类型覆写消耗分钟数（键如 say/talk/check/move/attack/wait）
+    costs: dict[str, int] = {}
+
+    @model_validator(mode="after")
+    def _check_start(self) -> "TimeConfig":
+        if _parse_hhmm(self.start) is None:
+            msg = f"time.start 时间格式非法：{self.start!r}（应为 HH:MM）"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def start_minutes(self) -> int:
+        """起始时刻折算为自 0:00 起的分钟数（加载期已校验）。"""
+        return _parse_hhmm(self.start) or 0
+
+
 class NPC(BaseModel):
-    """NPC：secrets 永不注入任何提示词。"""
+    """NPC：secrets 永不注入任何提示词。
+
+    NPC 可被玩家攻击、会反击、可死亡（数值镜像 Monster，
+    全部带默认值，旧模组不写也能用）。
+    """
 
     id: str
     name: str
@@ -187,14 +296,39 @@ class NPC(BaseModel):
     secrets: list[str] = []
     # LLM 失败时的罐头回复
     fallback_line: str = ""
+    # ── 生活行程 ──
+    # 行程条目（声明序=匹配优先级）；为空表示常驻 scene.npcs 所列场景
+    schedule: list[ScheduleEntry] = []
+    # ── 战斗数值（镜像 Monster；引擎结算，KP 不碰）──
+    hp: int = 10
+    attack_skill: int = 40
+    attack_name: str = "攻击"
+    damage: str = "1d3"
+    dodge: int = 30
+    on_death_clue: Optional[str] = None
+    on_death_text: str = ""
 
     @model_validator(mode="after")
     def _no_secret_leak(self) -> "NPC":
-        haystack = " ".join((self.persona, self.public_desc, *self.knows))
+        haystack = " ".join(
+            (
+                self.persona,
+                self.public_desc,
+                *self.knows,
+                *(e.activity for e in self.schedule),
+            )
+        )
         for secret in self.secrets:
             if secret and secret in haystack:
                 msg = f"NPC {self.id}：secret 出现在 persona/公开信息中，会泄露给 AI"
                 raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_damage(self) -> "NPC":
+        if not _is_dice_expr(self.damage):
+            msg = f"NPC {self.id}：damage 骰表达式非法：{self.damage!r}"
+            raise ValueError(msg)
         return self
 
 
@@ -266,6 +400,10 @@ class ModuleDef(BaseModel):
     monsters: list[Monster] = []
     clues: list[Clue] = []
     endings: list[Ending] = []
+    # 游戏内时钟（起始时刻与各行动耗时覆写）
+    time: TimeConfig = TimeConfig()
+    # 是否启用系统级通用结局（谋杀 / 纵火等极端行为的兜底结局）
+    generic_endings: bool = True
 
     @model_validator(mode="after")
     def _check_refs(self) -> "ModuleDef":  # noqa: C901,PLR0912,PLR0915
@@ -338,6 +476,18 @@ class ModuleDef(BaseModel):
             if monster.on_death_clue and monster.on_death_clue not in clues:
                 msg = f"怪物 {monster.id} 死亡奖励了未定义的线索"
                 raise ValueError(msg)
+        for npc in self.npcs:
+            if npc.on_death_clue and npc.on_death_clue not in clues:
+                msg = f"NPC {npc.id} 死亡奖励了未定义的线索"
+                raise ValueError(msg)
+            for entry in npc.schedule:
+                if not entry.away and entry.scene not in scenes:
+                    msg = f"NPC {npc.id} 行程引用了未定义的场景 {entry.scene!r}"
+                    raise ValueError(msg)
+                err = _validate_condition(entry.condition, scenes, monsters, clues)
+                if err is not None:
+                    msg = f"NPC {npc.id} 行程条件非法：{err}"
+                    raise ValueError(msg)
         for ending in self.endings:
             err = _validate_condition(ending.condition, scenes, monsters, clues)
             if err is not None:
@@ -363,6 +513,75 @@ class ModuleDef(BaseModel):
         """按 id 查线索。"""
         return next((c for c in self.clues if c.id == clue_id), None)
 
+    # ── NPC 在场解析（时间 + 事件条件；死亡过滤在引擎层）────
+
+    def npc_schedule_match(
+        self,
+        npc_id: str,
+        time_of_day: int,
+        ctx: ConditionContext,
+    ) -> Optional[ScheduleEntry]:
+        """取 NPC 命中的首条行程条目（条件成立 + 时钟落在窗口）。
+
+        无行程或全不匹配返回 None。away 条目也会命中（由调用
+        方决定如何使用其 activity，如离场播报的 flavor）。
+        """
+        npc = self.npc(npc_id)
+        if npc is None:
+            return None
+        for entry in npc.schedule:
+            if not evaluate_condition(entry.condition, ctx):
+                continue
+            frm = _parse_hhmm(entry.frm)
+            to = _parse_hhmm(entry.to)
+            # 加载期已校验，理论不可达；防御性跳过
+            if frm is not None and to is not None and _in_window(time_of_day, frm, to):
+                return entry
+        return None
+
+    def npc_presence(
+        self,
+        npc_id: str,
+        time_of_day: int,
+        ctx: ConditionContext,
+    ) -> Optional[tuple[str, str]]:
+        """解析 NPC 在给定时刻所在的场景与活动；不在场返回 None。
+
+        空行程 → 静态 scene.npcs 成员关系（首个列入的场景，
+        与无行程模组的旧行为一致）；非空行程 → 首条命中条目
+        （away 视为不在场）；全不匹配 → 不在场。死亡过滤不
+        在本层，由引擎的 Game 包装层负责。
+        """
+        npc = self.npc(npc_id)
+        if npc is None:
+            return None
+        if not npc.schedule:
+            for scene in self.scenes:
+                if npc_id in scene.npcs:
+                    return scene.id, ""
+            return None
+        entry = self.npc_schedule_match(npc_id, time_of_day, ctx)
+        if entry is None or entry.away:
+            return None
+        return entry.scene or "", entry.activity
+
+    def npcs_in_scene(
+        self,
+        scene_id: str,
+        time_of_day: int,
+        ctx: ConditionContext,
+    ) -> list[tuple[NPC, str]]:
+        """给定时刻在场于某场景的全部 NPC（按模组 npcs 声明序）。
+
+        每个元素为 (NPC, activity)；activity 为空串表示无行程信息。
+        """
+        found: list[tuple[NPC, str]] = []
+        for npc in self.npcs:
+            presence = self.npc_presence(npc.id, time_of_day, ctx)
+            if presence is not None and presence[0] == scene_id:
+                found.append((npc, presence[1]))
+        return found
+
 
 # ── 条件表达式求值（确定性，AI 不参与）───────────────────
 
@@ -375,6 +594,10 @@ class ConditionContext:
     dead_monsters: set[str] = field(default_factory=set)
     current_scene: str = ""
     all_incapped: bool = False
+    # 游戏内时钟（自 0:00 起的分钟数，0-1439）
+    time_of_day: int = 0
+    # 引擎记录的事件标记（名称 → 累计次数）
+    flags: dict[str, int] = field(default_factory=dict)
 
 
 def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
@@ -385,8 +608,11 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
 
     语法（可用 " & " 组合，须全部满足）：
     always / clue:<id> / clues:<a>+<b> / monster_dead:<id> /
-    scene:<id> / all_players_incapped。
-    未知词条保守判为不满足，避免作者笔误导致剧情失控。
+    scene:<id> / all_players_incapped /
+    time_after:HH:MM / time_before:HH:MM /
+    time_between:HH:MM-HH:MM（含跨午夜）/
+    flag:<name> / flag:<name>>=N。
+    未知词条与非法格式保守判为不满足，避免作者笔误导致剧情失控。
     """
     if not condition or not condition.strip():
         return True
@@ -412,6 +638,34 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
                 return False
         elif kind == "scene" and value:
             if ctx.current_scene != value:
+                return False
+        elif kind == "time_after" and value:
+            t = _parse_hhmm(value)
+            if t is None or ctx.time_of_day < t:
+                return False
+        elif kind == "time_before" and value:
+            t = _parse_hhmm(value)
+            if t is None or ctx.time_of_day >= t:
+                return False
+        elif kind == "time_between" and value:
+            left, tsep, right = value.partition("-")
+            frm = _parse_hhmm(left.strip()) if tsep else None
+            to = _parse_hhmm(right.strip()) if tsep else None
+            if frm is None or to is None:
+                return False
+            if not _in_window(ctx.time_of_day, frm, to):
+                return False
+        elif kind == "flag" and value:
+            name, ge, num = value.partition(">=")
+            count = ctx.flags.get(name, 0)
+            if ge:
+                try:
+                    need = int(num)
+                except ValueError:
+                    return False
+                if count < need:
+                    return False
+            elif count < 1:
                 return False
         else:
             return False
