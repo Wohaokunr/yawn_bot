@@ -16,9 +16,11 @@ class Config(BaseModel):
     ww_max_players: int = 12
 
     # 报名窗口（秒）
-    ww_signup_timeout: int = 120
-    # 报名窗口剩余多少秒时提醒一次
+    ww_signup_timeout: int = 180
+    # 报名窗口剩余多少秒时第一次提醒
     ww_signup_warn_remain: int = 60
+    # 报名窗口剩余多少秒时第二次（末次）提醒
+    ww_signup_warn_remain_final: int = 20
 
     # 女巫 / 预言家夜间行动阶段的时长（秒）：二者收到有效行动即提前
     # 结束，只有彻底无行动才会等满窗口
@@ -26,7 +28,9 @@ class Config(BaseModel):
     # 狼人阶段专属时长（秒）：两段式狼队讨论 + 串行出刀需要更长窗口，
     # 与女巫/预言家解耦，避免把后两者也拖长
     ww_wolf_timeout: int = 180
-    # 夜间阶段剩余多少秒时提醒一次
+    # 夜间通用心跳播报间隔（秒）：夜晚全群禁言期间每隔该间隔播报一条
+    # 不含角色/阶段信息的氛围文案，填补长夜死寂（旧语义"按子阶段剩余
+    # 秒数点名提醒"已废弃——那会向全群暴露当前行动角色）
     ww_night_warn_remain: int = 30
 
     # 每人发言时长（秒），竞选发言与 PK 发言同样使用
@@ -40,9 +44,9 @@ class Config(BaseModel):
     ww_last_words_timeout: int = 60
 
     # 警长竞选报名窗口（秒）
-    ww_sheriff_register_timeout: int = 30
-    # 移交警徽决策时长（秒）
-    ww_badge_timeout: int = 30
+    ww_sheriff_register_timeout: int = 45
+    # 移交警徽决策时长（秒）；同时复用为白天发言排序决策窗口
+    ww_badge_timeout: int = 45
 
     # ── AI 玩家 ──
     # AI 玩家总开关

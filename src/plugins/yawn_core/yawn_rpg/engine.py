@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional, Union
 
 from nonebot import get_bot, get_plugin_config, logger
-from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
@@ -63,7 +63,6 @@ from .state import (
 )
 
 if TYPE_CHECKING:
-    from nonebot.adapters.onebot.v11 import Message
     from openai.types.chat import (
         ChatCompletionMessageParam,
         ChatCompletionMessageToolCallUnion,
@@ -199,7 +198,10 @@ def _enter_phase(game: Game, phase: Phase) -> None:
 
 async def _announce(game: Game, text: Union[str, "Message"]) -> None:
     """群播报并记入群聊记录（KP 上下文来源）。"""
-    game.group_log.append(f"〔系统〕{text}")
+    # 入群聊记录前提纯文本：Message 里的 @ 等段否则会化作
+    # [CQ:...] 标记泄漏进 KP 局面提示词
+    plain = text.extract_plain_text() if isinstance(text, Message) else text
+    game.group_log.append(f"〔系统〕{plain}")
     if game.bot is None:
         return
     await api.safe_group_msg(game.bot, game.group_id, text)
@@ -570,6 +572,8 @@ async def resolve_check_point(
     if not success and cp.damage_on_fail:
         amount = roll_dice(cp.damage_on_fail)
         await apply_damage(game, player, amount, source=cp.id)
+    if success:
+        game.passed_checks.add(cp.id)
     if cp.once:
         game.fired_checks.add(cp.id)
     # 检定结算消耗时间（检定点 time_cost 覆写 > 引擎 check 默认；
@@ -833,10 +837,12 @@ def _find_attack_target(
         if mid in game.dead_monsters:
             continue
         monster = game.module.monster(mid)
-        if monster is not None and (needle in monster.name or needle == mid):
+        if monster is not None and (
+            (needle and needle in monster.name) or needle == mid
+        ):
             return monster
     for npc, _ in game.npcs_in_scene(game.current_scene):
-        if needle in npc.name or needle == npc.id:
+        if (needle and needle in npc.name) or needle == npc.id:
             return npc
     return None
 
@@ -989,6 +995,7 @@ _GENERIC_ENDING_ASSAULT = 3  # 袭击 ≥3 次 → 被制服坏结局
 # 模组无需编写即可生效的兜底结局（module.generic_endings 可关）。
 # 声明序即优先级：最具体的在前（纵火 4 次先于 2 次命中）；模组
 # 结局永远优先于通用结局（作者手写的谋杀结局压过通用逮捕）。
+# 全员倒地兜底殿后：模组自写 TPK 结局时永远轮不到它。
 _GENERIC_ENDINGS: tuple[Ending, ...] = (
     Ending(
         id="generic_arson_egg",
@@ -1027,6 +1034,16 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
             "═══ 结局 · 群起而攻 ═══\n"
             "一而再的暴行耗尽了所有人的耐心与善意。闻声赶来的人一拥而上，\n"
             "把你们死死按在地上。再没有人愿意听调查员解释，本团到此结束。"
+        ),
+        outcome="bad",
+    ),
+    Ending(
+        id="generic_tpk",
+        condition="all_players_incapped",
+        text=(
+            "═══ 结局 · 全军覆没 ═══\n"
+            "最后一名调查员的意识也像潮水般退去了。没有人还站着。\n"
+            "此地收回了它所有的秘密——连同前来窥探秘密的人。"
         ),
         outcome="bad",
     ),
@@ -1079,14 +1096,21 @@ def _resolve_player_arg(
     return None
 
 
-async def _fallback_narrate(game: Game, text: str) -> None:
+async def _fallback_narrate(
+    game: Game,
+    text: str,
+    actor: Optional[PlayerState] = None,
+) -> None:
     """AI 失败时的确定性兜底叙述。"""
     if game.phase is not Phase.PLAY:
         return
     cp = match_trigger(game, text)
     if cp is not None:
-        actors = game.active_players()
-        actor = actors[0] if actors else None
+        # 关键词由谁说出就由谁检定（降级模式下避免 1 号位替别人
+        # 吃检定与伤害）；actor 缺失或已倒地时回退首个活跃玩家
+        if actor is None or actor.incapped:
+            actors = game.active_players()
+            actor = actors[0] if actors else None
         if actor is not None:
             await resolve_check_point(game, actor, cp)
             return
@@ -1111,7 +1135,7 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
     绝不卡局。所有状态写入发生在 execute_tool 内的引擎函数里。
     """
     if not cfg.rpg_ai_enabled:
-        await _fallback_narrate(game, instruction)
+        await _fallback_narrate(game, instruction, actor)
         return
     # 防刷屏：宁可等待也不叠加调用
     wait = game.last_kp_at + cfg.rpg_kp_min_interval - _loop_time()
@@ -1120,7 +1144,11 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
             await asyncio.wait_for(asyncio.sleep(wait), timeout=wait + 1)
         if game.phase is not Phase.PLAY:
             return
-    situation = ai_kp.build_situation(game)
+    # 局面拆块：场景块存局上供 get_situation 去重；user 消息字节
+    # 与整段 build_situation 一致（场景块 + 易变尾）
+    scene_block = ai_kp.build_scene_block(game) or "（对局尚未开始）"
+    game.kp_situation_scene_block = scene_block
+    situation = f"{scene_block}\n{ai_kp.build_volatile_tail(game)}"
     user_content = f"{situation}\n\n【当前任务】{instruction}{hint}"
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": ai_kp.build_system_prompt(cfg)},
@@ -1191,8 +1219,15 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
                 if game.phase is not Phase.PLAY:
                     return
         else:
-            # 工具轮数用尽：强制收尾
-            messages.append({"role": "user", "content": ai_kp.FINAL_NUDGE})
+            # 工具轮数用尽：强制收尾。丢弃全部工具轮对（assistant
+            # tool_calls + tool 回执成对丢弃，无悬空引用），只留
+            # [系统提示词, 回合开始局面, 收尾指令]——KP 绕圈耗尽轮数
+            # 时按回合开始局面出最终旁白，顺带裁掉累积的轮次 payload
+            messages = [
+                messages[0],
+                messages[1],
+                {"role": "user", "content": ai_kp.FINAL_NUDGE},
+            ]
             remain = turn_deadline - _loop_time()
             if remain > 1:
                 final_text = await complete(
@@ -1214,7 +1249,7 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
         if text:
             await _announce(game, text)
             return
-    await _fallback_narrate(game, instruction)
+    await _fallback_narrate(game, instruction, actor)
 
 
 async def execute_tool(  # noqa: C901, PLR0911, PLR0912
@@ -1262,7 +1297,16 @@ async def execute_tool(  # noqa: C901, PLR0911, PLR0912
         if name == "end_session":
             return await _tool_end_session(game, args)
         if name == "get_situation":
-            return ai_kp.build_situation(game)
+            # 只回场景块（回合内时钟不 tick、群聊不变，易变尾纯冗余）；
+            # 与回合开始一致时回执"无变化"，避免局面在上下文里翻倍
+            fresh = ai_kp.build_scene_block(game) or "（对局尚未开始）"
+            if fresh == game.kp_situation_scene_block:
+                return (
+                    "局面未发生变化（场景/NPC/线索/出口/调查员状态"
+                    "均同回合开始时），无需刷新。"
+                )
+            game.kp_situation_scene_block = fresh
+            return fresh
     except Exception:  # noqa: BLE001
         # 工具处理器的一切异常都转化为错误回执，供 KP 自我纠正；
         # 向上抛只会让 run_game 兜底整局结束，违背"任何失败不卡局"
@@ -1394,7 +1438,14 @@ async def _tool_grant_clue(game: Game, args: dict[str, object]) -> str:
     if scene is None:
         return "当前场景缺失。"
     clue_id = str(args.get("clue_id", ""))
-    grantable = {cp.clue for cp in scene.checks if cp.clue}
+    grantable = {
+        cp.clue
+        for cp in scene.checks
+        # once 检定点已触发却失败时线索不可授予：系统已裁决结果，
+        # KP 不得以 grant_clue 覆盖失败检定（未裁决的检定点仍可授予）
+        if cp.clue
+        and not (cp.id in game.fired_checks and cp.id not in game.passed_checks)
+    }
     for mid in scene.monsters:
         if mid not in game.dead_monsters:
             continue  # 死亡奖励线索只能在怪物死后授予，否则提前剧透
@@ -1587,9 +1638,9 @@ async def _handle_explicit_check(game: Game, player: PlayerState, aux: str) -> N
     if skill is None:
         await _announce(game, "格式：/检定 技能名（如 /检定 侦查，可加 困难/极难）")
         return
-    if skill.key == "san":
-        await _roll_san(game, player, "1/1d6", source="显式检定")
-        await _tick_time(game, _time_cost(game, "check"))
+    if skill.key == "cthulhu_mythos":
+        # 与 request_check 工具侧一致：克苏鲁神话不可主动检定
+        await _announce(game, "克苏鲁神话不能主动检定~")
         return
     success = await do_skill_check(game, player, skill.key, difficulty)
     if success is None:
@@ -1681,11 +1732,13 @@ async def _process_action(
         if target is None:
             await _announce(game, "这个场景里没有你说的目标。")
         elif isinstance(target, NPC):
-            await _tick_time(game, _time_cost(game, "attack"))
-            # 攻击 NPC 是暴力行为：记 assault 标记（累计触发通用
-            # 结局），幸存的 NPC 立即确定性反击（镜像怪物行为）
+            # 攻击 NPC 是暴力行为：assault 标记先于 tick 记录
+            # （镜像 SAY 路径的"先于 tick"契约），flag 驱动的行程
+            # 变化（如 NPC 吓跑）才能在本次 tick 的进出 diff 里立即
+            # 播报；幸存的 NPC 立即确定性反击（镜像怪物行为）
             raise_flag(game, "assault")
             game.npc_hostile.add(target.id)
+            await _tick_time(game, _time_cost(game, "attack"))
             await do_player_attack_npc(game, player, target)
             if target.id not in game.dead_npcs:
                 await do_npc_attack(game, target, player)
@@ -1706,6 +1759,11 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
     # 游戏内时钟按模组起始时刻初始化（默认 20:00）
     game.clock_start_minutes = game.module.time.start_minutes
     await enter_scene(game, game.module.start_scene, opening=True)
+    # 连续自动切景上限：无环的自动出口链长度不可能超过场景数；
+    # 超出即 auto:true + 恒真条件成环——会无限播报刷屏且永远
+    # 轮不到空闲超时，此处兜底收尾（处理任一非自动行动后重置）
+    auto_hop_limit = len(game.module.scenes) + 1
+    auto_hops = 0
     while game.phase is Phase.PLAY:
         ending = check_endings(game)
         if ending is not None:
@@ -1713,6 +1771,14 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
             return
         auto = _try_auto_exit(game)
         if auto is not None:
+            auto_hops += 1
+            if auto_hops > auto_hop_limit:
+                logger.error(
+                    f"跑团群 {game.group_id} 自动出口连续切换超过 "
+                    f"{auto_hop_limit} 次，疑似恒真条件成环，本局结束"
+                )
+                await _announce(game, "场景数据异常，本局无法继续~")
+                return
             if not await enter_scene(game, auto.to_scene, transition=auto.narration):
                 # 条件恒真的自动出口 + 切换失败会构成无 await 忙环，
                 # 冻死整个事件循环；正常模组经加载校验不可达，此处兜底
@@ -1723,6 +1789,7 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
                 await _announce(game, "场景数据异常，本局无法继续~")
                 return
             continue
+        auto_hops = 0
         action = game.pending
         game.pending = None
         if action is None:

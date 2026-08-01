@@ -77,25 +77,29 @@ def build_system_prompt(cfg: "Config") -> str:
     return _SYSTEM_PROMPT.format(max_chars=cfg.rpg_kp_max_output_chars)
 
 
-def build_situation(game: "Game") -> str:  # noqa: C901
-    """组装无剧透的"当前局面"上下文。
+def build_scene_block(game: "Game") -> Optional[str]:  # noqa: C901
+    """组装无剧透的局面「场景块」（[当前场景]…[调查员状态]）。
 
-    区块顺序稳定 → 易变（时间 / 群聊最后）；每个实体中文名后
-    带括号 id——工具参数要 id，合法性由引擎 execute_tool 终裁。
+    场景状态（场景 / NPC 在场 / 怪物 / 线索 / 出口通行性 /
+    调查员定性状态）不变时输出逐字节稳定，作为 user 消息前置
+    部分可被端点前缀缓存在回合间接续命中；[时间] 与 [近期群聊]
+    属易变尾（build_volatile_tail），不在其内。每个实体中文名
+    后带括号 id——工具参数要 id，合法性由引擎 execute_tool 终裁。
+    对局尚无场景时返回 None（哨兵文案由调用方决定）。
     """
     module = game.module
     if module is None or game.current_scene is None:
-        return "（对局尚未开始）"
+        return None
     scene = module.scene(game.current_scene)
     if scene is None:
-        return "（场景缺失）"
+        return None
     ctx = game.condition_context()
     lines: list[str] = [
         f"[当前场景] {scene.name}({scene.id})",
         scene.narration.strip(),
     ]
     # 在场 NPC（时间 / 行程解析 + 死亡过滤）：公开简介 + 人格 + 可知信息
-    npcs = game.npcs_in_scene(scene.id)
+    npcs = game.npcs_in_scene(scene.id, ctx)
     if npcs:
         lines.append("[在场 NPC]")
         for npc, activity in npcs:
@@ -137,13 +141,27 @@ def build_situation(game: "Game") -> str:  # noqa: C901
         for p in game.players
     ]
     lines.append(f"[调查员状态] {'；'.join(status)}")
-    # 游戏内时钟（每行动即变，置于易变区）
-    lines.append(f"[时间] {game.clock_text()}")
+    return "\n".join(lines)
+
+
+def build_volatile_tail(game: "Game") -> str:
+    """局面易变尾：游戏内时钟（每行动即变）+ 近期群聊记录。"""
+    lines = [f"[时间] {game.clock_text()}"]
     # 近期群聊记录（只取尾部 N 行，避免提示词膨胀）
     if game.group_log:
         lines.append("[近期群聊]")
         lines.extend(list(game.group_log)[-config.rpg_max_context_lines :])
     return "\n".join(lines)
+
+
+def build_situation(game: "Game") -> str:
+    """完整局面 = 场景块 + 易变尾（与拆块拼装逐字节一致）。"""
+    block = build_scene_block(game)
+    if block is None:
+        if game.module is None or game.current_scene is None:
+            return "（对局尚未开始）"
+        return "（场景缺失）"
+    return f"{block}\n{build_volatile_tail(game)}"
 
 
 def build_tools(

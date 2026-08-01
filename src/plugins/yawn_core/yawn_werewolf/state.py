@@ -165,6 +165,9 @@ class Game:
     vote_exclude: tuple[int, ...] = ()
     # AI 玩家昵称分配表（AI user_id -> 伪装昵称）
     ai_names: dict[int, str] = field(default_factory=dict)
+    # 人类报名者显示名（user_id -> 群名片/昵称；报名阶段由命令层记录，
+    # 仅内存，不入 ORM）
+    signup_names: dict[int, str] = field(default_factory=dict)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -335,9 +338,21 @@ def leave_signup(game: Game, user_id: int) -> bool:
     if user_id not in game.signup_user_ids:
         return False
     game.signup_user_ids.remove(user_id)
+    game.signup_names.pop(user_id, None)
     if _user_index.get(user_id) == game.group_id:
         _user_index.pop(user_id, None)
     return True
+
+
+def note_signup_name(game: Game, user_id: int, name: str) -> None:
+    """记录人类报名者的显示名（报名阶段由命令层调用）。"""
+    if name:
+        game.signup_names[user_id] = name
+
+
+def display_name_of(game: Game, user_id: int) -> str:
+    """显示名：AI 伪装名 > 报名昵称 > QQ 号。"""
+    return game.ai_names.get(user_id) or game.signup_names.get(user_id) or str(user_id)
 
 
 def discard_game(game: Game) -> None:

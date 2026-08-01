@@ -9,6 +9,7 @@ game.action_queue 交给引擎裁决；私聊监听器仅在建卡阶段拦
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING, Optional
 
 from nonebot import (
     get_bot,
@@ -50,6 +51,9 @@ from .state import (
     leave_signup,
     stop_game,
 )
+
+if TYPE_CHECKING:
+    from .state import Game
 
 config = get_plugin_config(Config)
 
@@ -456,7 +460,8 @@ async def handle_wait(
             await wait_cmd.finish("格式：/等待 分钟数（如 /等待 90）")
         minutes = max(1, min(int(text), config.rpg_wait_max))
     else:
-        minutes = config.rpg_wait_default
+        # 缺省值同样受上限钳制（引擎侧只钳下限），防配置越界
+        minutes = max(1, min(config.rpg_wait_default, config.rpg_wait_max))
     game.action_queue.put_nowait(
         Action(ActionKind.WAIT, int(event.get_user_id()), value=minutes)
     )
@@ -538,6 +543,30 @@ async def handle_clues(
 
 # ── 私聊建卡监听 ──────────────────────────────────────────
 
+# 监听规则特性开关判定的缓存秒数：开关局内基本不变，逐条消息
+# 开库查 1-2 次主键 SELECT 纯属浪费；开关变更后最多 TTL 秒生效
+_FEATURE_CACHE_TTL = 300.0
+
+
+async def _rpg_feature_ok(game: "Game", user_id: int, group_id: Optional[int]) -> bool:
+    """查 rpg 特性开关（按 (用户, 群) 带 TTL 缓存，随对局销毁回收）。"""
+    now = asyncio.get_running_loop().time()
+    key = (user_id, group_id)
+    hit = game.feature_ok_cache.get(key)
+    if hit is not None and hit[1] > now:
+        return hit[0]
+    # 与命令处理器的 require_feature 一致：私聊走全局用户解析链
+    # （group_id=None），群聊走 用户→群 解析链
+    async with get_session() as session:
+        verdict = await check_feature_permission(
+            user_id,
+            group_id,
+            "rpg",
+            session,  # pyright: ignore[reportArgumentType]
+        )
+    game.feature_ok_cache[key] = (verdict, now + _FEATURE_CACHE_TTL)
+    return verdict
+
 
 async def _is_char_create_dm(event: MessageEvent) -> bool:
     """规则：私聊 ∧ 用户在建卡阶段的对局中 ∧ 未被禁用跑团功能。"""
@@ -547,14 +576,7 @@ async def _is_char_create_dm(event: MessageEvent) -> bool:
     game = game_of_user(user_id)
     if game is None or game.phase is not Phase.CHAR_CREATE:
         return False
-    # 与命令处理器的 require_feature 一致：按私聊解析链查全局用户开关
-    async with get_session() as session:
-        return await check_feature_permission(
-            user_id,
-            None,
-            "rpg",
-            session,  # pyright: ignore[reportArgumentType]
-        )
+    return await _rpg_feature_ok(game, user_id, None)
 
 
 private_listener = on_message(
@@ -603,13 +625,7 @@ async def _is_game_speech(event: MessageEvent) -> bool:
     player = game.player_by_user(int(event.get_user_id()))
     if player is None or player.incapped:
         return False
-    async with get_session() as session:
-        return await check_feature_permission(
-            int(event.get_user_id()),
-            int(event.group_id),
-            "rpg",
-            session,  # pyright: ignore[reportArgumentType]
-        )
+    return await _rpg_feature_ok(game, int(event.get_user_id()), int(event.group_id))
 
 
 speech_listener = on_message(
