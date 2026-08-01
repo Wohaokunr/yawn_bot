@@ -113,6 +113,8 @@ class Game:
     discovered_clues: set[str] = field(default_factory=set)
     # 已触发的 once 检定点 id
     fired_checks: set[str] = field(default_factory=set)
+    # 检定成功的检定点 id（grant_clue 据此拒绝覆盖失败检定的线索）
+    passed_checks: set[str] = field(default_factory=set)
     # 怪物当前 HP（出场时由引擎按模组初始化）
     monster_hp: dict[str, int] = field(default_factory=dict)
     dead_monsters: set[str] = field(default_factory=set)
@@ -139,6 +141,13 @@ class Game:
     last_kp_at: float = 0.0
     # 工具 schema 缓存（schema 全静态，整局只构建一次，见 ai_kp.build_tools）
     tools_cache: Optional[Any] = None
+    # 本 KP 回合开始时的局面场景块（get_situation 据此去重；仅引擎写入）
+    kp_situation_scene_block: str = ""
+    # ── 监听规则缓存（命令层读写）──────────────────────
+    # 特性开关判定缓存：(user_id, group_id|None) → (判定, 过期循环时刻)
+    feature_ok_cache: dict[tuple[int, Optional[int]], tuple[bool, float]] = field(
+        default_factory=dict
+    )
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -196,18 +205,24 @@ class Game:
             dead_monsters=set(self.dead_monsters),
             current_scene=self.current_scene or "",
             all_incapped=self.all_incapped(),
-            time_of_day=self.time_of_day,
+            clock_start_minutes=self.clock_start_minutes,
+            elapsed_minutes=self.elapsed_minutes,
             flags=dict(self.flags),
         )
 
     # ── NPC 在场解析（死亡过滤 + HP 幂等初始化的包装层）──────
 
-    def npcs_in_scene(self, scene_id: str) -> list[tuple["NPC", str]]:
+    def npcs_in_scene(
+        self,
+        scene_id: str,
+        ctx: Optional[ConditionContext] = None,
+    ) -> list[tuple["NPC", str]]:
         """当前时刻存活于给定场景的 NPC（按模组声明序）。
 
         每个元素为 (NPC, activity)。模组层解析器不感知死亡，
         过滤在此处统一进行；命中者顺手初始化 npc_hp（幂等，
-        仿 enter_scene 对怪物 HP 的处理）。
+        仿 enter_scene 对怪物 HP 的处理）。调用方已持有条件
+        快照时可经 ctx 传入复用，避免逐次重建。
         """
         if self.module is None:
             return []
@@ -215,7 +230,7 @@ class Game:
         for npc, activity in self.module.npcs_in_scene(
             scene_id,
             self.time_of_day,
-            self.condition_context(),
+            ctx if ctx is not None else self.condition_context(),
         ):
             if npc.id in self.dead_npcs:
                 continue
@@ -223,17 +238,26 @@ class Game:
             found.append((npc, activity))
         return found
 
-    def npc_present(self, npc_id: str) -> Optional[tuple["NPC", str]]:
+    def npc_present(
+        self,
+        npc_id: str,
+        ctx: Optional[ConditionContext] = None,
+    ) -> Optional[tuple["NPC", str]]:
         """NPC 当前时刻是否存活于当前场景；是则返回 (NPC, activity)。"""
         if self.current_scene is None:
             return None
-        for npc, activity in self.npcs_in_scene(self.current_scene):
+        for npc, activity in self.npcs_in_scene(self.current_scene, ctx):
             if npc.id == npc_id:
                 return npc, activity
         return None
 
     def drain_actions(self) -> None:
-        """非阻塞清空行动队列（场景切换时防上一场景指令泄漏）。"""
+        """非阻塞清空行动队列（场景切换时防上一场景指令泄漏）。
+
+        单槽缓冲 pending 一并清空：SAY 合批窗口内暂存的命令同样
+        属于上一场景，不该带到新场景执行。
+        """
+        self.pending = None
         while not self.action_queue.empty():
             try:
                 self.action_queue.get_nowait()

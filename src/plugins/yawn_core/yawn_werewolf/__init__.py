@@ -149,7 +149,8 @@ __plugin_meta__ = PluginMetadata(
             {
                 "name": "认主",
                 "aliases": ["选主"],
-                "description": "首夜混血儿选择主人（私聊，认主N）",
+                "description": "首夜混血儿选择主人"
+                "（私聊直接回复 认主N，自由文本无需斜杠）",
                 "feature": "werewolf",
                 "scope": "private",
                 "superuser": False,
@@ -157,7 +158,8 @@ __plugin_meta__ = PluginMetadata(
             {
                 "name": "禁言",
                 "aliases": ["禁票"],
-                "description": "夜晚禁言长老禁言/禁票玩家（私聊，禁言N；过=放弃）",
+                "description": "夜晚禁言长老禁言/禁票"
+                "（私聊直接回复 禁言N / 禁票N，自由文本；过=放弃）",
                 "feature": "werewolf",
                 "scope": "private",
                 "superuser": False,

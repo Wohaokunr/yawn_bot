@@ -44,11 +44,11 @@
 | `san_check` | 损失骰表达式合法；损失按 `RPG_AI_MAX_SAN_LOSS` 钳制；以当前 SAN 为技能值掷骰 |
 | `deal_damage` / `heal` | 数值按 `RPG_AI_MAX_DAMAGE_PER_CALL` 钳制；目标须存在 |
 | `transition_scene` | 目标须为**当前场景出口**；出口 `condition` 由引擎强制执行，不满足返回错误（KP 据此叙述"门锁着"） |
-| `grant_clue` | 线索须挂在当前场景（检定点奖励 / 怪物死亡奖励）且未被发现 |
+| `grant_clue` | 线索须挂在当前场景（检定点奖励 / 怪物死亡奖励）且未被发现；once 检定点已触发且失败时线索不可授予（系统已裁决，KP 不得覆盖） |
 | `speak_as_npc` | NPC 须经**时间/行程解析器**在场于当前场景且存活；死亡与不在场返回不同回执；台词截断 150 字、去 `/` 前缀，以「【NPC名】…」播报 |
 | `monster_attack` | 怪物须在场且存活；引擎用模组数值做对抗检定（玩家闪避对抗） |
 | `end_session` | 结局条件须已满足（引擎复核），否则拒绝 |
-| `get_situation` | 返回无剧透局面摘要（用于状态变化后的工具调用之间刷新） |
+| `get_situation` | 返回无剧透局面摘要（用于状态变化后的工具调用之间刷新）；场景块同回合未变则回执「无变化」，变化时只返回新场景块（不含易变尾） |
 
 工具 schema **全静态**：`ai_kp.build_tools(module, player_names)` 整局只
 构建一次（`Game.tools_cache` 惰性缓存）。随场景变化的枚举（出口 / 线索 /
@@ -64,9 +64,15 @@ KP 提示词（`ai_kp.build_situation`）只含：当前场景名(id) + narratio
 `knows`、在场存活怪物名(id)、已发现线索**名称**(id)、出口通行性
 （布尔 + id，不含解法）、调查员**定性**状态（无恙/轻伤/重伤/倒地）、
 `[时间]`（游戏内时钟）、近期群聊记录。区块顺序稳定 → 易变（群聊与
-【当前任务】指令最后）。检定的成功/失败文案、线索 `text`、NPC `secrets`、
-出口条件、结局条件、怪物数值**永不进提示词**。模组加载时校验 secret
-不是 persona/公开信息/行程活动的子串。
+【当前任务】指令最后）。局面拆为**场景块**（[当前场景]…[调查员状态]，
+`ai_kp.build_scene_block`）与**易变尾**（[时间]/[近期群聊]，
+`build_volatile_tail`）：场景状态不变时场景块逐字节稳定，作为 user
+消息前置部分供端点前缀缓存跨回合接续命中；`run_kp_turn` 把回合开始
+的场景块存入 `Game.kp_situation_scene_block`，`get_situation` 据此去重
+（回合内时钟不 tick、群聊不变，易变尾在工具回执里纯冗余）。检定的
+成功/失败文案、线索 `text`、NPC `secrets`、出口条件、结局条件、
+怪物数值**永不进提示词**。模组加载时校验 secret 不是 persona/公开
+信息/行程活动的子串。
 
 ## 游戏内时钟与 NPC 行程
 
@@ -96,8 +102,14 @@ KP 提示词（`ai_kp.build_situation`）只含：当前场景名(id) + narratio
 词条以 `&` 组合（须全部满足）：`always` / `clue:<id>` / `clues:<a>+<b>` /
 `monster_dead:<id>` / `scene:<id>` / `all_players_incapped` /
 `time_after:HH:MM` / `time_before:HH:MM` / `time_between:HH:MM-HH:MM`
-（跨午夜窗口）/ `flag:<name>` / `flag:<name>>=N`。未知词条与非法格式
-保守判 False。
+（跨午夜窗口）/ `flag:<name>` / `flag:<name>>=N`。未知词条、空词条
+（悬挂 `&`）与非法格式保守判 False。**时间词按剧本时间轴求值**：
+目标时刻折算为偏移 offset = (目标 − 开局时刻) mod 1440，与 elapsed
+比较——21:00 开局的 `time_after:06:00` 只在时钟推进到次日 06:00 后
+成立，而非开局钟面已过 06:00 即成立；`time_between` 的偏移窗口按
+elapsed 的日内位置匹配，保留每日重复语义。NPC 行程的 from/to 窗口
+是独立机制，不受此语义影响。**结局条件恒真（空 / 仅 always）在加载
+期拒绝**——否则开局第一次安全网扫描即触发、瞬间终局。
 
 **镜像契约**：新增词条必须同时改四处——`evaluate_condition` +
 `_validate_condition`（加载期校验）+ `ConditionContext`（快照字段）+
@@ -118,9 +130,11 @@ KP 提示词（`ai_kp.build_situation`）只含：当前场景名(id) + narratio
   不走模组加载校验）由 `check_endings` 在模组结局**之后**扫描
   （`module.generic_endings` 可关）。模组结局永远优先。阈值常量化：
   `flag:arson>=4` 彩蛋（neutral）→ `flag:arson>=2` 火灾（bad）→
-  `flag:murder` 逮捕（bad）→ `flag:assault>=3` 制服（bad），声明序即
-  优先级。结局安全网在 `_run_play` 循环顶每轮复检，时间 / 标记触发的
-  结局自然在下一轮点火。
+  `flag:murder` 逮捕（bad）→ `flag:assault>=3` 制服（bad）→
+  `all_players_incapped` 全军覆没（bad，兜底未自写 TPK 结局的模组；
+  模组结局与更具体的通用结局永远优先），声明序即优先级。结局安全网
+  在 `_run_play` 循环顶每轮复检，时间 / 标记触发的结局自然在下一轮
+  点火。
 
 ## NPC 战斗
 
@@ -162,9 +176,12 @@ NPC 战斗数值镜像 `Monster`（`hp` / `attack_skill` / `attack_name` /
 `SIGNUP`（报名 + `/选择模组 N`）→ `CHAR_CREATE`（系统掷卡私聊下发，
 私聊 DSL 微调：重掷/加减点/重置/查看/确认，超时自动确认，DM 失败
 自动确认）→ `PLAY`（时钟按 `time.start` 初始化；场景循环：结局安全网
-→ 自动出口 → 行动分发）→ `ENDED`。PLAY 期群自由文本由 priority-0
-非阻塞监听器投递 SAY，`rpg_say_settle_window` 内合批为一次 KP 调用；
-私聊监听器**仅建卡期**拦截（其余私聊放行给 ai_chat）。
+→ 自动出口 → 行动分发；连续自动切景超过场景数 +1 判为恒真条件成环、
+兜底收尾）→ `ENDED`。PLAY 期群自由文本由 priority-0 非阻塞监听器
+投递 SAY，`rpg_say_settle_window` 内合批为一次 KP 调用；私聊监听器
+**仅建卡期**拦截（其余私聊放行给 ai_chat）。两个监听规则的特性开关
+判定按 (用户, 群) 随对局缓存（TTL 300 秒，`commands._FEATURE_CACHE_TTL`），
+避免逐条消息查库；开关变更局内最多 5 分钟后生效。
 
 ## 配置键（`.env` 可覆盖，见 `config.py`）
 

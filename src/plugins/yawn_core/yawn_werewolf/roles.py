@@ -232,14 +232,30 @@ SILENT_ELDER_VOTE_SKILL_TEXT = (
 )
 
 
+# 白天常用指令速查（所有身份通用；身份卡与 help 之外的唯一入门教学）
+_DAY_COMMAND_CHEATSHEET: tuple[str, ...] = (
+    "/上警、/退水：竞选警长 / 退出竞选",
+    "/投票 N、/弃票：放逐投票 / 放弃投票",
+    "/过：提前结束自己的发言",
+    "/排序 N 顺|逆（警长）：决定发言顺序",
+    "/移交警徽 N、/撕警徽（死亡警长）：处置警徽",
+)
+
+
 def build_role_card(
     seat: int,
     role: Role,
     player_count: int,
     *,
     silence_mode: Optional[Literal["speech", "vote"]] = None,
+    roster: Optional[list[tuple[int, str]]] = None,
 ) -> str:
-    """构建私聊发送的身份卡文本。"""
+    """构建私聊发送的身份卡文本。
+
+    roster 为 (座位, 显示名) 列表，全体玩家收到相同的一份，
+    不标注 AI 座位。首行须保持 "═══ 狼人杀 · 身份卡 ═══"
+    （AI 驱动按此头跳过卡片，见 ai_player._ROLE_CARD_HEADER）。
+    """
     faction = ROLE_FACTION[role]
     faction_name = "狼人阵营" if faction is Faction.WOLF else "好人阵营"
     if role is Role.SILENT_ELDER and silence_mode == "vote":
@@ -253,8 +269,17 @@ def build_role_card(
         f"你的阵营：{faction_name}",
         "─── 技能说明 ───",
         skill_text,
-        "──────────────",
-        "夜晚行动请私聊我完成；白天在群内按流程发言、投票。",
-        "预祝你玩得开心~",
+        "─── 白天常用指令 ───",
+        *_DAY_COMMAND_CHEATSHEET,
     ]
+    if roster:
+        lines.append("─── 本局名单 ───")
+        lines.extend(f"{r_seat}号：{name}" for r_seat, name in roster)
+    lines.extend(
+        (
+            "──────────────",
+            "夜晚行动请私聊我完成；白天在群内按流程发言、投票。",
+            "预祝你玩得开心~",
+        )
+    )
     return "\n".join(lines)

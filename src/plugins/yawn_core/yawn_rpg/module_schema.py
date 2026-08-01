@@ -17,7 +17,7 @@ from typing import Optional
 
 import yaml
 from nonebot import logger
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .charsheet import SKILLS
 
@@ -116,6 +116,17 @@ def _parse_hhmm(text: str) -> Optional[int]:
     return int(match.group(1)) * 60 + int(match.group(2))
 
 
+def _coerce_hhmm(value: object) -> object:
+    """兼容 YAML 六十进制陷阱：未加引号的 21:00 会被 PyYAML（YAML 1.1）
+    解析为整数 1260，这里还原为 "21:00"，避免整个模组以难懂的类型
+    报错被跳过。其余类型原样交给后续校验。
+    """
+    if isinstance(value, int):
+        hours, minutes = divmod(value, 60)
+        return f"{hours}:{minutes:02d}"
+    return value
+
+
 def _in_window(t: int, frm: int, to: int) -> bool:
     """判断时刻 t 是否落在 [frm, to) 时段内（自 0:00 起的分钟数）。
 
@@ -145,7 +156,9 @@ def _validate_condition(  # noqa: C901,PLR0911,PLR0912
         return None
     for part in condition.split("&"):
         term = part.strip()
-        if term in ("", "always", "all_players_incapped"):
+        if not term:
+            return "条件含空词条（& 拼接有误，如悬挂的 &）"
+        if term in ("always", "all_players_incapped"):
             continue
         kind, sep, value = term.partition(":")
         if not sep or not value:
@@ -242,6 +255,11 @@ class ScheduleEntry(BaseModel):
     # True 表示外出（不在任何场景）；此时无需 scene
     away: bool = False
 
+    @field_validator("frm", "to", mode="before")
+    @classmethod
+    def _coerce_times(cls, value: object) -> object:
+        return _coerce_hhmm(value)
+
     @model_validator(mode="after")
     def _check_fields(self) -> "ScheduleEntry":
         if _parse_hhmm(self.frm) is None:
@@ -263,6 +281,11 @@ class TimeConfig(BaseModel):
     start: str = "20:00"
     # 按行动类型覆写消耗分钟数（键如 say/talk/check/move/attack/wait）
     costs: dict[str, int] = {}
+
+    @field_validator("start", mode="before")
+    @classmethod
+    def _coerce_start(cls, value: object) -> object:
+        return _coerce_hhmm(value)
 
     @model_validator(mode="after")
     def _check_start(self) -> "TimeConfig":
@@ -493,6 +516,12 @@ class ModuleDef(BaseModel):
             if err is not None:
                 msg = f"结局 {ending.id} 条件非法：{err}"
                 raise ValueError(msg)
+            if is_trivially_true(ending.condition):
+                msg = (
+                    f"结局 {ending.id} 条件恒真（空或仅 always）："
+                    "开局即会触发结局安全网、瞬间终局，加载期拒绝"
+                )
+                raise ValueError(msg)
         return self
 
     # ── 便捷查询（引擎与提示词构造使用）──────────────────
@@ -594,8 +623,10 @@ class ConditionContext:
     dead_monsters: set[str] = field(default_factory=set)
     current_scene: str = ""
     all_incapped: bool = False
-    # 游戏内时钟（自 0:00 起的分钟数，0-1439）
-    time_of_day: int = 0
+    # 开局游戏内起始时刻（自 0:00 起的分钟数；时间词偏移基准）
+    clock_start_minutes: int = 0
+    # 自开局已流逝的游戏内分钟数（时间词求值基准，取代绝对钟面）
+    elapsed_minutes: int = 0
     # 引擎记录的事件标记（名称 → 累计次数）
     flags: dict[str, int] = field(default_factory=dict)
 
@@ -612,14 +643,21 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
     time_after:HH:MM / time_before:HH:MM /
     time_between:HH:MM-HH:MM（含跨午夜）/
     flag:<name> / flag:<name>>=N。
-    未知词条与非法格式保守判为不满足，避免作者笔误导致剧情失控。
+    时间词按**剧本时间轴**求值：目标时刻折算为自开局流逝的分钟
+    偏移 offset = (目标 - 开局时刻) mod 1440，与 elapsed 比较。
+    21:00 开局的模组里 time_after:06:00 只在时钟推进到次日 06:00
+    后成立——而非开局钟面读数已超过 06:00 时立刻成立。
+    未知词条、空词条（悬挂 &）与非法格式保守判为不满足，
+    避免作者笔误导致剧情失控。
     """
     if not condition or not condition.strip():
         return True
     for part in condition.split("&"):
         term = part.strip()
-        if term in ("", "always"):
+        if term == "always":
             continue
+        if not term:
+            return False  # 悬挂 & 产生的空词条保守判 False
         if term == "all_players_incapped":
             if not ctx.all_incapped:
                 return False
@@ -641,11 +679,17 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
                 return False
         elif kind == "time_after" and value:
             t = _parse_hhmm(value)
-            if t is None or ctx.time_of_day < t:
+            if t is None:
+                return False
+            offset = (t - ctx.clock_start_minutes) % 1440
+            if ctx.elapsed_minutes < offset:
                 return False
         elif kind == "time_before" and value:
             t = _parse_hhmm(value)
-            if t is None or ctx.time_of_day >= t:
+            if t is None:
+                return False
+            offset = (t - ctx.clock_start_minutes) % 1440
+            if ctx.elapsed_minutes >= offset:
                 return False
         elif kind == "time_between" and value:
             left, tsep, right = value.partition("-")
@@ -653,7 +697,10 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
             to = _parse_hhmm(right.strip()) if tsep else None
             if frm is None or to is None:
                 return False
-            if not _in_window(ctx.time_of_day, frm, to):
+            frm_off = (frm - ctx.clock_start_minutes) % 1440
+            to_off = (to - ctx.clock_start_minutes) % 1440
+            # 偏移窗口按 elapsed 的日内位置匹配，保留每日重复语义
+            if not _in_window(ctx.elapsed_minutes % 1440, frm_off, to_off):
                 return False
         elif kind == "flag" and value:
             name, ge, num = value.partition(">=")
@@ -670,6 +717,18 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
         else:
             return False
     return True
+
+
+def is_trivially_true(condition: Optional[str]) -> bool:
+    """条件是否不依赖任何对局状态恒真（空 / 词条全为 always 或空）。
+
+    供加载期拦截恒真的结局条件——这类结局会在开局第一次结局
+    安全网扫描时立即触发，让游戏瞬间结束（出口 / 行程的空条件
+    恒真是预期语义，不受此函数影响）。
+    """
+    if not condition or not condition.strip():
+        return True
+    return all(part.strip() in ("", "always") for part in condition.split("&"))
 
 
 # ── 加载器 ────────────────────────────────────────────────

@@ -46,14 +46,17 @@ from .state import (
     ActionKind,
     Game,
     Phase,
+    PlayerState,
     add_ai_signup,
     count_ai_signup,
     create_game,
+    display_name_of,
     game_of_user,
     get_game,
     is_ai_uid,
     join_signup,
     leave_signup,
+    note_signup_name,
     remove_ai_signup,
     stop_game,
 )
@@ -90,6 +93,71 @@ def _parse_seat(text: object) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+# 阶段中文名（报错/提示用）。夜间子阶段一律折叠为"夜晚"：
+# 报错与提示不得暴露当前轮到哪个角色行动
+_PHASE_CN: dict[Phase, str] = {
+    Phase.SIGNUP: "报名中",
+    Phase.NIGHT_HALFBLOOD: "夜晚",
+    Phase.NIGHT_WOLVES: "夜晚",
+    Phase.NIGHT_WITCH: "夜晚",
+    Phase.NIGHT_SEER: "夜晚",
+    Phase.NIGHT_ELDER: "夜晚",
+    Phase.DAY_ANNOUNCE: "天亮结算",
+    Phase.LAST_WORDS: "遗言环节",
+    Phase.HUNTER_SHOT: "猎人开枪决策",
+    Phase.BADGE_TRANSFER: "警徽移交",
+    Phase.SHERIFF_REGISTER: "警长竞选报名",
+    Phase.SHERIFF_SPEECH: "竞选发言",
+    Phase.SHERIFF_VOTE: "警长投票",
+    Phase.SHERIFF_REVOTE: "警长终辩投票",
+    Phase.DAY_SPEECH: "白天发言",
+    Phase.DAY_VOTE: "放逐投票",
+    Phase.PK_SPEECH: "PK 发言",
+    Phase.PK_VOTE: "PK 投票",
+    Phase.ENDED: "已结束",
+}
+
+
+def _not_now(game: Optional[Game], guidance: str) -> str:
+    """阶段闸门报错：当前阶段 + 一行该怎么做。"""
+    if game is None:
+        return f"现在还不是时候~\n{guidance}"
+    return f"现在还不是时候~（当前阶段：{_PHASE_CN[game.phase]}）\n{guidance}"
+
+
+# 各角色可用的私聊行动（提示用；白天行动走群命令，不在此列）
+_ROLE_DM_ACTIONS: dict[Role, str] = {
+    Role.WEREWOLF: "刀N（击杀）/ 说XXX（与狼队友讨论）",
+    Role.WITCH: "救 / 毒N / 过",
+    Role.SEER: "查验N",
+    Role.HUNTER: "开枪N / 不开枪（死亡后）",
+    Role.HALFBLOOD: "认主N（仅首夜）",
+    Role.SILENT_ELDER: "禁言N（禁票板为 禁票N）/ 过",
+    Role.VILLAGER: "（本角色无夜间行动，耐心等待即可）",
+    Role.IDIOT: "（本角色无夜间行动，耐心等待即可）",
+    Role.KNIGHT: "（夜间无行动；白天发言阶段可在群内 /决斗 N）",
+}
+
+
+def _dm_hint_for(game: Game, player: Optional[PlayerState], raw: str) -> str:
+    """按角色与阶段裁剪的私聊指令提示（替代整面指令墙）。"""
+    if player is None:
+        return _DM_HINT
+    actions = _ROLE_DM_ACTIONS.get(player.role, "（当前无可用的私聊行动）")
+    return (
+        "═══ 指令提示 ═══\n"
+        f"当前阶段：{_PHASE_CN[game.phase]}\n"
+        f"你的身份：{player.role.value}\n"
+        f"可用私聊指令：{actions}\n"
+        f"直接私聊发送即可（无需斜杠）。无法识别：{raw}"
+    )
+
+
+def _sender_display(event: GroupMessageEvent) -> str:
+    """报名者显示名：群名片 > 昵称 > QQ 号。"""
+    return event.sender.card or event.sender.nickname or str(event.user_id)
+
+
 # ── 开局与报名 ────────────────────────────────────────────
 
 wolf_open = on_command(
@@ -115,6 +183,7 @@ async def handle_open(
     game = create_game(group_id, user_id)
     if game is None:
         await wolf_open.finish("开房失败，请稍后重试")
+    note_signup_name(game, user_id, _sender_display(event))
     game.worker = asyncio.create_task(engine.run_game(game))
     logger.info(f"狼人杀群 {group_id} 由 {user_id} 开房")
     await wolf_open.finish("狼人杀房间已创建，房主已自动报名~")
@@ -142,6 +211,7 @@ async def handle_signup(
         await signup_cmd.finish("报名已满员，等待开局~")
     if not join_signup(game, int(event.get_user_id())):
         await signup_cmd.finish("你已在局中，无需重复报名~")
+    note_signup_name(game, int(event.get_user_id()), _sender_display(event))
     logger.info(
         f"狼人杀群 {int(event.group_id)} {int(event.get_user_id())} 报名"
         f"（{len(game.signup_user_ids)}/{eff_max}）"
@@ -216,8 +286,7 @@ async def handle_view(
         f"板子：{game.board}（房主可发 /板子 切换）",
     ]
     for idx, uid in enumerate(game.signup_user_ids, start=1):
-        name = game.ai_names.get(uid)
-        lines.append(f"{idx}. {name}" if name is not None else f"{idx}. {uid}")
+        lines.append(f"{idx}. {display_name_of(game, uid)}")
     lines.append("──────────────")
     lines.append(
         f"当前 {len(game.signup_user_ids)}/{eff_max} 人，至少 {eff_min} 人开局"
@@ -469,7 +538,9 @@ async def handle_kill(
     """狼人刀人。"""
     game = game_of_user(int(event.get_user_id()))
     if game is None or game.phase is not Phase.NIGHT_WOLVES:
-        await kill_cmd.finish("现在不是狼人行动阶段")
+        await kill_cmd.finish(
+            _not_now(game, "刀 是狼人的夜间行动，请按私聊提示在夜里回复 刀N~")
+        )
     seat = _parse_seat(arg)
     if seat is None:
         await kill_cmd.finish("格式：/刀 N（N 为目标座位号）")
@@ -491,7 +562,9 @@ async def handle_check(
     """预言家查验。"""
     game = game_of_user(int(event.get_user_id()))
     if game is None or game.phase is not Phase.NIGHT_SEER:
-        await check_cmd.finish("现在不是预言家行动阶段")
+        await check_cmd.finish(
+            _not_now(game, "查验 是预言家的夜间行动，请按私聊提示在夜里回复 查验N~")
+        )
     seat = _parse_seat(arg)
     if seat is None:
         await check_cmd.finish("格式：/查验 N（N 为目标座位号）")
@@ -512,7 +585,9 @@ async def handle_save(
     """女巫救人。"""
     game = game_of_user(int(event.get_user_id()))
     if game is None or game.phase is not Phase.NIGHT_WITCH:
-        await save_cmd.finish("现在不是女巫行动阶段")
+        await save_cmd.finish(
+            _not_now(game, "救 是女巫的夜间行动，请按私聊提示在夜里回复 救~")
+        )
     game.action_queue.put_nowait(Action(ActionKind.SAVE, int(event.get_user_id())))
     await save_cmd.finish()
 
@@ -529,7 +604,9 @@ async def handle_poison(
     """女巫毒人。"""
     game = game_of_user(int(event.get_user_id()))
     if game is None or game.phase is not Phase.NIGHT_WITCH:
-        await poison_cmd.finish("现在不是女巫行动阶段")
+        await poison_cmd.finish(
+            _not_now(game, "毒 是女巫的夜间行动，请按私聊提示在夜里回复 毒N~")
+        )
     seat = _parse_seat(arg)
     if seat is None:
         await poison_cmd.finish("格式：/毒 N（N 为目标座位号）")
@@ -551,7 +628,9 @@ async def handle_shoot(
     """猎人开枪。"""
     game = game_of_user(int(event.get_user_id()))
     if game is None or game.phase is not Phase.HUNTER_SHOT:
-        await shoot_cmd.finish("现在不是开枪决策阶段")
+        await shoot_cmd.finish(
+            _not_now(game, "开枪 是猎人死亡后的决策，请按私聊提示回复 开枪N~")
+        )
     seat = _parse_seat(arg)
     if seat is None:
         await shoot_cmd.finish("格式：/开枪 N（N 为目标座位号）")
@@ -577,7 +656,9 @@ async def handle_no_shoot(
     """猎人放弃开枪。"""
     game = game_of_user(int(event.get_user_id()))
     if game is None or game.phase is not Phase.HUNTER_SHOT:
-        await no_shoot_cmd.finish("现在不是开枪决策阶段")
+        await no_shoot_cmd.finish(
+            _not_now(game, "不开枪 是猎人死亡后的决策，请按私聊提示回复 不开枪~")
+        )
     game.action_queue.put_nowait(Action(ActionKind.NO_SHOOT, int(event.get_user_id())))
     await no_shoot_cmd.finish()
 
@@ -595,7 +676,9 @@ async def handle_run(
     """竞选警长。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.SHERIFF_REGISTER:
-        await run_cmd.finish("现在不是警长竞选报名阶段")
+        await run_cmd.finish(
+            _not_now(game, "上警 仅在警长竞选报名阶段可用，请留意群内竞选播报~")
+        )
     game.action_queue.put_nowait(Action(ActionKind.RUN, int(event.get_user_id())))
     await run_cmd.finish()
 
@@ -614,7 +697,7 @@ async def handle_withdraw(
         Phase.SHERIFF_REGISTER,
         Phase.SHERIFF_SPEECH,
     ):
-        await withdraw_cmd.finish("现在不是警长竞选阶段")
+        await withdraw_cmd.finish(_not_now(game, "退水 仅在警长竞选阶段可用~"))
     game.action_queue.put_nowait(Action(ActionKind.WITHDRAW, int(event.get_user_id())))
     await withdraw_cmd.finish()
 
@@ -631,7 +714,9 @@ async def handle_order(
     """警长决定发言顺序：/排序 N 顺|逆。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.DAY_SPEECH:
-        await order_cmd.finish("现在不是发言排序阶段")
+        await order_cmd.finish(
+            _not_now(game, "排序 由警长在白天发言前决定，格式 /排序 N 顺|逆~")
+        )
     text = str(arg).strip()
     match = re.fullmatch(r"(\d+)\s*号?\s*(顺|逆)?", text)
     if match is None:
@@ -661,7 +746,9 @@ async def handle_pass_badge(
     """死亡警长移交警徽。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.BADGE_TRANSFER:
-        await pass_badge_cmd.finish("现在不是警徽移交阶段")
+        await pass_badge_cmd.finish(
+            _not_now(game, "移交警徽 仅在死亡警长的移交阶段可用~")
+        )
     seat = _parse_seat(arg)
     if seat is None:
         await pass_badge_cmd.finish("格式：/移交警徽 N（N 为存活玩家座位）")
@@ -682,7 +769,9 @@ async def handle_tear_badge(
     """死亡警长撕掉警徽。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.BADGE_TRANSFER:
-        await tear_badge_cmd.finish("现在不是警徽移交阶段")
+        await tear_badge_cmd.finish(
+            _not_now(game, "撕警徽 仅在死亡警长的移交阶段可用~")
+        )
     game.action_queue.put_nowait(
         Action(ActionKind.TEAR_BADGE, int(event.get_user_id()))
     )
@@ -700,7 +789,9 @@ async def handle_detonate(
     """狼人白天自爆。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase not in SELF_DETONATE_PHASES:
-        await detonate_cmd.finish("现在不是可以自爆的白天阶段")
+        await detonate_cmd.finish(
+            _not_now(game, "自爆 是狼人的白天行动，可在发言/投票阶段发动~")
+        )
     game.action_queue.put_nowait(
         Action(ActionKind.SELF_DETONATE, int(event.get_user_id()))
     )
@@ -719,7 +810,9 @@ async def handle_duel(
     """骑士白天翻牌决斗（发言阶段）。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase not in DUEL_PHASES:
-        await duel_cmd.finish("现在不是可以决斗的发言阶段")
+        await duel_cmd.finish(
+            _not_now(game, "决斗 是骑士的白天行动，可在发言阶段发动，格式 /决斗 N~")
+        )
     seat = _parse_seat(arg)
     if seat is None:
         await duel_cmd.finish("格式：/决斗 N（N 为目标座位号）")
@@ -741,7 +834,7 @@ async def handle_vote(
     """投票（警长/放逐/PK 按当前阶段解释）。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase not in _VOTE_PHASES:
-        await vote_cmd.finish("现在不是投票阶段")
+        await vote_cmd.finish(_not_now(game, "投票 仅在投票阶段可用，格式 /投票 N~"))
     seat = _parse_seat(arg)
     if seat is None:
         await vote_cmd.finish("格式：/投票 N（N 为目标座位号）")
@@ -762,7 +855,7 @@ async def handle_abstain(
     """弃票。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase not in _VOTE_PHASES:
-        await abstain_cmd.finish("现在不是投票阶段")
+        await abstain_cmd.finish(_not_now(game, "弃票 仅在投票阶段可用~"))
     game.action_queue.put_nowait(Action(ActionKind.ABSTAIN, int(event.get_user_id())))
     await abstain_cmd.finish()
 
@@ -784,7 +877,9 @@ async def handle_skip(
         Phase.PK_SPEECH,
         Phase.LAST_WORDS,
     ):
-        await skip_cmd.finish("现在没有可以跳过的发言环节")
+        await skip_cmd.finish(
+            _not_now(game, "过 用于提前结束自己的发言/遗言，现在没有你的发言窗口~")
+        )
     game.action_queue.put_nowait(Action(ActionKind.SKIP, int(event.get_user_id())))
     await skip_cmd.finish()
 
@@ -831,7 +926,9 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
     action = parse_dm_action(text, user_id)
     if action is None:
         logger.info(f"狼人杀群 {game.group_id} {user_id} 私聊无法解析：{text!r}")
-        await private_listener.finish(_DM_HINT)
+        await private_listener.finish(
+            _dm_hint_for(game, game.player_by_user(user_id), text)
+        )
     actor = game.player_by_user(user_id)
     seat_desc = f"{actor.seat}号" if actor is not None else str(user_id)
     target_desc = f"→{action.value}号" if action.value else ""
