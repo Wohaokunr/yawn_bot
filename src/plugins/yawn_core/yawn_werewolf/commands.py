@@ -7,7 +7,8 @@ game.action_queue 交给引擎裁决；私聊自由文本监听器在
 
 import asyncio
 import re
-from typing import Optional
+from collections.abc import Coroutine
+from typing import Any, Optional
 
 from nonebot import (
     get_driver,
@@ -38,7 +39,7 @@ from . import ai_player, api, engine
 from .config import Config
 from .dsl import _DM_HINT, parse_dm_action
 from .models import WerewolfPlayer
-from .roles import BOARDS, Role
+from .roles import BOARDS, Role, parse_role
 from .state import (
     DUEL_PHASES,
     SELF_DETONATE_PHASES,
@@ -76,6 +77,18 @@ _VOTE_PHASES: frozenset[Phase] = frozenset(
 def _is_su(user_id: int) -> bool:
     """是否为超级用户。"""
     return str(user_id) in get_driver().config.superusers
+
+
+# 发后即忘的后台任务登记：无引用的任务可能在完成前被事件循环
+# 的弱引用回收，登记持有强引用直至完成
+_bg_tasks: set[asyncio.Task[None]] = set()
+
+
+def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
+    """后台运行清理类协程，完成后自动出登记。"""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 def _eff_limits(game: Game) -> tuple[int, int]:
@@ -153,6 +166,41 @@ def _dm_hint_for(game: Game, player: Optional[PlayerState], raw: str) -> str:
     )
 
 
+# 私聊自由文本行动的阶段闸门：逐阶段镜像引擎循环实际消费的行动
+# 类型（engine.py 各阶段对异类行动静默 continue）。解析成功但当前
+# 阶段不消费的行动在此被拒并给出阶段闸门报错，否则玩家会白等一
+# 整个窗口而不知指令已被丢弃。夜间子阶段经 _PHASE_CN 折叠为"夜晚"，
+# 报错文案不暴露当前轮到哪个角色
+_DM_ALLOWED: dict[Phase, frozenset[ActionKind]] = {
+    Phase.NIGHT_HALFBLOOD: frozenset({ActionKind.CHOOSE_OWNER}),
+    Phase.NIGHT_WOLVES: frozenset({ActionKind.KILL, ActionKind.SAY}),
+    Phase.NIGHT_WITCH: frozenset({ActionKind.SAVE, ActionKind.POISON, ActionKind.SKIP}),
+    Phase.NIGHT_SEER: frozenset({ActionKind.CHECK}),
+    Phase.NIGHT_ELDER: frozenset({ActionKind.SILENCE, ActionKind.SKIP}),
+    Phase.LAST_WORDS: frozenset({ActionKind.SKIP, ActionKind.SELF_DETONATE}),
+    Phase.HUNTER_SHOT: frozenset(
+        {ActionKind.SHOOT, ActionKind.NO_SHOOT, ActionKind.SKIP}
+    ),
+    Phase.BADGE_TRANSFER: frozenset({ActionKind.PASS_BADGE, ActionKind.TEAR_BADGE}),
+    Phase.SHERIFF_REGISTER: frozenset(
+        {ActionKind.RUN, ActionKind.WITHDRAW, ActionKind.SELF_DETONATE}
+    ),
+    Phase.SHERIFF_SPEECH: frozenset(
+        {ActionKind.SKIP, ActionKind.WITHDRAW, ActionKind.SELF_DETONATE}
+    ),
+    Phase.SHERIFF_VOTE: frozenset({ActionKind.SELF_DETONATE}),
+    Phase.SHERIFF_REVOTE: frozenset({ActionKind.SKIP, ActionKind.SELF_DETONATE}),
+    Phase.DAY_SPEECH: frozenset(
+        {ActionKind.SKIP, ActionKind.DUEL, ActionKind.ORDER, ActionKind.SELF_DETONATE}
+    ),
+    Phase.DAY_VOTE: frozenset({ActionKind.SELF_DETONATE}),
+    Phase.PK_SPEECH: frozenset(
+        {ActionKind.SKIP, ActionKind.DUEL, ActionKind.SELF_DETONATE}
+    ),
+    Phase.PK_VOTE: frozenset({ActionKind.SELF_DETONATE}),
+}
+
+
 def _sender_display(event: GroupMessageEvent) -> str:
     """报名者显示名：群名片 > 昵称 > QQ 号。"""
     return event.sender.card or event.sender.nickname or str(event.user_id)
@@ -170,6 +218,7 @@ wolf_open = on_command(
 
 @wolf_open.handle()
 async def handle_open(
+    bot: Bot,
     event: GroupMessageEvent,
     _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
 ) -> None:
@@ -183,6 +232,9 @@ async def handle_open(
     game = create_game(group_id, user_id)
     if game is None:
         await wolf_open.finish("开房失败，请稍后重试")
+    # 注入收到本事件的 Bot：多机器人在线时 nonebot.get_bot() 会抛
+    # ValueError，引擎不能依赖它选连接（见 engine.run_game）
+    game.bot = bot
     note_signup_name(game, user_id, _sender_display(event))
     game.worker = asyncio.create_task(engine.run_game(game))
     logger.info(f"狼人杀群 {group_id} 由 {user_id} 开房")
@@ -520,8 +572,72 @@ async def handle_end(
         f"狼人杀群 {group_id} {user_id} 强制结束对局"
         f"（阶段 {game.phase.value}，第 {game.round_no} 回合）"
     )
-    await stop_game(game)
+    # stop_game 会等引擎 finally 收尾（逐人解禁等串行 API），大群迟缓：
+    # 先回执，后台等待清理完成
+    _spawn_background(stop_game(game))
     await end_cmd.finish("对局已结束")
+
+
+# ── 报名阶段私聊命令（选身份）────────────────────────────
+
+wish_cmd = on_command("选身份", aliases={"想要"}, priority=5, block=True)
+
+
+@wish_cmd.handle()
+async def handle_wish(
+    event: PrivateMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """报名阶段私聊请求期望身份（多人同选按份数随机分配）。"""
+    user_id = int(event.get_user_id())
+    game = game_of_user(user_id)
+    if game is None or game.phase is not Phase.SIGNUP:
+        await wish_cmd.finish(_not_now(game, "选身份仅在报名阶段可用~"))
+    if not config.ww_role_request:
+        await wish_cmd.finish("选身份功能未开启~")
+    if user_id not in game.signup_user_ids:
+        await wish_cmd.finish("你还没报名这局狼人杀，先在群里发 /报名~")
+    board = BOARDS[game.board]
+    role = parse_role(str(arg))
+    if role is None:
+        await wish_cmd.finish(
+            f"格式：/选身份 身份名。可选身份：{board.roles_summary()}"
+        )
+    if role not in board.all_roles():
+        await wish_cmd.finish(
+            f"板子「{board.key}」没有 {role.value}（可选：{board.roles_summary()}）"
+        )
+    prev = game.role_requests.get(user_id)
+    game.role_requests[user_id] = role
+    replaced = f"（原请求【{prev.value}】已替换）" if prev is not None else ""
+    logger.info(
+        f"狼人杀群 {game.group_id} {user_id} 选身份请求：{role.value}{replaced}"
+    )
+    await wish_cmd.finish(
+        f"已登记：你想要【{role.value}】{replaced}。\n"
+        "多人请求同一身份时，发牌将在请求者中按份数随机分配~"
+    )
+
+
+unwish_cmd = on_command("取消选身份", aliases={"不选了"}, priority=5, block=True)
+
+
+@unwish_cmd.handle()
+async def handle_unwish(
+    event: PrivateMessageEvent,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """取消报名阶段的身份请求。"""
+    user_id = int(event.get_user_id())
+    game = game_of_user(user_id)
+    if game is None or game.phase is not Phase.SIGNUP:
+        await unwish_cmd.finish(_not_now(game, "取消选身份仅在报名阶段可用~"))
+    prev = game.role_requests.pop(user_id, None)
+    if prev is None:
+        await unwish_cmd.finish("你当前没有选身份请求~")
+    logger.info(f"狼人杀群 {game.group_id} {user_id} 取消选身份请求：{prev.value}")
+    await unwish_cmd.finish(f"已取消【{prev.value}】的请求，发牌将按随机分配。")
 
 
 # ── 夜间私聊命令 ──────────────────────────────────────────
@@ -928,6 +1044,14 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
         logger.info(f"狼人杀群 {game.group_id} {user_id} 私聊无法解析：{text!r}")
         await private_listener.finish(
             _dm_hint_for(game, game.player_by_user(user_id), text)
+        )
+    if action.kind not in _DM_ALLOWED.get(game.phase, frozenset()):
+        logger.info(
+            f"狼人杀群 {game.group_id} {user_id} 私聊行动 "
+            f"{action.kind.value} 在阶段 {game.phase.value} 不可用，闸门拦截"
+        )
+        await private_listener.finish(
+            _not_now(game, "这条指令在当前阶段不可用，请按私聊提示行动~")
         )
     actor = game.player_by_user(user_id)
     seat_desc = f"{actor.seat}号" if actor is not None else str(user_id)

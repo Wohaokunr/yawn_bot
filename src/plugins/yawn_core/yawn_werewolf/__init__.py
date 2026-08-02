@@ -99,6 +99,23 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
+                "name": "选身份",
+                "aliases": ["想要"],
+                "description": "报名阶段请求期望身份（私聊，选身份 身份名；"
+                "多人同选发牌时按份数随机分配）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
+                "name": "取消选身份",
+                "aliases": ["不选了"],
+                "description": "取消报名阶段的身份请求（私聊）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
                 "name": "刀",
                 "aliases": ["狼刀"],
                 "description": "夜晚狼人击杀（私聊，刀N）",

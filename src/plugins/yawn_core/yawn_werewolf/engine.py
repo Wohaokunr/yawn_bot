@@ -231,6 +231,30 @@ def _board(game: Game) -> BoardSpec:
     return BOARDS[game.board]
 
 
+def _resolve_role_requests(game: Game, deck: list[Role]) -> dict[int, Role]:
+    """结算报名阶段的身份请求，返回如愿的 user_id -> 角色。
+
+    按份数满足：某角色的请求人数不超过牌堆份数则全部如愿，
+    超出则在请求者中随机抽取份数个赢家。落选者与过期请求
+    （报名中途 /板子 切换后角色不在牌堆里）不登记，回随机池。
+    """
+    counts: dict[Role, int] = {}
+    for role in deck:
+        counts[role] = counts.get(role, 0) + 1
+    by_role: dict[Role, list[int]] = {}
+    for uid in game.signup_user_ids:
+        role = game.role_requests.get(uid)
+        if role is not None and role in counts:
+            by_role.setdefault(role, []).append(uid)
+    wished: dict[int, Role] = {}
+    for role, uids in by_role.items():
+        n = counts[role]
+        winners = uids if len(uids) <= n else random.sample(uids, n)
+        for uid in winners:
+            wished[uid] = role
+    return wished
+
+
 def _as_detonation(
     game: Game,
     action: Action,
@@ -752,6 +776,8 @@ async def _hunter_prompt(
                     return target.seat
                 await _announce(game, "开枪目标无效，请重新发送 /开枪 N")
             elif action.kind in (ActionKind.NO_SHOOT, ActionKind.SKIP):
+                # 无效目标与超时都有反馈，显式放弃也补一条确认
+                await _dm(game, hunter, "收到，你选择不开枪，猎枪已压下。")
                 await _ban(game, hunter.user_id, 1800)
                 return None
         await _ban(game, hunter.user_id, 1800)
@@ -1584,8 +1610,12 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
     cfg = config
     logger.info(f"狼人杀群 {game.group_id} 引擎启动（房主 {game.host_user_id}）")
     try:
+        # 优先使用命令层开房时注入的 Bot（即收到 /狼人杀 事件的那个连接）；
+        # 仅在未注入时回退 get_bot()——多机器人在线时 get_bot() 会抛
+        # ValueError，直接依赖它会让房间无声死亡
         try:
-            game.bot = get_bot()
+            if game.bot is None:
+                game.bot = get_bot()
         except ValueError:
             # 无机器人连接：此前命令层已回复"房间已创建"，
             # 必须明确记日志，否则房间会无声消失
@@ -1676,24 +1706,37 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
             )
             return
         deck = build_role_deck(game.board, len(game.signup_user_ids))
-        random.shuffle(deck)
-        game.players = [
-            PlayerState(
-                user_id=uid,
-                seat=idx + 1,
-                role=role,
-                faction=ROLE_FACTION[role],
-                is_ai=is_ai_uid(uid),
-                display_name=game.ai_names.get(uid),
+        # 身份请求先按份数结算，如愿者从牌堆取走对应角色，
+        # 剩余角色洗牌后随机分给其余座位
+        wished = _resolve_role_requests(game, deck)
+        remaining = list(deck)
+        for role in wished.values():
+            remaining.remove(role)
+        random.shuffle(remaining)
+        game.players = []
+        for idx, uid in enumerate(game.signup_user_ids):
+            role = wished.get(uid) or remaining.pop()
+            game.players.append(
+                PlayerState(
+                    user_id=uid,
+                    seat=idx + 1,
+                    role=role,
+                    faction=ROLE_FACTION[role],
+                    is_ai=is_ai_uid(uid),
+                    display_name=game.ai_names.get(uid),
+                )
             )
-            for idx, (uid, role) in enumerate(zip(game.signup_user_ids, deck))
-        ]
         deal_desc = "、".join(
             f"{p.seat}号={p.role.value}"
             + (f"(AI {p.display_name or '?'})" if p.is_ai else f"({p.user_id})")
             for p in game.players
         )
         logger.info(f"狼人杀群 {game.group_id} 发牌：{deal_desc}")
+        if wished:
+            wish_desc = "、".join(f"{uid}={role.value}" for uid, role in wished.items())
+            logger.info(
+                f"狼人杀群 {game.group_id} 选身份如愿 {len(wished)} 人：{wish_desc}"
+            )
         # 身份卡私聊之前启动 AI 驱动（AI 座位身份由驱动的 system 提示
         # 承载，卡片 DM 不再记入其私聊上下文，见 ai_player.on_dm）
         ai_player.start_driver(game)

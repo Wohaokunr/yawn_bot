@@ -143,6 +143,14 @@ class Game:
     tools_cache: Optional[Any] = None
     # 本 KP 回合开始时的局面场景块（get_situation 据此去重；仅引擎写入）
     kp_situation_scene_block: str = ""
+    # 剧本概览（ai_kp.build_module_overview 整局构建一次，跨回合复用）
+    kp_overview: str = ""
+    # 已发生的具名事件 id（引擎 check_events 写入；KP 提示词只列名称）
+    occurred_events: set[str] = field(default_factory=set)
+    # 回合中吸纳：KP 回合内到达的非 SAY 行动（_run_play 循环顶先于
+    # pending 与 queue 消费；不复用单槽 pending——那是 SAY 合批窗口
+    # 专用，且多条会乱序）
+    mid_turn_buffer: deque[Action] = field(default_factory=deque)
     # ── 监听规则缓存（命令层读写）──────────────────────
     # 特性开关判定缓存：(user_id, group_id|None) → (判定, 过期循环时刻)
     feature_ok_cache: dict[tuple[int, Optional[int]], tuple[bool, float]] = field(
@@ -251,16 +259,20 @@ class Game:
                 return npc, activity
         return None
 
-    def drain_actions(self) -> None:
-        """非阻塞清空行动队列（场景切换时防上一场景指令泄漏）。
+    def stow_actions(self) -> None:
+        """非阻塞收存队列与 pending 到 mid_turn_buffer（场景切换用）。
 
-        单槽缓冲 pending 一并清空：SAY 合批窗口内暂存的命令同样
-        属于上一场景，不该带到新场景执行。
+        不再丢弃：一切确定性命令都会对当前场景状态做校验（过期的
+        /攻击、/前往 会拿到中文回执），收存后由 _run_play 于旁白
+        之后按原序执行；中途已被 run_kp_turn 吸收的 SAY 早已进入
+        KP 对话与群聊记录，不受影响。pending 更早，先入。
         """
-        self.pending = None
+        if self.pending is not None:
+            self.mid_turn_buffer.append(self.pending)
+            self.pending = None
         while not self.action_queue.empty():
             try:
-                self.action_queue.get_nowait()
+                self.mid_turn_buffer.append(self.action_queue.get_nowait())
                 self.action_queue.task_done()
             except asyncio.QueueEmpty:  # noqa: PERF203
                 break
