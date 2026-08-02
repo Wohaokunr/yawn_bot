@@ -301,7 +301,8 @@ class TimeConfig(BaseModel):
 
 
 class NPC(BaseModel):
-    """NPC：secrets 永不注入任何提示词。
+    """NPC：secrets 只进该 NPC 自己的智能体提示词（ai_npc，附不主动
+    透露指令），永不进 KP 提示词。
 
     NPC 可被玩家攻击、会反击、可死亡（数值镜像 Monster，
     全部带默认值，旧模组不写也能用）。
@@ -309,13 +310,14 @@ class NPC(BaseModel):
 
     id: str
     name: str
-    # 给 KP 看的公开简介（安全信息）
+    # 给 KP 看的公开简介（安全信息；进 KP 开局概览）
     public_desc: str
-    # NPC 对话人格（speak_as_npc 的扮演依据）
+    # NPC 对话人格（NPC 智能体的扮演依据；进 KP 开局概览）
     persona: str
-    # 可透露给玩家的信息块（进 NPC 相关提示）
+    # 可透露给玩家的信息块（进 NPC 智能体提示词与 KP 开局概览）
     knows: list[str] = []
-    # 绝密信息：仅用于作者自述，加载校验确保其不泄露进提示词
+    # 绝密信息：只注入该 NPC 自己的智能体提示词（KP 永不可见）；
+    # 加载校验确保其不出现在会进 KP 概览的字段里
     secrets: list[str] = []
     # LLM 失败时的罐头回复
     fallback_line: str = ""
@@ -343,7 +345,10 @@ class NPC(BaseModel):
         )
         for secret in self.secrets:
             if secret and secret in haystack:
-                msg = f"NPC {self.id}：secret 出现在 persona/公开信息中，会泄露给 AI"
+                msg = (
+                    f"NPC {self.id}：secret 出现在 persona/公开信息中，"
+                    "会随 KP 开局概览泄露给 KP"
+                )
                 raise ValueError(msg)
         return self
 
@@ -395,6 +400,15 @@ class Ending(BaseModel):
     text: str
     # good | bad | neutral
     outcome: str = "neutral"
+    # 展示名（进 KP 开局概览与 query_story）；空时 display_name 回退 id
+    name: str = ""
+    # KP 向来龙去脉说明（导演指引）：仅 query_story 回执，绝不播报给玩家
+    summary: str = ""
+
+    @property
+    def display_name(self) -> str:
+        """展示名：未写 name 时回退 id。"""
+        return self.name or self.id
 
     @model_validator(mode="after")
     def _check_outcome(self) -> "Ending":
@@ -405,6 +419,23 @@ class Ending(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+class PlotEvent(BaseModel):
+    """具名剧情事件：condition 满足时由引擎记入 game.occurred_events。
+
+    事件纯属 KP 上下文（概览列名、[已发生事件] 提示、query_story
+    查说明），不触发任何机制。condition 复用 evaluate_condition 现有
+    语法（无新词条，镜像契约四处不动）；空条件 = 序幕事件，开局
+    首轮扫描即记。与结局不同，恒真条件无害（只是名单多一行），
+    故加载期不做 is_trivially_true 拒绝。
+    """
+
+    id: str
+    name: str
+    # query_story 返回的 KP 向说明（导演指引，绝不播报给玩家）
+    summary: str = ""
+    condition: str = ""
 
 
 class ModuleDef(BaseModel):
@@ -423,6 +454,8 @@ class ModuleDef(BaseModel):
     monsters: list[Monster] = []
     clues: list[Clue] = []
     endings: list[Ending] = []
+    # 具名剧情事件（纯 KP 上下文，见 PlotEvent）
+    events: list[PlotEvent] = []
     # 游戏内时钟（起始时刻与各行动耗时覆写）
     time: TimeConfig = TimeConfig()
     # 是否启用系统级通用结局（谋杀 / 纵火等极端行为的兜底结局）
@@ -441,11 +474,13 @@ class ModuleDef(BaseModel):
         npc_ids = [n.id for n in self.npcs]
         monster_ids = [m.id for m in self.monsters]
         clue_ids = [c.id for c in self.clues]
+        event_ids = [e.id for e in self.events]
         for label, ids in (
             ("场景", scene_ids),
             ("NPC", npc_ids),
             ("怪物", monster_ids),
             ("线索", clue_ids),
+            ("事件", event_ids),
         ):
             dup = {i for i in ids if ids.count(i) > 1}
             if dup:
@@ -521,6 +556,12 @@ class ModuleDef(BaseModel):
                     f"结局 {ending.id} 条件恒真（空或仅 always）："
                     "开局即会触发结局安全网、瞬间终局，加载期拒绝"
                 )
+                raise ValueError(msg)
+        # 事件条件校验仿结局，但不拒恒真（序幕事件恒真无害，见 PlotEvent）
+        for event in self.events:
+            err = _validate_condition(event.condition, scenes, monsters, clues)
+            if err is not None:
+                msg = f"事件 {event.id} 条件非法：{err}"
                 raise ValueError(msg)
         return self
 

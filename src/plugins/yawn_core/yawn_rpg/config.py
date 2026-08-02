@@ -65,11 +65,23 @@ class Config(BaseModel):
     rpg_kp_max_tokens: int = 2048
     # KP 生成温度（叙述类调高）
     rpg_kp_temperature: float = 0.8
-    # KP 最终旁白截断长度
-    rpg_kp_max_output_chars: int = 400
+    # KP 最终旁白截断长度（旁白须简短但含场景基本要素）
+    rpg_kp_max_output_chars: int = 250
     # 两次 KP 调用之间的最小间隔（秒）：宁延长合批窗口也不丢发言
     rpg_kp_min_interval: float = 3.0
     # AI 工具 deal_damage/heal 单次生效上限（钳制 AI 数值权）
     rpg_ai_max_damage_per_call: int = 5
     # AI 工具 san_check 单次损失上限
     rpg_ai_max_san_loss: int = 10
+
+    # ── AI NPC 对白智能体（ai_npc）──
+    # NPC 单次台词生成超时（秒）：对白短，远小于 KP 叙述
+    rpg_npc_timeout: float = 15.0
+    # NPC 单次生成的最大 token 数（推理模型须给足余量，否则
+    # finish_reason=length 截断返空 → 全程退化为 fallback 罐头）
+    rpg_npc_max_tokens: int = 512
+    # NPC 生成温度（对白多样性略高于叙述）
+    rpg_npc_temperature: float = 0.9
+    # NPC 智能体的近期群聊窗口行数（小于 KP 的 rpg_max_context_lines，
+    # 控 NPC 提示词体积）
+    rpg_npc_context_lines: int = 8

@@ -226,6 +226,8 @@ endings:
       你们带着日记与长命锁走出旧宅时，雨已经停了。沈家父子的悲剧随晨光一同摊开在你们面前——
       这世上有些门，推开之后便再也关不上。但今夜，至少真相没有继续烂在地下。
     outcome: good
+    name: 真相大白
+    summary: 调查员击杀食尸鬼并取得完整日记后达成，是好结局。调查员犹豫时，可暗示长命锁与食尸鬼的关联。
   - id: buried_in_house
     condition: all_players_incapped
     text: |
@@ -233,6 +235,8 @@ endings:
       视线归于黑暗。油灯摔碎在地，火光熄灭前，你们最后看见的是食尸鬼没有嘴唇的笑。
       旧宅重归寂静，只有雨还在下。来年的某一日，或许还会有人收到一封没有署名的信。
     outcome: bad
+    name: 葬身旧宅
+    summary: 全体调查员倒地触发的坏结局（先于通用「全军覆没」）。调查员重伤时可用 NPC 之口劝阻冒进。
   # 时间条件结局示范（声明在最后，不遮蔽前面的模组结局）
   - id: dawn_breaks
     condition: time_after:06:00
@@ -242,3 +246,26 @@ endings:
       所有的秘密都随着退去的夜色缩回了黑暗里。你们决定先离开这里，改日再来——
       有些真相，不必急在这一夜揭开。
     outcome: neutral
+    name: 雨停天明
+    summary: 游戏内 06:00 后触发的中性结局（一夜未查清）。调查员拖延时，可借 NPC 之口提示去留。
+
+# 具名剧情事件：纯 KP 上下文（概览列名、[已发生事件] 提示、query_story 查说明）
+events:
+  - id: cellar_unlocked
+    name: 窖门可启
+    condition: clue:brass_key
+    summary: |
+      黄铜钥匙已现世，地下室之门可开。周伯最怕来人真的下去——得知此事的他应明显不安，
+      可借 NPC 反应施加压力，但不得阻止。
+  - id: ghoul_felled
+    name: 孽物伏诛
+    condition: monster_dead:ghoul
+    summary: |
+      戴长命锁的食尸鬼已被击倒，沈家父子的真相即将摊开。周伯长久的愧疚暂得解脱，
+      可让他松口说出喂养之事。
+  - id: late_night
+    name: 夜深
+    condition: time_after:02:00
+    summary: |
+      已过凌晨两点，雨势渐收。若调查员仍无进展，可借 NPC 之口提示去留；
+      时间结局「雨停天明」在 06:00 触发。

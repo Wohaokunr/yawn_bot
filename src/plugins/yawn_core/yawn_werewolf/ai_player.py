@@ -143,14 +143,34 @@ def on_dm(game: Game, player: PlayerState, text: str) -> None:
     driver.wake.set()
 
 
+# 引擎驳回 DM（含 无效/无法使用/请重新）只源于特定行动种类，清键时
+# 优先该种类：狼人阶段 "discuss"/"kill" 双键并存、发言阶段 "duel" 与
+# "speech"/"order" 并存，set 迭代序不确定，误清前者会让 AI 狼重新提议
+# 而非重刀、让 AI 骑士重新发言而非重决斗
+_RETRY_KIND_BY_PHASE: dict[Phase, str] = {
+    Phase.NIGHT_WOLVES: "kill",
+    Phase.DAY_SPEECH: "duel",
+    Phase.PK_SPEECH: "duel",
+}
+
+
 def _allow_retry(driver: AIDriver, game: Game, seat: int) -> None:
     """清除该座位当前阶段决策点的 handled 键（每点仅一次）。"""
     prefix = (game.round_no, game.phase, seat)
-    for key in list(driver.handled):
-        if key[:3] == prefix and key not in driver.retried:
-            driver.handled.discard(key)
-            driver.retried.add(key)
+    # sorted 保证确定性：set 迭代序随哈希变化，同一局面不得有两种结果
+    candidates = sorted(
+        key for key in driver.handled if key[:3] == prefix and key not in driver.retried
+    )
+    preferred_kind = _RETRY_KIND_BY_PHASE.get(game.phase)
+    if preferred_kind is not None:
+        exact = (*prefix, preferred_kind)
+        if exact in candidates:
+            driver.handled.discard(exact)
+            driver.retried.add(exact)
             return
+    if candidates:
+        driver.handled.discard(candidates[0])
+        driver.retried.add(candidates[0])
 
 
 def on_announce(game: Game, text: str) -> None:

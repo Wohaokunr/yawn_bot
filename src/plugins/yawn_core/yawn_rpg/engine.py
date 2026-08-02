@@ -24,7 +24,7 @@ from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
 from ..llm import complete, complete_with_tools  # noqa: TID252
-from . import ai_kp, api
+from . import ai_kp, ai_npc, api
 from .charsheet import (
     CharacterSheet,
     damage_bonus,
@@ -77,9 +77,6 @@ config = get_plugin_config(Config)
 load_modules()
 
 _BJ_TZ = timezone(timedelta(hours=8))
-
-# NPC 台词最大长度（speak_as_npc 工具截断用）
-_NPC_LINE_MAX = 150
 
 # 检定等级排序（对抗检定比较用）
 _TIER_RANK: dict[CheckTier, int] = {
@@ -640,7 +637,7 @@ async def enter_scene(  # noqa: C901
     if scene is None:
         return False
     game.current_scene = scene_id
-    game.drain_actions()
+    game.stow_actions()
     # 出场怪物按模组数值初始化 HP（已出现过的沿用现值）
     for mid in scene.monsters:
         monster = game.module.monster(mid)
@@ -1006,6 +1003,8 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
             "你们站在火场前放声大笑。有些调查员，查着查着就成了故事里最可怕的那一章。"
         ),
         outcome="neutral",
+        name="纵火狂",
+        summary="调查员屡次纵火（4 次以上）的彩蛋结局；他们选择了火焰，不必劝阻。",
     ),
     Ending(
         id="generic_fire",
@@ -1016,6 +1015,8 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
             "真相被永远埋在了瓦砾之下，你们也为鲁莽付出了代价。"
         ),
         outcome="bad",
+        name="怒火焚宅",
+        summary="纵火累计 2 次即不可逆；线索将随火场一同失去，是坏结局。",
     ),
     Ending(
         id="generic_arrest",
@@ -1026,6 +1027,8 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
             "接下来都只能在铁窗里慢慢讲了。调查员的身份救不了你们，本团到此结束。"
         ),
         outcome="bad",
+        name="锒铛入狱",
+        summary="杀害任一 NPC 立即触发；无可挽回，务必让调查员清楚动手的代价。",
     ),
     Ending(
         id="generic_subdued",
@@ -1036,6 +1039,8 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
             "把你们死死按在地上。再没有人愿意听调查员解释，本团到此结束。"
         ),
         outcome="bad",
+        name="群起而攻",
+        summary="攻击 NPC 累计 3 次（未杀死）触发；NPC 的忍耐是有限度的。",
     ),
     Ending(
         id="generic_tpk",
@@ -1046,6 +1051,8 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
             "此地收回了它所有的秘密——连同前来窥探秘密的人。"
         ),
         outcome="bad",
+        name="全军覆没",
+        summary="全体调查员失去行动能力的兜底结局；模组自写 TPK 结局时轮不到它。",
     ),
 )
 
@@ -1067,6 +1074,25 @@ def check_endings(game: Game) -> Optional[Ending]:
             if evaluate_condition(ending.condition, ctx):
                 return ending
     return None
+
+
+def check_events(game: Game) -> None:
+    """扫描模组事件条件，新满足者记入 occurred_events（静默，仅 KP 上下文）。
+
+    与 check_endings 同节奏（_run_play 循环顶每轮复检）：时间 /
+    标记驱动的事件自然在下一轮点亮。空条件 = 序幕事件，开局
+    首轮即记。条件求值复用 evaluate_condition，纯集合运算。
+    """
+    module = game.module
+    if module is None:
+        return
+    ctx = game.condition_context()
+    for event in module.events:
+        if event.id in game.occurred_events:
+            continue
+        if evaluate_condition(event.condition, ctx):
+            game.occurred_events.add(event.id)
+            logger.info(f"跑团群 {game.group_id} 事件发生：{event.name}")
 
 
 async def do_ending(game: Game, ending: Ending) -> None:
@@ -1122,6 +1148,71 @@ async def _fallback_narrate(
     await _announce(game, _GENERIC_IDLE)
 
 
+def _interjection_message(fresh: list[str], offenses: list[str]) -> str:
+    """回合中吸纳到 SAY 后注入下一轮对话的 user 消息。"""
+    msg = (
+        "【插话】回合进行中调查员插话（可并入旁白或用工具回应，勿复述台词）：\n"
+        + "\n".join(fresh)
+    )
+    if offenses:
+        labels = "、".join(_OFFENSE_LABELS[c] for c in offenses)
+        msg += f"\n其间调查员尝试{labels}，系统会让 NPC 反应，你只管叙述。"
+    return msg
+
+
+async def _absorb_action(
+    game: Game,
+    cfg: Config,
+    action: Action,
+    interjections: list[str],
+    offenses: list[str],
+) -> None:
+    """KP 回合内吸收一个行动。
+
+    SAY：与 _handle_say 相同的 KP 前处理但不调 KP——署名入群聊
+    记录、违规扫描记 flag（先于 tick 契约同 _handle_say）、tick
+    一次 say 时间、加入插话文本待注入下一轮 KP 对话。其他行动
+    按序入 mid_turn_buffer，旁白后由 _run_play 执行。
+    """
+    if action.kind is not ActionKind.SAY or not action.aux:
+        game.mid_turn_buffer.append(action)
+        return
+    player = game.player_by_user(action.actor_user_id)
+    if player is not None and player.sheet is not None:
+        name = player.sheet.name
+    else:
+        name = str(action.actor_user_id)
+    text = action.aux.strip()
+    if len(text) > cfg.rpg_speech_truncate:
+        text = text[: cfg.rpg_speech_truncate] + "……"
+    if not text:
+        return
+    game.group_log.append(f"【{name}】{text}")
+    offense = _scan_offense(text)
+    if offense is not None and offense not in offenses:
+        offenses.append(offense)
+        # 违规标记先于 tick（契约同 _handle_say）
+        raise_flag(game, offense)
+    await _tick_time(game, _time_cost(game, "say"))
+    interjections.append(f"{name}：{text}")
+
+
+async def _pump_mid_turn(
+    game: Game,
+    cfg: Config,
+    interjections: list[str],
+    offenses: list[str],
+) -> None:
+    """非阻塞清空 action_queue，逐条 _absorb_action。"""
+    while True:
+        try:
+            action = game.action_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        game.action_queue.task_done()
+        await _absorb_action(game, cfg, action, interjections, offenses)
+
+
 async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
     game: Game,
     cfg: Config,
@@ -1133,30 +1224,52 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
 
     任何失败都落到确定性兜底（关键词自动检定 / 罐头文案），
     绝不卡局。所有状态写入发生在 execute_tool 内的引擎函数里。
+    步调同步：回合期间到达的 SAY 经 _pump_mid_turn 吸纳（入群聊、
+    记 flag、tick，并以【插话】注入下一轮对话）；其他行动入
+    mid_turn_buffer 由 _run_play 于旁白后执行；回合内记到的违规
+    在最终旁白之后触发 _world_reaction。
     """
     if not cfg.rpg_ai_enabled:
         await _fallback_narrate(game, instruction, actor)
         return
-    # 防刷屏：宁可等待也不叠加调用
+    interjections: list[str] = []
+    offenses: list[str] = []
+    # 防刷屏：等待期间不空睡，顺便吸纳新到达的行动
     wait = game.last_kp_at + cfg.rpg_kp_min_interval - _loop_time()
-    if wait > 0:
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.sleep(wait), timeout=wait + 1)
+    while wait > 0:
         if game.phase is not Phase.PLAY:
             return
-    # 局面拆块：场景块存局上供 get_situation 去重；user 消息字节
-    # 与整段 build_situation 一致（场景块 + 易变尾）
+        action = await _get_action(game, min(wait, 0.5))
+        if action is not None:
+            await _absorb_action(game, cfg, action, interjections, offenses)
+        wait = game.last_kp_at + cfg.rpg_kp_min_interval - _loop_time()
+    # 剧本概览：整局惰性构建一次拼在系统提示词后（整局逐字节
+    # 稳定，落在前缀缓存内）。endings 由引擎组装（模组结局 +
+    # 开启时的通用结局），避免 ai_kp 反向导入 engine
+    if not game.kp_overview and game.module is not None:
+        endings = list(game.module.endings)
+        if game.module.generic_endings:
+            endings.extend(_GENERIC_ENDINGS)
+        game.kp_overview = ai_kp.build_module_overview(game.module, endings)
+    system_content = ai_kp.build_system_prompt(cfg)
+    if game.kp_overview:
+        system_content = f"{system_content}\n{game.kp_overview}"
+    # 局面拆块：场景块存局上供 get_situation 去重
     scene_block = ai_kp.build_scene_block(game) or "（对局尚未开始）"
     game.kp_situation_scene_block = scene_block
     situation = f"{scene_block}\n{ai_kp.build_volatile_tail(game)}"
-    user_content = f"{situation}\n\n【当前任务】{instruction}{hint}"
+    # 任务在前、动态状态区永远最后。接受的前缀缓存折中：缓存
+    # 前缀收缩为 tools + 系统提示词（含概览），但每回合场景块
+    # 同时因去掉 persona/knows 大幅缩小，净传输量下降
+    user_content = f"【当前任务】{instruction}{hint}\n\n{situation}"
     messages: list[ChatCompletionMessageParam] = [
-        {"role": "system", "content": ai_kp.build_system_prompt(cfg)},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
     logger.debug(f"跑团群 {game.group_id} KP 提示词：{user_content}")
     turn_deadline = _loop_time() + cfg.rpg_ai_turn_timeout
     final_text: Optional[str] = None
+    injected = 0
     try:
         for _ in range(cfg.rpg_ai_max_tool_rounds):
             if game.phase is not Phase.PLAY:
@@ -1164,6 +1277,20 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
             remain = turn_deadline - _loop_time()
             if remain <= 1:
                 break
+            # 回合中吸纳：SAY 入群聊与插话、其他行动入 mid_turn_buffer；
+            # 有新插话则以 user 消息注入本轮对话（仅 append，
+            # messages[0]/[1] 稳定，FINAL_NUDGE 尾部裁剪依旧有效）
+            await _pump_mid_turn(game, cfg, interjections, offenses)
+            if len(interjections) > injected:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": _interjection_message(
+                            interjections[injected:], offenses
+                        ),
+                    }
+                )
+                injected = len(interjections)
             timeout = min(cfg.rpg_kp_timeout, remain)
             if game.tools_broken:
                 final_text = await complete(
@@ -1248,8 +1375,13 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
         text = ai_kp.sanitize_narration(final_text, cfg.rpg_kp_max_output_chars)
         if text:
             await _announce(game, text)
+            # 回合内吸纳到的违规：NPC 反应在旁白之后
+            if offenses:
+                await _world_reaction(game, cfg, offenses)
             return
     await _fallback_narrate(game, instruction, actor)
+    if offenses:
+        await _world_reaction(game, cfg, offenses)
 
 
 async def execute_tool(  # noqa: C901, PLR0911, PLR0912
@@ -1291,11 +1423,13 @@ async def execute_tool(  # noqa: C901, PLR0911, PLR0912
         if name == "grant_clue":
             return await _tool_grant_clue(game, args)
         if name == "speak_as_npc":
-            return await _tool_speak_as_npc(game, args)
+            return await _tool_speak_as_npc(game, cfg, args)
         if name == "monster_attack":
             return await _tool_monster_attack(game, args)
         if name == "end_session":
             return await _tool_end_session(game, args)
+        if name == "query_story":
+            return await _tool_query_story(game, args)
         if name == "get_situation":
             # 只回场景块（回合内时钟不 tick、群聊不变，易变尾纯冗余）；
             # 与回合开始一致时回执"无变化"，避免局面在上下文里翻倍
@@ -1462,9 +1596,14 @@ async def _tool_grant_clue(game: Game, args: dict[str, object]) -> str:
 
 
 async def _tool_speak_as_npc(  # noqa: PLR0911
-    game: Game, args: dict[str, object]
+    game: Game, cfg: Config, args: dict[str, object]
 ) -> str:
-    """speak_as_npc：NPC 在场校验 + 格式化播报。"""
+    """speak_as_npc：NPC 在场校验 + NPC 智能体生成台词 + 格式化播报。
+
+    KP 只给意图（intent），台词由 ai_npc 按 NPC 自己的提示词
+    （persona/knows/secrets）生成——视角分离。降级：AI 关或
+    生成失败 → fallback_line。
+    """
     if game.module is None or game.current_scene is None:
         return "当前不在场景中。"
     scene = game.module.scene(game.current_scene)
@@ -1476,16 +1615,23 @@ async def _tool_speak_as_npc(  # noqa: PLR0911
         return "该 NPC 不存在。"
     if npc_id in game.dead_npcs:
         return "该 NPC 已经死了，无法开口。"
-    if game.npc_present(npc_id) is None:
+    found = game.npc_present(npc_id)
+    if found is None:
         return "该 NPC 不在当前场景。"
-    text = str(args.get("text", "")).strip().lstrip("/").strip()
-    if not text:
-        return "台词为空。"
-    if len(text) > _NPC_LINE_MAX:
-        text = text[:_NPC_LINE_MAX].rstrip() + "……"
+    intent = _opt_str(args.get("intent"))
+    if intent is None:
+        return "intent 为空。请给出这句话的意图（如：警告别下地下室）。"
+    activity = found[1]
+    line = None
+    if cfg.rpg_ai_enabled:
+        line = await ai_npc.generate_npc_line(
+            game, cfg, npc, activity, f"KP 指示：{intent}"
+        )
+    if not line:
+        line = npc.fallback_line or "（对方似乎不想多说。）"
     # _announce 已记入群聊记录，无需重复 append
-    await _announce(game, f"【{npc.name}】{text}")
-    return f"已以 {npc.name} 名义播报。"
+    await _announce(game, f"【{npc.name}】{ai_npc.sanitize_npc_line(line)}")
+    return f"已以 {npc.name} 名义播报（台词由系统按其人格生成）。"
 
 
 async def _tool_monster_attack(
@@ -1528,6 +1674,37 @@ async def _tool_end_session(game: Game, args: dict[str, object]) -> str:
     return "结局已播报，对局结束。"
 
 
+async def _tool_query_story(game: Game, args: dict[str, object]) -> str:
+    """query_story：结局 / 具名事件的 KP 向说明回执（不播报给玩家）。
+
+    名称或 id 精确匹配。结局返 名称 + 来龙去脉 + 倾向（不返
+    condition，守住防剧透边界——触发语境由作者在 summary 里写）；
+    事件返 名称 + 来龙去脉。
+    """
+    module = game.module
+    if module is None:
+        return "对局未就绪。"
+    q = _opt_str(args.get("name"))
+    if q is None:
+        return "请给出要查询的结局或事件名称（见【剧本概览】[结局]/[事件]）。"
+    endings = list(module.endings)
+    if module.generic_endings:
+        endings.extend(_GENERIC_ENDINGS)
+    for ending in endings:
+        if q in (ending.display_name, ending.id):
+            summary = ending.summary or "（作者未撰写说明）"
+            return (
+                f"结局 · {ending.display_name}\n"
+                f"来龙去脉：{summary}\n"
+                f"倾向：{ending.outcome}"
+            )
+    for event in module.events:
+        if q in (event.name, event.id):
+            summary = event.summary or "（作者未撰写说明）"
+            return f"事件 · {event.name}\n来龙去脉：{summary}"
+    return "未找到该名称的结局或事件，请查看【剧本概览】的 [结局]/[事件]。"
+
+
 def _opt_str(value: object) -> Optional[str]:
     """参数可选字符串化（None / 空串返回 None）。"""
     if value is None:
@@ -1537,6 +1714,31 @@ def _opt_str(value: object) -> Optional[str]:
 
 
 # ── PLAY 主循环 ───────────────────────────────────────────
+
+
+async def _world_reaction(game: Game, cfg: Config, offenses: list[str]) -> None:
+    """违规世界反应：在场首个 NPC 按人格一句反应。
+
+    镜像 AI-off 罐线路径结构：AI 开 → ai_npc 生成；AI 关 /
+    生成失败 → 固定惊呼罐头（非 fallback_line——那是聊天搪塞语，
+    作纵火反应是退化）；无 NPC 在场 → 通用恐慌文案。
+    """
+    labels = "、".join(_OFFENSE_LABELS[c] for c in offenses)
+    present = game.npcs_in_scene(game.current_scene or "")
+    if not present:
+        await _announce(game, "你们的举动引起了周围极大的恐慌。")
+        return
+    npc, activity = present[0]
+    line = None
+    if cfg.rpg_ai_enabled:
+        directive = (
+            f"你刚刚目睹了调查员尝试{labels}。"
+            "立即按其人格反应（阻止/呼救/逃跑/敌视），世界必须有回应。"
+        )
+        line = await ai_npc.generate_npc_line(game, cfg, npc, activity, directive)
+    if not line:
+        line = "住手！你们这是要干什么！来人啊！"
+    await _announce(game, f"【{npc.name}】{ai_npc.sanitize_npc_line(line)}")
 
 
 async def _collect_say_batch(
@@ -1562,9 +1764,7 @@ async def _collect_say_batch(
     return batch
 
 
-async def _handle_say(  # noqa: C901, PLR0912
-    game: Game, cfg: Config, first: Action
-) -> None:
+async def _handle_say(game: Game, cfg: Config, first: Action) -> None:
     """处理自由发言：合批 → 违规扫描 → 触发提示 → KP 智能体循环。"""
     batch = await _collect_say_batch(game, cfg, first)
     lines: list[str] = []
@@ -1600,24 +1800,9 @@ async def _handle_say(  # noqa: C901, PLR0912
     instruction = (
         "调查员的发言如下：\n" + "\n".join(lines) + "\n请即兴续写氛围或 NPC 反应。"
     )
+    # 违规世界反应走 NPC 智能体（AI 关为罐头），两路统一，先于 KP 旁白
     if offenses:
-        labels = "、".join(_OFFENSE_LABELS[c] for c in offenses)
-        if cfg.rpg_ai_enabled:
-            instruction += (
-                f"\n【世界反应】调查员刚才尝试{labels}。在场 NPC 必须按其人格"
-                "立即反应（阻止/呼救/逃跑/敌视），世界必须有回应，不得无视。"
-            )
-        else:
-            # 降级模式：NPC 反应同样不依赖 AI（确定性罐头台词）
-            present = game.npcs_in_scene(game.current_scene or "")
-            if present:
-                npc = present[0][0]
-                await _announce(
-                    game,
-                    f"【{npc.name}】住手！你们这是要干什么！来人啊！",
-                )
-            else:
-                await _announce(game, "你们的举动引起了周围极大的恐慌。")
+        await _world_reaction(game, cfg, offenses)
     await run_kp_turn(game, cfg, speaker, instruction, hint=hint)
 
 
@@ -1669,9 +1854,11 @@ async def _handle_talk_npc(
         await _announce(game, "格式：/对话 NPC名 要说的话")
         return
     npc = None
-    for cand, _ in game.npcs_in_scene(game.current_scene):
+    activity = ""
+    for cand, act in game.npcs_in_scene(game.current_scene):
         if npc_name in cand.name:
             npc = cand
+            activity = act
             break
     if npc is None:
         # 区分"死了"与"不在场"：对尸体搭话也给明确回应
@@ -1691,16 +1878,16 @@ async def _handle_talk_npc(
     await _tick_time(game, _time_cost(game, "talk"))
     pname = player.sheet.name if player.sheet else str(player.seat)
     game.group_log.append(f"【{pname}→{npc.name}】{text}")
-    if not cfg.rpg_ai_enabled:
+    # NPC 对话绕开 KP（视角分离）：NPC 智能体按自己的提示词回应；
+    # AI 关或生成失败落 fallback_line
+    line = None
+    if cfg.rpg_ai_enabled:
+        line = await ai_npc.generate_npc_line(
+            game, cfg, npc, activity, f"调查员 {pname} 对你说：「{text}」"
+        )
+    if not line:
         line = npc.fallback_line or "（对方似乎不想多说。）"
-        await _announce(game, f"【{npc.name}】{line}")
-        return
-    # 扮演规则系统提示词与工具 description 已说明，指令只给事实
-    instruction = (
-        f"调查员 {pname} 对 {npc.name} 说：「{text}」\n"
-        f"请以 {npc.name} 的身份回应，可附少量环境描写。"
-    )
-    await run_kp_turn(game, cfg, player, instruction)
+    await _announce(game, f"【{npc.name}】{ai_npc.sanitize_npc_line(line)}")
 
 
 async def _handle_wait(game: Game, minutes: int) -> None:
@@ -1751,13 +1938,17 @@ async def _process_action(
         await _handle_wait(game, action.value or cfg.rpg_wait_default)
 
 
-async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
+async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901, PLR0912
     """PLAY 主循环：结局安全网 → 自动出口 → 取行动 → 处理。"""
     _enter_phase(game, Phase.PLAY)
     if game.module is None:
         return
     # 游戏内时钟按模组起始时刻初始化（默认 20:00）
     game.clock_start_minutes = game.module.time.start_minutes
+    # 清空 PLAY 之前的群聊记录：报名 / 建卡的〔系统〕播报与剧本
+    # 无关，不该进第一个 KP 提示词（group_log 唯一消费方是
+    # ai_kp.build_volatile_tail，无旁路存档依赖）
+    game.group_log.clear()
     await enter_scene(game, game.module.start_scene, opening=True)
     # 连续自动切景上限：无环的自动出口链长度不可能超过场景数；
     # 超出即 auto:true + 恒真条件成环——会无限播报刷屏且永远
@@ -1769,6 +1960,7 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
         if ending is not None:
             await do_ending(game, ending)
             return
+        check_events(game)
         auto = _try_auto_exit(game)
         if auto is not None:
             auto_hops += 1
@@ -1790,10 +1982,15 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901
                 return
             continue
         auto_hops = 0
-        action = game.pending
-        game.pending = None
-        if action is None:
-            action = await _get_action_idle(game, cfg)
+        # 消费顺序：回合中吸纳缓冲（KP 回合 / 切景收存的行动，按原序）
+        # → 单槽 pending（SAY 合批窗口暂存）→ 等待队列
+        if game.mid_turn_buffer:
+            action = game.mid_turn_buffer.popleft()
+        else:
+            action = game.pending
+            game.pending = None
+            if action is None:
+                action = await _get_action_idle(game, cfg)
         if action is None:
             await _announce(game, "长时间无人行动，本团暂告一段落~")
             return

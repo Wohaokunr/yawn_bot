@@ -168,6 +168,9 @@ class Game:
     # 人类报名者显示名（user_id -> 群名片/昵称；报名阶段由命令层记录，
     # 仅内存，不入 ORM）
     signup_names: dict[int, str] = field(default_factory=dict)
+    # 报名阶段身份请求（user_id -> 期望角色；命令层记录，仅内存，
+    # 发牌时由引擎消费，退报名即清理）
+    role_requests: dict[int, Role] = field(default_factory=dict)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -339,6 +342,7 @@ def leave_signup(game: Game, user_id: int) -> bool:
         return False
     game.signup_user_ids.remove(user_id)
     game.signup_names.pop(user_id, None)
+    game.role_requests.pop(user_id, None)
     if _user_index.get(user_id) == game.group_id:
         _user_index.pop(user_id, None)
     return True

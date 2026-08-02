@@ -22,8 +22,15 @@
 ## 核心契约
 
 - **命令层只校验、只投递**：命令处理器把 `Action` 投入 `game.action_queue`，
-  从不直接改 `Game` 状态。唯一例外是报名阶段的增删（`state.py` 的注册表函数）
-  与空房解散时的 `phase=ENDED` + worker 取消。
+  从不直接改 `Game` 状态。唯一例外是报名阶段的增删（`state.py` 的注册表函数）、
+  报名阶段内存写入（`signup_names` / `role_requests`）与空房解散时的
+  `phase=ENDED` + worker 取消。
+- **选身份（报名阶段私聊 /选身份）**：请求记入 `game.role_requests`
+  （user_id → 期望角色，`signup_names` 同款内存先例，退报名即清理），
+  发牌时由引擎 `_resolve_role_requests` 消费——按份数满足（请求人数 ≤
+  牌堆份数全部如愿，超出在请求者中 `random.sample`），板子中途切换导致
+  的过期请求自然失效。**分配结果不做任何群播/私聊播报**：落选者可从
+  自己的身份卡反推竞争赢家，播报只会放大泄漏；身份卡是唯一揭晓渠道。
 - **引擎独占写入**：`current_speaker` / `vote_targets` / `vote_exclude` /
   `phase` 等信号只由引擎写入。阶段切换统一走 `_enter_phase()`（带日志）。
 - **AI 驱动对 Game 只读**，副作用仅限三个通道：投入 `action_queue`、
@@ -104,12 +111,15 @@
 无交集→报名即流局；开局人数不在板子 `counts` 内→发牌前流局。12 人专属
 板子下 AI 自动补位目标随之变为 12）、`WW_SIGNUP_TIMEOUT`（默认 180；
 提醒点两段：`WW_SIGNUP_WARN_REMAIN` 60 + `WW_SIGNUP_WARN_REMAIN_FINAL` 20）、
+`WW_ROLE_REQUEST`（默认 true；报名阶段私聊 /选身份 请求期望角色）、
 `WW_NIGHT_TIMEOUT`（女巫/预言家）、`WW_WOLF_TIMEOUT`（仅狼人阶段）、
 `WW_NIGHT_WARN_REMAIN`（语义为夜间心跳播报间隔，旧"按子阶段剩余秒数
 点名提醒"已废弃）、`WW_SPEECH_TIMEOUT`、
-`WW_VOTE_TIMEOUT`、`WW_SHERIFF_REGISTER_TIMEOUT`（默认 45，有 AI 时再
-+`WW_AI_REGISTER_BUFFER`）、`WW_BADGE_TIMEOUT`（默认 45；同时复用为
-白天发言排序决策窗口）、`WW_AI_ENABLED` /
+`WW_VOTE_TIMEOUT`、`WW_HUNTER_TIMEOUT`（猎人开枪决策）、
+`WW_LAST_WORDS_TIMEOUT`（遗言）、`WW_SHERIFF_REGISTER_TIMEOUT`（默认 45，
+有 AI 时再 +`WW_AI_REGISTER_BUFFER`）、`WW_BADGE_TIMEOUT`（默认 45；同时
+复用为白天发言排序决策窗口）、`WW_API_TIMEOUT`（默认 10.0 秒；api.py 全部
+OneBot 调用的 wait_for 上限）、`WW_AI_ENABLED` /
 `WW_AI_AUTOFILL` / `WW_AI_MAX`、`WW_AI_DECISION_TIMEOUT`、
 `WW_AI_SPEECH_TIMEOUT`、`WW_AI_MAX_TOKENS`、`WW_AI_SPEECH_MAX_TOKENS`、
 `WW_AI_WOLF_DISCUSS`、`WW_AI_DISCUSS_TIMEOUT`、`WW_AI_REGISTER_BUFFER`

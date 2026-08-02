@@ -22,6 +22,10 @@ class Config(BaseModel):
     # 报名窗口剩余多少秒时第二次（末次）提醒
     ww_signup_warn_remain_final: int = 20
 
+    # 报名阶段选身份开关：开启后玩家可私聊 /选身份 请求期望角色，
+    # 多人同选一个身份时发牌在请求者中按份数随机分配
+    ww_role_request: bool = True
+
     # 女巫 / 预言家夜间行动阶段的时长（秒）：二者收到有效行动即提前
     # 结束，只有彻底无行动才会等满窗口
     ww_night_timeout: int = 60
@@ -47,6 +51,11 @@ class Config(BaseModel):
     ww_sheriff_register_timeout: int = 45
     # 移交警徽决策时长（秒）；同时复用为白天发言排序决策窗口
     ww_badge_timeout: int = 45
+
+    # OneBot API 调用超时（秒）：消息发送、禁言、成员查询等全部经
+    # api.py 封装并包 asyncio.wait_for，协议端挂起时降级为 warning，
+    # 不卡死引擎任务
+    ww_api_timeout: float = 10.0
 
     # ── AI 玩家 ──
     # AI 玩家总开关

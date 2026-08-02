@@ -83,6 +83,13 @@ class BoardSpec:
         """支持的人数列表，如「9、10、11、12 人」。"""
         return "、".join(str(n) for n in sorted(self.counts))
 
+    def all_roles(self) -> frozenset[Role]:
+        """全部人数配置的角色并集（报名阶段人数未定，选身份请求校验用）。"""
+        roles: set[Role] = set()
+        for composition in self.counts.values():
+            roles.update(composition)
+        return frozenset(roles)
+
 
 BOARDS: dict[str, BoardSpec] = {
     "预女猎白": BoardSpec(
@@ -174,6 +181,15 @@ def build_role_deck(board_key: str, player_count: int) -> list[Role]:
     for role, count in composition.items():
         deck.extend([role] * count)
     return deck
+
+
+def parse_role(text: str) -> Optional[Role]:
+    """按中文名解析角色（去首尾空白后精确匹配），无匹配返回 None。"""
+    name = text.strip()
+    for role in Role:
+        if role.value == name:
+            return role
+    return None
 
 
 # ── 身份卡文本 ────────────────────────────────────────────
