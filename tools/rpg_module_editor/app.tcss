@@ -1,0 +1,33 @@
+/* 模组编辑器全局样式 */
+
+Screen {
+    background: $background;
+}
+
+Header {
+    dock: top;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+TabPane {
+    padding: 1 2;
+}
+
+EditorTab {
+    height: 1fr;
+}
+
+VerticalScroll {
+    height: 1fr;
+}
+
+Label {
+    height: auto;
+}
+
+Button {
+    min-width: 8;
+}

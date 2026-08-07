@@ -1257,11 +1257,14 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
     # 局面拆块：场景块存局上供 get_situation 去重
     scene_block = ai_kp.build_scene_block(game) or "（对局尚未开始）"
     game.kp_situation_scene_block = scene_block
-    situation = f"{scene_block}\n{ai_kp.build_volatile_tail(game)}"
-    # 任务在前、动态状态区永远最后。接受的前缀缓存折中：缓存
-    # 前缀收缩为 tools + 系统提示词（含概览），但每回合场景块
-    # 同时因去掉 persona/knows 大幅缩小，净传输量下降
-    user_content = f"【当前任务】{instruction}{hint}\n\n{situation}"
+    events_block = ai_kp.build_events_block(game)
+    stable = f"{scene_block}\n{events_block}" if events_block else scene_block
+    tail = ai_kp.build_volatile_tail(game)
+    # user 消息按稳定度降序：半稳定局面（场景块 + 已发生事件）
+    # 前置，接续 tools + 系统提示词的整局缓存前缀在回合间命中；
+    # 每回合必变的任务指令与时钟/群聊易变尾追加在最后，失效
+    # 范围自任务处收缩
+    user_content = f"{stable}\n\n【当前任务】{instruction}{hint}\n\n{tail}"
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},

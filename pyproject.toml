@@ -106,7 +106,7 @@ ignore = [
     "COM812",  # missing-trailing-comma
     "PLC0415", # import-outside-top-level
 ]
-allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "｜", "×", "＋", "－"]
+allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "｜", "×", "＋", "－", "›", "０", "９"]
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
@@ -122,4 +122,9 @@ dev = [
     "pyright>=1.1.411",
     "ruff>=0.16.0",
     "types-PyYAML>=6.0",
+]
+tools = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "textual>=8.2.8",
 ]
