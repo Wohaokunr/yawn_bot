@@ -88,11 +88,13 @@ def build_scene_block(game: "Game") -> Optional[str]:
     """组装无剧透的局面「场景块」（[当前场景]…[调查员状态]）。
 
     场景状态（场景 / NPC 在场 / 怪物 / 线索 / 出口通行性 /
-    调查员定性状态）不变时输出逐字节稳定，作为 user 消息前置
-    部分可被端点前缀缓存在回合间接续命中；[时间] 与 [近期群聊]
-    属易变尾（build_volatile_tail），不在其内。每个实体中文名
-    后带括号 id——工具参数要 id，合法性由引擎 execute_tool 终裁。
-    对局尚无场景时返回 None（哨兵文案由调用方决定）。
+    调查员定性状态）不变时输出逐字节稳定，与低频变化的事件块
+    （build_events_block）一起作为 user 消息的半稳定前缀，可被
+    端点前缀缓存在回合间接续命中；每回合必变的【当前任务】与
+    [时间]/[近期群聊] 易变尾（build_volatile_tail）由调用方追加
+    在其后。每个实体中文名后带括号 id——工具参数要 id，合法性
+    由引擎 execute_tool 终裁。对局尚无场景时返回 None（哨兵文案
+    由调用方决定）。
     """
     module = game.module
     if module is None or game.current_scene is None:
@@ -148,19 +150,34 @@ def build_scene_block(game: "Game") -> Optional[str]:
     return "\n".join(lines)
 
 
+def build_events_block(game: "Game") -> str:
+    """局面「事件块」：已发生的具名事件（按模组声明序）。
+
+    低频变化（仅线索达成 / 击杀 / 时间阈值新满足时增长），排在
+    场景块之后、每回合必变内容之前，与场景块一起构成 user 消息
+    的半稳定前缀供端点前缀缓存命中。来龙去脉经 query_story 查询。
+    无事件时返回空串。
+    """
+    module = game.module
+    if module is None or not game.occurred_events:
+        return ""
+    names = [ev.name for ev in module.events if ev.id in game.occurred_events]
+    if not names:
+        return ""
+    return f"[已发生事件] {'、'.join(names)}"
+
+
 def build_volatile_tail(game: "Game") -> str:
-    """局面易变尾：游戏内时钟 + 近期群聊记录 + 已发生事件。"""
+    """局面易变尾：游戏内时钟 + 近期群聊记录。
+
+    每回合必变（时钟随成功行动推进、群聊随消息增长），调用方
+    永远置于 user 消息最后，使前缀缓存失效范围自其起始处收缩。
+    """
     lines = [f"[时间] {game.clock_text()}"]
     # 近期群聊记录（只取尾部 N 行，避免提示词膨胀）
     if game.group_log:
         lines.append("[近期群聊]")
         lines.extend(list(game.group_log)[-config.rpg_max_context_lines :])
-    # 已发生的具名事件（按模组声明序；来龙去脉经 query_story 查询）
-    module = game.module
-    if module is not None and game.occurred_events:
-        names = [ev.name for ev in module.events if ev.id in game.occurred_events]
-        if names:
-            lines.append(f"[已发生事件] {'、'.join(names)}")
     return "\n".join(lines)
 
 
