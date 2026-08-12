@@ -139,3 +139,7 @@ dmypy.json
 .pytype/
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+# Local agent state and nested temporary worktrees
+.claude/settings.local.json
+.claude/worktrees/
