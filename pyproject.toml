@@ -15,12 +15,14 @@ dependencies = [
     "nonebot-plugin-orm[sqlite]>=0.8.3",
     "nonebot-plugin-htmlkit>=0.1.0rc5",
     "openai>=2.50.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pyright[nodejs]",
-    "ruff"
+    "ruff",
+    "types-PyYAML>=6.0",
 ]
 
 [tool.nonebot]
@@ -105,7 +107,7 @@ ignore = [
     "COM812",  # missing-trailing-comma
     "PLC0415", # import-outside-top-level
 ]
-allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "×", "｜", "＋", "－"]
+allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "×", "｜", "＋", "－", "›", "０", "９"]
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
@@ -120,4 +122,9 @@ typeCheckingMode = "standard"
 dev = [
     "pyright>=1.1.411",
     "ruff>=0.16.0",
+]
+tools = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "textual>=8.2.8",
 ]
