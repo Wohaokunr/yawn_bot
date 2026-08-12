@@ -49,8 +49,26 @@ _KNOWN_KEYS: dict[type, set[str]] = {
     SocialStrategy: set(SocialStrategy.model_fields),
 }
 
-# 引擎发言关键词扫描写入的 flag（作者只能消费，不能配置）
-_ENGINE_FLAGS = ("arson", "threat", "destroy", "assault", "murder", "npc_dead")
+# 引擎发言关键词与行动直接写入的固定 flag。
+_ENGINE_FLAGS = frozenset({"arson", "threat", "destroy", "assault", "murder"})
+
+
+def _declared_social_flags(data: dict[str, Any]) -> set[str]:
+    """收集社交节点明确声明的运行时 flag 写入目标。"""
+    declared: set[str] = set()
+    for npc in get_list(data, "npcs"):
+        if not isinstance(npc, dict):
+            continue
+        for node in get_list(npc, "social_nodes"):
+            if not isinstance(node, dict):
+                continue
+            for field_name in ("success_flags", "failure_flags"):
+                values = node.get(field_name, [])
+                if isinstance(values, list):
+                    declared.update(
+                        value for value in values if isinstance(value, str) and value
+                    )
+    return declared
 
 
 def _tag(item: Any, fallback: str = "?") -> str:
@@ -620,22 +638,22 @@ def _misc_lint(data: dict[str, Any], issues: list[Issue]) -> None:
         if isinstance(event, dict) and not str(event.get("condition", "")).strip()
     )
     flag_term = re.compile(r"\bflag:([a-z0-9_]+)")
+    writable_flags = _ENGINE_FLAGS | _declared_social_flags(data)
     for where, host in condition_fields(data):
         condition = host.get("condition")
         if not isinstance(condition, str):
             continue
         for match in flag_term.finditer(condition):
             name = match.group(1)
-            if not name.startswith(_ENGINE_FLAGS[:5]) and not name.startswith(
-                "npc_dead"
-            ):
+            if name not in writable_flags and name != "npc_dead":
                 issues.append(
                     _issue(
                         SEVERITY_WARNING,
                         "通用",
                         f"{where} › condition",
-                        f"flag:{name} 非引擎写入的 flag（引擎只写 arson/threat/destroy/"
-                        "assault/murder/npc_dead:*），该条件可能永不成立",
+                        f"flag:{name} 没有已知写入来源"
+                        "（引擎固定 flag 或 NPC 社交节点），"
+                        "该条件可能永不成立",
                     )
                 )
 

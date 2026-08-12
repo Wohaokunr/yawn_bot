@@ -177,7 +177,16 @@ def test_unknown_flag_warned(valid_data: dict) -> None:
     data = copy.deepcopy(valid_data)
     data["endings"][0]["condition"] = "flag:custom_flag"
     issues = run_lint(data)
-    assert any("非引擎写入的 flag" in i.message for i in issues)
+    assert any("没有已知写入来源" in i.message for i in issues)
+
+
+def test_social_node_declared_flag_is_known(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    butler["social_nodes"][0]["success_flags"] = ["custom_flag"]
+    data["endings"][0]["condition"] = "flag:custom_flag"
+    issues = run_lint(data)
+    assert not any("flag:custom_flag" in i.message for i in issues)
 
 
 def test_skeleton_template_is_clean() -> None:
