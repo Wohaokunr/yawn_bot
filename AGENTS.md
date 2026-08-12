@@ -14,4 +14,4 @@
 
 ## 任务完成记录
 
-- 2026-08-12：为当前项目准备推送到 GitHub 私有仓库 `Wohaokunr/yawn_bot`；本地 Claude 临时工作树不纳入主仓库。
+- 2026-08-12：已创建并推送 GitHub 私有仓库 `Wohaokunr/yawn_bot`；本地 Claude 临时工作树不纳入主仓库。
