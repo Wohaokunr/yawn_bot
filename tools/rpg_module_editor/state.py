@@ -296,6 +296,85 @@ def entity_label(item: dict[str, Any]) -> str:
     return f"{name}({ident})" if name else str(ident)
 
 
+@dataclass(frozen=True)
+class ReferenceDescriptor:
+    """编辑器可识别的实体引用字段描述。
+
+    该描述只服务 TUI 控件，不参与 YAML 序列化，也不改变运行时 schema。
+    ``context`` 用于表达当前 NPC 等局部作用域，例如 NPC 私人情报。
+    """
+
+    kind: str
+    label: str
+    allow_blank: bool = True
+    multiple: bool = False
+    context: Optional[str] = None
+
+
+_REFERENCE_DESCRIPTORS: dict[str, ReferenceDescriptor] = {
+    "start_scene": ReferenceDescriptor("scene", "起始场景"),
+    "exit.to_scene": ReferenceDescriptor("scene", "目标场景", allow_blank=False),
+    "schedule.scene": ReferenceDescriptor("scene", "行程场景"),
+    "check.clue": ReferenceDescriptor("clue", "奖励线索"),
+    "npc.on_death_clue": ReferenceDescriptor("clue", "NPC 死亡线索"),
+    "monster.on_death_clue": ReferenceDescriptor("clue", "怪物死亡线索"),
+    "scene.npcs": ReferenceDescriptor("npc", "在场 NPC", multiple=True),
+    "scene.monsters": ReferenceDescriptor("monster", "在场怪物", multiple=True),
+    "node.requires_facts": ReferenceDescriptor(
+        "fact", "前置情报", multiple=True, context="npc"
+    ),
+    "node.unlock_facts": ReferenceDescriptor(
+        "fact", "解锁情报", multiple=True, context="npc"
+    ),
+    "node.private_clues": ReferenceDescriptor("clue", "私人线索", multiple=True),
+    "node.public_clues": ReferenceDescriptor("clue", "公开线索", multiple=True),
+}
+
+
+def reference_descriptor(field_key: str) -> Optional[ReferenceDescriptor]:
+    """按表单字段键返回引用描述；未知字段保持普通输入。"""
+    return _REFERENCE_DESCRIPTORS.get(field_key)
+
+
+def build_reference_options(
+    data: dict[str, Any], kind: str, *, context: Optional[dict[str, Any]] = None
+) -> list[tuple[str, str]]:
+    """从当前草稿生成引用候选，返回 ``(展示标签, 实际值)``。"""
+    section = {
+        "scene": "scenes",
+        "npc": "npcs",
+        "monster": "monsters",
+        "clue": "clues",
+    }.get(kind)
+    if section is not None:
+        return [
+            (entity_label(item), str(item["id"]))
+            for item in get_list(data, section)
+            if isinstance(item, dict) and item.get("id")
+        ]
+    if kind == "fact":
+        npc = context or {}
+        return [
+            (entity_label(item), str(item["id"]))
+            for item in get_list(npc, "facts")
+            if isinstance(item, dict) and item.get("id")
+        ]
+    return []
+
+
+def build_reference_options_for_field(
+    data: dict[str, Any],
+    field_key: str,
+    *,
+    context: Optional[dict[str, Any]] = None,
+) -> list[tuple[str, str]]:
+    """根据字段路径自动选择引用目录；未登记字段返回空候选。"""
+    descriptor = reference_descriptor(field_key)
+    if descriptor is None:
+        return []
+    return build_reference_options(data, descriptor.kind, context=context)
+
+
 def condition_fields(data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """全部含 condition 字段的 (位置描述, 宿主 dict) 列表。"""
     found: list[tuple[str, dict[str, Any]]] = []
@@ -472,6 +551,242 @@ def deep_copy_module(data: dict[str, Any], new_id: str) -> dict[str, Any]:
     return copied
 
 
+def duplicate_item(
+    items: list[Any],
+    index: Optional[int],
+    *,
+    id_key: Optional[str] = "id",
+    id_scope: Optional[set[str]] = None,
+    base: Optional[str] = None,
+) -> Optional[int]:
+    """深复制列表项并插入其后，返回新索引。
+
+    ``id_key=None`` 用于没有 id 的嵌套条目（出口、行程等）。有 id 的
+    条目默认生成 ``<old>_copy`` 形式的唯一 id；调用方可用 ``id_scope``
+    提供跨容器唯一的作用域，例如全模组检定点。
+    """
+    if index is None or not (0 <= index < len(items)):
+        return None
+    source = items[index]
+    if not isinstance(source, dict):
+        return None
+    copied = copy.deepcopy(source)
+    if id_key is not None:
+        current = str(copied.get(id_key, base or "copy"))
+        existing = (
+            id_scope
+            if id_scope is not None
+            else {
+                str(item.get(id_key))
+                for item in items
+                if isinstance(item, dict) and item.get(id_key)
+            }
+        )
+        copied[id_key] = generate_unique_id(base or f"{current}_copy", existing)
+    items.insert(index + 1, copied)
+    return index + 1
+
+
+def duplicate_scene(data: dict[str, Any], index: Optional[int]) -> Optional[int]:
+    """复制场景，并为其中的全局检定点生成新 id。"""
+    scenes = get_list(data, "scenes")
+    new_index = duplicate_item(
+        scenes,
+        index,
+        id_scope={str(item.get("id", "")) for item in scenes if isinstance(item, dict)},
+    )
+    if new_index is None:
+        return None
+    copied = scenes[new_index]
+    if not isinstance(copied, dict):
+        return new_index
+    check_ids = {
+        str(check.get("id", ""))
+        for scene in scenes
+        if isinstance(scene, dict)
+        for check in get_list(scene, "checks")
+        if isinstance(check, dict)
+    }
+    for check in get_list(copied, "checks"):
+        if not isinstance(check, dict):
+            continue
+        old_id = str(check.get("id", "copy_check"))
+        new_id = generate_unique_id(f"{old_id}_copy", check_ids)
+        check_ids.add(new_id)
+        check["id"] = new_id
+    return new_index
+
+
+def duplicate_npc(data: dict[str, Any], index: Optional[int]) -> Optional[int]:
+    """复制 NPC，并重建副本内部情报/社交节点 id 与情报引用。"""
+    npcs = get_list(data, "npcs")
+    new_index = duplicate_item(
+        npcs,
+        index,
+        id_scope={str(item.get("id", "")) for item in npcs if isinstance(item, dict)},
+    )
+    if new_index is None:
+        return None
+    copied = npcs[new_index]
+    if not isinstance(copied, dict):
+        return new_index
+
+    facts = get_list(copied, "facts")
+    fact_ids = {str(fact.get("id", "")) for fact in facts if isinstance(fact, dict)}
+    fact_mapping: dict[str, str] = {}
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        old_id = str(fact.get("id", "copy_fact"))
+        new_id = generate_unique_id(f"{old_id}_copy", fact_ids)
+        fact_ids.add(new_id)
+        fact_mapping[old_id] = new_id
+        fact["id"] = new_id
+
+    nodes = get_list(copied, "social_nodes")
+    node_ids = {str(node.get("id", "")) for node in nodes if isinstance(node, dict)}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        old_id = str(node.get("id", "copy_node"))
+        new_id = generate_unique_id(f"{old_id}_copy", node_ids)
+        node_ids.add(new_id)
+        node["id"] = new_id
+        for field_name in ("requires_facts", "unlock_facts"):
+            values = node.get(field_name)
+            if isinstance(values, list):
+                node[field_name] = [
+                    fact_mapping.get(str(value), value) for value in values
+                ]
+    return new_index
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """编辑器全局搜索结果及其可定位的 YAML 路径。"""
+
+    path: tuple[Any, ...]
+    tab_id: str
+    label: str
+    field_path: str
+    excerpt: str
+
+
+_SEARCH_TABS = {
+    "scenes": "tab-scenes",
+    "npcs": "tab-npcs",
+    "monsters": "tab-monsters",
+    "clues": "tab-clues",
+    "endings": "tab-endings",
+    "events": "tab-events",
+}
+_SEARCH_CONTAINER_LABELS = {
+    "scenes": "场景",
+    "npcs": "NPC",
+    "monsters": "怪物",
+    "clues": "线索",
+    "endings": "结局",
+    "events": "事件",
+    "checks": "检定点",
+    "exits": "出口",
+    "schedule": "行程",
+    "facts": "情报",
+    "social_nodes": "社交节点",
+    "strategies": "策略",
+}
+
+
+def _search_path_label(data: dict[str, Any], path: tuple[Any, ...]) -> str:
+    if not path:
+        return "模组"
+    top = str(path[0])
+    if top not in _SEARCH_TABS:
+        return "模组 › " + " › ".join(str(part) for part in path)
+    parts = [_SEARCH_CONTAINER_LABELS.get(top, top)]
+    current: Any = data.get(top)
+    for part in path[1:]:
+        if isinstance(part, int):
+            item = (
+                current[part]
+                if isinstance(current, list) and 0 <= part < len(current)
+                else None
+            )
+            ident = entity_label(item) if isinstance(item, dict) else f"#{part + 1}"
+            parts.append(ident)
+            current = item
+            continue
+        child = current.get(part) if isinstance(current, dict) else None
+        label = _SEARCH_CONTAINER_LABELS.get(str(part), str(part))
+        parts.append(label)
+        current = child
+    return " › ".join(parts)
+
+
+def _search_field_path(path: tuple[Any, ...]) -> str:
+    result = ""
+    for part in path:
+        if isinstance(part, int):
+            result += f"[{part}]"
+        elif result:
+            result += f".{part}"
+        else:
+            result = str(part)
+    return result
+
+
+def search_module(
+    data: dict[str, Any], query: str, *, limit: int = 200
+) -> list[SearchResult]:
+    """搜索所有模组字符串字段（包括未知键），返回可导航结果。"""
+    needle = query.strip().casefold()
+    if not needle:
+        return []
+    found: list[SearchResult] = []
+
+    def visit(value: Any, path: tuple[Any, ...]) -> None:
+        if len(found) >= limit:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                key_path = (*path, str(key))
+                if needle in str(key).casefold() and not isinstance(
+                    child, (dict, list)
+                ):
+                    text = str(child)
+                    found.append(
+                        SearchResult(
+                            path=key_path,
+                            tab_id=_SEARCH_TABS.get(
+                                str(path[0])
+                                if path and path[0] in _SEARCH_TABS
+                                else "",
+                                "tab-module",
+                            ),
+                            label=_search_path_label(data, key_path),
+                            field_path=_search_field_path(key_path),
+                            excerpt=text[:100],
+                        )
+                    )
+                visit(child, key_path)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, (*path, index))
+        elif isinstance(value, str) and needle in value.casefold():
+            top = str(path[0]) if path and path[0] in _SEARCH_TABS else "tab-module"
+            found.append(
+                SearchResult(
+                    path=path,
+                    tab_id=_SEARCH_TABS.get(top, "tab-module"),
+                    label=_search_path_label(data, path),
+                    field_path=_search_field_path(path),
+                    excerpt=value.replace("\n", " ")[:100],
+                )
+            )
+
+    visit(data, ())
+    return found
+
+
 # 引擎发言关键词扫描 / 攻击行为写入的 flag（README「flags 由引擎写入」）
 _ENGINE_FLAG_HINTS = (
     ("arson", "纵火关键词累计"),
@@ -581,11 +896,18 @@ def iter_dict_strings(value: Any, path: str = "") -> Any:
 
 __all__ = [
     "ModuleDraft",
+    "ReferenceDescriptor",
+    "SearchResult",
     "blank_module_dict",
     "build_condition_tokens",
+    "build_reference_options",
+    "build_reference_options_for_field",
     "clue_referrers",
     "condition_fields",
     "deep_copy_module",
+    "duplicate_item",
+    "duplicate_npc",
+    "duplicate_scene",
     "entity_ids",
     "entity_label",
     "generate_unique_id",
@@ -602,6 +924,8 @@ __all__ = [
     "new_schedule_entry_dict",
     "new_social_node_dict",
     "new_social_strategy_dict",
+    "reference_descriptor",
     "rename_entity",
     "rename_npc_fact",
+    "search_module",
 ]

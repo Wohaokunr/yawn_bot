@@ -9,7 +9,6 @@ from textual.widgets import (
     Button,
     Label,
     OptionList,
-    SelectionList,
     TabbedContent,
     TabPane,
 )
@@ -18,6 +17,9 @@ from textual.widgets.option_list import Option
 from ..schema_loader import SKILLS  # noqa: TID252
 from ..state import (  # noqa: TID252
     build_condition_tokens,
+    build_reference_options_for_field,
+    duplicate_item,
+    duplicate_scene,
     entity_label,
     generate_unique_id,
     get_list,
@@ -37,9 +39,13 @@ from ..widgets import (  # noqa: TID252
     LabeledSelect,
     LabeledSwitch,
     LabeledTextArea,
+    ReferenceListEditor,
     StrListEditor,
 )
 from . import EditorTab, move_item
+
+_ENTITY_PATH_PARTS = 2
+_NESTED_PATH_PARTS = 4
 
 _SKILL_OPTIONS = [("SAN 理智检定", "san")] + [
     (f"{skill.name}（{skill.key}）", skill.key) for skill in SKILLS
@@ -259,8 +265,16 @@ class ScenesTab(EditorTab):
         self._check_form = CheckForm()
         self._exit_list = OptionList(classes="-sub-list")
         self._exit_form = ExitForm(tokens_provider=self._tokens)
-        self._npc_presence = SelectionList()
-        self._monster_presence = SelectionList()
+        self._npc_presence = ReferenceListEditor(
+            "在场 NPC",
+            "scene.npcs",
+            hint="搜索名称或 ID；有行程的 NPC 以 NPC 页 schedule 为准",
+        )
+        self._monster_presence = ReferenceListEditor(
+            "在场怪物",
+            "scene.monsters",
+            hint="搜索名称或 ID；进入场景时按怪物 HP 初始化",
+        )
         self._scene_idx: Optional[int] = None
         self._check_idx: Optional[int] = None
         self._exit_idx: Optional[int] = None
@@ -277,6 +291,7 @@ class ScenesTab(EditorTab):
                     yield Button("删除", variant="error", classes="-scene-del")
                     yield Button("上移", classes="-scene-up")
                     yield Button("下移", classes="-scene-down")
+                    yield Button("复制", classes="-scene-copy")
             with Vertical(classes="-form-pane"):
                 yield self._scene_id
                 yield self._scene_name
@@ -298,6 +313,7 @@ class ScenesTab(EditorTab):
                                 )
                                 yield Button("上移", classes="-check-up")
                                 yield Button("下移", classes="-check-down")
+                                yield Button("复制", classes="-check-copy")
                         yield self._check_form
                     with (
                         TabPane("出口", id="tab-exits"),
@@ -314,16 +330,10 @@ class ScenesTab(EditorTab):
                                 )
                                 yield Button("上移", classes="-exit-up")
                                 yield Button("下移", classes="-exit-down")
+                                yield Button("复制", classes="-exit-copy")
                         yield self._exit_form
                     with TabPane("在场成员", id="tab-presence"), VerticalScroll():
-                        yield Label(
-                            "[b]NPC[/b]（有行程表的 NPC 忽略此列表，见 NPC 页）",
-                            markup=True,
-                        )
                         yield self._npc_presence
-                        yield Label(
-                            "[b]怪物[/b]（进入场景时按怪物 HP 初始化）", markup=True
-                        )
                         yield self._monster_presence
 
     # ── 数据访问 ──────────────────────────────────────────
@@ -359,21 +369,87 @@ class ScenesTab(EditorTab):
         return exit_ if isinstance(exit_, dict) else None
 
     def _scene_options(self) -> list[tuple[str, str]]:
-        return [
-            (entity_label(s), str(s.get("id", "")))
-            for s in self._scenes()
-            if isinstance(s, dict)
-        ]
+        return build_reference_options_for_field(
+            self.editor.draft.data, "exit.to_scene"
+        )
 
     def _clue_options(self) -> list[tuple[str, str]]:
-        return [
-            (entity_label(c), str(c.get("id", "")))
-            for c in get_list(self.editor.draft.data, "clues")
-            if isinstance(c, dict)
-        ]
+        return build_reference_options_for_field(self.editor.draft.data, "check.clue")
 
     def _tokens(self) -> list[tuple[str, str]]:
         return build_condition_tokens(self.editor.draft.data)
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) < _ENTITY_PATH_PARTS or path[0] != "scenes":
+            return
+        self._scene_idx = int(path[1])
+        self._fill_scene_form()
+        self._fill_check_list()
+        self._fill_exit_list()
+        self._fill_presence()
+        if len(path) >= _NESTED_PATH_PARTS and path[2] in {"checks", "exits"}:
+            child = str(path[2])
+            index = int(path[3])
+            self.query_one(TabbedContent).active = (
+                "tab-checks" if child == "checks" else "tab-exits"
+            )
+            if child == "checks":
+                self._check_idx = index
+                self._fill_check_list(index)
+            else:
+                self._exit_idx = index
+                self._fill_exit_list(index)
+
+    def duplicate_current(self) -> bool:
+        nested = self.query_one(TabbedContent).active
+        if nested == "tab-checks":
+            duplicated = self._duplicate_check()
+        elif nested == "tab-exits":
+            duplicated = self._duplicate_exit()
+        else:
+            duplicated = self._duplicate_scene()
+        if duplicated:
+            self.editor.on_data_changed()
+        return duplicated
+
+    def _duplicate_scene(self) -> bool:
+        new_idx = duplicate_scene(self.editor.draft.data, self._scene_idx)
+        if new_idx is None:
+            return False
+        self._scene_idx = new_idx
+        self.editor.refresh_all()
+        return True
+
+    def _duplicate_check(self) -> bool:
+        scene = self._current_scene()
+        if scene is None:
+            return False
+        checks = get_list(scene, "checks")
+        all_ids = {
+            str(check.get("id", ""))
+            for current_scene in self._scenes()
+            if isinstance(current_scene, dict)
+            for check in get_list(current_scene, "checks")
+            if isinstance(check, dict)
+        }
+        new_idx = duplicate_item(checks, self._check_idx, id_scope=all_ids)
+        if new_idx is None:
+            return False
+        self._check_idx = new_idx
+        self._fill_check_list(new_idx)
+        return True
+
+    def _duplicate_exit(self) -> bool:
+        scene = self._current_scene()
+        if scene is None:
+            return False
+        exits = get_list(scene, "exits")
+        new_idx = duplicate_item(exits, self._exit_idx, id_key=None)
+        if new_idx is None:
+            return False
+        self._exit_idx = new_idx
+        self._fill_exit_list(new_idx)
+        return True
 
     # ── 重填 ──────────────────────────────────────────────
 
@@ -478,25 +554,14 @@ class ScenesTab(EditorTab):
         scene = self._current_scene()
         scene_npcs = get_list(scene, "npcs") if scene else []
         scene_monsters = get_list(scene, "monsters") if scene else []
-        npc_options = [
-            (entity_label(n), str(n.get("id", "")), n.get("id") in scene_npcs)
-            for n in get_list(data, "npcs")
-            if isinstance(n, dict)
-        ]
-        monster_options = [
-            (entity_label(m), str(m.get("id", "")), m.get("id") in scene_monsters)
-            for m in get_list(data, "monsters")
-            if isinstance(m, dict)
-        ]
-        # 程序化重建选项不得触发 SelectedChanged 回写
-        with self._npc_presence.prevent(SelectionList.SelectedChanged):
-            self._npc_presence.clear_options()
-            if npc_options:
-                self._npc_presence.add_options(npc_options)
-        with self._monster_presence.prevent(SelectionList.SelectedChanged):
-            self._monster_presence.clear_options()
-            if monster_options:
-                self._monster_presence.add_options(monster_options)
+        self._npc_presence.set_reference_options(
+            build_reference_options_for_field(data, "scene.npcs")
+        )
+        self._npc_presence.set_items([str(value) for value in scene_npcs])
+        self._monster_presence.set_reference_options(
+            build_reference_options_for_field(data, "scene.monsters")
+        )
+        self._monster_presence.set_items([str(value) for value in scene_monsters])
 
     # ── 选择切换 ──────────────────────────────────────────
 
@@ -548,6 +613,9 @@ class ScenesTab(EditorTab):
             if new_idx is not None:
                 self._scene_idx = new_idx
                 self.editor.refresh_all()
+        elif "-scene-copy" in classes:
+            if self._duplicate_scene():
+                self.editor.on_data_changed()
         elif "-check-add" in classes:
             scene = self._current_scene()
             if scene is None:
@@ -581,6 +649,9 @@ class ScenesTab(EditorTab):
             if new_idx is not None:
                 self._fill_check_list(new_idx)
                 self.editor.on_data_changed()
+        elif "-check-copy" in classes:
+            if self._duplicate_check():
+                self.editor.on_data_changed()
         elif "-exit-add" in classes:
             scene = self._current_scene()
             if scene is None:
@@ -610,6 +681,9 @@ class ScenesTab(EditorTab):
             new_idx = move_item(exits, self._exit_idx, delta)
             if new_idx is not None:
                 self._fill_exit_list(new_idx)
+                self.editor.on_data_changed()
+        elif "-exit-copy" in classes:
+            if self._duplicate_exit():
                 self.editor.on_data_changed()
 
     def _confirm_delete_scene(self, scene: dict[str, Any]) -> None:
@@ -728,19 +802,4 @@ class ScenesTab(EditorTab):
             exit_[field] = value
         if field in ("to_scene", "condition"):
             self._fill_exit_list()
-        self.editor.on_data_changed()
-
-    # ── 在场成员 ──────────────────────────────────────────
-
-    def on_selection_list_selected_changed(
-        self, event: SelectionList.SelectedChanged
-    ) -> None:
-        scene = self._current_scene()
-        if scene is None:
-            return
-        selected = [str(v) for v in event.selection_list.selected]
-        if event.control is self._npc_presence:
-            scene["npcs"] = selected
-        elif event.control is self._monster_presence:
-            scene["monsters"] = selected
         self.editor.on_data_changed()

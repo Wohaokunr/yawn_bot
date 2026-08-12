@@ -28,6 +28,13 @@ class EditorTab(Widget):
     def on_field_changed(self, event: FieldChanged) -> None:
         """子类覆写：把 FieldChanged 写回 draft.data。"""
 
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        """将全局搜索结果定位到本页；子类按自己的嵌套索引实现。"""
+
+    def duplicate_current(self) -> bool:
+        """复制当前选中项；返回是否完成复制。"""
+        return False
+
 
 def move_item(items: list[Any], index: Optional[int], delta: int) -> Optional[int]:
     """移动列表项并返回新索引；边界或无选中时不修改并返回 ``None``。"""

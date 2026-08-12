@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from textual.containers import Horizontal, VerticalScroll
 
-from ..state import get_list  # noqa: TID252
+from ..state import build_reference_options_for_field  # noqa: TID252
 from ..widgets import (  # noqa: TID252
     FieldChanged,
     IdInput,
@@ -73,6 +74,31 @@ class ModuleTab(EditorTab):
                 yield self._cost_inputs[key]
             yield self._generic_endings
 
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if not path:
+            return
+        controls = {
+            "id": self._id,
+            "name": self._name,
+            "description": self._description,
+            "difficulty": self._difficulty,
+            "min_players": self._min_players,
+            "max_players": self._max_players,
+            "start_scene": self._start_scene,
+            "opening": self._opening,
+            "generic_endings": self._generic_endings,
+        }
+        control = controls.get(str(path[0]))
+        if control is None:
+            return
+        with contextlib.suppress(Exception):  # pragma: no cover - jump is best effort
+            target = getattr(control, "input", None)
+            if target is None:
+                target = getattr(control, "area", None)
+            if target is None:
+                target = getattr(control, "switch", control)
+            target.focus()
+
     def refresh_tab(self, data: dict[str, Any]) -> None:
         def text(key: str) -> str:
             value = data.get(key, "")
@@ -89,12 +115,7 @@ class ModuleTab(EditorTab):
         self._min_players.set_value(integer("min_players"))
         self._max_players.set_value(integer("max_players"))
 
-        scene_options = []
-        for scene in get_list(data, "scenes"):
-            if isinstance(scene, dict):
-                ident = str(scene.get("id", ""))
-                name = str(scene.get("name", ""))
-                scene_options.append((f"{name}({ident})" if name else ident, ident))
+        scene_options = build_reference_options_for_field(data, "start_scene")
         start_scene = data.get("start_scene")
         self._start_scene.set_options(
             scene_options, start_scene if isinstance(start_scene, str) else None

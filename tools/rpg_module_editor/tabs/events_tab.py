@@ -10,6 +10,7 @@ from textual.widgets.option_list import Option
 
 from ..state import (  # noqa: TID252
     build_condition_tokens,
+    duplicate_item,
     entity_label,
     get_list,
     new_event_dict,
@@ -24,6 +25,8 @@ from ..widgets import (  # noqa: TID252
     LabeledTextArea,
 )
 from . import EditorTab
+
+_ENTITY_PATH_PARTS = 2
 
 
 def _str_text(value: Any) -> str:
@@ -74,6 +77,7 @@ class EventsTab(EditorTab):
                     yield Button("删除", variant="error", classes="-event-del")
                     yield Button("上移", classes="-event-up")
                     yield Button("下移", classes="-event-down")
+                    yield Button("复制", classes="-event-copy")
             with VerticalScroll(classes="-form-pane"):
                 yield Label(
                     "[dim]事件纯属 KP 上下文：条件满足时记入「已发生事件」，"
@@ -94,6 +98,27 @@ class EventsTab(EditorTab):
             return None
         event = events[self._event_idx]
         return event if isinstance(event, dict) else None
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) >= _ENTITY_PATH_PARTS and path[0] == "events":
+            self._event_idx = int(path[1])
+            self._fill_form()
+
+    def duplicate_current(self) -> bool:
+        events = self._events()
+        new_idx = duplicate_item(
+            events,
+            self._event_idx,
+            id_scope={
+                str(item.get("id", "")) for item in events if isinstance(item, dict)
+            },
+        )
+        if new_idx is None:
+            return False
+        self._event_idx = new_idx
+        self.editor.refresh_all()
+        self.editor.on_data_changed()
+        return True
 
     def _tokens(self) -> list[tuple[str, str]]:
         return build_condition_tokens(self.editor.draft.data)
@@ -175,6 +200,8 @@ class EventsTab(EditorTab):
             move(self._event_idx, 1)
             self.refresh_tab(data)
             self.editor.on_data_changed()
+        elif "-event-copy" in classes:
+            self.duplicate_current()
 
     def _confirm_delete(self, event_item: dict[str, Any]) -> None:
         def _delete(confirmed: Optional[bool]) -> None:  # noqa: FBT001

@@ -14,6 +14,7 @@ Header {
     background: $surface;
     border-bottom: solid $panel;
     align-vertical: middle;
+    overflow-x: auto;
 }
 
 #editor-toolbar Button {
@@ -23,6 +24,14 @@ Header {
 
 #editor-toolbar .-toolbar-hint {
     width: 1fr;
+    height: 1;
+    color: $text-muted;
+    content-align: right middle;
+}
+
+#editor-toolbar .-layout-status {
+    width: auto;
+    min-width: 18;
     height: 1;
     color: $text-muted;
     content-align: right middle;
@@ -54,4 +63,91 @@ Button {
 
 Footer {
     height: 1;
+}
+
+/* 视口响应式：宽屏扩展列表，窄屏改为单栏，短屏减少装饰占用。 */
+Screen.-wide TabPane {
+    padding: 1 3;
+}
+
+Screen.-wide EditorTab Vertical.-list-pane,
+Screen.-wide EditorTab Vertical.-list-box {
+    width: 28%;
+    min-width: 28;
+    max-width: 64;
+}
+
+Screen.-compact TabPane {
+    padding: 1 1;
+}
+
+Screen.-compact EditorTab Vertical.-list-pane,
+Screen.-compact EditorTab Vertical.-list-box {
+    width: 30%;
+    min-width: 24;
+    max-width: 36;
+}
+
+Screen.-narrow #editor-toolbar {
+    padding: 0 1;
+}
+
+Screen.-narrow #editor-toolbar Button {
+    min-width: 5;
+    margin-right: 0;
+}
+
+Screen.-narrow #editor-toolbar .-toolbar-hint,
+Screen.-narrow #editor-toolbar .-toolbar-hint {
+    display: none;
+}
+
+Screen.-narrow TabPane {
+    padding: 0 1;
+}
+
+Screen.-narrow EditorTab Horizontal.-master,
+Screen.-narrow EditorTab Horizontal.-subedit,
+Screen.-narrow SocialEditor .-split {
+    layout: vertical;
+}
+
+Screen.-narrow EditorTab Vertical.-list-pane,
+Screen.-narrow EditorTab Vertical.-form-pane,
+Screen.-narrow EditorTab Vertical.-list-box,
+Screen.-narrow SocialEditor .-list-box,
+Screen.-narrow SocialEditor .-detail-box {
+    width: 1fr;
+    min-width: 0;
+}
+
+Screen.-narrow EditorTab OptionList.-main-list {
+    height: 7;
+}
+
+Screen.-narrow ScenesTab Horizontal.-subedit {
+    height: auto;
+}
+
+Screen.-narrow ScenesTab OptionList.-sub-list {
+    width: 1fr;
+    height: 7;
+}
+
+Screen.-narrow NpcsTab OptionList.-sub-list {
+    height: 7;
+}
+
+Screen.-short #editor-toolbar {
+    height: 2;
+    padding: 0 1;
+}
+
+Screen.-short EditorTab Horizontal.-row,
+Screen.-short SocialEditor .-buttons {
+    height: 2;
+}
+
+Screen.-short LabeledTextArea TextArea {
+    height: 4;
 }

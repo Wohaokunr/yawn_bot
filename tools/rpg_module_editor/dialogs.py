@@ -12,6 +12,7 @@ from textual.widgets import Button, DirectoryTree, Input, Label, Markdown, Optio
 from textual.widgets.option_list import Option
 
 from .schema_loader import modules_dir
+from .state import SearchResult, search_module
 from .yaml_io import load_or_error
 
 if TYPE_CHECKING:
@@ -78,7 +79,7 @@ class OpenFileScreen(ModalScreen[Optional[Path]]):
         align: center middle;
         Vertical {
             width: 92%;
-            max-width: 110;
+            max-width: 128;
             height: 80%;
             border: thick $primary;
             background: $surface;
@@ -171,7 +172,7 @@ class SaveFileScreen(ModalScreen[Optional[Path]]):
         align: center middle;
         Vertical {
             width: 92%;
-            max-width: 110;
+            max-width: 128;
             height: 80%;
             border: thick $primary;
             background: $surface;
@@ -257,7 +258,13 @@ class NewModuleScreen(ModalScreen[Optional[dict[str, Any]]]):
     DEFAULT_CSS = """
     NewModuleScreen {
         align: center middle;
-        OptionList { width: 76; height: 20; border: thick $primary; }
+        OptionList {
+            width: 92%;
+            max-width: 92;
+            height: 70%;
+            max-height: 24;
+            border: thick $primary;
+        }
     }
     """
 
@@ -306,7 +313,8 @@ class HelpScreen(ModalScreen[None]):
     HelpScreen {
         align: center middle;
         VerticalScroll {
-            width: 100;
+            width: 94%;
+            max-width: 128;
             height: 86%;
             border: thick $primary;
             background: $surface;
@@ -327,4 +335,74 @@ class HelpScreen(ModalScreen[None]):
             yield Label(f"[dim]{escape('Esc / F1 关闭')}[/dim]")
 
     def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class SearchScreen(ModalScreen[Optional[SearchResult]]):
+    """全局搜索：只读展示结果，回车后交给主应用定位。"""
+
+    DEFAULT_CSS = """
+    SearchScreen {
+        align: center middle;
+        Vertical {
+            width: 94%;
+            max-width: 128;
+            height: 82%;
+            max-height: 38;
+            border: thick $primary;
+            background: $surface;
+            padding: 1 2;
+        }
+        Input { height: 3; }
+        OptionList { height: 1fr; border: tall $primary; margin-top: 1; }
+        Label.-hint { height: 1; color: $text-muted; }
+    }
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "取消")]
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        super().__init__()
+        self._data = data
+        self._results: list[SearchResult] = []
+
+    def compose(self) -> Any:
+        with Vertical() as box:
+            box.border_title = "全局搜索（Ctrl+F）"
+            yield Input(placeholder="搜索 ID、名称、文案或未知字段")
+            yield Label("输入关键词后，选择结果并回车定位", classes="-hint")
+            yield OptionList()
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def _refresh(self, query: str) -> None:
+        self._results = search_module(self._data, query)
+        view = self.query_one(OptionList)
+        view.clear_options()
+        if not query.strip():
+            view.add_option(Option("请输入关键词"))
+            return
+        if not self._results:
+            view.add_option(Option("没有匹配结果"))
+            return
+        for result in self._results:
+            view.add_option(
+                Option(f"{result.label} · {result.field_path}：{result.excerpt}")
+            )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._refresh(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is not self.query_one(Input) or not self._results:
+            return
+        self.dismiss(self._results[0])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        index = event.option_index
+        if 0 <= index < len(self._results):
+            self.dismiss(self._results[index])
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

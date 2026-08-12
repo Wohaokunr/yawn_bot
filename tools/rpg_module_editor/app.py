@@ -12,11 +12,18 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Button, Footer, Header, Label, TabbedContent, TabPane
 
-from .dialogs import HelpScreen, NewModuleScreen, OpenFileScreen, SaveFileScreen
+from .dialogs import (
+    HelpScreen,
+    NewModuleScreen,
+    OpenFileScreen,
+    SaveFileScreen,
+    SearchScreen,
+)
 from .schema_loader import modules_dir
-from .state import ModuleDraft
+from .state import ModuleDraft, SearchResult
 from .tabs.clues_tab import CluesTab
 from .tabs.endings_tab import EndingsTab
 from .tabs.events_tab import EventsTab
@@ -32,6 +39,7 @@ from .yaml_io import default_header, load_or_error, save_module_file
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from textual import events
     from textual.timer import Timer
 
     from .tabs import EditorTab
@@ -45,6 +53,9 @@ _TAB_ENDINGS = "tab-endings"
 _TAB_EVENTS = "tab-events"
 _TAB_YAML = "tab-yaml"
 _TAB_REPORT = "tab-report"
+_WIDE_WIDTH = 130
+_COMPACT_WIDTH = 90
+_SHORT_HEIGHT = 32
 
 
 class ModuleEditorApp(App):
@@ -63,6 +74,8 @@ class ModuleEditorApp(App):
         Binding("f5", "revalidate", "重新校验"),
         Binding("ctrl+q", "quit_guarded", "退出"),
         Binding("f1", "help", "帮助"),
+        Binding("ctrl+f", "search", "搜索"),
+        Binding("ctrl+d", "duplicate", "复制当前", show=False),
     ]
 
     def __init__(self, initial_path: Optional[Path] = None) -> None:
@@ -102,6 +115,7 @@ class ModuleEditorApp(App):
             _TAB_YAML: "YAML 源码",
             _TAB_REPORT: "校验",
         }
+        self._layout_mode = "wide"
 
     # ── 生命周期 ──────────────────────────────────────────
 
@@ -113,8 +127,10 @@ class ModuleEditorApp(App):
             yield Button("保存", id="toolbar-save", variant="success")
             yield Button("另存为", id="toolbar-save-as")
             yield Button("校验", id="toolbar-validate")
+            yield Button("搜索", id="toolbar-search")
             yield Button("帮助", id="toolbar-help")
             yield Label("快捷键见底部", classes="-toolbar-hint")
+            yield Label("", id="-layout-status", classes="-layout-status")
         with TabbedContent(initial=_TAB_MODULE):
             for tab_id, tab in self._tabs.items():
                 with TabPane(self._tab_titles[tab_id], id=tab_id):
@@ -124,6 +140,32 @@ class ModuleEditorApp(App):
     def on_mount(self) -> None:
         self._load_initial()
         self.refresh_all()
+        self._update_layout(self.size.width, self.size.height)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_layout(event.size.width, event.size.height)
+
+    def _update_layout(self, width: int, height: int) -> None:
+        """按真实 viewport 切换 CSS 布局，兼容最大化与窄终端。"""
+        if width >= _WIDE_WIDTH:
+            mode = "wide"
+        elif width >= _COMPACT_WIDTH:
+            mode = "compact"
+        else:
+            mode = "narrow"
+        if height < _SHORT_HEIGHT:
+            mode += " short"
+        self._layout_mode = mode
+        try:
+            for class_name in ("wide", "compact", "narrow", "short"):
+                self.screen.remove_class(class_name)
+            for class_name in mode.split():
+                self.screen.add_class(class_name)
+            self.query_one("#-layout-status", Label).update(
+                f"{width}×{height} · {mode.replace(' ', ' / ')}"
+            )
+        except NoMatches:  # pragma: no cover - compose 尚未完成时的 resize
+            return
 
     def _load_initial(self) -> None:
         if self._initial_path is None:
@@ -264,6 +306,7 @@ class ModuleEditorApp(App):
             "toolbar-save": self.action_save,
             "toolbar-save-as": self.action_save_as,
             "toolbar-validate": self.action_revalidate,
+            "toolbar-search": self.action_search,
             "toolbar-help": self.action_help,
         }
         action = actions.get(event.button.id or "")
@@ -291,6 +334,24 @@ class ModuleEditorApp(App):
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
+
+    def action_search(self) -> None:
+        self.push_screen(SearchScreen(self.draft.data), self._search_result)
+
+    def _search_result(self, result: Optional[SearchResult]) -> None:
+        if result is None:
+            return
+        tab = self._tabs.get(result.tab_id)
+        if tab is None:
+            return
+        self.query_one(TabbedContent).active = result.tab_id
+        tab.locate_path(result.path)
+
+    def action_duplicate(self) -> None:
+        tabbed = self.query_one(TabbedContent)
+        tab = self._tabs.get(tabbed.active)
+        if tab is None or not tab.duplicate_current():
+            self.notify("当前区域没有可复制的条目", severity="warning")
 
     def action_quit_guarded(self) -> None:
         if not self.draft.dirty:
