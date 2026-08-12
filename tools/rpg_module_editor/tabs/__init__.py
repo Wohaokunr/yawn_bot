@@ -1,0 +1,40 @@
+"""编辑器分区页基类与各 Tab 实现。"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional, cast
+
+from textual.widget import Widget
+
+if TYPE_CHECKING:
+    from ..app import ModuleEditorApp  # noqa: TID252
+    from ..widgets import FieldChanged  # noqa: TID252
+
+
+class EditorTab(Widget):
+    """Tab 基类：refresh 从 dict 状态重填控件（不重建控件树）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._populated = False
+
+    @property
+    def editor(self) -> "ModuleEditorApp":
+        return cast("ModuleEditorApp", self.app)
+
+    def refresh_tab(self, data: dict[str, Any]) -> None:
+        """从 dict 重填本页控件；子类实现。"""
+
+    def on_field_changed(self, event: FieldChanged) -> None:
+        """子类覆写：把 FieldChanged 写回 draft.data。"""
+
+
+def move_item(items: list[Any], index: Optional[int], delta: int) -> Optional[int]:
+    """移动列表项并返回新索引；边界或无选中时不修改并返回 ``None``。"""
+    if index is None or not (0 <= index < len(items)):
+        return None
+    target = index + delta
+    if not (0 <= target < len(items)):
+        return None
+    items[index], items[target] = items[target], items[index]
+    return target
