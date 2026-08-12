@@ -38,3 +38,4 @@
 - 2026-08-12：诊断狼人杀 AI 玩家无法添加：当前 `main` 仅包含基础报名实现，缺少 `添加AI/移除AI` 命令、`PlayerState.is_ai` 与 AI 驱动器；相关功能位于未合并的 `feat/werewolf-ai` 分支提交链（29352b1 起）。
 - 2026-08-12：将 `feat/werewolf-ai` 合并到 `main`；保留主线当前 RPG/编辑器版本，合入狼人杀 AI 命令、驱动器、板子与状态支持及 `is_ai`/板子字段迁移，排除嵌套 worktree、`.vs` 状态、重复 RPG 迁移和顶层迁移副本。AI 变更 Ruff、Pyright、compileall 与 NoneBot 插件加载通过；RPG 核心 11 项、编辑器校验/YAML 33 项、响应式 16 项、应用冒烟 14 项、提醒 5 项通过，编辑器社交表单 1 项保留主线既有失败。
 - 2026-08-12：`yawn_bot` 私有仓库受当前 GitHub 计划限制无法直接启用 Pages；未公开整个项目，改将 `docs/yawnbot-architecture.html` 发布到现有公开 Pages 站点 `Wohaokunr/Wohaokunr.github.io`，页面地址为 `https://wohaokunr.github.io/yawnbot-architecture.html`，部署工作流验证成功。
+- 2026-08-12：按最新工作区重绘 `docs/yawnbot-architecture.html`；保持 Lieflat `wire` 编辑部红配色，补入定时提醒、RPG《潮声停靠之前》与 Textual 编辑器、狼人杀四种板子 / AI 玩家及 board/is_ai 迁移，并增加手机安全区布局、横向筛选、单指拖动 / 双指缩放说明、缩放 / 重置 / 适应屏幕按钮。HTML 脚本、宽屏渲染和 390×844 窄屏交互检查通过，窄屏无横向溢出。
