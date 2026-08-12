@@ -145,6 +145,7 @@ dmypy.json
 # Local agent state and nested temporary worktrees
 .claude/settings.local.json
 .claude/worktrees/
+.vs/
 
 # Local database recovery copies
 .local-db-backups/

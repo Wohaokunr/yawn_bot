@@ -1,4 +1,4 @@
-"""YawnBot 狼人杀子插件：经典预女猎白群聊小游戏。
+"""YawnBot 狼人杀子插件：群聊狼人杀（预女猎白 / 预女猎白混 / 禁言骑士 / 禁票骑士）。
 
 作为 yawn_core 的可选子插件加载（父插件不硬依赖本包）：
 群内报名匹配，夜间私聊下达行动，群禁言控制发言秩序，
@@ -13,8 +13,8 @@ from .config import Config
 
 __plugin_meta__ = PluginMetadata(
     name="狼人杀",
-    description="经典预女猎白群聊狼人杀：群内报名、私聊行动、禁言控场",
-    usage="发送 /狼人杀 开房，/报名 加入，夜间按私聊提示行动",
+    description="群聊狼人杀（预女猎白/预女猎白混/禁言骑士/禁票骑士）：群内报名、私聊行动、禁言控场",
+    usage="发送 /狼人杀 开房，/板子 切换板子，/报名 加入，夜间按私聊提示行动",
     config=Config,
     extra={
         "commands": [
@@ -51,6 +51,30 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
+                "name": "板子",
+                "aliases": ["选板子", "换板子"],
+                "description": "查看可选板子；切换板子（板子 名称，房主/群管/超管）",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "添加AI",
+                "aliases": ["加AI", "补人"],
+                "description": "报名阶段添加 AI 玩家（添加AI N，房主/群管/超管）",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "移除AI",
+                "aliases": ["减AI"],
+                "description": "报名阶段移除 AI 玩家（移除AI N，房主/群管/超管）",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
                 "name": "开始游戏",
                 "aliases": ["发车"],
                 "description": "开始游戏（房主/群管/超管）",
@@ -72,6 +96,23 @@ __plugin_meta__ = PluginMetadata(
                 "description": "查看狼人杀胜率（群管/超管可 @ 他人）",
                 "feature": "werewolf",
                 "scope": "all",
+                "superuser": False,
+            },
+            {
+                "name": "选身份",
+                "aliases": ["想要"],
+                "description": "报名阶段请求期望身份（私聊，选身份 身份名；"
+                "多人同选发牌时按份数随机分配）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
+                "name": "取消选身份",
+                "aliases": ["不选了"],
+                "description": "取消报名阶段的身份请求（私聊）",
+                "feature": "werewolf",
+                "scope": "private",
                 "superuser": False,
             },
             {
@@ -123,6 +164,24 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
+                "name": "认主",
+                "aliases": ["选主"],
+                "description": "首夜混血儿选择主人"
+                "（私聊直接回复 认主N，自由文本无需斜杠）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
+                "name": "禁言",
+                "aliases": ["禁票"],
+                "description": "夜晚禁言长老禁言/禁票"
+                "（私聊直接回复 禁言N / 禁票N，自由文本；过=放弃）",
+                "feature": "werewolf",
+                "scope": "private",
+                "superuser": False,
+            },
+            {
                 "name": "上警",
                 "aliases": ["竞选"],
                 "description": "报名竞选警长",
@@ -166,6 +225,14 @@ __plugin_meta__ = PluginMetadata(
                 "name": "自爆",
                 "aliases": [],
                 "description": "狼人白天自爆，立即进入夜晚",
+                "feature": "werewolf",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "决斗",
+                "aliases": [],
+                "description": "骑士发言阶段翻牌决斗（决斗 N）",
                 "feature": "werewolf",
                 "scope": "group",
                 "superuser": False,

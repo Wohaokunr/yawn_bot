@@ -122,6 +122,7 @@ typeCheckingMode = "standard"
 dev = [
     "pyright>=1.1.411",
     "ruff>=0.16.0",
+    "types-PyYAML>=6.0",
 ]
 tools = [
     "pytest>=9.1.1",

@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
+
+from .roles import DEFAULT_BOARD_KEY
 
 if TYPE_CHECKING:
     from .roles import DeathCause, Faction, Role
@@ -21,9 +22,11 @@ class Phase(str, Enum):
     """游戏阶段。"""
 
     SIGNUP = "SIGNUP"  # 报名
+    NIGHT_HALFBLOOD = "NIGHT_HALFBLOOD"  # 混血儿认主（仅首夜，率先睁眼）
     NIGHT_WOLVES = "NIGHT_WOLVES"  # 狼人行动
     NIGHT_WITCH = "NIGHT_WITCH"  # 女巫行动
     NIGHT_SEER = "NIGHT_SEER"  # 预言家行动
+    NIGHT_ELDER = "NIGHT_ELDER"  # 禁言长老行动
     DAY_ANNOUNCE = "DAY_ANNOUNCE"  # 白天死讯播报
     LAST_WORDS = "LAST_WORDS"  # 遗言
     HUNTER_SHOT = "HUNTER_SHOT"  # 猎人开枪决策
@@ -54,6 +57,14 @@ SELF_DETONATE_PHASES: frozenset[Phase] = frozenset(
     }
 )
 
+# 允许骑士 /决斗 翻牌的白天子阶段（放逐投票前的发言阶段）
+DUEL_PHASES: frozenset[Phase] = frozenset(
+    {
+        Phase.DAY_SPEECH,
+        Phase.PK_SPEECH,
+    }
+)
+
 
 class ActionKind(str, Enum):
     """玩家行动类型。"""
@@ -75,6 +86,9 @@ class ActionKind(str, Enum):
     SELF_DETONATE = "self_detonate"  # 狼人自爆
     SAY = "say"  # 狼人讨论发言（aux=文本，由引擎转发给其他狼人）
     START_GAME = "start_game"  # 房主/管理员手动开局（报名阶段）
+    CHOOSE_OWNER = "choose_owner"  # 混血儿认主（value=主人座位）
+    SILENCE = "silence"  # 禁言长老禁言（value=目标座位）
+    DUEL = "duel"  # 骑士决斗（value=目标座位）
 
 
 @dataclass
@@ -98,6 +112,10 @@ class PlayerState:
     alive: bool = True
     death_round: Optional[int] = None
     death_cause: Optional[DeathCause] = None
+    # AI 玩家：user_id 为负数合成 ID，不发私聊/禁言 API
+    is_ai: bool = False
+    # AI 伪装昵称（报名名单与代发发言显示用；人类玩家为 None）
+    display_name: Optional[str] = None
     # 女巫药剂状态
     save_used: bool = False
     poison_used: bool = False
@@ -108,6 +126,10 @@ class PlayerState:
     sheriff_candidate: bool = False
     is_sheriff: bool = False
     was_sheriff: bool = False  # 曾经担任警长（战绩统计用）
+    # 混血儿认主状态（主人座位；胜负随主人阵营）
+    owner_seat: Optional[int] = None
+    # 禁言长老上一晚的实际禁言目标（连续两晚不可同人；放弃后清空）
+    elder_last_target: Optional[int] = None
     # 身份卡私聊是否投递成功
     dm_ok: bool = True
 
@@ -120,6 +142,10 @@ class Game:
     host_user_id: int
     phase: Phase = Phase.SIGNUP
     round_no: int = 0
+    # 板子键名（roles.BOARDS 的键；报名阶段可由房主 /板子 切换）
+    board: str = DEFAULT_BOARD_KEY
+    # 禁言长老当夜禁言的座位（次日发言/投票限制用；每晚进入长老阶段时清空）
+    silenced_seat: Optional[int] = None
     # 发牌后填充
     players: list[PlayerState] = field(default_factory=list)
     # 报名顺序（退报名移除）
@@ -131,6 +157,20 @@ class Game:
     game_row_id: Optional[int] = None
     # 携带 onebot v11 Bot 实例；用 Any 避免 nonebot 基类与适配器类型冲突
     bot: Any = None
+    # ── 引擎 → AI 驱动的只读信号（仅引擎写入）──
+    # 当前发言者座位（发言轮换 / 遗言期间），None=无
+    current_speaker: Optional[int] = None
+    # 当前投票阶段的合法目标座位 / 被排除座位（_collect_votes 写入）
+    vote_targets: list[int] = field(default_factory=list)
+    vote_exclude: tuple[int, ...] = ()
+    # AI 玩家昵称分配表（AI user_id -> 伪装昵称）
+    ai_names: dict[int, str] = field(default_factory=dict)
+    # 人类报名者显示名（user_id -> 群名片/昵称；报名阶段由命令层记录，
+    # 仅内存，不入 ORM）
+    signup_names: dict[int, str] = field(default_factory=dict)
+    # 报名阶段身份请求（user_id -> 期望角色；命令层记录，仅内存，
+    # 发牌时由引擎消费，退报名即清理）
+    role_requests: dict[int, Role] = field(default_factory=dict)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -174,6 +214,83 @@ class Game:
                 self.action_queue.task_done()
             except asyncio.QueueEmpty:  # noqa: PERF203
                 break
+
+
+# ── AI 玩家合成身份 ───────────────────────────────────────
+
+# 负数 user_id 永不与真实 QQ 号冲突；_user_index 保证跨局唯一在局
+AI_UID_BASE = -10000
+_ai_uid_counter = 0
+
+# AI 伪装昵称池（普通群昵称风格，不透露 AI 身份）
+AI_NICKNAMES: tuple[str, ...] = (
+    "阿宝",
+    "小鱼",
+    "团子",
+    "栗子",
+    "年糕",
+    "布丁",
+    "奶茶",
+    "土豆",
+    "花生",
+    "芝麻",
+    "汤圆",
+    "橘子",
+    "海苔",
+    "麻薯",
+    "柚子",
+    "豆浆",
+    "核桃",
+    "樱桃",
+    "麦兜",
+    "胖虎",
+)
+
+
+def new_ai_uid() -> int:
+    """分配一个新的 AI 合成 user_id（负数）。"""
+    global _ai_uid_counter  # noqa: PLW0603
+    _ai_uid_counter += 1
+    return AI_UID_BASE - _ai_uid_counter
+
+
+def is_ai_uid(user_id: int) -> bool:
+    """判断 user_id 是否为 AI 合成 ID。"""
+    return user_id < 0
+
+
+def pick_ai_name(game: Game) -> str:
+    """为本局新 AI 玩家取一个不重复的伪装昵称。"""
+    used = set(game.ai_names.values())
+    for name in AI_NICKNAMES:
+        if name not in used:
+            return name
+    return f"玩家{len(game.ai_names) + 1}"
+
+
+def add_ai_signup(game: Game) -> Optional[int]:
+    """为当前对局报名一个 AI 玩家；返回其 user_id，失败返回 None。"""
+    uid = new_ai_uid()
+    if not join_signup(game, uid):
+        return None
+    game.ai_names[uid] = pick_ai_name(game)
+    return uid
+
+
+def remove_ai_signup(game: Game) -> bool:
+    """移除最近加入的一个 AI 报名者；无 AI 返回 False。"""
+    for uid in reversed(game.signup_user_ids):
+        if not is_ai_uid(uid):
+            continue
+        if leave_signup(game, uid):
+            game.ai_names.pop(uid, None)
+            return True
+    return False
+
+
+def count_ai_signup(game: Game) -> int:
+    """统计当前报名中的 AI 数量。"""
+    return sum(1 for uid in game.signup_user_ids if is_ai_uid(uid))
 
 
 # ── 注册表 ────────────────────────────────────────────────
@@ -224,9 +341,22 @@ def leave_signup(game: Game, user_id: int) -> bool:
     if user_id not in game.signup_user_ids:
         return False
     game.signup_user_ids.remove(user_id)
+    game.signup_names.pop(user_id, None)
+    game.role_requests.pop(user_id, None)
     if _user_index.get(user_id) == game.group_id:
         _user_index.pop(user_id, None)
     return True
+
+
+def note_signup_name(game: Game, user_id: int, name: str) -> None:
+    """记录人类报名者的显示名（报名阶段由命令层调用）。"""
+    if name:
+        game.signup_names[user_id] = name
+
+
+def display_name_of(game: Game, user_id: int) -> str:
+    """显示名：AI 伪装名 > 报名昵称 > QQ 号。"""
+    return game.ai_names.get(user_id) or game.signup_names.get(user_id) or str(user_id)
 
 
 def discard_game(game: Game) -> None:
@@ -249,5 +379,6 @@ async def stop_game(game: Game) -> None:
     game.worker = None
     if task is not None and not task.done():
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+        # wait() 不抛出被取消任务的 CancelledError（引擎 finally 里的
+        # 清理因此不会被打断），而外部对本协程的取消照常传播
+        await asyncio.wait([task])

@@ -36,3 +36,5 @@
 - 2026-08-12：完成 RPG 模组编辑器响应式 TUI 与引用字段智能下拉；布局按 60×24、80×30、96×36、140×44、240×80 自适应，时间线使用实际控件宽度；新增可搜索单值/多值实体引用、条件词条筛选、Ctrl+F 搜索定位和实体/嵌套条目深复制，未知引用保留为手动值。编辑器 pytest 60 项、Ruff、Pyright 均通过。
 - 2026-08-12：新增青春轻小说 RPG 模组《潮声停靠之前》；以 NPC 社交节点成败均写入的剧情 flag 累积「自己的声音」，真结局只判断汐见未央是否自主选择，不把上车规定为标准答案；场景推进同时使用已获线索驱动的 NPC 行程与钟点兜底，避免快慢团错过关键 NPC。编辑器 lint 现会把社交节点声明的 success_flags/failure_flags 识别为合法写入来源。模组校验零错误零警告，编辑器 pytest 67 项、RPG pytest 11 项、Ruff 与 Pyright 均通过。
 - 2026-08-12：诊断狼人杀 AI 玩家无法添加：当前 `main` 仅包含基础报名实现，缺少 `添加AI/移除AI` 命令、`PlayerState.is_ai` 与 AI 驱动器；相关功能位于未合并的 `feat/werewolf-ai` 分支提交链（29352b1 起）。
+- 2026-08-12：将 `feat/werewolf-ai` 合并到 `main`；保留主线当前 RPG/编辑器版本，合入狼人杀 AI 命令、驱动器、板子与状态支持及 `is_ai`/板子字段迁移，排除嵌套 worktree、`.vs` 状态、重复 RPG 迁移和顶层迁移副本。AI 变更 Ruff、Pyright、compileall 与 NoneBot 插件加载通过；RPG 核心 11 项、编辑器校验/YAML 33 项、响应式 16 项、应用冒烟 14 项、提醒 5 项通过，编辑器社交表单 1 项保留主线既有失败。
+- 2026-08-12：`yawn_bot` 私有仓库受当前 GitHub 计划限制无法直接启用 Pages；未公开整个项目，改将 `docs/yawnbot-architecture.html` 发布到现有公开 Pages 站点 `Wohaokunr/Wohaokunr.github.io`，页面地址为 `https://wohaokunr.github.io/yawnbot-architecture.html`，部署工作流验证成功。
