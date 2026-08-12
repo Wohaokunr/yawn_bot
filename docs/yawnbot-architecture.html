@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Wire — YawnBot Architecture</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@6/dist/echarts.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -11,20 +11,29 @@
   :root{--bg:#F0F0EE;--dark:#1C1C1A;--paper:#F0F0EE;--muted:#8F8E86;--faint:#55554F;
     --grid:#2E2D29;--grid-soft:#2A2925;--rule:#3F3E38}
   *{margin:0;padding:0;box-sizing:border-box}
+  html{background:var(--bg)}
   body{background:var(--bg);font-family:'Inter',sans-serif;padding:32px;
-    -webkit-font-smoothing:antialiased;display:flex;justify-content:center;color:var(--dark)}
+    -webkit-font-smoothing:antialiased;display:flex;justify-content:center;color:var(--dark);
+    min-height:100dvh;overflow-x:hidden}
   .card{background:var(--dark);color:var(--paper);border-radius:24px;padding:34px 34px 24px;
-    width:min(1480px,100%)}
+    width:min(1480px,100%);overflow:hidden}
   h1{font-weight:700;font-size:21px;letter-spacing:-.025em;margin-bottom:5px}
   .sub{font-size:12px;color:var(--muted);line-height:1.65;margin-bottom:12px}
   .src{font-size:9.5px;color:var(--faint);margin-top:12px;letter-spacing:.08em;font-weight:500}
-  #ch{height:min(78vh,900px);min-height:650px;cursor:grab}
+  #ch{height:min(78vh,900px);min-height:650px;max-height:900px;cursor:grab;
+    touch-action:none;overscroll-behavior:contain}
   #ch:active{cursor:grabbing}
   .toolbar{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:14px 0 4px}
   .toolbar-label{font-size:9px;letter-spacing:.11em;color:var(--faint);font-weight:700;margin-right:4px}
   .filter{border:0;border-radius:99px;padding:6px 11px;background:var(--grid-soft);color:var(--muted);
     font:600 10px 'Inter',sans-serif;letter-spacing:.04em;cursor:pointer;transition:background .2s,color .2s}
   .filter:hover,.filter.active{background:var(--paper);color:var(--dark)}
+  .filter:focus-visible,.chart-action:focus-visible{outline:2px solid #F5572F;outline-offset:2px}
+  .view-tools{display:flex;align-items:center;gap:7px;min-height:30px;margin:8px 0 2px;color:var(--muted)}
+  .chart-action{border:1px solid var(--rule);border-radius:8px;min-width:31px;height:29px;padding:0 8px;
+    background:transparent;color:var(--paper);font:700 13px 'Inter',sans-serif;cursor:pointer}
+  .chart-action:hover{background:var(--paper);color:var(--dark)}
+  .gesture-note{font-size:9px;color:var(--faint);letter-spacing:.02em;margin-left:4px}
   .reading{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:15px}
   .panel{background:var(--grid-soft);border-radius:16px;padding:16px 18px;color:var(--muted);font-size:11px;line-height:1.7}
   .panel h3{color:var(--paper);font-size:11px;font-weight:700;letter-spacing:.08em;margin-bottom:7px}
@@ -44,8 +53,22 @@
   summary{cursor:pointer;color:var(--faint);letter-spacing:.08em;font-weight:600}
   details strong{color:var(--paper)}
   @media (max-width:800px){
-    body{padding:12px}.card{padding:24px 18px 18px}h1{font-size:18px}
-    #ch{height:72vh;min-height:540px}.reading{grid-template-columns:1fr}
+    body{padding:max(8px,env(safe-area-inset-top)) max(8px,env(safe-area-inset-right))
+      max(8px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));align-items:stretch}
+    .card{width:100%;padding:22px 12px 14px;border-radius:18px}
+    h1{font-size:18px;line-height:1.35}.sub{font-size:11px;line-height:1.55}
+    .toolbar{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:3px;margin-right:-4px}
+    .toolbar::-webkit-scrollbar{display:none}.toolbar-label{flex:0 0 auto}
+    .filter{flex:0 0 auto;min-height:32px;padding:8px 12px}
+    .view-tools{flex-wrap:wrap;gap:6px;margin-top:8px}.chart-action{height:32px;min-width:34px}
+    .gesture-note{flex:1 1 180px;line-height:1.5}
+    #ch{height:68svh;min-height:430px;max-height:680px}
+    .reading{grid-template-columns:1fr;gap:10px}.panel{padding:13px 14px;font-size:10.5px}
+    #detail{min-height:160px}#detail .detail-files{font-size:9px}.src{font-size:8px;line-height:1.45}
+  }
+  @media (max-width:420px){
+    .card{padding-left:10px;padding-right:10px}h1{font-size:17px}.sub{font-size:10.5px}
+    #ch{height:64svh;min-height:400px}.reading{margin-top:10px}
   }
   @media (prefers-reduced-motion:reduce){
     .filter{transition:none}
@@ -54,10 +77,10 @@
 </head>
 <body>
 <main class="card">
-  <h1>一套共享核心，两个隔离的群聊游戏引擎</h1>
+  <h1>一套共享核心，两个群聊游戏引擎 + 一个模组编辑闭环</h1>
   <div class="sub">
     YawnBot 的当前工作区架构快照 · 节点 = 实际模块 / 外部边界 · 连线 = 导入关系或运行时数据流 · 节点大小 = 定性架构中心性 ·
-    拖拽查看局部结构，悬停聚焦邻接关系，点击节点查看职责与文件
+    电脑可拖拽与滚轮缩放，手机可单指拖动、双指缩放，点节点查看职责与文件
   </div>
   <div class="toolbar" aria-label="图层筛选">
     <span class="toolbar-label">FILTER LAYER</span>
@@ -68,6 +91,15 @@
     <button class="filter" data-filter="data">数据与迁移</button>
     <button class="filter" data-filter="rpg">yawn_rpg</button>
     <button class="filter" data-filter="werewolf">yawn_werewolf</button>
+    <button class="filter" data-filter="tooling">工具与验证</button>
+  </div>
+  <div class="view-tools" aria-label="图形视图控制">
+    <span class="toolbar-label">VIEW</span>
+    <button class="chart-action" data-action="zoom-out" aria-label="缩小图形" title="缩小">−</button>
+    <button class="chart-action" data-action="zoom-in" aria-label="放大图形" title="放大">＋</button>
+    <button class="chart-action" data-action="reset" aria-label="重置视图" title="重置视图">重置</button>
+    <button class="chart-action" data-action="fit" aria-label="适应屏幕" title="适应屏幕">适应屏幕</button>
+    <span class="gesture-note">拖动节点 / 空白区域 · 滚轮或双指缩放 · 点击节点阅读详情</span>
   </div>
   <div id="ch" aria-label="YawnBot interactive architecture graph"></div>
 
@@ -81,6 +113,7 @@
         <span class="legend-item"><i class="swatch" style="background:#4A4944"></i>数据与迁移</span>
         <span class="legend-item"><i class="swatch" style="background:#C0BFB7"></i>yawn_rpg</span>
         <span class="legend-item"><i class="swatch" style="background:#22211F"></i>yawn_werewolf</span>
+        <span class="legend-item"><i class="swatch" style="background:#DBDAD3"></i>工具与验证</span>
         <span class="legend-item"><i class="line-swatch"></i>运行时流</span>
         <span class="legend-item"><i class="line-swatch line-dash"></i>持久化 / 可选边</span>
         <span class="legend-item"><i class="line-swatch line-dot"></i>导入 / 依赖</span>
@@ -88,7 +121,7 @@
     </section>
     <section class="panel" id="detail" aria-live="polite">
       <div class="detail-title">点击一个节点开始阅读</div>
-      <div class="detail-meta">DEFAULT VIEW · SHARED CORE → OPTIONAL SUB-PLUGINS → PERSISTENCE / AI</div>
+      <div class="detail-meta">DEFAULT VIEW · SHARED CORE → OPTIONAL SUB-PLUGINS → DATA / AI / TOOLING</div>
       <div class="detail-body">建议先看 <strong>yawn_core</strong>、<strong>rpg_engine</strong> 和 <strong>ww_engine</strong>，再用图层筛选查看具体模块。</div>
     </section>
   </div>
@@ -101,7 +134,7 @@
       <br><strong>淘汰 L2 Dot Cascade：</strong>它编码的是可数单位的排名，不适合表达导入与运行时流。
       <br><strong>淘汰 L4 Arc Matrix：</strong>它适合小规模“分类 × 分类 + 量”的矩阵，本项目关系不是规则矩阵。
       <br><strong>数据口径：</strong>节点和主链路来自当前工作区的 Python、YAML、迁移和配置文件；边分为导入、运行时流、持久化、可选加载四类，不把未来规划当成现状。
-      <br><strong>维护提示：</strong>RPG 处理器当前大量使用 <code>require_feature("rpg")</code>，而 <code>permission.py</code> 的现有 <code>FEATURE_REGISTRY</code> 文本未列出 <code>rpg</code>，该边界值得单独复核。
+      <br><strong>更新口径：</strong>当前快照已纳入定时提醒、RPG《潮声停靠之前》、Textual 模组编辑器、狼人杀四种板子与 AI 玩家；编辑器只写 YAML，运行时仍由 yawn_rpg 引擎单写裁决。
     </div>
   </details>
   <div class="src">FORCE GRAPH · B2 / BIG-FORCE · WIRE EDITORIAL RED · PROJECT ARCHITECTURE · WORKSPACE SNAPSHOT 2026-08-12</div>
@@ -192,6 +225,7 @@ const LAYERS = [
   {key: 'bootstrap', name: '启动与装配', shade: '#6A6963'},
   {key: 'core', name: 'yawn_core 通用能力', shade: '#F5572F'},
   {key: 'data', name: '数据与迁移', shade: '#4A4944'},
+  {key: 'tooling', name: '工具与验证', shade: '#DBDAD3'},
   {key: 'rpg', name: 'yawn_rpg 跑团', shade: '#C0BFB7'},
   {key: 'werewolf', name: 'yawn_werewolf 狼人杀', shade: '#22211F'},
 ];
@@ -232,6 +266,7 @@ const NODES = [
   N('core_panel', 'panel.py', 'core', '管理面板：群 / 用户功能开关、用户与群信息、对话历史查看和删除。', ['src/plugins/yawn_core/panel.py'], 48, ['管理', '查询']),
   N('core_checkin', 'checkin.py', 'core', '签到命令与每日唯一约束；更新签到汇总、记录奖励并受 checkin 功能开关保护。', ['src/plugins/yawn_core/checkin.py'], 44, ['功能', '签到']),
   N('core_friend', 'friend_approve.py', 'core', '好友申请记录、待审批查询、同意 / 拒绝和 OneBot 回执。', ['src/plugins/yawn_core/friend_approve.py'], 32, ['功能', '好友申请']),
+  N('core_reminder', 'reminder.py', 'core', '群聊 / 私聊定时提醒：持久化 Cron 配置，启动时恢复全局 scheduler，发送时通过 OneBot Bot API 重新加载数据并安全复制消息段。', ['src/plugins/yawn_core/reminder.py', 'src/plugins/yawn_core/data_models/scheduled_reminder.py'], 58, ['功能', '调度'], true),
   N('core_ai_chat', 'ai_chat.py', 'core', '私聊 AI 对话：/对话 开关、会话创建、历史加载、流式输出、软删除和 idle 退出。', ['src/plugins/yawn_core/ai_chat.py'], 72, ['AI', '私聊'], true),
   N('core_chat_state', 'chat_state.py', 'core', '每用户 asyncio.Queue + worker；串行化 AI 调用，10 分钟空闲自动退出，worker 使用独立 DB session。', ['src/plugins/yawn_core/chat_state.py'], 55, ['AI', '队列']),
   N('core_reply_chain', 'reply_chain.py', 'core', '通过 OneBot get_msg 解析 QQ 回复引用链，压缩成可注入 AI prompt 的上下文。', ['src/plugins/yawn_core/reply_chain.py'], 35, ['AI', '上下文']),
@@ -246,17 +281,22 @@ const NODES = [
   N('core_migrations', 'yawn_core migrations', 'data', '正本在 data/nonebot_plugin_orm/migrations/yawn_core；src/plugins 下迁移是副本，勿直接编辑。', ['data/nonebot_plugin_orm/migrations/yawn_core', 'src/plugins/yawn_core/migrations'], 34, ['迁移', 'yawn_core bind']),
   N('rpg_models', 'RPGGame / RPGPlayer', 'data', 'RPG 两张汇总表：对局基本信息、结局倾向、玩家起止 HP/SAN、生存和倒地状态，bind_key=yawn_rpg。', ['src/plugins/yawn_core/yawn_rpg/models.py'], 48, ['yawn_rpg bind', 'ORM'], true),
   N('rpg_migrations', 'yawn_rpg migrations', 'data', 'RPGGame / RPGPlayer 的 Alembic 正本；当前长局详细行动仍主要保存在内存状态。', ['data/nonebot_plugin_orm/migrations/d853bca98b7f_rpg.py', 'migrations/versions/d853bca98b7f_rpg.py'], 34, ['迁移', 'yawn_rpg bind']),
-  N('ww_models', 'WerewolfGame / WerewolfPlayer', 'data', '狼人杀对局与玩家汇总表，记录获胜阵营、角色、座位、死亡原因等，bind_key=yawn_werewolf。', ['src/plugins/yawn_core/yawn_werewolf/models.py'], 42, ['yawn_werewolf bind', 'ORM']),
-  N('ww_migrations', 'yawn_werewolf migrations', 'data', '狼人杀游戏表和玩家表的 Alembic 正本；迁移副本位于子插件目录。', ['data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf', 'src/plugins/yawn_core/yawn_werewolf/migrations'], 30, ['迁移', 'yawn_werewolf bind']),
+  N('ww_models', 'WerewolfGame / WerewolfPlayer', 'data', '狼人杀对局与玩家汇总表，记录板子、获胜阵营、角色、座位、真人 / AI 标记和死亡原因，bind_key=yawn_werewolf。', ['src/plugins/yawn_core/yawn_werewolf/models.py'], 48, ['yawn_werewolf bind', 'ORM']),
+  N('ww_migrations', 'yawn_werewolf migrations', 'data', '狼人杀表结构的 Alembic 正本；包含 board 列与玩家 is_ai 列迁移，副本位于子插件目录。', ['data/nonebot_plugin_orm/migrations/33d3f5e9af32_werewolf_game_board_column.py', 'data/nonebot_plugin_orm/migrations/cc9ace87b0ea_add_is_ai_to_werewolf_player.py', 'src/plugins/yawn_core/yawn_werewolf/migrations'], 36, ['迁移', 'yawn_werewolf bind']),
+
+  // 工具与验证
+  N('rpg_editor', 'Textual RPG module editor', 'tooling', '面向模组作者的响应式终端编辑器：覆盖模组、场景、NPC 社交、怪物、线索、结局、事件、YAML 与报告页；按真实终端宽高切换布局。', ['tools/rpg_module_editor/app.py', 'tools/rpg_module_editor/app.tcss'], 62, ['工具', '响应式'], true),
+  N('rpg_editor_rules', 'editor schema / lint', 'tooling', '编辑器复用运行时 schema 与 modules_dir；结构校验、引用诊断、社交 flag、行程和结局规则只读检查，不改变 YAML 运行时接口。', ['tools/rpg_module_editor/schema_loader.py', 'tools/rpg_module_editor/validate.py', 'tools/rpg_module_editor/lint.py'], 52, ['工具', '校验']),
+  N('rpg_editor_tests', 'editor regression tests', 'tooling', '覆盖 YAML 往返、社交表单、引用下拉、窄屏 / 短屏响应式布局、应用冒烟和排序边界。', ['tools/rpg_module_editor/tests'], 30, ['验证', 'TUI']),
 
   // yawn_rpg
   N('rpg_pkg', 'yawn_rpg/__init__.py', 'rpg', '可选 RPG 子插件入口：声明 CoC 7 元数据、注册 commands / models，并把命令清单交给父插件帮助面板。', ['src/plugins/yawn_core/yawn_rpg/__init__.py'], 54, ['插件入口', 'RPG'], true),
   N('rpg_commands', 'rpg/commands.py', 'rpg', '群命令、群自由文本 SAY、建卡私聊监听；只做轻量校验并通过 submit_action() 入队，不直接写局内状态。', ['src/plugins/yawn_core/yawn_rpg/commands.py'], 72, ['输入', 'RPG'], true),
   N('rpg_action', 'Action queue / submit_action()', 'rpg', 'state.py 中的唯一入队入口：容量、单用户配额、SAY 合并、action_id 去重、阶段 / 场景快照和消费后 release。', ['src/plugins/yawn_core/yawn_rpg/state.py'], 74, ['队列', '背压'], true),
-  N('rpg_state', 'RPG Game / PlayerState', 'rpg', '单群单局内存状态：SIGNUP → CHAR_CREATE → PLAY → ENDED；引擎独占 phase、场景、线索、HP/SAN、时钟与 flags 写入。', ['src/plugins/yawn_core/yawn_rpg/state.py'], 82, ['状态机', '单写'], true),
+  N('rpg_state', 'RPG Game / PlayerState', 'rpg', '单群单局内存状态：SIGNUP → CHAR_CREATE → PLAY → ENDED；引擎独占 phase、场景、线索、HP/SAN、时钟、社交关系与 flags 写入。', ['src/plugins/yawn_core/yawn_rpg/state.py'], 82, ['状态机', '单写'], true),
   N('rpg_engine', 'rpg/engine.py', 'rpg', '每局一个 asyncio task 的单写引擎：消费动作、推进场景与时钟、执行工具、处理 NPC / 怪物、结局安全网并持久化摘要。', ['src/plugins/yawn_core/yawn_rpg/engine.py'], 92, ['核心引擎', '单写'], true),
-  N('rpg_schema', 'module_schema.py', 'rpg', 'Pydantic 模组模型、YAML loader、条件表达式求值、NPC 行程 / 在场解析和加载期校验。', ['src/plugins/yawn_core/yawn_rpg/module_schema.py'], 70, ['规则', '模组'], true),
-  N('rpg_module', 'modules/*.yaml', 'rpg', '剧本数据边界：雨夜旧宅定义场景、出口、检定点、NPC、怪物、线索、事件与结局。', ['src/plugins/yawn_core/yawn_rpg/modules/yuzhai_old_house.yaml', 'src/plugins/yawn_core/yawn_rpg/modules/README.md'], 43, ['内容', 'YAML']),
+  N('rpg_schema', 'module_schema.py', 'rpg', 'Pydantic 模组模型、YAML loader、条件表达式求值、NPC 行程 / 在场解析、团队检定、社交节点和加载期校验。', ['src/plugins/yawn_core/yawn_rpg/module_schema.py'], 74, ['规则', '模组'], true),
+  N('rpg_module', 'modules/*.yaml', 'rpg', '剧本数据边界：包含《雨夜旧宅》和《潮声停靠之前》，覆盖场景图、团队 / 个人检定、NPC 社交、行程、线索、事件、时钟与多种结局。', ['src/plugins/yawn_core/yawn_rpg/modules/yuzhai_old_house.yaml', 'src/plugins/yawn_core/yawn_rpg/modules/before_tide_departs.yaml', 'src/plugins/yawn_core/yawn_rpg/modules/README.md'], 52, ['内容', 'YAML']),
   N('rpg_dsl', 'dsl.py', 'rpg', '建卡期私聊文本 → Action 的解析器；保持独立，不反向导入 commands / engine，避免循环依赖。', ['src/plugins/yawn_core/yawn_rpg/dsl.py'], 30, ['解析', '建卡']),
   N('rpg_charsheet', 'charsheet.py', 'rpg', 'CoC 7 人物卡：属性、派生值、技能表、系统掷卡和玩家加减点 / 重置校验。', ['src/plugins/yawn_core/yawn_rpg/charsheet.py'], 42, ['规则', '人物卡']),
   N('rpg_dice', 'dice.py', 'rpg', '所有数值的唯一来源：d100 检定分级和骰表达式求值；引擎不信任 AI 传入的数字。', ['src/plugins/yawn_core/yawn_rpg/dice.py'], 52, ['规则', '确定性裁决']),
@@ -268,10 +308,12 @@ const NODES = [
 
   // yawn_werewolf
   N('ww_pkg', 'yawn_werewolf/__init__.py', 'werewolf', '可选狼人杀子插件入口：声明元数据、导入 commands / models，并由父插件隔离加载。', ['src/plugins/yawn_core/yawn_werewolf/__init__.py'], 45, ['插件入口', '狼人杀'], true),
-  N('ww_commands', 'werewolf/commands.py', 'werewolf', '群报名 / 开局 / 投票和私聊行动监听；经 require_feature("werewolf") 后只校验并投入行动队列。', ['src/plugins/yawn_core/yawn_werewolf/commands.py'], 58, ['输入', '狼人杀'], true),
-  N('ww_state', 'werewolf/state.py', 'werewolf', '狼人杀 Game、PlayerState、Phase、Action 和注册表；引擎任务独占状态变更。', ['src/plugins/yawn_core/yawn_werewolf/state.py'], 55, ['状态机', '单写']),
+  N('ww_commands', 'werewolf/commands.py', 'werewolf', '群报名 / 开局 / 投票和私聊行动监听；支持 /板子、/添加AI、/移除AI；经 require_feature("werewolf") 后只校验并投入行动队列。', ['src/plugins/yawn_core/yawn_werewolf/commands.py'], 64, ['输入', '狼人杀'], true),
+  N('ww_state', 'werewolf/state.py', 'werewolf', '狼人杀 Game、PlayerState、Phase、Action 和注册表；携带 board、AI 合成 UID、当前发言者与投票信号，引擎任务独占状态变更。', ['src/plugins/yawn_core/yawn_werewolf/state.py'], 62, ['状态机', '单写']),
   N('ww_engine', 'werewolf/engine.py', 'werewolf', '每局一个 asyncio task：夜晚角色行动、白天发言 / 竞选 / 投票、禁言控场、超时托管和结局持久化。', ['src/plugins/yawn_core/yawn_werewolf/engine.py'], 76, ['核心引擎', '狼人杀'], true),
-  N('ww_roles', 'werewolf/roles.py', 'werewolf', '角色、阵营、死亡原因、角色牌和牌堆构造。', ['src/plugins/yawn_core/yawn_werewolf/roles.py'], 30, ['规则']),
+  N('ww_roles', 'werewolf/roles.py', 'werewolf', '角色、阵营、死亡原因、角色牌和牌堆构造；四种板子覆盖预女猎白 9–12 人、混血儿、禁言长老与禁票长老变种。', ['src/plugins/yawn_core/yawn_werewolf/roles.py'], 48, ['规则', '板子']),
+  N('ww_dsl', 'werewolf/dsl.py', 'werewolf', '解析 AI / 玩家私聊行动文本为统一 Action；目标、数字和安全默认值在进入引擎前收敛。', ['src/plugins/yawn_core/yawn_werewolf/dsl.py'], 38, ['解析', '行动']),
+  N('ww_ai_player', 'werewolf/ai_player.py', 'werewolf', '每局独立 AI 玩家驱动：消费引擎只读钩子、维护公共 / 私聊上下文、调用共享 complete()，解析后把人类与 AI 相同的 Action 投入队列；失败降级为安全默认行动。', ['src/plugins/yawn_core/yawn_werewolf/ai_player.py'], 70, ['AI', '行动队列'], true),
   N('ww_api', 'werewolf/api.py', 'werewolf', '安全群消息、私聊、禁言 / 解禁和管理员判断封装。', ['src/plugins/yawn_core/yawn_werewolf/api.py'], 40, ['出站', 'QQ']),
   N('ww_config', 'werewolf/config.py', 'werewolf', '狼人杀玩家人数、阶段超时、AI / 禁言行为等配置。', ['src/plugins/yawn_core/yawn_werewolf/config.py'], 24, ['配置']),
 ];
@@ -290,6 +332,7 @@ const LINKS = [
   E('pyproject', 'localstore', 'optional', '第三方插件声明'),
   E('pyproject', 'alconna', 'optional', '第三方插件声明'),
   E('pyproject', 'htmlkit', 'optional', '第三方插件声明'),
+  E('pyproject', 'rpg_editor', 'config', 'Textual 编辑器工具依赖'),
   E('plugin_discovery', 'core_init', 'flow', '发现 yawn_core'),
   E('nonebot', 'core_init', 'import', '加载插件包'),
   E('core_init', 'startup_wal', 'flow', 'on_startup'),
@@ -305,6 +348,7 @@ const LINKS = [
   E('core_init', 'core_panel', 'import'),
   E('core_init', 'core_checkin', 'import'),
   E('core_init', 'core_friend', 'import'),
+  E('core_init', 'core_reminder', 'import'),
   E('core_init', 'core_ai_chat', 'import'),
   E('data_registry', 'identity_models', 'import'),
   E('data_registry', 'permission_models', 'import'),
@@ -320,6 +364,7 @@ const LINKS = [
   E('onebot', 'core_ai_chat', 'flow', '私聊 / 对话'),
   E('onebot', 'core_checkin', 'flow', '签到命令'),
   E('onebot', 'core_friend', 'flow', '好友请求'),
+  E('onebot', 'core_reminder', 'flow', '提醒发送 / 查询'),
   E('onebot', 'core_panel', 'flow', '管理命令'),
   E('onebot', 'core_help', 'flow', '/help'),
   E('core_presence', 'identity_models', 'persist', 'upsert 用户 / 群 / 成员'),
@@ -337,6 +382,11 @@ const LINKS = [
   E('core_checkin', 'checkin_models', 'persist', '每日记录与汇总'),
   E('core_friend', 'misc_models', 'persist', '好友申请状态'),
   E('core_friend', 'onebot', 'flow', '同意 / 拒绝'),
+  E('core_reminder', 'core_permission', 'guard', 'require_feature(reminder)'),
+  E('core_reminder', 'identity_models', 'import', '群 / 用户边界'),
+  E('core_reminder', 'misc_models', 'persist', 'ScheduledReminder'),
+  E('core_reminder', 'apscheduler', 'flow', '全局 scheduler / Cron'),
+  E('core_reminder', 'onebot', 'flow', 'Bot API 发送消息段'),
   E('core_migrations', 'orm', 'persist', 'Alembic bind'),
   E('identity_models', 'orm', 'persist', 'yawn_core bind'),
   E('permission_models', 'orm', 'persist', 'yawn_core bind'),
@@ -359,6 +409,15 @@ const LINKS = [
   E('core_reply_chain', 'onebot', 'flow', 'get_msg / reply quote'),
   E('core_llm', 'llm_remote', 'flow', 'OpenAI-compatible API'),
   E('env', 'core_llm', 'config', 'ai_api_key / base_url / model'),
+
+  // 模组编辑器与验证闭环
+  E('rpg_editor', 'rpg_editor_rules', 'flow', '编辑器表单 / YAML 报告'),
+  E('rpg_editor', 'rpg_module', 'flow', '读取 / 保存 YAML 模组'),
+  E('rpg_editor_rules', 'rpg_schema', 'import', '复用运行时 ModuleDef'),
+  E('rpg_editor_rules', 'rpg_module', 'import', '模块引用与规则诊断'),
+  E('rpg_editor_tests', 'rpg_editor', 'flow', '应用冒烟 / 响应式回归'),
+  E('rpg_editor_tests', 'rpg_editor_rules', 'flow', '校验 / lint 回归'),
+  E('rpg_editor_tests', 'rpg_module', 'flow', '真实 YAML 往返'),
 
   // RPG 装配与输入边界
   E('rpg_pkg', 'rpg_commands', 'import'),
@@ -416,13 +475,21 @@ const LINKS = [
   E('ww_commands', 'ww_state', 'flow', '提交行动 / 查询对局'),
   E('ww_commands', 'ww_engine', 'flow', '启动 run_game'),
   E('ww_commands', 'ww_roles', 'import', '角色参数'),
+  E('ww_commands', 'ww_dsl', 'import', '解析私聊行动'),
   E('ww_commands', 'ww_api', 'flow', '管理员 / 私聊边界'),
   E('ww_engine', 'ww_state', 'flow', '引擎独占状态变更'),
   E('ww_engine', 'ww_roles', 'import', '角色牌 / 阵营 / 胜负'),
+  E('ww_engine', 'ww_ai_player', 'flow', '引擎钩子 / AI driver 生命周期'),
   E('ww_engine', 'ww_api', 'flow', '群播 / 私聊 / 禁言'),
   E('ww_engine', 'ww_models', 'persist', '开局 / 结局摘要'),
   E('ww_engine', 'ww_config', 'config', '阶段超时与玩法'),
   E('ww_state', 'ww_engine', 'flow', 'Action queue consumed'),
+  E('ww_dsl', 'ww_state', 'import', 'Action / ActionKind'),
+  E('ww_ai_player', 'ww_dsl', 'import', 'AI 文本 → Action'),
+  E('ww_ai_player', 'ww_state', 'flow', '人类 / AI 共用行动队列'),
+  E('ww_ai_player', 'core_llm', 'flow', '共享 complete()'),
+  E('ww_ai_player', 'ww_roles', 'import', '板子 / 角色上下文'),
+  E('ww_ai_player', 'ww_api', 'flow', 'AI 代发群消息'),
   E('ww_api', 'onebot', 'flow', 'safe_group_msg / ban / DM'),
   E('ww_config', 'env', 'config', '狼人杀配置'),
   E('ww_models', 'orm', 'persist', 'bind_key=yawn_werewolf'),
@@ -460,15 +527,17 @@ function isVisible(node) { return currentFilter === 'all' || node.layer === curr
 function graphNode(node, index) {
   const visible = isVisible(node);
   const layer = layerFor(node);
+  const compact = window.innerWidth <= 520;
   const baseSize = node.score >= 70 ? 13 : node.score >= 50 ? 9 : 5;
+  const labelVisible = visible && (node.showLabel || node.score >= 78) && (!compact || node.showLabel || node.score >= 84);
   return {
     id: node.id, name: node.name, value: node.score, category: LAYER_INDEX[node.layer],
     layer: node.layer, detail: node.detail, files: node.files, tags: node.tags,
-    symbolSize: node.score >= 70 ? 16 + Math.sqrt(node.score) * 1.5 : baseSize + Math.sqrt(node.score) * 1.05,
+    symbolSize: (node.score >= 70 ? 16 + Math.sqrt(node.score) * 1.5 : baseSize + Math.sqrt(node.score) * 1.05) * (compact ? .88 : 1),
     x: 260 + (MONO.rnd(index + 3, 17) - .5) * 900,
     y: 260 + (MONO.rnd(index + 11, 29) - .5) * 520,
     itemStyle: {color: layer.shade, borderColor: MONO.DARK.bg, borderWidth: node.score >= 70 ? 1.6 : .4, opacity: visible ? 1 : .08},
-    label: {show: visible && (node.showLabel || node.score >= 78), color: MONO.DARK.ink, fontFamily: 'Inter', fontSize: node.score >= 70 ? 9.5 : 8, fontWeight: node.score >= 70 ? 800 : 600, formatter: node.name},
+    label: {show: labelVisible, color: MONO.DARK.ink, fontFamily: 'Inter', fontSize: compact ? (node.score >= 70 ? 8.5 : 7.5) : (node.score >= 70 ? 9.5 : 8), fontWeight: node.score >= 70 ? 800 : 600, formatter: compact && node.name.length > 15 ? `${node.name.slice(0, 14)}…` : node.name},
     emphasis: {itemStyle: {opacity: 1, borderColor: MONO.DARK.ink, borderWidth: 2}, label: {show: true, color: MONO.DARK.ink, fontWeight: 800}},
   };
 }
@@ -506,8 +575,8 @@ function renderDetail(id) {
   const rels = connected(id);
   const outgoing = rels.outgoing.slice(0, 9).map(item => `${item.node.name}（${relationLabel(item.link.type)}）`).join('、') || '无';
   const incoming = rels.incoming.slice(0, 9).map(item => `${item.node.name}（${relationLabel(item.link.type)}）`).join('、') || '无';
-  const warning = id === 'rpg_commands'
-    ? '<div class="detail-warning">维护提示：该节点的处理器使用 require_feature("rpg")；当前 permission.py 的 FEATURE_REGISTRY 文本未列出 rpg。</div>'
+  const warning = id === 'rpg_editor'
+    ? '<div class="detail-warning">编辑边界：编辑器复用运行时 schema 做诊断，但保存仍保留 YAML 的数据格式；真正的局内写入继续由 RPG 引擎单独完成。</div>'
     : '';
   detailEl.innerHTML = `
     <div class="detail-title">${escapeHtml(node.name)}</div>
@@ -520,6 +589,7 @@ function renderDetail(id) {
 }
 
 function graphOption() {
+  const compact = window.innerWidth <= 520;
   const data = NODES.map(graphNode);
   const links = LINKS.map(graphLink);
   return {
@@ -530,13 +600,15 @@ function graphOption() {
     legend: [],
     series: [{
       type: 'graph', layout: 'force', initLayout: 'circular', roam: true, draggable: true,
+      scaleLimit: {min: .42, max: 3.4},
       left: 6, right: 6, top: 6, bottom: 6,
       data, links, categories: LAYERS.map(layer => ({name: layer.name})),
-      force: {repulsion: 95, edgeLength: [32, 104], gravity: .095, friction: .22, layoutAnimation: !prefersReducedMotion},
+      force: {repulsion: compact ? 128 : 95, edgeLength: compact ? [30, 70] : [32, 104], gravity: compact ? .035 : .095, friction: .22, layoutAnimation: !prefersReducedMotion},
       edgeSymbol: ['none', 'arrow'], edgeSymbolSize: [0, 4],
       emphasis: {focus: 'adjacency', lineStyle: {color: MONO.DARK.ink, opacity: .94, width: 1.65}, label: {show: true, color: MONO.DARK.ink}},
       blur: {itemStyle: {opacity: .08}, lineStyle: {opacity: .025}, label: {opacity: .08}},
       label: {position: 'right'},
+      labelLayout: {hideOverlap: compact},
     }],
   };
 }
@@ -548,6 +620,37 @@ function play() {
 }
 
 play();
+
+function resetView() {
+  graph.setOption({series: [{center: ['50%', '50%'], zoom: 1}]});
+  graph.resize();
+}
+
+function fitView() {
+  // 重新计算 force 布局，让旋转手机或筛选后的节点重新落入当前视口。
+  play();
+  graph.resize();
+}
+
+document.querySelectorAll('.chart-action').forEach(button => {
+  button.addEventListener('click', () => {
+    const action = button.dataset.action;
+    if (action === 'reset') {
+      resetView();
+    } else if (action === 'fit') {
+      fitView();
+    } else {
+      graph.dispatchAction({
+        type: 'graphRoam',
+        seriesIndex: 0,
+        zoom: action === 'zoom-in' ? 1.2 : .84,
+        originX: graphEl.clientWidth / 2,
+        originY: graphEl.clientHeight / 2,
+      });
+    }
+  });
+});
+
 graph.on('click', params => {
   if (params.dataType === 'node') {
     selectedId = params.data.id;
@@ -559,6 +662,10 @@ graph.on('click', params => {
 });
 graph.getZr().on('click', event => { if (!event.target) { selectedId = null; play(); } });
 window.addEventListener('resize', () => graph.resize());
+if (typeof ResizeObserver !== 'undefined') {
+  const graphResizeObserver = new ResizeObserver(() => graph.resize());
+  graphResizeObserver.observe(graphEl);
+}
 
 document.querySelectorAll('.filter').forEach(button => {
   button.addEventListener('click', () => {
