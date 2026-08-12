@@ -9,6 +9,7 @@ from . import (
     panel,
     permission,
     presence,
+    reminder,
 )
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "panel",
     "permission",
     "presence",
+    "reminder",
 ]
 
 
@@ -39,7 +41,7 @@ async def _enable_sqlite_wal() -> None:
                     cursor.close()
 
                 logger.debug("SQLite WAL 模式已启用")
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("启用 SQLite WAL 模式失败，使用默认配置")
 
 
@@ -49,17 +51,19 @@ def _load_sub_plugins() -> None:
 
     import nonebot
 
-    if not (Path(__file__).parent / "yawn_werewolf").is_dir():
-        return
-    try:
-        # 用 __name__ 推导模块路径：nonebot 以 CWD 相对路径注册插件
-        # （如 src.plugins.yawn_core），硬编码包名会找不到模块
-        plugin = nonebot.load_plugin(f"{__name__}.yawn_werewolf")
-    except Exception:  # noqa: BLE001
-        logger.warning("狼人杀子插件加载失败，已跳过")
-        return
-    if plugin is None:
-        logger.warning("狼人杀子插件未能注册，已跳过")
+    # 用 __name__ 推导模块路径：nonebot 以 CWD 相对路径注册插件
+    # （如 src.plugins.yawn_core），硬编码包名会找不到模块。
+    # 子插件逐个隔离加载，某个目录缺失或导入失败不能阻断其他玩法。
+    for dirname, label in (("yawn_werewolf", "狼人杀"), ("yawn_rpg", "跑团")):
+        if not (Path(__file__).parent / dirname).is_dir():
+            continue
+        try:
+            plugin = nonebot.load_plugin(f"{__name__}.{dirname}")
+        except Exception:  # noqa: BLE001
+            logger.warning(f"{label}子插件加载失败，已跳过", exc_info=True)
+            continue
+        if plugin is None:
+            logger.warning(f"{label}子插件未能注册，已跳过")
 
 
 _load_sub_plugins()

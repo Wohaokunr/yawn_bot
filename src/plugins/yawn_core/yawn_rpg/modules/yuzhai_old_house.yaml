@@ -134,6 +134,60 @@ npcs:
     secrets:
       - 你其实知道地下室里有一只食尸鬼，这三个月一直是你在偷偷喂它，因为它身上戴着少爷的长命锁。
     fallback_line: ……老了，记不清了。
+    initial_rapport: 0
+    initial_attitude: -5
+    facts:
+      - id: butler_feeding_truth
+        name: 夜间守秘
+        text: 周伯承认，自己一直在夜里给地下室里的东西喂食，因为那东西还戴着少爷的长命锁。
+    social_nodes:
+      - id: butler_feeding
+        name: 追问夜间动静
+        goal: 让周伯说明自己为何总在夜里守着地下室
+        strategies:
+          - skill: persuade
+            name: 温和劝说
+            difficulty: regular
+          - skill: fast_talk
+            name: 顺势套话
+            difficulty: hard
+          - skill: intimidate
+            name: 直接施压
+            difficulty: regular
+            success_rapport_delta: 8
+            success_attitude_delta: 2
+            failure_rapport_delta: -10
+            failure_attitude_delta: -5
+        min_rapport: -20
+        min_attitude: -30
+        max_attempts: 3
+        success_rapport_delta: 18
+        success_attitude_delta: 4
+        failure_rapport_delta: -5
+        failure_attitude_delta: -2
+        success_text: 周伯攥紧油灯，终于承认自己一直在替沈家守着一个不能见光的秘密。
+        failure_text: 周伯脸色发白，只反复说着「别问了，求求你们别问了」。
+        unlock_facts: [butler_feeding_truth]
+        success_flags: [butler_feeding_revealed]
+      - id: butler_lock_truth
+        name: 追问长命锁
+        goal: 让周伯说明地下室里的东西为何认得少爷的长命锁
+        requires_facts: [butler_feeding_truth]
+        strategies:
+          - skill: persuade
+            name: 继续劝说
+            difficulty: hard
+          - skill: fast_talk
+            name: 抓住破绽追问
+            difficulty: regular
+          - skill: intimidate
+            name: 逼问真相
+            difficulty: extreme
+        min_rapport: 10
+        min_attitude: -10
+        success_text: 周伯低声说，那枚长命锁是少爷留下的，地下室里的东西始终把它当作主人的气味。
+        failure_text: 周伯闭上眼睛，像是再也不愿回忆那枚长命锁的来历。
+        success_flags: [butler_lock_explained]
     # 行程（声明序=匹配优先级；时段为 [from, to) 半开区间，支持跨午夜）
     schedule:
       - from: "21:00"
@@ -172,6 +226,36 @@ npcs:
       - 沈家失踪那晚下着大雨，你看见老爷书房的灯亮到天明，却没听见一点人声。
     secrets: []
     fallback_line: 这个我也不太清楚……
+    initial_rapport: 5
+    initial_attitude: 0
+    facts:
+      - id: neighbor_red_lamp
+        name: 红色灯影
+        text: 林女士承认，失踪那晚书房的灯光曾短暂变成血红色，随后窗内传来三下敲击声。
+    social_nodes:
+      - id: neighbor_witness
+        name: 询问失踪当晚
+        goal: 让林女士讲清失踪当晚书房附近出现的异常
+        strategies:
+          - skill: persuade
+            name: 耐心安抚
+            difficulty: regular
+          - skill: fast_talk
+            name: 轻松套话
+            difficulty: hard
+          - skill: intimidate
+            name: 强硬逼问
+            difficulty: extreme
+        min_rapport: -10
+        min_attitude: -20
+        success_rapport_delta: 12
+        success_attitude_delta: 3
+        failure_rapport_delta: -6
+        failure_attitude_delta: -3
+        success_text: 林女士咽了口唾沫，终于把那晚不敢说出口的细节告诉了你们。
+        failure_text: 林女士连连摇头，说自己什么也没看见，只想赶紧离开这里。
+        unlock_facts: [neighbor_red_lamp]
+        success_flags: [neighbor_witness_revealed]
     schedule:
       # 调查员的暴力行为会把她立刻吓跑（首条优先；from==to 为全天窗口，flag 条件示范）
       - from: "00:00"

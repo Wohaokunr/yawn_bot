@@ -101,12 +101,16 @@ AI 模式下它只是给 KP 的**建议**（是否检定由 KP 决定）；AI �
 
 | 字段 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `id` / `name` | ✔ | — | id 唯一；name 用于播报与 `/对话`、`/攻击` 的名称子串查找 |
+| `id` / `name` | ✔ | — | id 唯一；name 用于播报、自然语言路由与 `/攻击` 的名称子串查找 |
 | `public_desc` | ✔ | — | 公开形象。进 KP 概览与每回合场景块——只写安全信息 |
 | `persona` | ✔ | — | 人格。进 KP 概览（压缩一行）+ NPC 对白智能体（全文） |
 | `knows` | | `[]` | 可在对话中自然说出的信息。进 KP 概览 + NPC 智能体 |
 | `secrets` | | `[]` | 机密。**唯一入口是该 NPC 自己的对白智能体提示词**（附「绝不主动透露」指令），KP 概览永不可见。加载期校验：任何 secret 不得是 persona / public_desc / 任一 knows / 任一行程 activity 的子串（正是会进概览的字段），违者拒载 |
-| `fallback_line` | | `""` | AI 关闭/失败时 `/对话` 与 `speak_as_npc` 的罐头回复 |
+| `fallback_line` | | `""` | AI 关闭/失败时自然语言 NPC 对话与 `speak_as_npc` 的罐头回复 |
+| `initial_rapport` | | `0` | 对单个调查员的初始好感，范围 `-100~100` |
+| `initial_attitude` | | `0` | 对全队共享的初始公共态度，范围 `-100~100` |
+| `facts` | | `[]` | 只能由社交节点解锁的个人情报；正文只私聊发现者 |
+| `social_nodes` | | `[]` | 可由自然语言路由触发的社交诉求与确定性检定规则 |
 | `schedule` | | `[]` | 行程表，见下 |
 | `hp` | | `10` | 生命值（可被 `/攻击`，镜像怪物战斗） |
 | `attack_skill` | | `40` | 反击命中率（d100 百分制） |
@@ -118,6 +122,72 @@ AI 模式下它只是给 KP 的**建议**（是否检定由 KP 决定）；AI �
 
 **击杀 NPC 的硬性后果**（作者只能知情、无法配置）：记 `murder` +
 `npc_dead:<id>` flag → 触发通用逮捕结局；在场存活 NPC 立即反击。
+
+### facts 与 social_nodes（NPC 社交）
+
+群内自然语言是 NPC 对话的唯一入口。系统先用轻量路由器判断这是普通
+`kp_say`、`npc_talk` 还是 `social_action`；路由失败、置信度不足或 AI
+关闭时，只按消息中的 NPC 名称/id，或该玩家最近交互的 NPC 做确定性兜底。
+普通 NPC 对话不掷骰；命中社交节点后，才由引擎按节点声明调用确定性技能检定。
+
+NPC 的关系有两层：`rapport` 是「NPC 对当前玩家」的个人好感，
+`attitude` 是「NPC 对全队」的公共态度。两者都限制在 `-100~100`，玩家
+只看到「敌对 / 警惕 / 中立 / 友善 / 信任」分段，不显示裸数值。每个 NPC
+的公开上下文独立保存最近六轮，其他 NPC 的对话不会串入；`secrets` 和
+未公开 `facts.text` 也不会进入群聊、KP 提示词或其他 NPC 上下文。
+
+`NPCFact` 的正文是私人信息，只会通过私聊发给解锁者；玩家可用
+`/分享情报 NPC名 情报名` 经行动队列公开。`private_clues` 复用个人线索
+归属机制，`public_clues` 直接全队播报。节点文案中的成功/失败目标必须是
+安全的公开反应，不能把私人情报正文写进 `goal`、`success_text` 或
+`failure_text`。
+
+最小示例：
+
+```yaml
+facts:
+  - id: hidden_fact
+    name: 夜间守秘
+    text: NPC 私下告诉当前玩家的完整情报。
+social_nodes:
+  - id: ask_secret
+    name: 追问夜间动静
+    goal: 让 NPC 说明自己为何在夜里守着旧宅
+    requires_facts: []
+    strategies:
+      - skill: persuade
+        name: 温和劝说
+        difficulty: regular
+      - skill: fast_talk
+        name: 顺势套话
+        difficulty: hard
+      - skill: intimidate
+        name: 直接施压
+        difficulty: extreme
+    min_rapport: -20
+    min_attitude: -20
+    max_attempts: 3
+    retry_rapport_penalty: 2
+    retry_attitude_penalty: 1
+    success_rapport_delta: 15
+    success_attitude_delta: 4
+    failure_rapport_delta: -5
+    failure_attitude_delta: -2
+    success_text: NPC 在众人面前松口了。
+    failure_text: NPC 变得更加警惕。
+    unlock_facts: [hidden_fact]
+    private_clues: []
+    public_clues: []
+    success_flags: [npc_opened_up]
+    failure_flags: []
+```
+
+`SocialStrategy` 可以覆盖节点的成功/失败关系变化和文案；省略时继承
+节点默认值。失败重试会额外扣除
+`retry_rapport_penalty * (attempt - 1)` 与
+`retry_attitude_penalty * (attempt - 1)`，超过 `max_attempts` 后不再检定。
+普通礼貌、共情、道歉等情绪只产生很小的关系微调，并按每 NPC 每探索轮
+的上限累计；社交节点的重大变化不受该微调上限影响。
 
 ### schedule（行程条目）
 

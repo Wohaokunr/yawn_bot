@@ -1,4 +1,4 @@
-# ruff: noqa: C901, E501, PLR0912, PLR0915, PLR2004, SIM103
+# ruff: noqa: C901, E501, PLR0912, PLR0913, PLR0915, PLR0917, PLR2004, SIM103
 """跑团游戏引擎：每局一个 asyncio 任务。
 
 引擎独占所有状态变更与群播报；命令处理器只做校验，
@@ -26,7 +26,7 @@ from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
 from ..llm import complete, complete_with_tools  # noqa: TID252
-from . import ai_kp, ai_npc, api
+from . import ai_kp, ai_npc, ai_social, api
 from .charsheet import (
     CharacterSheet,
     damage_bonus,
@@ -52,6 +52,8 @@ from .module_schema import (
     CheckDifficulty,
     CheckMode,
     Ending,
+    SocialNode,
+    SocialStrategy,
     evaluate_condition,
     list_modules,
     load_modules,
@@ -132,6 +134,223 @@ def _scan_offense(text: str) -> Optional[str]:
     if any(kw in lowered for kw in _DESTROY_KW):
         return "destroy"
     return None
+
+
+_NPC_ROUTE_NAMES = frozenset({"npc_talk", "social_action"})
+_ROUTER_CONFIDENCE_MIN = 0.70
+
+
+def _current_npc(game: Game, npc_id: str) -> Optional[tuple[NPC, str]]:
+    """只从当前场景的存活 NPC 中解析目标。"""
+    if game.current_scene is None:
+        return None
+    return next(
+        ((npc, activity) for npc, activity in game.npcs_in_scene(game.current_scene) if npc.id == npc_id),
+        None,
+    )
+
+
+def _deterministic_npc_target(
+    game: Game,
+    user_id: int,
+    text: str,
+) -> Optional[str]:
+    """AI 不可用时按 NPC 名称/id/当前焦点兜底解析。"""
+    if game.current_scene is None:
+        return None
+    present = game.npcs_in_scene(game.current_scene)
+    lowered = text.casefold()
+    explicit = [
+        npc
+        for npc, _ in present
+        if npc.id.casefold() in lowered or npc.name.casefold() in lowered
+    ]
+    if explicit:
+        explicit.sort(key=lambda npc: max(len(npc.id), len(npc.name)), reverse=True)
+        return explicit[0].id
+    focus = game.npc_focus.get(user_id)
+    if focus and any(npc.id == focus for npc, _ in present):
+        return focus
+    return None
+
+
+def _infer_social_skill(text: str) -> Optional[str]:
+    """确定性模式下识别最明确的社交策略。"""
+    lowered = text.casefold()
+    if any(token in lowered for token in ("恐吓", "威胁", "吓唬", "intimidate")):
+        return "intimidate"
+    if any(token in lowered for token in ("话术", "忽悠", "欺骗", "骗", "fast_talk")):
+        return "fast_talk"
+    if any(token in lowered for token in ("说服", "劝", "请求", "persuade")):
+        return "persuade"
+    return None
+
+
+def _infer_emotion(text: str) -> Optional[str]:
+    """AI 不可用时识别少量明确情绪词，避免普通关系微调完全失效。"""
+    lowered = text.casefold()
+    if any(token in lowered for token in ("对不起", "抱歉", "道歉", "sorry")):
+        return "apology"
+    if any(token in lowered for token in ("理解你", "谢谢", "感谢", "辛苦", "thank")):
+        return "empathetic"
+    if any(token in lowered for token in ("威胁", "恐吓", "不然", "否则", "pressuring")):
+        return "pressuring"
+    if any(token in lowered for token in ("滚", "蠢", "废物", "侮辱", "insult")):
+        return "insulting"
+    if any(token in lowered for token in ("撒谎", "骗你", "骗人", "lie", "lying")):
+        return "lying"
+    return None
+
+
+async def _classify_say(  # noqa: PLR0911
+    game: Game,
+    cfg: Config,
+    action: Action,
+) -> None:
+    """给一条 SAY 写入受引擎信任边界保护的路由结果。"""
+    if action.route is not None:
+        return
+    text = (action.aux or "").strip()
+    route = None
+    if cfg.rpg_ai_enabled and text:
+        route = await ai_social.classify_message(
+            game,
+            cfg,
+            action.actor_user_id,
+            text,
+        )
+    if route is not None:
+        if route.confidence < _ROUTER_CONFIDENCE_MIN:
+            action.route = "kp_say"
+            return
+        if route.route == "kp_say":
+            action.route = "kp_say"
+            return
+        if route.npc_id is None or _current_npc(game, route.npc_id) is None:
+            action.route = "kp_say"
+            return
+        action.target_id = route.npc_id
+        action.emotion = route.emotion
+        action.emotion_confidence = route.emotion_confidence
+        if route.route == "social_action":
+            npc = game.module.npc(route.npc_id) if game.module is not None else None
+            node = (
+                next(
+                    (item for item in npc.social_nodes if item.id == route.node_id),
+                    None,
+                )
+                if npc is not None and route.node_id
+                else None
+            )
+            if node is not None and route.skill and node.strategy(route.skill) is not None:
+                action.route = "social_action"
+                action.social_node_id = node.id
+                action.social_skill = route.skill
+                return
+            # 目标 NPC 合法但社交节点不合法：保留自然对话，不执行越界效果。
+            action.route = "npc_talk"
+            return
+        action.route = "npc_talk"
+        return
+
+    # AI 关闭或调用失败时，不凭空创造社交效果；仅做名称/焦点兜底。
+    target_id = _deterministic_npc_target(game, action.actor_user_id, text)
+    if target_id is None:
+        action.route = "kp_say"
+        return
+    action.route = "npc_talk"
+    action.target_id = target_id
+    action.emotion = _infer_emotion(text)
+    action.emotion_confidence = 1.0 if action.emotion is not None else 0.0
+    skill = _infer_social_skill(text)
+    if skill and game.module is not None:
+        npc = game.module.npc(target_id)
+        if npc is not None:
+            node = next(
+                (item for item in npc.social_nodes if item.strategy(skill) is not None),
+                None,
+            )
+            if node is not None:
+                action.route = "social_action"
+                action.social_node_id = node.id
+                action.social_skill = skill
+
+
+def _apply_relation_delta(
+    game: Game,
+    npc: NPC,
+    user_id: int,
+    rapport_delta: int,
+    attitude_delta: int,
+) -> tuple[str, str, bool]:
+    """应用一次关系变化，返回个人/公共新分段及公共分段是否变化。"""
+    rapport_map = game.npc_rapport.setdefault(npc.id, {})
+    rapport = game.npc_rapport_value(npc.id, user_id)
+    attitude = game.npc_attitude_value(npc.id)
+    old_attitude = attitude
+    rapport_map[user_id] = max(-100, min(100, rapport + rapport_delta))
+    game.npc_attitude[npc.id] = max(-100, min(100, attitude + attitude_delta))
+    return (
+        game.npc_rapport_band(npc.id, user_id),
+        game.npc_attitude_band(npc.id),
+        old_attitude != game.npc_attitude_value(npc.id),
+    )
+
+
+def _capped_delta(current: int, requested: int, cap: int) -> int:
+    """把普通情绪变化限制在本轮 [-cap, cap] 的累计预算内。"""
+    if requested > 0:
+        return min(requested, max(0, cap - current))
+    if requested < 0:
+        return max(requested, min(0, -cap - current))
+    return 0
+
+
+async def _apply_emotion(
+    game: Game,
+    cfg: Config,
+    npc: NPC,
+    user_id: int,
+    emotion: Optional[str],
+    confidence: float,
+) -> None:
+    """应用普通对话的可审计、小幅情绪变化。"""
+    if confidence < cfg.rpg_social_emotion_min_confidence:
+        return
+    if emotion in {"friendly", "empathetic", "apology"}:
+        requested_rapport = cfg.rpg_social_positive_rapport_delta
+        requested_attitude = cfg.rpg_social_positive_attitude_delta
+    elif emotion in {"insulting", "lying", "pressuring"}:
+        requested_rapport = cfg.rpg_social_negative_rapport_delta
+        requested_attitude = cfg.rpg_social_negative_attitude_delta
+    else:
+        return
+    rapport_key = (npc.id, user_id)
+    previous_rapport = game.npc_emotion_rapport_delta.get(rapport_key, 0)
+    previous_attitude = game.npc_emotion_attitude_delta.get(npc.id, 0)
+    rapport_delta = _capped_delta(
+        previous_rapport,
+        requested_rapport,
+        max(cfg.rpg_social_rapport_round_cap, 0),
+    )
+    attitude_delta = _capped_delta(
+        previous_attitude,
+        requested_attitude,
+        max(cfg.rpg_social_attitude_round_cap, 0),
+    )
+    if rapport_delta == 0 and attitude_delta == 0:
+        return
+    game.npc_emotion_rapport_delta[rapport_key] = previous_rapport + rapport_delta
+    game.npc_emotion_attitude_delta[npc.id] = previous_attitude + attitude_delta
+    _, attitude_band, public_changed = _apply_relation_delta(
+        game,
+        npc,
+        user_id,
+        rapport_delta,
+        attitude_delta,
+    )
+    if public_changed:
+        await _announce(game, f"{npc.name} 对调查员们的态度变为：{attitude_band}。")
 
 
 def _now_bj() -> datetime:
@@ -1291,24 +1510,34 @@ async def _absorb_action(
     if action.kind is not ActionKind.SAY or not action.aux:
         game.mid_turn_buffer.append(action)
         return
-    player = game.player_by_user(action.actor_user_id)
-    if player is not None and player.sheet is not None:
-        name = player.sheet.name
-    else:
-        name = str(action.actor_user_id)
-    text = action.aux.strip()
-    if len(text) > cfg.rpg_speech_truncate:
-        text = text[: cfg.rpg_speech_truncate] + "……"
-    if not text:
+    await _classify_say(game, cfg, action)
+    if action.route in _NPC_ROUTE_NAMES:
+        # NPC 发言不能塞进 KP 的合批文本；等当前 KP 旁白结束后，
+        # 由 _run_play 按原顺序作为独立主要行动处理。
+        game.mid_turn_buffer.append(action)
         return
-    game.group_log.append(f"【{name}】{text}")
-    offense = _scan_offense(text)
-    if offense is not None and offense not in offenses:
-        offenses.append(offense)
-        # 违规标记先于 tick（契约同 _handle_say）
-        raise_flag(game, offense)
-    await _tick_time(game, _time_cost(game, "say"))
-    interjections.append(f"{name}：{text}")
+    try:
+        player = game.player_by_user(action.actor_user_id)
+        if player is not None and player.sheet is not None:
+            name = player.sheet.name
+        else:
+            name = str(action.actor_user_id)
+        text = action.aux.strip()
+        if len(text) > cfg.rpg_speech_truncate:
+            text = text[: cfg.rpg_speech_truncate] + "……"
+        if not text:
+            return
+        game.group_log.append(f"【{name}】{text}")
+        offense = _scan_offense(text)
+        if offense is not None and offense not in offenses:
+            offenses.append(offense)
+            # 违规标记先于 tick（契约同 _handle_say）
+            raise_flag(game, offense)
+        await _tick_time(game, _time_cost(game, "say"))
+        interjections.append(f"{name}：{text}")
+    finally:
+        # 这类 SAY 已经被 KP 回合消费，不会再回到 _run_play；及时释放配额。
+        release_action(game, action)
 
 
 async def _pump_mid_turn(
@@ -1766,8 +1995,10 @@ async def _tool_speak_as_npc(  # noqa: PLR0911
         )
     if not line:
         line = npc.fallback_line or "（对方似乎不想多说。）"
-    # _announce 已记入群聊记录，无需重复 append
-    await _announce(game, f"【{npc.name}】{ai_npc.sanitize_npc_line(line)}")
+    clean_line = ai_npc.sanitize_npc_line(line)
+    # KP 工具只能产生公开台词；它不经过社交结算，也不修改关系。
+    game.append_npc_context(npc.id, f"NPC {npc.name}：{clean_line}")
+    await _announce(game, f"【{npc.name}】{clean_line}")
     return f"已以 {npc.name} 名义播报（台词由系统按其人格生成）。"
 
 
@@ -1875,7 +2106,9 @@ async def _world_reaction(game: Game, cfg: Config, offenses: list[str]) -> None:
         line = await ai_npc.generate_npc_line(game, cfg, npc, activity, directive)
     if not line:
         line = "住手！你们这是要干什么！来人啊！"
-    await _announce(game, f"【{npc.name}】{ai_npc.sanitize_npc_line(line)}")
+    clean_line = ai_npc.sanitize_npc_line(line)
+    game.append_npc_context(npc.id, f"NPC {npc.name}：{clean_line}")
+    await _announce(game, f"【{npc.name}】{clean_line}")
 
 
 async def _collect_say_batch(
@@ -1884,6 +2117,9 @@ async def _collect_say_batch(
     first: Action,
 ) -> list[Action]:
     """合批连续 SAY：合批窗口内的发言合并为一次 KP 调用。"""
+    await _classify_say(game, cfg, first)
+    if first.route in _NPC_ROUTE_NAMES:
+        return [first]
     batch = [first]
     deadline = _loop_time() + cfg.rpg_say_settle_window
     while len(batch) < cfg.rpg_kp_max_batch_lines:
@@ -1894,7 +2130,12 @@ async def _collect_say_batch(
         if action is None:
             continue
         if action.kind is ActionKind.SAY and action.aux:
-            batch.append(action)
+            await _classify_say(game, cfg, action)
+            if action.route == "kp_say":
+                batch.append(action)
+            else:
+                game.pending = action  # NPC 发言必须保持独立顺序
+                break
         else:
             game.pending = action  # 首个非 SAY 行动暂存，下轮处理
             break
@@ -1903,48 +2144,69 @@ async def _collect_say_batch(
 
 async def _handle_say(game: Game, cfg: Config, first: Action) -> None:
     """处理自由发言：合批 → 违规扫描 → 触发提示 → KP 智能体循环。"""
+    await _classify_say(game, cfg, first)
+    if first.route in _NPC_ROUTE_NAMES:
+        player = game.player_by_user(first.actor_user_id)
+        if player is not None and first.target_id is not None:
+            await _handle_npc_interaction(
+                game,
+                cfg,
+                player,
+                first.target_id,
+                first.aux or "",
+                route=first.route,
+                social_node_id=first.social_node_id,
+                social_skill=first.social_skill,
+                emotion=first.emotion,
+                emotion_confidence=first.emotion_confidence,
+            )
+            return
+        # 分类器不应产生无目标 NPC 路由；安全降级为 KP 普通发言。
+        first.route = "kp_say"
     batch = await _collect_say_batch(game, cfg, first)
-    lines: list[str] = []
-    hint = ""
-    offenses: list[str] = []
-    for action in batch:
-        player = game.player_by_user(action.actor_user_id)
-        if player is not None and player.sheet is not None:
-            name = player.sheet.name
-        else:
-            name = str(action.actor_user_id)
-        text = (action.aux or "").strip()
-        if len(text) > cfg.rpg_speech_truncate:
-            text = text[: cfg.rpg_speech_truncate] + "……"
-        if not text:
-            continue
-        game.group_log.append(f"【{name}】{text}")
-        lines.append(f"{name}：{text}")
-        if not hint:
-            hint = _trigger_hint(game, text)
-        offense = _scan_offense(text)
-        if offense is not None and offense not in offenses:
-            offenses.append(offense)
-    if not lines:
+    try:
+        lines: list[str] = []
+        hint = ""
+        offenses: list[str] = []
+        for action in batch:
+            player = game.player_by_user(action.actor_user_id)
+            if player is not None and player.sheet is not None:
+                name = player.sheet.name
+            else:
+                name = str(action.actor_user_id)
+            text = (action.aux or "").strip()
+            if len(text) > cfg.rpg_speech_truncate:
+                text = text[: cfg.rpg_speech_truncate] + "……"
+            if not text:
+                continue
+            game.group_log.append(f"【{name}】{text}")
+            lines.append(f"{name}：{text}")
+            if not hint:
+                hint = _trigger_hint(game, text)
+            offense = _scan_offense(text)
+            if offense is not None and offense not in offenses:
+                offenses.append(offense)
+        if not lines:
+            return
+        # 违规标记先于 tick 记录：flag 驱动的行程变化（如 NPC 吓跑）
+        # 能在本次 tick 的进出 diff 里立即体现
+        for category in offenses:
+            raise_flag(game, category)
+        # 每批发言整体消耗一次时间（在 KP 回合之前 tick，让局面反映最新时刻）
+        await _tick_time(game, _time_cost(game, "say"))
+        speaker = game.player_by_user(first.actor_user_id)
+        instruction = (
+            "调查员的发言如下：\n"
+            + "\n".join(lines)
+            + "\n请即兴续写氛围或 NPC 反应。"
+        )
+        # 违规世界反应走 NPC 智能体（AI 关为罐头），两路统一，先于 KP 旁白
+        if offenses:
+            await _world_reaction(game, cfg, offenses)
+        await run_kp_turn(game, cfg, speaker, instruction, hint=hint)
+    finally:
         for queued in batch[1:]:
             release_action(game, queued)
-        return
-    # 违规标记先于 tick 记录：flag 驱动的行程变化（如 NPC 吓跑）
-    # 能在本次 tick 的进出 diff 里立即体现
-    for category in offenses:
-        raise_flag(game, category)
-    # 每批发言整体消耗一次时间（在 KP 回合之前 tick，让局面反映最新时刻）
-    await _tick_time(game, _time_cost(game, "say"))
-    speaker = game.player_by_user(first.actor_user_id)
-    instruction = (
-        "调查员的发言如下：\n" + "\n".join(lines) + "\n请即兴续写氛围或 NPC 反应。"
-    )
-    # 违规世界反应走 NPC 智能体（AI 关为罐头），两路统一，先于 KP 旁白
-    if offenses:
-        await _world_reaction(game, cfg, offenses)
-    await run_kp_turn(game, cfg, speaker, instruction, hint=hint)
-    for queued in batch[1:]:
-        release_action(game, queued)
 
 
 async def _handle_explicit_check(game: Game, player: PlayerState, aux: str) -> None:
@@ -1975,60 +2237,234 @@ async def _handle_explicit_check(game: Game, player: PlayerState, aux: str) -> N
     await _tick_time(game, _time_cost(game, "check"))
 
 
+def _social_delta(
+    strategy: SocialStrategy,
+    node: SocialNode,
+    field: str,
+) -> int:
+    """读取策略覆写值，否则回退到节点默认值。"""
+    value = getattr(strategy, field)
+    return getattr(node, field) if value is None else value
+
+
+def _social_text(
+    strategy: SocialStrategy,
+    node: SocialNode,
+    field: str,
+) -> str:
+    """读取策略覆写文案，否则回退到节点文案。"""
+    value = getattr(strategy, field)
+    return getattr(node, field) if value is None else value
+
+
+async def _deliver_social_rewards(
+    game: Game,
+    player: PlayerState,
+    npc: NPC,
+    node: SocialNode,
+    *,
+    success: bool,
+) -> None:
+    """发放社交节点奖励；私人正文只进入私聊，不进入群聊或 NPC 上下文。"""
+    if game.module is None:
+        return
+    reward_key = (npc.id, player.user_id, node.id, success)
+    if reward_key in game.npc_social_rewards:
+        return
+    game.npc_social_rewards.add(reward_key)
+    if success:
+        fact_ids = game.npc_unlocked_facts.setdefault((npc.id, player.user_id), set())
+        new_facts = [
+            fact
+            for fact in npc.facts
+            if fact.id in node.unlock_facts and fact.id not in fact_ids
+        ]
+        fact_ids.update(fact.id for fact in new_facts)
+        if new_facts:
+            fact_text = "\n\n".join(
+                f"〔NPC 情报〕{fact.name}\n{fact.text}" for fact in new_facts
+            )
+            sent = await _dm(game, player, fact_text)
+            if not sent and game.bot is None:
+                await _announce(
+                    game,
+                    MessageSegment.at(player.user_id)
+                    + " 获得了 NPC 私人情报，但私聊发送失败，请加机器人为好友。",
+                )
+        for clue_id in node.private_clues:
+            await discover_clue(game, clue_id, owner=player)
+        for clue_id in node.public_clues:
+            if clue_id in game.public_clues:
+                continue
+            if clue_id in game.discovered_clues:
+                clue = game.module.clue(clue_id)
+                if clue is not None:
+                    game.public_clues.add(clue_id)
+                    await _announce(game, f"〔线索〕{clue.name}\n{clue.text}")
+            else:
+                await discover_clue(game, clue_id)
+        for flag in node.success_flags:
+            raise_flag(game, flag)
+    else:
+        for flag in node.failure_flags:
+            raise_flag(game, flag)
+
+
+async def _resolve_social_action(  # noqa: PLR0911
+    game: Game,
+    player: PlayerState,
+    npc: NPC,
+    node: SocialNode,
+    skill_key: str,
+) -> str:
+    """校验并结算一次模组声明的社交节点，返回给 NPC 的公开反应指令。"""
+    strategy = node.strategy(skill_key)
+    if strategy is None:
+        return "调查员的交涉方式不符合当前诉求；保持 NPC 的自然态度回应。"
+    if _player_skill(player, strategy.skill) is None:
+        return "调查员没有这项交涉技能；保持 NPC 的自然态度回应。"
+    unlocked = game.npc_unlocked_facts.get((npc.id, player.user_id), set())
+    unlocked = unlocked | game.npc_public_facts.get(npc.id, set())
+    if not set(node.requires_facts).issubset(unlocked):
+        await _announce(game, f"{npc.name} 似乎还不愿谈及这件事。")
+        return "调查员尚未掌握足够背景；不要透露隐藏情报，只按人格婉拒。"
+    rapport = game.npc_rapport_value(npc.id, player.user_id)
+    attitude = game.npc_attitude_value(npc.id)
+    if rapport < node.min_rapport or attitude < node.min_attitude:
+        await _announce(game, f"{npc.name} 对这个请求仍保持距离。")
+        return "调查员与 NPC 的关系尚未达到要求；不要透露隐藏情报，只按人格婉拒。"
+    key = (npc.id, player.user_id, node.id)
+    attempt = game.npc_social_attempts.get(key, 0)
+    if attempt >= node.max_attempts:
+        await _announce(game, f"{npc.name} 已经不愿再回应这件事了。")
+        return "这个社交诉求已经没有新的尝试机会；按 NPC 人格冷淡收束。"
+    attempt += 1
+    game.npc_social_attempts[key] = attempt
+    success = await do_skill_check(game, player, strategy.skill, strategy.difficulty)
+    if success is None:
+        return "系统无法完成这次社交检定；保持 NPC 的自然态度回应。"
+    if success:
+        rapport_delta = _social_delta(strategy, node, "success_rapport_delta")
+        attitude_delta = _social_delta(strategy, node, "success_attitude_delta")
+    else:
+        rapport_delta = _social_delta(strategy, node, "failure_rapport_delta")
+        attitude_delta = _social_delta(strategy, node, "failure_attitude_delta")
+        rapport_delta -= node.retry_rapport_penalty * (attempt - 1)
+        attitude_delta -= node.retry_attitude_penalty * (attempt - 1)
+    rapport_band, attitude_band, public_changed = _apply_relation_delta(
+        game,
+        npc,
+        player.user_id,
+        rapport_delta,
+        attitude_delta,
+    )
+    text_field = "success_text" if success else "failure_text"
+    fixed_text = _social_text(strategy, node, text_field)
+    if fixed_text:
+        await _announce(game, fixed_text)
+    await _deliver_social_rewards(game, player, npc, node, success=success)
+    if public_changed:
+        await _announce(game, f"{npc.name} 对调查员们的态度变为：{attitude_band}。")
+    await _dm(
+        game,
+        player,
+        f"〔社交反馈〕你与 {npc.name} 的关系：{rapport_band}。",
+    )
+    result = "成功" if success else "失败"
+    return (
+        f"调查员尝试以{strategy.name or strategy.skill}处理「{node.name}」，系统裁决：{result}。"
+        f"不要透露私人情报，只根据当前关系和 NPC 人格回应。"
+    )
+
+
+async def _handle_npc_interaction(
+    game: Game,
+    cfg: Config,
+    player: PlayerState,
+    npc_id: str,
+    text: str,
+    *,
+    route: str = "npc_talk",
+    social_node_id: Optional[str] = None,
+    social_skill: Optional[str] = None,
+    emotion: Optional[str] = None,
+    emotion_confidence: float = 0.0,
+) -> None:
+    """统一处理自然语言 NPC 对话、社交节点和 NPC 上下文写入。"""
+    found = _current_npc(game, npc_id)
+    if found is None or game.module is None:
+        if npc_id in game.dead_npcs and game.module is not None:
+            dead = game.module.npc(npc_id)
+            if dead is not None:
+                await _announce(game, f"……{dead.name} 已经死了。")
+                return
+        await _announce(game, "这个 NPC 不在当前场景里。")
+        return
+    npc, activity = found
+    text = text.strip()
+    if not text:
+        await _announce(game, "请直接说出你想对 NPC 说的话。")
+        return
+    if len(text) > cfg.rpg_speech_truncate:
+        text = text[: cfg.rpg_speech_truncate] + "……"
+    pname = player.sheet.name if player.sheet else str(player.seat)
+    game.npc_focus[player.user_id] = npc.id
+    game.group_log.append(f"【{pname}→{npc.name}】{text}")
+    game.append_npc_context(npc.id, f"玩家 {pname}：{text}")
+    await _tick_time(game, _time_cost(game, "talk"))
+    directive = f"调查员 {pname} 对你说：「{text}」"
+    if route == "social_action" and social_node_id and social_skill:
+        node = next(
+            (item for item in npc.social_nodes if item.id == social_node_id),
+            None,
+        )
+        if node is not None:
+            directive += "\n" + await _resolve_social_action(
+                game,
+                player,
+                npc,
+                node,
+                social_skill,
+            )
+    else:
+        await _apply_emotion(
+            game,
+            cfg,
+            npc,
+            player.user_id,
+            emotion,
+            emotion_confidence,
+        )
+    line = None
+    if cfg.rpg_ai_enabled:
+        line = await ai_npc.generate_npc_line(
+            game,
+            cfg,
+            npc,
+            activity,
+            directive,
+            player.user_id,
+        )
+    if not line:
+        line = npc.fallback_line or "（对方似乎不想多说。）"
+    clean_line = ai_npc.sanitize_npc_line(line)
+    game.append_npc_context(npc.id, f"NPC {npc.name}：{clean_line}")
+    await _announce(game, f"【{npc.name}】{clean_line}")
+
+
 async def _handle_talk_npc(
     game: Game,
     cfg: Config,
     player: PlayerState,
     aux: str,
 ) -> None:
-    """处理 /对话 NPC名 内容。"""
-    module = game.module
-    if module is None or game.current_scene is None:
-        return
-    scene = module.scene(game.current_scene)
-    if scene is None:
-        return
+    """兼容内部旧 Action 的 NPC 对话处理；玩家命令入口已移除。"""
     npc_name, _, text = aux.partition(" ")
-    npc_name = npc_name.strip()
-    text = text.strip()
-    if not npc_name or not text:
-        await _announce(game, "格式：/对话 NPC名 要说的话")
+    target_id = _deterministic_npc_target(game, player.user_id, npc_name)
+    if target_id is None:
+        await _announce(game, f"{npc_name or '这个 NPC'} 不在这个场景里。")
         return
-    npc = None
-    activity = ""
-    for cand, act in game.npcs_in_scene(game.current_scene):
-        if npc_name in cand.name:
-            npc = cand
-            activity = act
-            break
-    if npc is None:
-        # 区分"死了"与"不在场"：对尸体搭话也给明确回应
-        dead_match = next(
-            (
-                cand
-                for cand in (module.npc(nid) for nid in game.dead_npcs)
-                if cand is not None and npc_name in cand.name
-            ),
-            None,
-        )
-        if dead_match is not None:
-            await _announce(game, f"……{dead_match.name} 已经死了。")
-        else:
-            await _announce(game, f"{npc_name} 不在这个场景里。")
-        return
-    await _tick_time(game, _time_cost(game, "talk"))
-    pname = player.sheet.name if player.sheet else str(player.seat)
-    game.group_log.append(f"【{pname}→{npc.name}】{text}")
-    # NPC 对话绕开 KP（视角分离）：NPC 智能体按自己的提示词回应；
-    # AI 关或生成失败落 fallback_line
-    line = None
-    if cfg.rpg_ai_enabled:
-        line = await ai_npc.generate_npc_line(
-            game, cfg, npc, activity, f"调查员 {pname} 对你说：「{text}」"
-        )
-    if not line:
-        line = npc.fallback_line or "（对方似乎不想多说。）"
-    await _announce(game, f"【{npc.name}】{ai_npc.sanitize_npc_line(line)}")
+    await _handle_npc_interaction(game, cfg, player, target_id, text)
 
 
 async def _handle_wait(game: Game, minutes: int) -> None:
@@ -2043,6 +2479,8 @@ async def _handle_wait(game: Game, minutes: int) -> None:
 
 
 def _is_major_action(action: Action) -> bool:
+    if action.kind is ActionKind.SAY:
+        return action.route in _NPC_ROUTE_NAMES
     return action.kind in {
         ActionKind.CHECK,
         ActionKind.TALK_NPC,
@@ -2140,6 +2578,50 @@ async def _handle_share_clue(game: Game, player: PlayerState, aux: str) -> None:
     await _announce(game, f"〔线索分享〕{clue.name}\n{clue.text}")
 
 
+async def _handle_share_fact(game: Game, player: PlayerState, aux: str) -> None:
+    """公开当前玩家已从 NPC 获得的个人情报。"""
+    if game.module is None:
+        return
+    npc_text, sep, fact_text = aux.partition("|")
+    npc_needle = npc_text.strip()
+    fact_needle = fact_text.strip()
+    if not sep or not npc_needle or not fact_needle:
+        await _announce(game, "格式：/分享情报 NPC名 情报名")
+        return
+    npc = next(
+        (
+            item
+            for item in game.module.npcs
+            if item.id == npc_needle or npc_needle in item.name
+        ),
+        None,
+    )
+    if npc is None:
+        await _announce(game, f"没有找到 NPC「{npc_needle}」。")
+        return
+    owned = game.npc_unlocked_facts.get((npc.id, player.user_id), set())
+    fact = next(
+        (
+            item
+            for item in npc.facts
+            if item.id in owned
+            and (item.id == fact_needle or fact_needle in item.name)
+        ),
+        None,
+    )
+    if fact is None:
+        await _announce(game, MessageSegment.at(player.user_id) + " 你没有这条 NPC 情报。")
+        return
+    public = game.npc_public_facts.setdefault(npc.id, set())
+    if fact.id in public:
+        await _announce(game, f"这条关于 {npc.name} 的情报已经公开过了。")
+        return
+    public.add(fact.id)
+    # 公开后才允许正文进入该 NPC 的公开上下文。
+    game.append_npc_context(npc.id, f"〔公开情报〕{fact.name}：{fact.text}")
+    await _announce(game, f"〔情报分享〕{npc.name}：{fact.name}\n{fact.text}")
+
+
 def _start_combat(game: Game, cfg: Config) -> None:
     if game.combat_order:
         return
@@ -2220,6 +2702,18 @@ async def _process_action(
             # 播报；幸存的 NPC 立即确定性反击（镜像怪物行为）
             raise_flag(game, "assault")
             game.npc_hostile.add(target.id)
+            _, attitude_band, public_changed = _apply_relation_delta(
+                game,
+                target,
+                player.user_id,
+                -40,
+                -30,
+            )
+            if public_changed:
+                await _announce(
+                    game,
+                    f"{target.name} 对调查员们的态度变为：{attitude_band}。",
+                )
             await _tick_time(game, _time_cost(game, "attack"))
             await do_player_attack_npc(game, player, target)
             if target.id not in game.dead_npcs:
@@ -2236,6 +2730,8 @@ async def _process_action(
         await _handle_assist(game, player, action.aux or "")
     elif action.kind is ActionKind.SHARE_CLUE:
         await _handle_share_clue(game, player, action.aux or "")
+    elif action.kind is ActionKind.SHARE_FACT:
+        await _handle_share_fact(game, player, action.aux or "")
     elif action.kind is ActionKind.PASS_TURN:
         if game.combat_order:
             if game.combat_order[game.combat_index] != player.user_id:
@@ -2351,6 +2847,17 @@ async def _run_play(game: Game, cfg: Config) -> None:
                     MessageSegment.at(player.user_id) + " 你已失去行动能力，无法行动。",
                 )
                 continue
+            if action.kind is ActionKind.SAY:
+                await _classify_say(game, cfg, action)
+                # SAY 在分类前无法判断是否属于主要行动；分类后重新
+                # 检查 TTL，避免等待路由器期间放过过期 NPC 对话。
+                if _action_stale(game, cfg, action):
+                    await _announce(
+                        game,
+                        MessageSegment.at(player.user_id)
+                        + " 这条行动已过期，请按当前局面重新操作。",
+                    )
+                    continue
             if _is_major_action(action) and not game.combat_order:
                 if player.user_id in game.explore_acted:
                     await _announce(
@@ -2524,6 +3031,7 @@ async def run_game(game: Game) -> None:
         with contextlib.suppress(Exception):
             await _announce(game, "游戏引擎发生异常，本局已结束")
     finally:
+        game.release_unprocessed_actions()
         _enter_phase(game, Phase.ENDED)
         discard_game(game)
         logger.info(f"跑团群 {game.group_id} 引擎任务结束")

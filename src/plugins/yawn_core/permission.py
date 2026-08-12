@@ -34,6 +34,7 @@ FEATURE_REGISTRY: dict[str, str] = {
     "info": "个人信息",
     "ai_chat": "Yawn对话",
     "werewolf": "狼人杀",
+    "reminder": "定时提醒",
 }
 
 

@@ -2,7 +2,7 @@
 
 作为 yawn_core 的可选子插件加载（父插件不硬依赖本包）：
 群内 `/跑团` 开房选模组，人物卡系统生成、私聊微调，局内
-自由发言交给 KP 叙述；KP 通过 tool_call 驱动系统判定与
+自由发言由路由器分发给 KP 或 NPC 社交系统；KP 通过 tool_call 驱动系统判定与
 剧情分支，引擎验证并执行每一次工具调用（骰子与数值始终
 由系统掌控）。命令元数据由父插件 help_panel 扫描。
 """
@@ -16,7 +16,10 @@ from .config import Config
 __plugin_meta__ = PluginMetadata(
     name="跑团",
     description="CoC 7版群聊跑团：AI 主持人主持，按模组推进剧情",
-    usage="发送 /跑团 开房，/选择模组 N 选定剧本，/报名 加入，开局后私聊调整角色卡",
+    usage=(
+        "发送 /跑团 开房，/选择模组 N 选定剧本，/报名 加入；"
+        "开局后直接用自然语言行动或与 NPC 交谈，个人情报可用 /分享情报 公开"
+    ),
     config=Config,
     extra={
         "commands": [
@@ -93,14 +96,6 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
-                "name": "对话",
-                "aliases": ["询问"],
-                "description": "与在场 NPC 交谈（对话 NPC名 内容）",
-                "feature": "rpg",
-                "scope": "group",
-                "superuser": False,
-            },
-            {
                 "name": "攻击",
                 "aliases": ["打"],
                 "description": "攻击场景中的怪物或 NPC（攻击 目标名）",
@@ -152,6 +147,14 @@ __plugin_meta__ = PluginMetadata(
                 "name": "线索",
                 "aliases": ["已发现线索"],
                 "description": "列出已发现的线索",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "分享情报",
+                "aliases": ["公开情报"],
+                "description": "公开自己从 NPC 获得的个人情报",
                 "feature": "rpg",
                 "scope": "group",
                 "superuser": False,

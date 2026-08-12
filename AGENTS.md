@@ -14,6 +14,18 @@
 
 ## 任务完成记录
 
+- 2026-08-12：为 yawn_core 增加持久化定时提醒；调度必须使用 nonebot-plugin-apscheduler 的全局 scheduler，消息发送必须通过 OneBot V11 Bot API，重启时从 ORM 恢复启用任务。
+- 2026-08-12：定时提醒只持久化可复用的 OneBot 消息段，拒绝 reply、forward、node 等临时段；文本支持 {{倒计时:YYYY-MM-DD}}，新增提醒的 ORM 迁移必须由维护者手动生成并应用。
+- 2026-08-12：按维护者要求生成并应用定时提醒迁移 ea3af2a76220；因已有迁移存在多个 head，实际使用 uv run nb orm upgrade heads，数据库已创建 yawn_core_scheduledreminder。
+
 - 2026-08-12：已创建并推送 GitHub 私有仓库 `Wohaokunr/yawn_bot`；本地 Claude 临时工作树不纳入主仓库。
 - 2026-08-12：已隔离损坏的 SQLite 数据库并通过 `nb orm upgrade` 重建；SQLite 的 `-wal`、`-shm` 运行时文件已加入忽略规则，避免再次提交。
 - 2026-08-12：`yawn_rpg` 从 Git 提交 `13c4a22` 恢复到当前工作区；当前 `main` 分支不含该目录，恢复文件会先显示为未跟踪，确认内容后再由维护者决定是否加入主分支。
+- 2026-08-12：修复 `yawn_core` 子插件加载器，使狼人杀与 RPG 独立加载；恢复 RPG 依赖的共享 `llm.py`，并通过 NoneBot 按 `pyproject.toml` 的正式发现流程验证 RPG 已注册。
+- 2026-08-12：修复 RPG 命令成功入队时把空字符串传给 `NoneBot.finish()` 的问题；成功入队改为静默结束，避免 OneBot 报 `message must contain at least one sendable segment`，并保留拥塞、重复和过期行动的提示。
+- 2026-08-12：实现 NPC 自然语言社交系统：自然语言经 `ai_social` 路由到 KP、NPC 对话或社交节点；每个 NPC 隔离维护公开上下文、个人好感、公共态度、尝试次数与个人情报；社交节点使用确定性检定、关系门槛、递增重试惩罚、情报/线索/flag 奖励；移除 `/对话`、`/询问`，新增 `/分享情报`；补齐 NPC 生成失败、公开奖励和 KP 回合 SAY 配额释放兜底。RPG pytest 11 项、Ruff 与 Pyright 均通过，并同步允许项目已有的中文标点。
+- 2026-08-12：新增 `docs/yawnbot-architecture.html` 项目架构图；按 Lieflat B2 Force Graph 模板覆盖 NoneBot/OneBot、`yawn_core`、RPG、狼人杀、ORM/SQLite、LLM 与迁移链路，并完成 HTML 脚本语法、浏览器渲染和筛选/节点详情交互检查。
+- 2026-08-12：审查狼人杀子插件但未修改业务代码；确认死者在白天流程中会被重新解禁、狼人杀私聊监听与 Yawn 对话监听同优先级导致无斜杠行动可能被吞、引擎任务未首次运行或获取 Bot 失败时会残留幽灵房间，以及狼人杀与 RPG 可在同群并存并造成同名命令路由冲突。后续修复应优先补生命周期清理、私聊路由、死者禁言、跨玩法互斥和有界行动队列。
+- 2026-08-12：狼人杀业务源码（排除项目规定不编辑的重复迁移副本）通过 Ruff、Pyright 和 compileall；现有 pytest 9 项通过，但仓库没有狼人杀专属测试。狼人杀 ORM 表及迁移已在本地数据库中存在，重复迁移副本单独触发 Ruff 56 项格式/导入告警。
+- 2026-08-12：将架构图换为 Lieflat `porcelain` 青瓷蓝预设，统一更新暗卡背景、节点层次、连线、图例和 tooltip；已完成浏览器视觉与图层筛选检查。
+- 2026-08-12：按用户选择将架构图改为 Lieflat `wire` 编辑部红：保留黑灰暗卡结构，仅用荧光橙强调共享 `yawn_core` 层，其余层级保持灰阶。

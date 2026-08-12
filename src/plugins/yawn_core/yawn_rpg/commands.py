@@ -57,8 +57,13 @@ if TYPE_CHECKING:
 config = get_plugin_config(Config)
 
 
-def _submit(game: "Game", action: Action) -> str:
-    """命令层唯一入队入口；只反馈背压，业务裁决由引擎完成。"""
+def _submit(game: "Game", action: Action) -> str | None:
+    """命令层唯一入队入口；只反馈背压，业务裁决由引擎完成。
+
+    已入队不是需要发送给用户的消息；用 ``None`` 表示静默结束，
+    避免把空字符串交给 OneBot，导致 ``message must contain at least
+    one sendable segment``。
+    """
     result = submit_action(
         game,
         action,
@@ -66,8 +71,8 @@ def _submit(game: "Game", action: Action) -> str:
         user_pending_max=config.rpg_user_pending_max,
         user_say_pending_max=config.rpg_user_say_pending_max,
     )
-    messages = {
-        SubmitResult.ACCEPTED: "",
+    messages: dict[SubmitResult, str | None] = {
+        SubmitResult.ACCEPTED: None,
         SubmitResult.QUEUE_FULL: "当前行动过多，请稍后再试~",
         SubmitResult.USER_LIMIT: "你的待处理行动过多，请等待系统结算~",
         SubmitResult.DUPLICATE: "这条行动已经提交过了~",
@@ -120,18 +125,6 @@ def _rpg_game_in_group(event: MessageEvent) -> bool:
     if not isinstance(event, GroupMessageEvent):
         return False
     return get_game(int(event.group_id)) is not None
-
-
-def _rpg_game_in_play(event: MessageEvent) -> bool:
-    """规则：群消息 ∧ 跑团对局进行中（PLAY）。
-
-    /对话 与 ai_chat 的同名别名冲突（ai_chat 先注册），仅在对局
-    内接管，其余情况放行给 ai_chat。
-    """
-    if not isinstance(event, GroupMessageEvent):
-        return False
-    game = get_game(int(event.group_id))
-    return game is not None and game.phase is Phase.PLAY
 
 
 # ── 开房与报名 ────────────────────────────────────────────
@@ -379,35 +372,6 @@ async def handle_check(
     await check_cmd.finish(error)
 
 
-talk_cmd = on_command(
-    "对话",
-    aliases={"询问"},
-    rule=Rule(_rpg_game_in_play),
-    priority=4,  # 先于 ai_chat 的 /对话 别名；非对局期放行给 ai_chat
-    block=True,
-)
-
-
-@talk_cmd.handle()
-async def handle_talk(
-    event: GroupMessageEvent,
-    arg: Message = CommandArg(),
-    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
-) -> None:
-    """与在场 NPC 交谈：/对话 NPC名 要说的话。"""
-    game = get_game(int(event.group_id))
-    if game is None or game.phase is not Phase.PLAY:
-        await talk_cmd.finish("现在不在跑团进行中")
-    text = str(arg).strip()
-    if not text:
-        await talk_cmd.finish("格式：/对话 NPC名 要说的话")
-    error = _submit(
-        game,
-        _action(ActionKind.TALK_NPC, int(event.get_user_id()), game=game, aux=text),
-    )
-    await talk_cmd.finish(error)
-
-
 attack_cmd = on_command("攻击", aliases={"打"}, priority=5, block=True)
 
 
@@ -622,6 +586,34 @@ async def handle_share_clue(
     await share_clue_cmd.finish(error)
 
 
+share_fact_cmd = on_command("分享情报", aliases={"公开情报"}, priority=5, block=True)
+
+
+@share_fact_cmd.handle()
+async def handle_share_fact(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """将自己从 NPC 获得的个人情报公开给队伍。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await share_fact_cmd.finish("现在不在跑团进行中")
+    npc, sep, fact = str(arg).strip().partition(" ")
+    if not sep or not npc or not fact.strip():
+        await share_fact_cmd.finish("格式：/分享情报 NPC名 情报名")
+    error = _submit(
+        game,
+        _action(
+            ActionKind.SHARE_FACT,
+            int(event.get_user_id()),
+            game=game,
+            aux=f"{npc}|{fact.strip()}",
+        ),
+    )
+    await share_fact_cmd.finish(error)
+
+
 pass_turn_cmd = on_command("跳过", aliases={"结束行动"}, priority=5, block=True)
 
 
@@ -681,7 +673,7 @@ async def _is_char_create_dm(event: MessageEvent) -> bool:
 private_listener = on_message(
     rule=Rule(_is_char_create_dm),
     # 必须抢先于 ai_chat 的对话模式监听器（同 block=True、priority=0
-    # 但注册更早）：否则处于 /对话 模式的用户发来的建卡指令会被当成
+    # 但注册更早）：否则建卡期玩家的私聊指令会被当成
     # 闲聊吃掉，角色卡只能等超时自动确认。负优先级保证本监听器在
     # CHAR_CREATE 期先于一切私聊拦截器运行（规则已把范围收窄到
     # 建卡期在局玩家，不影响其余私聊）。
@@ -737,7 +729,7 @@ speech_listener = on_message(
 
 @speech_listener.handle()
 async def handle_game_speech(event: GroupMessageEvent) -> None:
-    """在局玩家的群自由发言 → SAY 行动（交给 KP 智能体循环）。"""
+    """在局玩家的群自由发言 → SAY 行动（交给 AI 路由器与引擎）。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         return

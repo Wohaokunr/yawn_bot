@@ -91,6 +91,22 @@ class Config(BaseModel):
     rpg_npc_max_tokens: int = 512
     # NPC 生成温度（对白多样性略高于叙述）
     rpg_npc_temperature: float = 0.9
-    # NPC 智能体的近期群聊窗口行数（小于 KP 的 rpg_max_context_lines，
-    # 控 NPC 提示词体积）
+    # 旧版 NPC 群聊窗口配置，保留字段以兼容环境变量；社交上下文改由
+    # rpg_npc_context_turns 按固定往返轮数控制，不再读取此字段。
     rpg_npc_context_lines: int = 8
+    # 自然语言 NPC 路由器
+    rpg_npc_router_timeout: float = 4.0
+    rpg_npc_router_max_tokens: int = 128
+    rpg_npc_router_temperature: float = 0.0
+    # 每个 NPC 的公开对话上下文窗口（轮数）
+    rpg_npc_context_turns: int = 6
+    # 普通情绪微调的最低置信度
+    rpg_social_emotion_min_confidence: float = 0.75
+    # 普通情绪微调：正向 / 负向的个人好感与公共态度变化
+    rpg_social_positive_rapport_delta: int = 2
+    rpg_social_positive_attitude_delta: int = 1
+    rpg_social_negative_rapport_delta: int = -3
+    rpg_social_negative_attitude_delta: int = -2
+    # 每个 NPC、每个探索轮的普通情绪微调绝对上限
+    rpg_social_rapport_round_cap: int = 6
+    rpg_social_attitude_round_cap: int = 4

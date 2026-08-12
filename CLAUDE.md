@@ -16,7 +16,9 @@ uv run ruff format src         # format (LF line endings, 88 cols)
 uv run pyright src             # type check (standard mode, python 3.9 target in config)
 ```
 
-There is no test suite.
+There is no project-wide test suite; `yawn_rpg` has focused tests under
+`src/plugins/yawn_core/yawn_rpg/tests/`. Run them with the project virtual
+environment when changing RPG behavior.
 
 ### Database migrations (nonebot-plugin-orm + Alembic)
 
