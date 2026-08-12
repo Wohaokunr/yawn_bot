@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from textual import events
+    from textual.screen import Screen
     from textual.timer import Timer
 
     from .tabs import EditorTab
@@ -116,6 +117,7 @@ class ModuleEditorApp(App):
             _TAB_REPORT: "校验",
         }
         self._layout_mode = "wide"
+        self._base_screen: Optional[Screen] = None
 
     # ── 生命周期 ──────────────────────────────────────────
 
@@ -138,6 +140,7 @@ class ModuleEditorApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._base_screen = self.screen
         self._load_initial()
         self.refresh_all()
         self._update_layout(self.size.width, self.size.height)
@@ -147,6 +150,10 @@ class ModuleEditorApp(App):
 
     def _update_layout(self, width: int, height: int) -> None:
         """按真实 viewport 切换 CSS 布局，兼容最大化与窄终端。"""
+        # Windows 终端最大化时可能先发一个 0×0 的过渡 resize；不要让这个
+        # 瞬时尺寸把主界面切到不可恢复的窄屏布局。
+        if width <= 0 or height <= 0:
+            return
         if width >= _WIDE_WIDTH:
             mode = "wide"
         elif width >= _COMPACT_WIDTH:
@@ -156,12 +163,13 @@ class ModuleEditorApp(App):
         if height < _SHORT_HEIGHT:
             mode += " short"
         self._layout_mode = mode
+        target = self._base_screen or self.screen
         try:
             for class_name in ("wide", "compact", "narrow", "short"):
-                self.screen.remove_class(class_name)
+                target.remove_class(class_name)
             for class_name in mode.split():
-                self.screen.add_class(class_name)
-            self.query_one("#-layout-status", Label).update(
+                target.add_class(class_name)
+            target.query_one("#-layout-status", Label).update(
                 f"{width}×{height} · {mode.replace(' ', ' / ')}"
             )
         except NoMatches:  # pragma: no cover - compose 尚未完成时的 resize

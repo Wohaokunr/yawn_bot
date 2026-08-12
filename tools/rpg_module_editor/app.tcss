@@ -10,6 +10,8 @@ Header {
 
 #editor-toolbar {
     height: 3;
+    width: 1fr;
+    min-width: 0;
     padding: 0 2;
     background: $surface;
     border-bottom: solid $panel;
@@ -39,13 +41,19 @@ Header {
 
 TabbedContent {
     height: 1fr;
+    width: 1fr;
+    min-width: 0;
 }
 
 TabPane {
+    width: 1fr;
+    min-width: 0;
     padding: 1 2;
 }
 
-EditorTab {
+.editor-tab {
+    width: 1fr;
+    min-width: 0;
     height: 1fr;
 }
 
@@ -66,88 +74,114 @@ Footer {
 }
 
 /* 视口响应式：宽屏扩展列表，窄屏改为单栏，短屏减少装饰占用。 */
-Screen.-wide TabPane {
+Screen.wide TabPane {
     padding: 1 3;
 }
 
-Screen.-wide EditorTab Vertical.-list-pane,
-Screen.-wide EditorTab Vertical.-list-box {
+Screen.wide .editor-tab .-list-pane,
+Screen.wide .editor-tab .-list-box {
     width: 28%;
     min-width: 28;
     max-width: 64;
 }
 
-Screen.-compact TabPane {
+Screen.compact TabPane {
     padding: 1 1;
 }
 
-Screen.-compact EditorTab Vertical.-list-pane,
-Screen.-compact EditorTab Vertical.-list-box {
+Screen.compact .editor-tab .-list-pane,
+Screen.compact .editor-tab .-list-box {
     width: 30%;
     min-width: 24;
     max-width: 36;
 }
 
-Screen.-narrow #editor-toolbar {
+Screen.narrow #editor-toolbar {
     padding: 0 1;
 }
 
-Screen.-narrow #editor-toolbar Button {
+Screen.narrow #editor-toolbar Button {
     min-width: 5;
     margin-right: 0;
 }
 
-Screen.-narrow #editor-toolbar .-toolbar-hint,
-Screen.-narrow #editor-toolbar .-toolbar-hint {
+Screen.narrow #editor-toolbar .-toolbar-hint {
     display: none;
 }
 
-Screen.-narrow TabPane {
+Screen.narrow TabPane {
     padding: 0 1;
 }
 
-Screen.-narrow EditorTab Horizontal.-master,
-Screen.-narrow EditorTab Horizontal.-subedit,
-Screen.-narrow SocialEditor .-split {
+Screen.narrow .editor-tab Horizontal.-master,
+Screen.narrow .editor-tab Horizontal.-subedit,
+Screen.narrow SocialEditor .-split {
     layout: vertical;
 }
 
-Screen.-narrow EditorTab Vertical.-list-pane,
-Screen.-narrow EditorTab Vertical.-form-pane,
-Screen.-narrow EditorTab Vertical.-list-box,
-Screen.-narrow SocialEditor .-list-box,
-Screen.-narrow SocialEditor .-detail-box {
+Screen.narrow .editor-tab .-list-pane,
+Screen.narrow .editor-tab .-form-pane,
+Screen.narrow .editor-tab .-list-box,
+Screen.narrow SocialEditor .-list-box,
+Screen.narrow SocialEditor .-detail-box {
     width: 1fr;
     min-width: 0;
 }
 
-Screen.-narrow EditorTab OptionList.-main-list {
+Screen.narrow .editor-tab OptionList.-main-list {
     height: 7;
 }
 
-Screen.-narrow ScenesTab Horizontal.-subedit {
-    height: auto;
+Screen.narrow ScenesTab Horizontal.-subedit {
+    height: 1fr;
+    min-height: 15;
 }
 
-Screen.-narrow ScenesTab OptionList.-sub-list {
+Screen.narrow ScenesTab .-scene-list-pane {
+    height: 9;
+    min-height: 8;
+    max-height: 10;
+}
+
+Screen.narrow ScenesTab .-scene-list-pane OptionList.-main-list {
+    height: 1fr;
+}
+
+Screen.narrow ScenesTab .-nested-list-pane {
+    height: 9;
+    min-height: 9;
+}
+
+Screen.narrow ScenesTab OptionList.-sub-list {
     width: 1fr;
     height: 7;
 }
 
-Screen.-narrow NpcsTab OptionList.-sub-list {
+Screen.narrow ScenesTab CheckForm,
+Screen.narrow ScenesTab ExitForm {
+    width: 1fr;
+    min-width: 0;
+    min-height: 12;
+}
+
+Screen.narrow ScenesTab Horizontal.-master {
+    overflow-y: auto;
+}
+
+Screen.narrow NpcsTab OptionList.-sub-list {
     height: 7;
 }
 
-Screen.-short #editor-toolbar {
+Screen.short #editor-toolbar {
     height: 2;
     padding: 0 1;
 }
 
-Screen.-short EditorTab Horizontal.-row,
-Screen.-short SocialEditor .-buttons {
+Screen.short .editor-tab Horizontal.-row,
+Screen.short SocialEditor .-buttons {
     height: 2;
 }
 
-Screen.-short LabeledTextArea TextArea {
+Screen.short LabeledTextArea TextArea {
     height: 4;
 }

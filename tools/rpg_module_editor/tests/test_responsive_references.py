@@ -26,6 +26,12 @@ from tools.rpg_module_editor.yaml_io import load_module_file
 
 _YUZHAI = modules_dir() / "yuzhai_old_house.yaml"
 _BASELINE_TIMELINE_WIDTH = 96
+_SCENE_NESTED_MIN_HEIGHT = 18
+_SCENE_PANE_MIN_HEIGHT = 14
+_SCENE_LIST_MIN_HEIGHT = 8
+_MAXIMIZED_TOOLBAR_MIN_WIDTH = 230
+_MAXIMIZED_TAB_MIN_WIDTH = 220
+_MAXIMIZED_TAB_MIN_HEIGHT = 65
 _LAYOUT_CASES = [
     ((60, 24), "narrow short"),
     ((80, 30), "narrow short"),
@@ -104,6 +110,73 @@ async def test_layout_modes_cover_small_and_maximized_viewports(
         status = app.query_one("#-layout-status")
         assert f"{size[0]}" in str(status.render())
         assert f"{size[1]}" in str(status.render())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [case[0] for case in _LAYOUT_CASES])
+async def test_scene_nested_panels_keep_a_usable_height_on_each_layout(
+    size: tuple[int, int],
+) -> None:
+    app = ModuleEditorApp(initial_path=_YUZHAI)
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-scenes"
+        await pilot.pause()
+
+        scenes = app._scenes_tab
+        nested = scenes.query_one(TabbedContent)
+        assert nested.size.height >= _SCENE_NESTED_MIN_HEIGHT
+        assert scenes.query_one(".-scene-form-pane").max_scroll_y >= 0
+
+        for pane_id in ("tab-checks", "tab-exits", "tab-presence"):
+            nested.active = pane_id
+            await pilot.pause()
+            pane = scenes.query_one(f"#{pane_id}")
+            assert pane.size.height >= _SCENE_PANE_MIN_HEIGHT
+
+        presence = scenes.query_one("#tab-presence .-presence-pane")
+        assert presence.size.height >= _SCENE_PANE_MIN_HEIGHT
+        assert scenes._npc_presence.size.height > 0
+        assert scenes._monster_presence.size.height > 0
+
+        if "narrow" in app._layout_mode:
+            master = scenes.query_one(".-master")
+            assert str(master.styles.layout) == "<vertical>"
+            assert (
+                scenes.query_one(".-scene-list-pane").size.height
+                >= _SCENE_LIST_MIN_HEIGHT
+            )
+            assert scenes.query_one(".-scene-form-pane").size.height > 0
+
+
+@pytest.mark.asyncio
+async def test_maximize_updates_the_base_screen_without_collapsing_the_editor() -> None:
+    app = ModuleEditorApp(initial_path=_YUZHAI)
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        app.action_new()
+        await pilot.pause()
+
+        await pilot.resize_terminal(240, 80)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._layout_mode == "wide"
+        assert app._base_screen is not None
+        assert "wide" in app._base_screen.classes
+
+        # 最大化期间即使有弹窗，尺寸状态也必须写回主 Screen；关闭弹窗后
+        # 工具栏和当前 Tab 不能只剩下一个居中的按钮。
+        app.pop_screen()
+        await pilot.pause()
+        toolbar = app.query_one("#editor-toolbar")
+        assert toolbar.size.width >= _MAXIMIZED_TOOLBAR_MIN_WIDTH
+        assert app._module_tab.size.width >= _MAXIMIZED_TAB_MIN_WIDTH
+        assert app._module_tab.size.height >= _MAXIMIZED_TAB_MIN_HEIGHT
+        assert all(
+            button.size.width > 0
+            for button in app.query("#editor-toolbar Button")
+        )
 
 
 @pytest.mark.asyncio
