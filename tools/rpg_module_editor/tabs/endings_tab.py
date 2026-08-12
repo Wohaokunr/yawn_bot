@@ -10,6 +10,7 @@ from textual.widgets.option_list import Option
 
 from ..state import (  # noqa: TID252
     build_condition_tokens,
+    duplicate_item,
     entity_label,
     get_list,
     new_ending_dict,
@@ -25,6 +26,8 @@ from ..widgets import (  # noqa: TID252
     LabeledTextArea,
 )
 from . import EditorTab
+
+_ENTITY_PATH_PARTS = 2
 
 _OUTCOME_OPTIONS = [
     ("好结局 good", "good"),
@@ -102,6 +105,7 @@ class EndingsTab(EditorTab):
                     yield Button("删除", variant="error", classes="-ending-del")
                     yield Button("上移=提权", classes="-ending-up")
                     yield Button("下移=降权", classes="-ending-down")
+                    yield Button("复制", classes="-ending-copy")
                 yield Label(_GENERIC_ENDINGS_NOTE, markup=True, classes="-note")
             with VerticalScroll(classes="-form-pane"):
                 yield Label(
@@ -125,6 +129,27 @@ class EndingsTab(EditorTab):
             return None
         ending = endings[self._ending_idx]
         return ending if isinstance(ending, dict) else None
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) >= _ENTITY_PATH_PARTS and path[0] == "endings":
+            self._ending_idx = int(path[1])
+            self._fill_form()
+
+    def duplicate_current(self) -> bool:
+        endings = self._endings()
+        new_idx = duplicate_item(
+            endings,
+            self._ending_idx,
+            id_scope={
+                str(item.get("id", "")) for item in endings if isinstance(item, dict)
+            },
+        )
+        if new_idx is None:
+            return False
+        self._ending_idx = new_idx
+        self.editor.refresh_all()
+        self.editor.on_data_changed()
+        return True
 
     def _tokens(self) -> list[tuple[str, str]]:
         return build_condition_tokens(self.editor.draft.data)
@@ -217,6 +242,8 @@ class EndingsTab(EditorTab):
             move(self._ending_idx, 1)
             self.refresh_tab(data)
             self.editor.on_data_changed()
+        elif "-ending-copy" in classes:
+            self.duplicate_current()
 
     def _confirm_delete(self, ending: dict[str, Any]) -> None:
         def _delete(confirmed: Optional[bool]) -> None:  # noqa: FBT001

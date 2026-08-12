@@ -11,11 +11,11 @@ import re
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, cast
 
 from rich.markup import escape
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch
+from textual.widgets import Button, Input, Label, OptionList, Static, Switch
 from textual.widgets import TextArea as _TextArea
 from textual.widgets.option_list import Option
 
@@ -262,7 +262,12 @@ class LabeledSwitch(Widget):
 
 
 class LabeledSelect(Widget):
-    """下拉选择；外部值（如 difficulty 自由文本）以「自定义：X」项保留。"""
+    """可搜索下拉选择；外部值以「自定义」项保留。
+
+    Textual 自带 ``Select`` 适合短的固定枚举，但实体引用通常有几十个
+    候选。这里统一用输入框 + 候选列表实现可搜索组合框，同时保留手动
+    输入路径，兼容先写引用、后创建实体的模组创作流程。
+    """
 
     DEFAULT_CSS = """
     LabeledSelect {
@@ -270,6 +275,12 @@ class LabeledSelect(Widget):
         height: auto;
         margin-bottom: 1;
         Label { height: 1; color: $text-muted; }
+        Horizontal { height: auto; }
+        Input { width: 1fr; }
+        Button { margin-left: 1; min-width: 4; }
+        OptionList.-options { height: 6; display: none; border: tall $primary; }
+        LabeledSelect.-open OptionList.-options { display: block; }
+        Label.-foreign { height: 1; color: $warning; }
     }
     """
 
@@ -292,15 +303,22 @@ class LabeledSelect(Widget):
 
     def compose(self) -> Any:
         yield Label(self._label_markup, markup=True)
-        options = self._with_foreign(self._options, self._initial)
-        if self._initial is None:
-            yield Select(options, allow_blank=self._allow_blank)
-        else:
-            yield Select(options, allow_blank=self._allow_blank, value=self._initial)
+        with Horizontal():
+            yield Input(
+                value="" if self._initial is None else str(self._initial),
+                classes="-input",
+            )
+            yield Button("▾", classes="-toggle")
+        yield OptionList(classes="-options")
+        yield Label("", classes="-foreign")
 
     @property
-    def select(self) -> Select:
-        return self.query_one(Select)
+    def input(self) -> Input:
+        return self.query_one(".-input", Input)
+
+    @property
+    def options_view(self) -> OptionList:
+        return self.query_one(".-options", OptionList)
 
     @staticmethod
     def _with_foreign(
@@ -311,37 +329,126 @@ class LabeledSelect(Widget):
             result.append((f"自定义：{current}", current))
         return result
 
+    def _refresh_foreign_feedback(self, value: Any) -> None:
+        if not self.is_mounted:
+            return
+        label = self.query_one(".-foreign", Label)
+        values = {candidate for _, candidate in self._options}
+        if value not in (None, "") and value not in values:
+            label.update(
+                f"[yellow]⚠ 未找到候选，保留自定义值：{escape(str(value))}[/yellow]"
+            )
+        elif not self._allow_blank and value in (None, ""):
+            label.update("[yellow]请选择一个候选或手动输入引用[/yellow]")
+        elif not self._options:
+            label.update("[dim]暂无候选，可手动输入引用[/dim]")
+        else:
+            label.update("")
+
+    def _refresh_options(self, query: Optional[str] = None) -> None:
+        if not self.is_mounted:
+            return
+        text = (self.input.value if query is None else query).strip().casefold()
+        options = self._with_foreign(self._options, self.input.value)
+        if text:
+            options = [
+                (label, value)
+                for label, value in options
+                if text in str(label).casefold() or text in str(value).casefold()
+            ]
+        view = self.options_view
+        view.clear_options()
+        for label, value in options:
+            view.add_option(Option(str(label), id=str(value)))
+        if not options:
+            view.add_option(Option("暂无候选，可手动输入引用", disabled=True))
+        self.set_class(bool(options), "-has-options")
+
     def _assign_value(self, value: Any) -> None:
-        # 值不在选项里已由 _with_foreign 兜底
-        with self.select.prevent(Select.Changed), contextlib.suppress(Exception):
-            self.select.value = Select.BLANK if value is None else value
+        if not self.is_mounted:
+            self._initial = value
+            return
+        with self.input.prevent(Input.Changed):
+            self.input.value = "" if value is None else str(value)
+        self._refresh_options()
+        self._refresh_foreign_feedback(value)
 
     def set_options(self, options: list[tuple[str, Any]], current: Any = None) -> None:
         """id 集合变化时刷新选项，保留当前值。"""
         self._options = options
-        value = current if current is not None else self.select.value
-        if value == Select.BLANK:
-            value = None
-        with self.select.prevent(Select.Changed):
-            self.select.set_options(self._with_foreign(options, value))
-            with contextlib.suppress(Exception):
-                self.select.value = Select.BLANK if value is None else value
+        if current is not None:
+            value = current
+        elif self.is_mounted:
+            value = self.input.value
+        else:
+            value = self._initial
+        self._assign_value(value)
 
     def set_value(self, value: Any) -> None:
         self._assign_value(value)
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        value = None if event.value == Select.BLANK else event.value
+    def on_mount(self) -> None:
+        self._refresh_options()
+        self._refresh_foreign_feedback(self.input.value or None)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.control is not self.input:
+            return
+        self._refresh_options(event.value)
+        self.add_class("-open")
+        value = event.value
+        self._refresh_foreign_feedback(value or None)
+        self.post_message(FieldChanged(self.field_key, value or None))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is not self.input:
+            return
+        options = self.options_view.options
+        if options:
+            self._choose_option(options[0])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.control is self.options_view:
+            self._choose_option(event.option)
+
+    def _choose_option(self, option: Option) -> None:
+        value = option.id
+        if value is None:
+            return
+        with self.input.prevent(Input.Changed):
+            self.input.value = str(value)
+        self.remove_class("-open")
+        self._refresh_foreign_feedback(value)
         self.post_message(FieldChanged(self.field_key, value))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if "-toggle" not in event.button.classes:
+            return
+        if self.has_class("-open"):
+            self.remove_class("-open")
+        else:
+            self._refresh_options()
+            self.add_class("-open")
+            self.input.focus()
 
 
 class TokenPicker(ModalScreen[Optional[str]]):
-    """条件词条插入面板：从当前模组真实 id 生成可插入词条。"""
+    """条件词条插入面板：从当前模组真实 id 生成可搜索候选。"""
 
     DEFAULT_CSS = """
     TokenPicker {
         align: center middle;
-        OptionList { width: 62; height: 18; border: thick $primary; }
+        Vertical {
+            width: 78;
+            max-width: 94%;
+            height: 70%;
+            max-height: 24;
+            border: thick $primary;
+            background: $surface;
+            padding: 1 2;
+        }
+        Input { width: 1fr; height: 3; }
+        OptionList { height: 1fr; border: tall $primary; }
     }
     """
 
@@ -352,8 +459,30 @@ class TokenPicker(ModalScreen[Optional[str]]):
         self._tokens = tokens
 
     def compose(self) -> Any:
-        options = [Option(label, id=token) for label, token in self._tokens]
-        yield OptionList(*options)
+        with Vertical() as box:
+            box.border_title = "插入条件词条"
+            yield Input(placeholder="按中文说明或 token 搜索")
+            yield OptionList()
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+        self._refresh_options()
+
+    def _refresh_options(self, query: str = "") -> None:
+        needle = query.strip().casefold()
+        view = self.query_one(OptionList)
+        view.clear_options()
+        for label, token in self._tokens:
+            if (
+                needle
+                and needle not in label.casefold()
+                and needle not in token.casefold()
+            ):
+                continue
+            view.add_option(Option(f"{label}  ·  {token}", id=token))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._refresh_options(event.value)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(cast("Optional[str]", event.option.id))
@@ -470,6 +599,9 @@ class StrListEditor(Widget):
         margin-bottom: 1;
         Label { height: 1; color: $text-muted; }
         OptionList { height: 6; }
+        OptionList.-suggestions { height: 5; display: none; border: tall $primary; }
+        StrListEditor.-reference-open OptionList.-suggestions { display: block; }
+        Input.-search { margin-bottom: 1; }
         Horizontal { height: auto; }
         Input { width: 1fr; }
         Horizontal.-buttons { height: 3; }
@@ -478,30 +610,53 @@ class StrListEditor(Widget):
     """
 
     def __init__(
-        self, label: str, key: str, *, badge: str = "", hint: str = ""
+        self,
+        label: str,
+        key: str,
+        *,
+        badge: str = "",
+        hint: str = "",
+        reference: bool = False,
     ) -> None:
         super().__init__()
         self.field_key = key
         self._label_markup = _label_markup(label, badge)
         self._hint = hint
+        self._reference = reference
+        self._reference_options: list[tuple[str, str]] = []
         self._items: list[str] = []
 
     def compose(self) -> Any:
         yield Label(self._label_markup, markup=True)
-        yield OptionList()
+        if self._reference:
+            yield Input(placeholder="搜索候选（显示名或 ID）", classes="-search")
+            yield OptionList(classes="-suggestions")
+        yield OptionList(classes="-items")
         with Horizontal():
-            yield Input(placeholder="输入新条目后按「添加」")
+            yield Input(placeholder="输入新条目后按「添加」", classes="-new")
             yield Button("添加", variant="primary", classes="-add")
         with Horizontal(classes="-buttons"):
             yield Button("删除", variant="error", classes="-delete")
             yield Button("上移", classes="-up")
             yield Button("下移", classes="-down")
         if self._hint:
-            yield Label(f"[dim]{escape(self._hint)}[/dim]", markup=True)
+            yield Label(
+                f"[dim]{escape(self._hint)}[/dim]", markup=True, classes="-hint"
+            )
 
     @property
     def list_view(self) -> OptionList:
-        return self.query_one(OptionList)
+        return self.query_one(".-items", OptionList)
+
+    @property
+    def suggestions_view(self) -> Optional[OptionList]:
+        if not self._reference:
+            return None
+        return self.query_one(".-suggestions", OptionList)
+
+    @property
+    def new_input(self) -> Input:
+        return self.query_one(".-new", Input)
 
     def _refresh_options(self) -> None:
         # 勿命名为 _render：会遮蔽 Widget._render 导致渲染崩溃
@@ -510,6 +665,35 @@ class StrListEditor(Widget):
         for i, item in enumerate(self._items):
             view.add_option(Option(f"{i + 1}. {item}", id=str(i)))
 
+    def _refresh_suggestions(self, query: str = "") -> None:
+        if not self._reference or not self.is_mounted:
+            return
+        view = self.suggestions_view
+        if view is None:
+            return
+        needle = query.strip().casefold()
+        view.clear_options()
+        options = list(self._reference_options)
+        known_values = {value for _, value in options}
+        options.extend(
+            (f"自定义/未找到：{value}", value)
+            for value in self._items
+            if value not in known_values
+        )
+        shown = False
+        for label, value in options:
+            if (
+                needle
+                and needle not in label.casefold()
+                and needle not in value.casefold()
+            ):
+                continue
+            mark = "✓" if value in self._items else "＋"
+            view.add_option(Option(f"{mark} {label}", id=value))
+            shown = True
+        if not shown:
+            view.add_option(Option("暂无匹配候选，可在下方手动输入", disabled=True))
+
     def _emit(self) -> None:
         self.post_message(FieldChanged(self.field_key, list(self._items)))
 
@@ -517,22 +701,38 @@ class StrListEditor(Widget):
         self._items = list(items)
         if self.is_mounted:
             self._refresh_options()
+            self._refresh_suggestions()
+
+    def set_reference_options(self, options: list[tuple[str, str]]) -> None:
+        """刷新实体引用候选，保留当前手填值与已选值。"""
+        self._reference_options = list(options)
+        if self.is_mounted:
+            search = self.query_one(".-search", Input)
+            self._refresh_suggestions(search.value)
+
+    def _toggle_reference(self, value: str) -> None:
+        if value in self._items:
+            self._items.remove(value)
+        else:
+            self._items.append(value)
+        self._refresh_options()
+        self._refresh_suggestions()
+        self._emit()
 
     def set_hint(self, hint: str) -> None:
         """刷新可用 ID 等动态提示，不触发字段写回。"""
         self._hint = hint
         if self.is_mounted:
             with contextlib.suppress(Exception):
-                self.query_one(".-hint", Label).update(
-                    f"[dim]{escape(hint)}[/dim]"
-                )
+                self.query_one(".-hint", Label).update(f"[dim]{escape(hint)}[/dim]")
 
     def on_mount(self) -> None:
         self._refresh_options()
+        self._refresh_suggestions()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         classes = event.button.classes
-        input_box = self.query_one(Input)
+        input_box = self.new_input
         highlighted = self.list_view.highlighted
         if "-add" in classes:
             text = input_box.value.strip()
@@ -571,6 +771,8 @@ class StrListEditor(Widget):
             self._emit()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self._reference and event.input is not self.new_input:
+            return
         text = event.value.strip()
         if text:
             self._items.append(text)
@@ -579,7 +781,46 @@ class StrListEditor(Widget):
             self._emit()
 
     def input_new_value(self) -> None:
-        self.query_one(Input).value = ""
+        self.new_input.value = ""
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if not self._reference:
+            return
+        search = self.query_one(".-search", Input)
+        if event.input is not search:
+            return
+        self._refresh_suggestions(event.value)
+        self.add_class("-reference-open")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if not self._reference or event.control is not self.suggestions_view:
+            return
+        value = event.option.id
+        if value is not None:
+            self._toggle_reference(str(value))
+
+
+class ReferenceListEditor(StrListEditor):
+    """带可搜索实体候选的多值引用编辑器。"""
+
+    def __init__(
+        self,
+        label: str,
+        key: str,
+        *,
+        badge: str = "",
+        hint: str = "",
+        options: Optional[list[tuple[str, str]]] = None,
+    ) -> None:
+        super().__init__(
+            label,
+            key,
+            badge=badge,
+            hint=hint,
+            reference=True,
+        )
+        if options:
+            self._reference_options = list(options)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -589,7 +830,8 @@ class ConfirmScreen(ModalScreen[bool]):
     ConfirmScreen {
         align: center middle;
         VerticalScroll {
-            width: 70;
+            width: 92%;
+            max-width: 90;
             max-height: 24;
             border: thick $primary;
             background: $surface;

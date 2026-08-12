@@ -10,6 +10,7 @@ from textual.widgets.option_list import Option
 
 from ..state import (  # noqa: TID252
     clue_referrers,
+    duplicate_item,
     entity_label,
     generate_unique_id,
     get_list,
@@ -24,6 +25,8 @@ from ..widgets import (  # noqa: TID252
     LabeledTextArea,
 )
 from . import EditorTab, move_item
+
+_ENTITY_PATH_PARTS = 2
 
 
 def _str_text(value: Any) -> str:
@@ -72,6 +75,7 @@ class CluesTab(EditorTab):
                     yield Button("删除", variant="error", classes="-clue-del")
                     yield Button("上移", classes="-clue-up")
                     yield Button("下移", classes="-clue-down")
+                    yield Button("复制", classes="-clue-copy")
             with VerticalScroll(classes="-form-pane"):
                 yield self._id
                 yield self._name
@@ -87,6 +91,27 @@ class CluesTab(EditorTab):
             return None
         clue = clues[self._clue_idx]
         return clue if isinstance(clue, dict) else None
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) >= _ENTITY_PATH_PARTS and path[0] == "clues":
+            self._clue_idx = int(path[1])
+            self._fill_form()
+
+    def duplicate_current(self) -> bool:
+        clues = self._clues()
+        new_idx = duplicate_item(
+            clues,
+            self._clue_idx,
+            id_scope={
+                str(item.get("id", "")) for item in clues if isinstance(item, dict)
+            },
+        )
+        if new_idx is None:
+            return False
+        self._clue_idx = new_idx
+        self.editor.refresh_all()
+        self.editor.on_data_changed()
+        return True
 
     def refresh_tab(self, data: dict[str, Any]) -> None:
         clues = get_list(data, "clues")
@@ -171,6 +196,8 @@ class CluesTab(EditorTab):
             if new_idx is not None:
                 self._clue_idx = new_idx
                 self.editor.refresh_all()
+        elif "-clue-copy" in classes:
+            self.duplicate_current()
 
     def _confirm_delete(self, clue: dict[str, Any]) -> None:
         ident = str(clue.get("id", "?"))

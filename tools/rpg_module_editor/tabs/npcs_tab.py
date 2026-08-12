@@ -12,6 +12,9 @@ from textual.widgets.option_list import Option
 from ..schema_loader import in_window, parse_hhmm  # noqa: TID252
 from ..state import (  # noqa: TID252
     build_condition_tokens,
+    build_reference_options_for_field,
+    duplicate_item,
+    duplicate_npc,
     entity_label,
     generate_unique_id,
     get_list,
@@ -40,6 +43,8 @@ if TYPE_CHECKING:
     from textual import events
 
 _ENTRY_COLORS = ("green", "cyan", "magenta", "yellow", "blue", "red")
+_ENTITY_PATH_PARTS = 2
+_NESTED_PATH_PARTS = 4
 
 
 def _str_text(value: Any) -> str:
@@ -83,9 +88,9 @@ class ScheduleCoverage(Static):
         chars[start:end] = clipped[: end - start]
 
     def _timeline_width(self) -> int:
-        # 96 列对应 15 分钟精度；窄窗口下聚合显示，但始终保持单行。
+        # 直接使用控件内容宽度；终端最大化时时间线也随之展开。
         available = self.content_size.width or self.size.width or 48
-        return max(1, min(96, available))
+        return max(1, available)
 
     def _render_coverage(self) -> None:
         entries = [e for e in self._schedule if isinstance(e, dict)]
@@ -262,6 +267,7 @@ class NpcsTab(EditorTab):
                     yield Button("删除", variant="error", classes="-npc-del")
                     yield Button("上移", classes="-npc-up")
                     yield Button("下移", classes="-npc-down")
+                    yield Button("复制", classes="-npc-copy")
             with Vertical(classes="-form-pane"), TabbedContent(initial="tab-npc-base"):
                 with TabPane("基本与对白", id="tab-npc-base"), VerticalScroll():
                     yield self._id
@@ -296,6 +302,7 @@ class NpcsTab(EditorTab):
                         yield Button("删除条目", variant="error", classes="-entry-del")
                         yield Button("上移", classes="-entry-up")
                         yield Button("下移", classes="-entry-down")
+                        yield Button("复制", classes="-entry-copy")
                     yield self._coverage
                     yield self._schedule_form
                 with TabPane("社交", id="tab-npc-social"), VerticalScroll():
@@ -324,21 +331,67 @@ class NpcsTab(EditorTab):
         return entry if isinstance(entry, dict) else None
 
     def _scene_options(self) -> list[tuple[str, str]]:
-        return [
-            (entity_label(s), str(s.get("id", "")))
-            for s in get_list(self.editor.draft.data, "scenes")
-            if isinstance(s, dict)
-        ]
+        return build_reference_options_for_field(
+            self.editor.draft.data, "schedule.scene"
+        )
 
     def _clue_options(self) -> list[tuple[str, str]]:
-        return [
-            (entity_label(c), str(c.get("id", "")))
-            for c in get_list(self.editor.draft.data, "clues")
-            if isinstance(c, dict)
-        ]
+        return build_reference_options_for_field(
+            self.editor.draft.data, "npc.on_death_clue"
+        )
 
     def _tokens(self) -> list[tuple[str, str]]:
         return build_condition_tokens(self.editor.draft.data)
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) < _ENTITY_PATH_PARTS or path[0] != "npcs":
+            return
+        self._npc_idx = int(path[1])
+        self._fill_npc_form()
+        self._fill_schedule()
+        if len(path) >= _NESTED_PATH_PARTS and path[2] == "schedule":
+            self.query_one(TabbedContent).active = "tab-npc-schedule"
+            self._entry_idx = int(path[3])
+            self._fill_schedule(self._entry_idx)
+        elif len(path) >= _NESTED_PATH_PARTS and path[2] in {
+            "facts",
+            "social_nodes",
+            "strategies",
+        }:
+            self.query_one(TabbedContent).active = "tab-npc-social"
+            self._social.locate_path(path[2:])
+
+    def duplicate_current(self) -> bool:
+        active = self.query_one(TabbedContent).active
+        if active == "tab-npc-schedule":
+            duplicated = self._duplicate_entry()
+        elif active == "tab-npc-social":
+            duplicated = self._social.duplicate_current()
+        else:
+            duplicated = self._duplicate_npc()
+        if duplicated:
+            self.editor.on_data_changed()
+        return duplicated
+
+    def _duplicate_npc(self) -> bool:
+        new_idx = duplicate_npc(self.editor.draft.data, self._npc_idx)
+        if new_idx is None:
+            return False
+        self._npc_idx = new_idx
+        self.editor.refresh_all()
+        return True
+
+    def _duplicate_entry(self) -> bool:
+        npc = self._current_npc()
+        if npc is None:
+            return False
+        entries = get_list(npc, "schedule")
+        new_idx = duplicate_item(entries, self._entry_idx, id_key=None)
+        if new_idx is None:
+            return False
+        self._entry_idx = new_idx
+        self._fill_schedule(new_idx)
+        return True
 
     # ── 重填 ──────────────────────────────────────────────
 
@@ -469,9 +522,7 @@ class NpcsTab(EditorTab):
                 ],
             ]
         )
-        secret_leaks = [
-            s for s in get_list(npc, "secrets") if s and str(s) in haystack
-        ]
+        secret_leaks = [s for s in get_list(npc, "secrets") if s and str(s) in haystack]
         fact_leaks = [
             f
             for fact in get_list(npc, "facts")
@@ -508,7 +559,7 @@ class NpcsTab(EditorTab):
 
     # ── 按钮 ──────────────────────────────────────────────
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:  # noqa: C901,PLR0912
+    def on_button_pressed(self, event: Button.Pressed) -> None:  # noqa: C901,PLR0912,PLR0915
         classes = event.button.classes
         data = self.editor.draft.data
 
@@ -535,6 +586,9 @@ class NpcsTab(EditorTab):
             if new_idx is not None:
                 self._npc_idx = new_idx
                 self.editor.refresh_all()
+        elif "-npc-copy" in classes:
+            if self._duplicate_npc():
+                self.editor.on_data_changed()
         elif "-entry-add" in classes:
             npc = self._current_npc()
             if npc is None:
@@ -568,6 +622,9 @@ class NpcsTab(EditorTab):
             new_idx = move_item(entries, self._entry_idx, delta)
             if new_idx is not None:
                 self._fill_schedule(new_idx)
+                self.editor.on_data_changed()
+        elif "-entry-copy" in classes:
+            if self._duplicate_entry():
                 self.editor.on_data_changed()
 
     def _confirm_delete_npc(self, npc: dict[str, Any]) -> None:

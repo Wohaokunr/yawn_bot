@@ -9,6 +9,8 @@ from textual.widgets import Button, Label, OptionList
 from textual.widgets.option_list import Option
 
 from ..state import (  # noqa: TID252
+    build_reference_options_for_field,
+    duplicate_item,
     get_list,
     new_npc_fact_dict,
     new_social_node_dict,
@@ -22,6 +24,7 @@ from ..widgets import (  # noqa: TID252
     LabeledInput,
     LabeledSelect,
     LabeledTextArea,
+    ReferenceListEditor,
     StrListEditor,
 )
 from . import move_item
@@ -57,6 +60,8 @@ _STRATEGY_OPTIONAL_INT_FIELDS = {
     "failure_attitude_delta",
 }
 _STRATEGY_OPTIONAL_TEXT_FIELDS = {"success_text", "failure_text"}
+_ENTITY_PATH_PARTS = 2
+_NESTED_PATH_PARTS = 4
 
 
 def _str_text(value: Any) -> str:
@@ -138,7 +143,7 @@ class SocialEditor(Vertical):
         self._node_goal = LabeledTextArea(
             "安全目标 goal", "node.goal", badge="只给社交路由器，不写隐藏奖励"
         )
-        self._requires_facts = StrListEditor(
+        self._requires_facts = ReferenceListEditor(
             "前置情报 requires_facts",
             "node.requires_facts",
             hint="可用情报 ID：",
@@ -170,17 +175,17 @@ class SocialEditor(Vertical):
         self._node_failure = LabeledTextArea(
             "失败文案 failure_text", "node.failure_text", tall=True
         )
-        self._unlock_facts = StrListEditor(
+        self._unlock_facts = ReferenceListEditor(
             "成功解锁情报 unlock_facts",
             "node.unlock_facts",
             hint="可用情报 ID：",
         )
-        self._private_clues = StrListEditor(
+        self._private_clues = ReferenceListEditor(
             "私人线索 private_clues",
             "node.private_clues",
             hint="可用线索 ID：",
         )
-        self._public_clues = StrListEditor(
+        self._public_clues = ReferenceListEditor(
             "公开线索 public_clues",
             "node.public_clues",
             hint="可用线索 ID：",
@@ -259,6 +264,7 @@ class SocialEditor(Vertical):
                 with Horizontal(classes="-buttons"):
                     yield Button("上移", classes="-social-fact-up")
                     yield Button("下移", classes="-social-fact-down")
+                    yield Button("复制", classes="-social-fact-copy")
             with Vertical(classes="-detail-box"):
                 yield self._fact_id
                 yield self._fact_name
@@ -276,6 +282,7 @@ class SocialEditor(Vertical):
                 with Horizontal(classes="-buttons"):
                     yield Button("上移", classes="-social-node-up")
                     yield Button("下移", classes="-social-node-down")
+                    yield Button("复制", classes="-social-node-copy")
             with Vertical(classes="-detail-box"):
                 yield self._node_id
                 yield self._node_name
@@ -311,6 +318,7 @@ class SocialEditor(Vertical):
                     )
                     yield Button("上移", classes="-social-strategy-up")
                     yield Button("下移", classes="-social-strategy-down")
+                    yield Button("复制", classes="-social-strategy-copy")
                 yield self._strategy_skill
                 yield self._strategy_difficulty
                 yield self._strategy_name
@@ -345,6 +353,83 @@ class SocialEditor(Vertical):
 
     def _strategies(self) -> list[Any]:
         return get_list(self._current_node() or {}, "strategies")
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) < _ENTITY_PATH_PARTS:
+            return
+        if path[0] == "facts":
+            self._fact_idx = int(path[1])
+            self._fill_facts(self._fact_idx)
+        elif path[0] == "social_nodes":
+            self._node_idx = int(path[1])
+            self._fill_nodes(self._node_idx)
+            if len(path) >= _NESTED_PATH_PARTS and path[2] == "strategies":
+                self._strategy_idx = int(path[3])
+                self._fill_strategies(self._strategy_idx)
+
+    def duplicate_current(self) -> bool:
+        if self._strategy_idx is not None and self._current_strategy() is not None:
+            return self._duplicate_strategy()
+        if self._node_idx is not None and self._current_node() is not None:
+            return self._duplicate_node()
+        return self._duplicate_fact()
+
+    def duplicate_fact(self) -> bool:
+        return self._duplicate_fact()
+
+    def duplicate_node(self) -> bool:
+        return self._duplicate_node()
+
+    def duplicate_strategy(self) -> bool:
+        return self._duplicate_strategy()
+
+    def _duplicate_strategy(self) -> bool:
+        strategies = self._strategies()
+        used = {
+            str(strategy.get("skill"))
+            for strategy in strategies
+            if isinstance(strategy, dict)
+        }
+        available = [skill for _, skill in _SOCIAL_SKILL_OPTIONS if skill not in used]
+        if not available:
+            return False
+        new_idx = duplicate_item(strategies, self._strategy_idx, id_key=None)
+        if new_idx is None:
+            return False
+        strategies[new_idx]["skill"] = available[0]
+        self._strategy_idx = new_idx
+        self._fill_strategies(new_idx)
+        return True
+
+    def _duplicate_node(self) -> bool:
+        nodes = self._social_nodes()
+        new_idx = duplicate_item(
+            nodes,
+            self._node_idx,
+            id_scope={
+                str(item.get("id", "")) for item in nodes if isinstance(item, dict)
+            },
+        )
+        if new_idx is None:
+            return False
+        self._node_idx = new_idx
+        self._fill_nodes(new_idx)
+        return True
+
+    def _duplicate_fact(self) -> bool:
+        facts = self._facts()
+        new_idx = duplicate_item(
+            facts,
+            self._fact_idx,
+            id_scope={
+                str(item.get("id", "")) for item in facts if isinstance(item, dict)
+            },
+        )
+        if new_idx is None:
+            return False
+        self._fact_idx = new_idx
+        self._fill_facts(new_idx)
+        return True
 
     def _current_strategy(self) -> Optional[dict[str, Any]]:
         strategies = self._strategies()
@@ -386,12 +471,23 @@ class SocialEditor(Vertical):
         ]
         fact_hint = f"可用情报 ID：{'、'.join(fact_ids) or '（暂无）'}"
         clue_hint = f"可用线索 ID：{'、'.join(clue_ids) or '（暂无）'}"
+        fact_options = build_reference_options_for_field(
+            self._data, "node.requires_facts", context=self._npc
+        )
+        clue_options = build_reference_options_for_field(
+            self._data, "node.private_clues"
+        )
+        for control in (self._requires_facts, self._unlock_facts):
+            control.set_reference_options(fact_options)
+        for control in (self._private_clues, self._public_clues):
+            control.set_reference_options(clue_options)
         self._requires_facts.set_hint(fact_hint)
         self._unlock_facts.set_hint(fact_hint)
         self._private_clues.set_hint(clue_hint)
         self._public_clues.set_hint(clue_hint)
 
     def _fill_facts(self, selected_idx: Optional[int] = None) -> None:
+        self._set_reference_hints()
         facts = self._facts()
         selected = _selected_id(facts, self._fact_idx)
         if selected_idx is not None:
@@ -575,6 +671,9 @@ class SocialEditor(Vertical):
             if new_index is not None:
                 self._fill_facts(new_index)
                 self.editor.on_data_changed()
+        elif "-social-fact-copy" in classes:
+            if self.duplicate_fact():
+                self.editor.on_data_changed()
         elif "-social-node-add" in classes:
             nodes = npc.setdefault("social_nodes", [])
             if not isinstance(nodes, list):
@@ -596,6 +695,9 @@ class SocialEditor(Vertical):
             new_index = move_item(self._social_nodes(), self._node_idx, delta)
             if new_index is not None:
                 self._fill_nodes(new_index)
+                self.editor.on_data_changed()
+        elif "-social-node-copy" in classes:
+            if self.duplicate_node():
                 self.editor.on_data_changed()
         elif "-social-strategy-add" in classes:
             node = self._current_node()
@@ -619,6 +721,9 @@ class SocialEditor(Vertical):
             new_index = move_item(self._strategies(), self._strategy_idx, delta)
             if new_index is not None:
                 self._fill_strategies(new_index)
+                self.editor.on_data_changed()
+        elif "-social-strategy-copy" in classes:
+            if self.duplicate_strategy():
                 self.editor.on_data_changed()
 
     def _fact_referrers(self, fact_id: str) -> list[str]:

@@ -9,6 +9,8 @@ from textual.widgets import Button, Label, OptionList
 from textual.widgets.option_list import Option
 
 from ..state import (  # noqa: TID252
+    build_reference_options_for_field,
+    duplicate_item,
     entity_label,
     generate_unique_id,
     get_list,
@@ -25,6 +27,8 @@ from ..widgets import (  # noqa: TID252
     LabeledTextArea,
 )
 from . import EditorTab, move_item
+
+_ENTITY_PATH_PARTS = 2
 
 
 def _str_text(value: Any) -> str:
@@ -89,6 +93,7 @@ class MonstersTab(EditorTab):
                     yield Button("删除", variant="error", classes="-monster-del")
                     yield Button("上移", classes="-monster-up")
                     yield Button("下移", classes="-monster-down")
+                    yield Button("复制", classes="-monster-copy")
             with VerticalScroll(classes="-form-pane"):
                 yield Label(
                     "[dim]战斗数值由引擎结算，KP 永不进提示词[/dim]", markup=True
@@ -114,11 +119,30 @@ class MonstersTab(EditorTab):
         return monster if isinstance(monster, dict) else None
 
     def _clue_options(self) -> list[tuple[str, str]]:
-        return [
-            (entity_label(c), str(c.get("id", "")))
-            for c in get_list(self.editor.draft.data, "clues")
-            if isinstance(c, dict)
-        ]
+        return build_reference_options_for_field(
+            self.editor.draft.data, "monster.on_death_clue"
+        )
+
+    def locate_path(self, path: tuple[Any, ...]) -> None:
+        if len(path) >= _ENTITY_PATH_PARTS and path[0] == "monsters":
+            self._monster_idx = int(path[1])
+            self._fill_form()
+
+    def duplicate_current(self) -> bool:
+        monsters = self._monsters()
+        new_idx = duplicate_item(
+            monsters,
+            self._monster_idx,
+            id_scope={
+                str(item.get("id", "")) for item in monsters if isinstance(item, dict)
+            },
+        )
+        if new_idx is None:
+            return False
+        self._monster_idx = new_idx
+        self.editor.refresh_all()
+        self.editor.on_data_changed()
+        return True
 
     def refresh_tab(self, data: dict[str, Any]) -> None:
         monsters = get_list(data, "monsters")
@@ -195,6 +219,8 @@ class MonstersTab(EditorTab):
             if new_idx is not None:
                 self._monster_idx = new_idx
                 self.editor.refresh_all()
+        elif "-monster-copy" in classes:
+            self.duplicate_current()
 
     def _confirm_delete(self, monster: dict[str, Any]) -> None:
         ident = str(monster.get("id", "?"))
