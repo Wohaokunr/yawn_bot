@@ -2446,6 +2446,7 @@ dev = [
 dev = [
     { name = "pyright" },
     { name = "ruff" },
+    { name = "types-pyyaml" },
 ]
 tools = [
     { name = "pytest" },
@@ -2476,6 +2477,7 @@ provides-extras = ["dev"]
 dev = [
     { name = "pyright", specifier = ">=1.1.411" },
     { name = "ruff", specifier = ">=0.16.0" },
+    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 tools = [
     { name = "pytest", specifier = ">=9.1.1" },
