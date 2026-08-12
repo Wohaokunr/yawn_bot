@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -33,7 +33,10 @@ from ..widgets import (  # noqa: TID252
     StrListEditor,
     TimeInput,
 )
-from . import EditorTab
+from . import EditorTab, move_item
+
+if TYPE_CHECKING:
+    from textual import events
 
 _ENTRY_COLORS = ("green", "cyan", "magenta", "yellow", "blue", "red")
 
@@ -62,14 +65,35 @@ class ScheduleCoverage(Static):
     """
 
     DEFAULT_CSS = """
-    ScheduleCoverage { height: auto; padding: 0; }
+    ScheduleCoverage { height: auto; padding: 0; overflow-x: hidden; }
     """
 
-    def refresh_coverage(self, schedule: list[Any]) -> None:
-        entries = [e for e in schedule if isinstance(e, dict)]
+    def __init__(self) -> None:
+        super().__init__()
+        self._schedule: list[Any] = []
+
+    @staticmethod
+    def _put_label(chars: list[str], label: str, center: int) -> None:
+        if not chars:
+            return
+        clipped = label[: len(chars)]
+        start = max(0, min(len(chars) - len(clipped), center - len(clipped) // 2))
+        end = min(len(chars), start + len(clipped))
+        chars[start:end] = clipped[: end - start]
+
+    def _timeline_width(self) -> int:
+        # 96 列对应 15 分钟精度；窄窗口下聚合显示，但始终保持单行。
+        available = self.content_size.width or self.size.width or 48
+        return max(1, min(96, available))
+
+    def _render_coverage(self) -> None:
+        entries = [e for e in self._schedule if isinstance(e, dict)]
         bounds = [_entry_bounds(e) for e in entries]
-        line = Text()
-        for slot in range(0, 24 * 60, 15):
+        width = self._timeline_width()
+        line = Text(no_wrap=True, overflow="crop")
+        for column in range(width):
+            # 每列取其所代表区间的中点；宽度 96 时恰为每个 15 分钟槽位。
+            slot = min(24 * 60 - 1, int((column + 0.5) * 24 * 60 / width))
             mark, styled = "·", "dim"
             for idx, (entry, bound) in enumerate(zip(entries, bounds)):
                 if bound is None:
@@ -80,7 +104,12 @@ class ScheduleCoverage(Static):
                     styled = color
                     break
             line.append(mark, styled)
-        ruler = Text("0:00      6:00      12:00     18:00     24:00\n", "dim")
+
+        ruler_chars = [" " for _ in range(width)]
+        for hour, label in ((0, "0"), (6, "6"), (12, "12"), (18, "18"), (24, "24")):
+            center = round((width - 1) * hour / 24)
+            self._put_label(ruler_chars, label, center)
+        ruler = Text("".join(ruler_chars) + "\n", "dim", no_wrap=True)
         legend = Text()
         for idx, entry in enumerate(entries):
             color = _ENTRY_COLORS[idx % len(_ENTRY_COLORS)]
@@ -93,9 +122,17 @@ class ScheduleCoverage(Static):
         if not entries:
             legend.append("（无行程：常驻 scene.npcs 所列场景）\n", "dim")
         legend.append(
-            "█=命中条目  ?=条件条目（条件不成立时落到后续条目/不在场）  ·=不在场", "dim"
+            "█=命中条目  ?=条件条目（条件不成立时落到后续条目/不在场）  ·=不在场",
+            "dim",
         )
         self.update(ruler + line + Text("\n") + legend)
+
+    def refresh_coverage(self, schedule: list[Any]) -> None:
+        self._schedule = list(schedule)
+        self._render_coverage()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self._render_coverage()
 
 
 class ScheduleForm(VerticalScroll):
@@ -355,9 +392,11 @@ class NpcsTab(EditorTab):
         self._on_death_text.set_value(_str_text(npc.get("on_death_text")))
         self._refresh_leak_feedback()
 
-    def _fill_schedule(self) -> None:
+    def _fill_schedule(self, selected_idx: Optional[int] = None) -> None:
         npc = self._current_npc()
         entries = get_list(npc, "schedule") if npc else []
+        if selected_idx is None:
+            selected_idx = self._entry_idx
         self._schedule_list.clear_options()
         for i, entry in enumerate(entries):
             if isinstance(entry, dict):
@@ -368,9 +407,11 @@ class NpcsTab(EditorTab):
                 self._schedule_list.add_option(
                     Option(f"#{i + 1} {frm}→{to} {where}{mark}", id=str(i))
                 )
-        self._entry_idx = 0 if entries else None
         if entries:
-            self._schedule_list.highlighted = 0
+            self._entry_idx = min(max(selected_idx or 0, 0), len(entries) - 1)
+            self._schedule_list.highlighted = self._entry_idx
+        else:
+            self._entry_idx = None
         self._coverage.refresh_coverage(entries)
         self._fill_entry_form()
 
@@ -431,11 +472,6 @@ class NpcsTab(EditorTab):
         classes = event.button.classes
         data = self.editor.draft.data
 
-        def move(items: list[Any], index: Optional[int], delta: int) -> None:
-            if index is None or not (0 <= index + delta < len(items)):
-                return
-            items[index], items[index + delta] = items[index + delta], items[index]
-
         if "-npc-add" in classes:
             new_id = generate_unique_id(
                 "new_npc",
@@ -455,10 +491,10 @@ class NpcsTab(EditorTab):
         elif "-npc-up" in classes or "-npc-down" in classes:
             npcs = self._npcs()
             delta = -1 if "-npc-up" in classes else 1
-            move(npcs, self._npc_idx, delta)
-            if self._npc_idx is not None:
-                self._npc_idx += delta
-            self.editor.refresh_all()
+            new_idx = move_item(npcs, self._npc_idx, delta)
+            if new_idx is not None:
+                self._npc_idx = new_idx
+                self.editor.refresh_all()
         elif "-entry-add" in classes:
             npc = self._current_npc()
             if npc is None:
@@ -472,7 +508,7 @@ class NpcsTab(EditorTab):
                 "",
             )
             npc.setdefault("schedule", []).append(new_schedule_entry_dict(first_scene))
-            self._fill_schedule()
+            self._fill_schedule(len(get_list(npc, "schedule")) - 1)
             self.editor.on_data_changed()
         elif "-entry-del" in classes:
             npc = self._current_npc()
@@ -481,7 +517,7 @@ class NpcsTab(EditorTab):
             entries = get_list(npc, "schedule")
             if 0 <= self._entry_idx < len(entries):
                 del entries[self._entry_idx]
-            self._fill_schedule()
+            self._fill_schedule(self._entry_idx)
             self.editor.on_data_changed()
         elif "-entry-up" in classes or "-entry-down" in classes:
             npc = self._current_npc()
@@ -489,11 +525,10 @@ class NpcsTab(EditorTab):
                 return
             entries = get_list(npc, "schedule")
             delta = -1 if "-entry-up" in classes else 1
-            move(entries, self._entry_idx, delta)
-            if self._entry_idx is not None:
-                self._entry_idx += delta
-            self._fill_schedule()
-            self.editor.on_data_changed()
+            new_idx = move_item(entries, self._entry_idx, delta)
+            if new_idx is not None:
+                self._fill_schedule(new_idx)
+                self.editor.on_data_changed()
 
     def _confirm_delete_npc(self, npc: dict[str, Any]) -> None:
         ident = str(npc.get("id", "?"))
@@ -563,7 +598,7 @@ class NpcsTab(EditorTab):
             return
         self._npc_list.replace_option_prompt_at_index(self._npc_idx, entity_label(npc))
 
-    def _write_schedule_field(self, field: str, value: Any) -> None:
+    def _write_schedule_field(self, field: str, value: Any) -> None:  # noqa: PLR0912
         entry = self._current_entry()
         npc = self._current_npc()
         if entry is None or npc is None:
@@ -585,12 +620,10 @@ class NpcsTab(EditorTab):
                 entry.pop("scene", None)
         else:
             entry[field] = value
-        self._coverage.refresh_coverage(get_list(npc, "schedule"))
         if field in ("from", "to", "scene", "away", "condition"):
-            current = self._entry_idx
-            self._fill_schedule()
-            if current is not None and current < len(get_list(npc, "schedule")):
-                self._entry_idx = current
-                self._schedule_list.highlighted = current
-                self._fill_entry_form()
+            self._fill_schedule(self._entry_idx)
+        else:
+            self._coverage.refresh_coverage(get_list(npc, "schedule"))
+        if field == "activity":
+            self._refresh_leak_feedback()
         self.editor.on_data_changed()

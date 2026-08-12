@@ -23,7 +23,6 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     Message,
     MessageEvent,
-    MessageSegment,
     PrivateMessageEvent,
 )
 from nonebot.params import CommandArg
@@ -44,18 +43,57 @@ from .state import (
     Action,
     ActionKind,
     Phase,
+    SubmitResult,
     create_game,
     game_of_user,
     get_game,
-    join_signup,
-    leave_signup,
     stop_game,
+    submit_action,
 )
 
 if TYPE_CHECKING:
     from .state import Game
 
 config = get_plugin_config(Config)
+
+
+def _submit(game: "Game", action: Action) -> str:
+    """命令层唯一入队入口；只反馈背压，业务裁决由引擎完成。"""
+    result = submit_action(
+        game,
+        action,
+        queue_max=config.rpg_action_queue_max,
+        user_pending_max=config.rpg_user_pending_max,
+        user_say_pending_max=config.rpg_user_say_pending_max,
+    )
+    messages = {
+        SubmitResult.ACCEPTED: "",
+        SubmitResult.QUEUE_FULL: "当前行动过多，请稍后再试~",
+        SubmitResult.USER_LIMIT: "你的待处理行动过多，请等待系统结算~",
+        SubmitResult.DUPLICATE: "这条行动已经提交过了~",
+        SubmitResult.STALE: "局面已经变化，请重新操作~",
+    }
+    return messages[result]
+
+
+def _action(
+    kind: ActionKind,
+    user_id: int,
+    *,
+    game: "Game",
+    value: int | None = None,
+    aux: str | None = None,
+) -> Action:
+    """构造带阶段/场景快照的动作，供引擎拒绝过期操作。"""
+    scene = game.current_scene if game.phase is Phase.PLAY else None
+    return Action(
+        kind,
+        user_id,
+        value=value,
+        aux=aux,
+        expected_phase=game.phase,
+        expected_scene=scene,
+    )
 
 
 def _is_su(user_id: int) -> bool:
@@ -124,7 +162,7 @@ async def handle_open(
         get_bot()
     except ValueError:
         await rpg_open.finish("机器人连接未就绪，请稍后重试~")
-    game = create_game(group_id, user_id)
+    game = create_game(group_id, user_id, queue_max=config.rpg_action_queue_max)
     if game is None:
         await rpg_open.finish("开房失败，请稍后重试")
     game.worker = asyncio.create_task(engine.run_game(game))
@@ -172,8 +210,10 @@ async def handle_select_module(
     text = str(arg).strip()
     if not text:
         await select_module_cmd.finish("格式：/选择模组 N（发送 /模组列表 查看）")
-    game.action_queue.put_nowait(Action(ActionKind.MODULE_SELECT, user_id, aux=text))
-    await select_module_cmd.finish()
+    error = _submit(
+        game, _action(ActionKind.MODULE_SELECT, user_id, game=game, aux=text)
+    )
+    await select_module_cmd.finish(error)
 
 
 signup_cmd = on_command(
@@ -194,19 +234,11 @@ async def handle_signup(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.SIGNUP:
         await signup_cmd.finish("本群当前没有报名中的跑团（发送 /跑团 开房）")
-    cap = _signup_cap(game.module.max_players if game.module else None)
-    if len(game.signup_user_ids) >= cap:
-        await signup_cmd.finish("报名已满员，等待开局~")
-    if not join_signup(game, int(event.get_user_id())):
-        await signup_cmd.finish("你已在局中，无需重复报名~")
-    logger.info(
-        f"跑团群 {int(event.group_id)} {int(event.get_user_id())} 报名"
-        f"（{len(game.signup_user_ids)}/{cap}）"
+    error = _submit(
+        game,
+        _action(ActionKind.JOIN_GAME, int(event.get_user_id()), game=game),
     )
-    await signup_cmd.finish(
-        MessageSegment.at(event.user_id)
-        + f"报名成功！当前 {len(game.signup_user_ids)}/{cap} 人"
-    )
+    await signup_cmd.finish(error or "报名申请已提交，系统将按顺序处理~")
 
 
 leave_cmd = on_command(
@@ -228,20 +260,8 @@ async def handle_leave(
     user_id = int(event.get_user_id())
     if game is None or game.phase is not Phase.SIGNUP:
         await leave_cmd.finish("本群当前没有报名中的跑团")
-    if not leave_signup(game, user_id):
-        await leave_cmd.finish("你还没有报名~")
-    logger.info(f"跑团群 {int(event.group_id)} {user_id} 退报名")
-    if not game.signup_user_ids:
-        # 空房：复用 stop_game（ENDED + cancel + await 引擎 finally 清理），
-        # 避免未等待清理完成时新开房撞到残留注册项。引擎取消分支见到
-        # ENDED 不再重复播报"对局已被强制结束"，解散文案由命令层自播
-        await stop_game(game)
-        logger.info(f"跑团群 {int(event.group_id)} 空房解散")
-        await leave_cmd.finish("房间已解散")
-    if game.host_user_id == user_id:
-        game.host_user_id = game.signup_user_ids[0]
-        await leave_cmd.finish(f"已退报名，房主移交给 {game.host_user_id}")
-    await leave_cmd.finish("已退出报名~")
+    error = _submit(game, _action(ActionKind.LEAVE_GAME, user_id, game=game))
+    await leave_cmd.finish(error or "退报名申请已提交，系统将按顺序处理~")
 
 
 view_cmd = on_command(
@@ -297,7 +317,9 @@ async def handle_start(
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await start_cmd.finish("只有房主、群管理员或超管可以开始游戏~")
-    game.action_queue.put_nowait(Action(ActionKind.START_GAME, user_id))
+    error = _submit(game, _action(ActionKind.START_GAME, user_id, game=game))
+    if error:
+        await start_cmd.finish(error)
     logger.info(
         f"跑团群 {int(event.group_id)} {user_id} 请求开始游戏"
         f"（{len(game.signup_user_ids)} 人）"
@@ -348,10 +370,13 @@ async def handle_check(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await check_cmd.finish("现在不在跑团进行中")
-    game.action_queue.put_nowait(
-        Action(ActionKind.CHECK, int(event.get_user_id()), aux=str(arg).strip())
+    error = _submit(
+        game,
+        _action(
+            ActionKind.CHECK, int(event.get_user_id()), game=game, aux=str(arg).strip()
+        ),
     )
-    await check_cmd.finish()
+    await check_cmd.finish(error)
 
 
 talk_cmd = on_command(
@@ -376,10 +401,11 @@ async def handle_talk(
     text = str(arg).strip()
     if not text:
         await talk_cmd.finish("格式：/对话 NPC名 要说的话")
-    game.action_queue.put_nowait(
-        Action(ActionKind.TALK_NPC, int(event.get_user_id()), aux=text)
+    error = _submit(
+        game,
+        _action(ActionKind.TALK_NPC, int(event.get_user_id()), game=game, aux=text),
     )
-    await talk_cmd.finish()
+    await talk_cmd.finish(error)
 
 
 attack_cmd = on_command("攻击", aliases={"打"}, priority=5, block=True)
@@ -398,10 +424,11 @@ async def handle_attack(
     target = str(arg).strip()
     if not target:
         await attack_cmd.finish("格式：/攻击 目标名")
-    game.action_queue.put_nowait(
-        Action(ActionKind.ATTACK, int(event.get_user_id()), aux=target)
+    error = _submit(
+        game,
+        _action(ActionKind.ATTACK, int(event.get_user_id()), game=game, aux=target),
     )
-    await attack_cmd.finish()
+    await attack_cmd.finish(error)
 
 
 move_cmd = on_command("前往", aliases={"去"}, priority=5, block=True)
@@ -420,10 +447,10 @@ async def handle_move(
     target = str(arg).strip()
     if not target:
         await move_cmd.finish("格式：/前往 地点名")
-    game.action_queue.put_nowait(
-        Action(ActionKind.MOVE, int(event.get_user_id()), aux=target)
+    error = _submit(
+        game, _action(ActionKind.MOVE, int(event.get_user_id()), game=game, aux=target)
     )
-    await move_cmd.finish()
+    await move_cmd.finish(error)
 
 
 time_cmd = on_command("时间", aliases={"时辰"}, priority=5, block=True)
@@ -462,10 +489,11 @@ async def handle_wait(
     else:
         # 缺省值同样受上限钳制（引擎侧只钳下限），防配置越界
         minutes = max(1, min(config.rpg_wait_default, config.rpg_wait_max))
-    game.action_queue.put_nowait(
-        Action(ActionKind.WAIT, int(event.get_user_id()), value=minutes)
+    error = _submit(
+        game,
+        _action(ActionKind.WAIT, int(event.get_user_id()), game=game, value=minutes),
     )
-    await wait_cmd.finish()
+    await wait_cmd.finish(error)
 
 
 status_cmd = on_command("状态", aliases={"我的状态"}, priority=5, block=True)
@@ -533,12 +561,83 @@ async def handle_clues(
     module = game.module
     if not game.discovered_clues or module is None:
         await clue_cmd.finish("还没有发现任何线索~")
+    user_id = int(event.get_user_id())
     names = [
         clue.name
         for cid in sorted(game.discovered_clues)
         if (clue := module.clue(cid)) is not None
+        and (cid in game.public_clues or user_id in game.clue_owners.get(cid, set()))
     ]
-    await clue_cmd.finish("已发现线索：" + ("、".join(names) if names else "无"))
+    await clue_cmd.finish("你可查看的线索：" + ("、".join(names) if names else "无"))
+
+
+assist_cmd = on_command("协助", aliases={"帮忙"}, priority=5, block=True)
+
+
+@assist_cmd.handle()
+async def handle_assist(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """协助一名同场景调查员的下一次技能检定。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await assist_cmd.finish("现在不在跑团进行中")
+    target, sep, skill = str(arg).strip().partition(" ")
+    if not sep or not target or not skill.strip():
+        await assist_cmd.finish("格式：/协助 玩家 技能（如 /协助 阿明 侦查）")
+    error = _submit(
+        game,
+        _action(
+            ActionKind.ASSIST,
+            int(event.get_user_id()),
+            game=game,
+            aux=f"{target}|{skill.strip()}",
+        ),
+    )
+    await assist_cmd.finish(error)
+
+
+share_clue_cmd = on_command("分享线索", aliases={"公开线索"}, priority=5, block=True)
+
+
+@share_clue_cmd.handle()
+async def handle_share_clue(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """将自己的个人线索公开给队伍。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await share_clue_cmd.finish("现在不在跑团进行中")
+    clue = str(arg).strip()
+    if not clue:
+        await share_clue_cmd.finish("格式：/分享线索 线索名")
+    error = _submit(
+        game,
+        _action(ActionKind.SHARE_CLUE, int(event.get_user_id()), game=game, aux=clue),
+    )
+    await share_clue_cmd.finish(error)
+
+
+pass_turn_cmd = on_command("跳过", aliases={"结束行动"}, priority=5, block=True)
+
+
+@pass_turn_cmd.handle()
+async def handle_pass_turn(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """结束本探索轮或当前战斗行动。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await pass_turn_cmd.finish("现在不在跑团进行中")
+    error = _submit(
+        game, _action(ActionKind.PASS_TURN, int(event.get_user_id()), game=game)
+    )
+    await pass_turn_cmd.finish(error)
 
 
 # ── 私聊建卡监听 ──────────────────────────────────────────
@@ -608,8 +707,9 @@ async def handle_char_create_dm(event: PrivateMessageEvent) -> None:
     logger.info(
         f"跑团群 {game.group_id} {name} 建卡行动：{action.kind.value}（原文 {text!r}）"
     )
-    game.action_queue.put_nowait(action)
-    await private_listener.finish()
+    action.expected_phase = game.phase
+    error = _submit(game, action)
+    await private_listener.finish(error)
 
 
 # ── 群自由文本监听（SAY）─────────────────────────────────
@@ -645,6 +745,8 @@ async def handle_game_speech(event: GroupMessageEvent) -> None:
     # 空消息与命令（/检定 等）不算自由发言
     if not text or text.startswith("/"):
         return
-    game.action_queue.put_nowait(
-        Action(ActionKind.SAY, int(event.get_user_id()), aux=text)
+    error = _submit(
+        game, _action(ActionKind.SAY, int(event.get_user_id()), game=game, aux=text)
     )
+    if error:
+        logger.info(f"跑团群 {game.group_id} 自由发言未入队：{error}")

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import yaml
@@ -14,6 +14,7 @@ from textual.widgets import TabbedContent
 
 from tools.rpg_module_editor.app import ModuleEditorApp
 from tools.rpg_module_editor.schema_loader import ModuleDef, modules_dir
+from tools.rpg_module_editor.tabs import move_item
 from tools.rpg_module_editor.tabs.report_tab import collect_issues
 from tools.rpg_module_editor.widgets import ConfirmScreen
 
@@ -205,3 +206,67 @@ async def test_new_module_skeleton_is_clean() -> None:
         issues, ok = collect_issues(app.draft.data)
         assert ok
         assert not [i for i in issues if i.severity == "ERROR"]
+
+
+@pytest.mark.parametrize("terminal_width", [70, 100, 140])
+async def test_schedule_coverage_adapts_to_terminal_width(
+    terminal_width: int,
+) -> None:
+    """时间条随可用宽度聚合，刻度和覆盖条都不得换行。"""
+    app = ModuleEditorApp(initial_path=_YUZHAI)
+    async with app.run_test(size=(terminal_width, 36)) as pilot:
+        app.query_one(TabbedContent).active = "tab-npcs"
+        await pilot.pause()
+        app._npcs_tab.query_one(TabbedContent).active = "tab-npc-schedule"
+        await pilot.pause()
+        coverage = app._npcs_tab._coverage
+        rendered = cast("Any", coverage.render()).plain.splitlines()
+        assert len(rendered[0]) == coverage._timeline_width()
+        assert len(rendered[1]) == coverage._timeline_width()
+        assert rendered[0].strip().startswith("0")
+        assert rendered[0].strip().endswith("24")
+
+
+async def test_schedule_edit_and_move_preserve_selection() -> None:
+    """行程编辑和排序后继续选中原条目；边界移动不改变数据或索引。"""
+    app = ModuleEditorApp(initial_path=_YUZHAI)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one(TabbedContent).active = "tab-npcs"
+        await pilot.pause()
+        nt = app._npcs_tab
+        nt._entry_idx = 1
+        nt._fill_entry_form()
+        nt._write_schedule_field("from", "23:15")
+        assert nt._entry_idx == 1
+        assert nt._schedule_list.highlighted == 1
+
+        entries = nt._current_npc()["schedule"]  # type: ignore[index]
+        selected = entries[1]
+        new_idx = move_item(entries, nt._entry_idx, 1)
+        target_idx = 2
+        assert new_idx == target_idx and entries[target_idx] is selected
+        nt._fill_schedule(new_idx)
+        assert nt._entry_idx == target_idx
+        before = list(entries)
+        assert move_item(entries, nt._entry_idx, 1) is None
+        assert entries == before
+
+
+async def test_schedule_coverage_time_edge_cases() -> None:
+    """全天、跨午夜、条件、非法时间与空行程均可稳定渲染。"""
+    app = ModuleEditorApp()
+    async with app.run_test(size=(80, 32)) as pilot:
+        await pilot.pause()
+        coverage = app._npcs_tab._coverage
+        cases = [
+            [{"from": "00:00", "to": "00:00", "away": True}],
+            [{"from": "23:00", "to": "02:00", "scene": "entrance"}],
+            [{"from": "10:00", "to": "11:00", "condition": "flag:x"}],
+            [{"from": "bad", "to": "11:00", "away": True}],
+            [],
+        ]
+        for schedule in cases:
+            coverage.refresh_coverage(schedule)
+            lines = cast("Any", coverage.render()).plain.splitlines()
+            assert len(lines[0]) == coverage._timeline_width()
+            assert len(lines[1]) == coverage._timeline_width()

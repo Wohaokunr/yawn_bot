@@ -57,6 +57,7 @@ class CheckResult:
     skill_value: int
     difficulty: CheckDifficulty
     tier: CheckTier
+    candidates: tuple[int, ...] = ()
 
     @property
     def success(self) -> bool:
@@ -86,9 +87,12 @@ class CheckResult:
             CheckDifficulty.HARD: "（困难）",
             CheckDifficulty.EXTREME: "（极难）",
         }
+        suffix = ""
+        if self.candidates:
+            suffix = f"（奖励骰候选：{'/'.join(map(str, self.candidates))}）"
         return (
             f"〔检定〕{skill_name}{diff_names[self.difficulty]}："
-            f"d100={self.roll}/{self.skill_value} {names[self.tier]}"
+            f"d100={self.roll}/{self.skill_value} {names[self.tier]}{suffix}"
         )
 
 
@@ -116,14 +120,27 @@ def classify_roll(roll: int, skill_value: int) -> CheckTier:
 def skill_check(
     skill_value: int,
     difficulty: CheckDifficulty = CheckDifficulty.REGULAR,
+    *,
+    bonus_dice: int = 0,
 ) -> CheckResult:
     """执行一次技能检定：掷 d100 并按难度判定成功与否。"""
-    roll = roll_d100()
+    # CoC 奖励骰共用个位，重投十位并取组成数值最小的一项；00 为 100。
+    if bonus_dice > 0:
+        ones = random.randint(0, 9)
+        tens = [random.randint(0, 9) for _ in range(min(bonus_dice, 2) + 1)]
+        candidates = tuple(
+            100 if ten == 0 and ones == 0 else ten * 10 + ones for ten in tens
+        )
+        roll = min(candidates)
+    else:
+        roll = roll_d100()
+        candidates = ()
     return CheckResult(
         roll=roll,
         skill_value=skill_value,
         difficulty=difficulty,
         tier=classify_roll(roll, skill_value),
+        candidates=candidates,
     )
 
 

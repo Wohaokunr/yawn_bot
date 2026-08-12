@@ -39,6 +39,15 @@ class Config(BaseModel):
     rpg_idle_warn_remain: int = 120
     # 连续自由发言的合批窗口（秒）：窗口内的 SAY 合并为一次 KP 调用
     rpg_say_settle_window: float = 2.5
+    # 单局待处理动作上限与单用户配额；命令层只入队，超限明确拒绝
+    rpg_action_queue_max: int = 100
+    rpg_user_pending_max: int = 5
+    rpg_user_say_pending_max: int = 10
+    # 有场景依赖的确定性行动超过此秒数后不再执行
+    rpg_action_ttl: float = 30.0
+    # 探索软轮次与战斗行动超时
+    rpg_explore_round_timeout: float = 60.0
+    rpg_combat_turn_timeout: float = 45.0
     # 单条玩家发言截断长度
     rpg_speech_truncate: int = 300
     # 每次合批最多喂给 KP 的发言条数

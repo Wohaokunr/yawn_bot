@@ -23,7 +23,7 @@ from ..widgets import (  # noqa: TID252
     LabeledInput,
     LabeledTextArea,
 )
-from . import EditorTab
+from . import EditorTab, move_item
 
 
 def _str_text(value: Any) -> str:
@@ -148,11 +148,6 @@ class CluesTab(EditorTab):
         classes = event.button.classes
         data = self.editor.draft.data
 
-        def move(items: list[Any], index: Optional[int], delta: int) -> None:
-            if index is None or not (0 <= index + delta < len(items)):
-                return
-            items[index], items[index + delta] = items[index + delta], items[index]
-
         if "-clue-add" in classes:
             new_id = generate_unique_id(
                 "new_clue",
@@ -172,10 +167,10 @@ class CluesTab(EditorTab):
         elif "-clue-up" in classes or "-clue-down" in classes:
             clues = self._clues()
             delta = -1 if "-clue-up" in classes else 1
-            move(clues, self._clue_idx, delta)
-            if self._clue_idx is not None:
-                self._clue_idx += delta
-            self.editor.refresh_all()
+            new_idx = move_item(clues, self._clue_idx, delta)
+            if new_idx is not None:
+                self._clue_idx = new_idx
+                self.editor.refresh_all()
 
     def _confirm_delete(self, clue: dict[str, Any]) -> None:
         ident = str(clue.get("id", "?"))
