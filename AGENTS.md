@@ -29,3 +29,4 @@
 - 2026-08-12：狼人杀业务源码（排除项目规定不编辑的重复迁移副本）通过 Ruff、Pyright 和 compileall；现有 pytest 9 项通过，但仓库没有狼人杀专属测试。狼人杀 ORM 表及迁移已在本地数据库中存在，重复迁移副本单独触发 Ruff 56 项格式/导入告警。
 - 2026-08-12：将架构图换为 Lieflat `porcelain` 青瓷蓝预设，统一更新暗卡背景、节点层次、连线、图例和 tooltip；已完成浏览器视觉与图层筛选检查。
 - 2026-08-12：按用户选择将架构图改为 Lieflat `wire` 编辑部红：保留黑灰暗卡结构，仅用荧光橙强调共享 `yawn_core` 层，其余层级保持灰阶。
+- 2026-08-12：新增个人技能 `C:\Users\ASUS\.codex\skills\rpg-module-author`，用于交互式编写覆盖 yawn_rpg 全部当前模组特性的 YAML；技能以 `module_schema.py`、`modules/README.md` 和 `tools/rpg_module_editor --check` 为校验依据，综合模板已通过结构校验与同源加载器注册验证。
