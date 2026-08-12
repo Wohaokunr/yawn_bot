@@ -67,3 +67,5 @@
   - **P1 狼人杀放逐猎人开枪不递归**：`src/plugins/yawn_core/yawn_werewolf/engine.py:1420-1431` 只处理被放逐猎人一次；若其开枪带走另一名猎人，目标不会再次触发开枪。夜死路径有递归 `pending` 处理，放逐路径行为不一致。
 
   验证记录：`uv run pytest -q` 为 84 passed/3 failed；失败来自提醒重构后已删除或改签的旧内部 API。`uv run pytest -q src/plugins/yawn_core/yawn_rpg/tests` 为 13 passed。`uv run pyright src tools/rpg_module_editor` 报 1 个 reminder 可空值错误；`uv run ruff check src tests tools/rpg_module_editor` 报 8 个错误，其中 6 个来自当前未提交的提醒改动。上述审查期间未修改业务代码。
+
+- 2026-08-13：完成定时提醒交互向导：新建、列表、详情、编辑、复制、启用/停用、立即发送和二次确认删除均使用单一会话状态机；移除旧版单行添加与英文动作入口。时间支持每天、工作日、每周、每月及一次性事件，消息段和倒计时占位符继续按可持久化规则校验。修复循环提醒首轮误删调度、一次性提醒立即发送提前终止、运行时用户/群功能开关绕过、启动恢复过期事件悬挂和操作后详情状态过期问题。新增迁移 `f4b6e8d2a901` 扩展 `schedule_type`、`run_at` 并允许循环 Cron 为空；数据库迁移仍需维护者手动执行 `uv run nb orm upgrade heads`。目标提醒测试 7 项、全量 pytest 88 项、Ruff、Pyright 与 `git diff --check` 通过。
