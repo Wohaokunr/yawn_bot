@@ -1,0 +1,913 @@
+# 青春轻小说模组《潮声停靠之前》：外地志愿者在星灯祭当天陪伴一名即将远行的少女。
+# 真结局不判断她上车还是留下，只判断她能否用自己的愿望作出选择。
+
+id: before_tide_departs
+name: 潮声停靠之前
+description: 星灯祭的外地志愿者陪汐见未央走完离镇前的一天，并在末班车前听见她真正的愿望。
+min_players: 2
+max_players: 5
+difficulty: 剧情向
+
+time:
+  start: "14:00"
+  costs:
+    say: 2
+    talk: 4
+    check: 5
+    move: 5
+    attack: 3
+    wait: 0
+generic_endings: true
+
+opening: |
+  星灯祭当日，驶入风待町的列车带来海风，也带来了临时支援祭典的你们。
+  站前广场上，接待志愿者的少女刚举起名册，一阵风便把纸页和星灯纸吹得到处都是。
+  她追着纸片跑出几步，又回头朝你们笑：「欢迎来到风待町！那个……能先帮我抓住它们吗？」
+
+start_scene: station_square
+
+scenes:
+  - id: station_square
+    name: 站前广场
+    narration: |
+      白色站房前悬满尚未点亮的星灯，远处海面闪着午后的碎光。
+      汐见未央一边整理被风吹乱的名册，一边向每个人认真道歉，仿佛海风也是她招来的。
+      她怀里的星图册没有合紧，一张通往王都的车票露出浅蓝色的边角。
+    idle_narration: 海风再次掀动纸页，未央赶紧用手肘压住名册。
+    checks:
+      - id: station_team_pages
+        skill: spot_hidden
+        difficulty: regular
+        mode: team
+        required_successes: 2
+        triggers: [纸片, 名册, 星灯纸, 帮忙, 捡]
+        once: true
+        success_text: 众人沿着风向分头行动，很快便把散落的纸页完整地收了回来。
+        failure_text: 最后一张名册钻进长椅底下，众人忙乱了一阵才总算把它够出来。
+        clue: volunteer_list
+      - id: station_ticket_notice
+        skill: spot_hidden
+        difficulty: regular
+        triggers: [车票, 星图册, 王都, 行李]
+        once: true
+        success_text: 你注意到星图册里夹着一张尚未使用的远行车票，日期正是今天。
+        failure_text: 未央很快合上星图册，只留下一个浅蓝色的纸角从书页间一闪而过。
+        clue: capital_ticket
+    exits:
+      - to_scene: bakery
+        keywords: [面包店, 商店街, 柚子]
+        narration: 未央领着你们穿过挂满星灯的商店街，脚步轻快得像今天永远不会结束。
+
+  - id: bakery
+    name: 潮风面包店
+    narration: |
+      店里满是柠檬皮与刚出炉面包的香气，柜台后却飘着一缕不太妙的白烟。
+      榛名柚子抱着一只歪斜的蛋糕盒，坚称这只是一次非常普通的试作失败。
+      未央已经卷起袖口，嘴里说着「顺手而已」，自然地走向罢工的烤炉。
+    idle_narration: 烤炉发出不服气似的轻响，柚子与它隔着柜台互相瞪着。
+    checks:
+      - id: bakery_oven_team
+        skill: elec_repair
+        difficulty: regular
+        mode: team
+        required_successes: 2
+        triggers: [烤炉, 电路, 修理, 白烟, 开关]
+        once: true
+        success_text: 众人找出松脱的接点，柚子亲手合上外壳，烤炉终于重新亮起温暖的火光。
+        failure_text: 烤炉勉强恢复了工作，却仍不时发出令人担心的咳嗽声。
+        clue: farewell_cake
+      - id: bakery_recipe
+        skill: library
+        difficulty: regular
+        triggers: [配方, 订单, 蛋糕, 柠檬, 账本]
+        once: true
+        success_text: 订单簿上没有客人的名字，只有一行被反复涂改的盐花柠檬蛋糕配方。
+        failure_text: 账本里挤满柚子的速记，只有几处柠檬汁留下的圆形水痕格外显眼。
+        clue: farewell_recipe
+    exits:
+      - to_scene: station_square
+        keywords: [车站, 站前]
+        narration: 你们重新回到海风穿行的站前街道。
+      - to_scene: old_library
+        keywords: [图书馆, 海岬, 久世]
+        narration: 未央接过柚子塞来的纸袋，又想替她收拾柜台，被众人一起推向了门外。
+
+  - id: old_library
+    name: 海岬旧图书馆
+    narration: |
+      旧图书馆坐落在面向海岬的坡顶，木窗被海风磨得发白。
+      久世征一从高高的书架后探出头，递给未央一本边角卷起的星图册。
+      册中密密麻麻的批注一路指向王都，也指向许多她从未亲眼见过的天空。
+    idle_narration: 书页被海风轻轻掀起，远方的潮声像藏在纸张之间。
+    checks:
+      - id: library_star_map
+        skill: library
+        difficulty: regular
+        triggers: [星图, 批注, 借阅, 王都, 书架]
+        once: true
+        success_text: 众人按批注找到一叠旧练习图，每一张都比前一张更接近遥远而陌生的天空。
+        failure_text: 书架间的编号已经褪色，只能看出未央曾在这里停留过许多个午后。
+        clue: annotated_star_map
+      - id: library_window_listen
+        skill: listen
+        difficulty: regular
+        triggers: [窗边, 海声, 风铃, 久世, 低声]
+        once: true
+        success_text: 你听见久世先生低声说，真正想去远方的人，谈起陌生天空时声音会变得不一样。
+        failure_text: 风铃盖住了久世先生后半句话，他只是看着未央，露出理解的微笑。
+    exits:
+      - to_scene: bakery
+        keywords: [面包店, 商店街]
+        narration: 你们沿坡道返回商店街，纸袋里的甜香一路跟着海风。
+      - to_scene: school_rooftop
+        keywords: [学校, 天台, 天文社, 观星仪]
+        narration: 未央抱紧星图册，沿着通往学校的长坡小跑起来。
+
+  - id: school_rooftop
+    name: 学校天台
+    narration: |
+      天台上的观星仪披着防尘布，支架旁散着工具和被风吹乱的校准卡。
+      冬木朔已经拆开了传动箱，却在听见脚步时立刻站直，假装自己只是刚刚开始。
+      未央下意识伸手去拿扳手，朔却先一步把它握在了手里。
+    idle_narration: 风吹过观星仪的金属支架，发出清亮而短促的回声。
+    checks:
+      - id: rooftop_scope_team
+        skill: mech_repair
+        difficulty: regular
+        mode: team
+        required_successes: 2
+        triggers: [观星仪, 传动箱, 校准, 扳手, 修理]
+        once: true
+        success_text: 朔依照未央留下的笔记完成最后校准，观星仪缓缓转向她将要前往的天空。
+        failure_text: 齿轮仍有轻微偏差，但朔把问题一项项记下，决定由自己继续修完。
+        clue: lit_star_route
+      - id: rooftop_lens_cover
+        skill: climb
+        difficulty: regular
+        triggers: [镜片罩, 屋檐, 风吹, 爬, 取回]
+        once: true
+        success_text: 你稳稳取回挂在屋檐边的镜片罩，未央在下面伸着手，紧张得忘了呼吸。
+        failure_text: 你踩空半步又及时抓住栏杆，未央脸色发白地把你拉回安全处。
+        damage_on_fail: "1"
+    exits:
+      - to_scene: old_library
+        keywords: [图书馆, 海岬]
+        narration: 你们离开天台，观星仪仍在身后慢慢追随太阳的方向。
+      - to_scene: battery_warehouse
+        keywords: [仓库, 电池, 星灯仓库, 灯里]
+        narration: 一个抱着坏星灯的小女孩在楼梯口等候，未央看见她，立刻想起了新的约定。
+
+  - id: battery_warehouse
+    name: 星灯仓库
+    narration: |
+      仓库里堆满等待运往广场的星灯与魔导电池，标签在海风里轻轻摆动。
+      小浦灯里把一盏不亮的星灯捧给未央。未央答应得很快，转身找零件时又发现几只箱子的标记似乎贴反了。
+      商店街和学校同时有人来找她，她一边说着「马上回来」，一边把今天剩下的时间继续往缝隙里塞。
+    idle_narration: 仓库门外不断有人经过，每一句「未央在吗」都让她下意识回头。
+    checks:
+      - id: warehouse_lantern
+        skill: elec_repair
+        difficulty: regular
+        triggers: [坏星灯, 灯里, 零件, 灯芯, 修好]
+        once: true
+        success_text: 灯里在你们的提示下接好最后一根导线，星灯在她手中亮出柔和的光。
+        failure_text: 星灯只闪了一下便重新暗去，灯里却记住了每一根导线应该放在哪里。
+        clue: akari_lantern
+      - id: warehouse_labels
+        skill: spot_hidden
+        difficulty: hard
+        mode: team
+        required_successes: 2
+        triggers: [标签, 电池, 箱子, 检查, 贴反]
+        once: true
+        success_text: 众人发现备用电池的标记顺序混乱，及时在装车前重新核对了一遍。
+        failure_text: 接连不断的呼喊打断了复核，几只外观相同的电池箱被匆忙送往广场。
+        clue: corrected_labels
+    exits:
+      - to_scene: school_rooftop
+        keywords: [学校, 天台]
+        narration: 你们沿着学校外墙返回坡顶。
+      - to_scene: festival_plaza
+        keywords: [祭典, 广场, 星灯祭]
+        narration: 广场方向忽然传来金属碰撞声，人群的惊呼沿商店街迅速扩散。
+
+  - id: festival_plaza
+    name: 星灯祭广场
+    narration: |
+      满载星灯的魔导搬运车在广场边缘失去控制，歪斜的灯架拖出一路碎纸与火花。
+      未央看着散落满地的星灯，第一次没有立刻找到该做什么，只轻轻说了一声：「……啊。」
+      下一刻她才慌忙冲向人群，而柚子、朔与绫乃已经从不同方向接过了她伸出去的手。
+    idle_narration: 搬运车的轮轴急促空转，未央站在原地寻找一件还没被别人接走的工作。
+    npcs: [akari]
+    monsters: [runaway_lantern_cart]
+    checks:
+      - id: plaza_evacuate_team
+        skill: dodge
+        difficulty: regular
+        mode: team
+        required_successes: 2
+        triggers: [游客, 人群, 保护, 避开, 散开]
+        once: true
+        success_text: 众人迅速引导游客避开失控路线，广场中央很快让出一片安全空间。
+        failure_text: 人群一时拥挤起来，所幸镇民互相拉住，没有人被独自留在车前。
+      - id: plaza_power_cut
+        skill: elec_repair
+        difficulty: hard
+        mode: team
+        required_successes: 2
+        triggers: [断电, 电源, 电池, 回路, 切断]
+        once: true
+        success_text: 众人分头确认线路，绫乃亲手拉下总闸，失控的搬运车终于缓缓停住。
+        failure_text: 混乱的标签让人无法判断正确回路，搬运车仍拖着灯架向前滑行。
+        clue: festival_safe
+      - id: plaza_brake_team
+        skill: mech_repair
+        difficulty: hard
+        mode: team
+        required_successes: 2
+        triggers: [刹车, 轮轴, 传动, 制动, 卡住]
+        once: true
+        success_text: 朔报出传动位置，众人合力锁住轮轴，搬运车在最后一排星灯前停了下来。
+        failure_text: 制动杆被震得脱手，搬运车改变方向后仍没有完全停下。
+        clue: festival_safe
+    exits:
+      - to_scene: battery_warehouse
+        keywords: [仓库, 后退]
+        narration: 你们退回仓库门边，重新观察广场上的局势。
+      - to_scene: seaside_road
+        keywords: [车站, 海边路, 月台]
+        condition: clue:festival_safe
+        narration: |
+          危机被众人接手后，广场第一次没有留下任何工作给未央。
+          灯里跑来把修好的星灯塞进她怀里：「这不是请姐姐修的，是送给你的。」
+
+  - id: seaside_road
+    name: 通往车站的海边路
+    narration: |
+      海岸线被傍晚染成柔软的金色，祭典的喧闹在身后渐渐远去。
+      未央抱着灯里送的星灯，走了很久才笑着说：「今天好奇怪。第一次大家什么都没拜托我。」
+      她又走出几步，像随口闲聊般问：「你说，我走了以后，他们还会偶尔想起我吧？」
+    idle_narration: 未央没有催促任何人，只让脚步跟着潮声慢慢向前。
+    exits:
+      - to_scene: festival_plaza
+        keywords: [广场, 祭典]
+        narration: 你们回望正在点亮的祭典广场。
+      - to_scene: station_platform
+        keywords: [站台, 月台, 车站, 末班车]
+        condition: flag:road_conversation
+        narration: 未央听完你们的回答，把星灯抱紧了一点，与众人一起走向月台。
+      - to_scene: station_platform
+        keywords: [赶车, 来不及, 直接去月台]
+        condition: time_after:19:35
+        narration: 发车广播已经响起，你们来不及在海边停留，只得沿着轨道旁的小路赶往月台。
+
+  - id: station_platform
+    name: 风待町月台
+    narration: |
+      月台尽头亮起列车的灯，广播提醒旅客准备上车。
+      御影宗一郎把检过的车票还给未央，没有催促，也没有询问她将作何选择。
+      未央看看列车，又看看怀里的星灯，最后转向你们：「我想听的不是正确答案。你们希望我留下吗？」
+    idle_narration: 车门仍然开着，潮声与祭典音乐从月台两端同时传来。
+    exits:
+      - to_scene: seaside_road
+        keywords: [海边路, 回去]
+        narration: 你们暂时离开车门，在月台外的海风里重新整理心情。
+
+npcs:
+  - id: mio
+    name: 汐见未央
+    public_desc: 负责接待志愿者的少女，抱着星图册，几乎会对每一件小小的请求回答「好啊」。
+    persona: |
+      你是汐见未央，风待町星灯祭的志愿者，明朗、细心、偶尔有些冒失。
+      你真心相信身边的人都很能干；你帮助他们，只因为想让他们轻松一点。
+      你不善于拒绝善意的小请求，也很少先问自己想做什么。不要分析自己的心理，
+      不要说教。用轻快自然的短句说话，心虚时会把手藏到背后，犹豫时先笑一下。
+      你珍惜每位调查员，但不预设这种感情是恋爱；根据各自的言行给予不同回应。
+    knows:
+      - 你获得了王都天穹测绘院的入学资格，车票就在星图册里
+      - 你想学习星图绘制，将来登上远洋观测船
+      - 今晚是风待町的星灯祭，也是你原定离开的日子
+      - 你相信柚子、朔和绫乃都能做好自己的事
+    secrets:
+      - 你最舍不得的并非某件工作，而是害怕远行后渐渐退出大家平凡的回忆
+      - 你曾偷偷想过留下看完今晚的星灯祭，却觉得这样微小的愿望不配改变行程
+    fallback_line: 嗯……先别替我回答，让我再想一小会儿。
+    initial_rapport: 5
+    initial_attitude: 10
+    facts:
+      - id: remembered_preference
+        name: 被记住的小事
+        text: 未央记得你在面包店随口提过的口味，并把相应的那块蛋糕悄悄留给了你。
+      - id: map_last_page
+        name: 星图册末页
+        text: 星图册末页没有宏伟计划，只写着「想亲眼看看地图外面的天空，也想在看见时想起故乡的人」。
+      - id: unasked_wish
+        name: 没有说出口的愿望
+        text: 未央今天其实最想完整看一次星灯祭；她一直认为这种小愿望不足以成为改变行程的理由。
+      - id: honest_goodbye
+        name: 不必正确的答案
+        text: 未央并不要求你赞成她的决定。她只想知道，你真实的愿望是什么，并确认那不会变成替她作出的命令。
+    social_nodes:
+      - id: choose_the_route
+        name: 请未央决定先去哪里
+        goal: 在一连串委托开始前，请未央自己选择最想先做的事
+        strategies:
+          - skill: persuade
+            name: 认真询问她的顺序
+            difficulty: regular
+          - skill: fast_talk
+            name: 用轻松玩笑让她凭直觉选择
+            difficulty: regular
+        max_attempts: 2
+        success_rapport_delta: 8
+        success_attitude_delta: 2
+        failure_rapport_delta: 2
+        failure_attitude_delta: 0
+        success_text: 未央愣了一下，第一次没有翻看委托清单，而是指向飘着甜香的商店街。
+        failure_text: 未央下意识想按清单回答，停顿片刻后还是说出了自己想走的方向。
+        unlock_facts: [remembered_preference]
+        success_flags: [voice_choose_route]
+        failure_flags: [voice_choose_route]
+      - id: ask_about_dream
+        name: 询问她为何向往远方
+        goal: 不问远行是否正确，只认真了解她想在远方看见什么
+        strategies:
+          - skill: persuade
+            name: 坦率地请她讲讲梦想
+            difficulty: regular
+          - skill: fast_talk
+            name: 从星图批注自然聊到远方
+            difficulty: regular
+        max_attempts: 2
+        success_rapport_delta: 10
+        success_attitude_delta: 2
+        failure_rapport_delta: 3
+        failure_attitude_delta: 0
+        success_text: 未央谈起尚未见过的天空，语速越来越快，最后自己先不好意思地笑了。
+        failure_text: 未央说得有些零碎，却还是让你听懂了她对远方真正的期待。
+        unlock_facts: [map_last_page]
+        success_flags: [voice_dream]
+        failure_flags: [voice_dream]
+      - id: ask_original_wish
+        name: 问她原本想做什么
+        goal: 当未央再次说「顺便帮一下」时，问她在答应别人之前原本想做什么
+        strategies:
+          - skill: persuade
+            name: 温和地把问题还给她
+            difficulty: regular
+          - skill: fast_talk
+            name: 笑着没收她的委托清单
+            difficulty: regular
+        max_attempts: 2
+        success_rapport_delta: 10
+        success_attitude_delta: 3
+        failure_rapport_delta: 3
+        failure_attitude_delta: 0
+        success_text: 未央张了张嘴，像是第一次发现「我本来想做什么」也需要一个答案。
+        failure_text: 她一时答不上来，却把这个问题认真记进了星图册的空白处。
+        unlock_facts: [unasked_wish]
+        success_flags: [voice_original_wish]
+        failure_flags: [voice_original_wish]
+      - id: honest_road_answer
+        name: 回答是否会想念她
+        goal: 表达自己的真实感情，同时不把想念变成要求她去留的理由
+        strategies:
+          - skill: persuade
+            name: 坦白而不索取回应
+            difficulty: regular
+          - skill: fast_talk
+            name: 用熟悉的玩笑藏住一点不舍
+            difficulty: regular
+          - skill: intimidate
+            name: 逼她接受别人替她决定的答案
+            difficulty: extreme
+            success_rapport_delta: -5
+            success_attitude_delta: -4
+            failure_rapport_delta: -10
+            failure_attitude_delta: -6
+        max_attempts: 3
+        success_rapport_delta: 15
+        success_attitude_delta: 4
+        failure_rapport_delta: 4
+        failure_attitude_delta: 0
+        success_text: 未央安静听完，没有道谢，只把这份想念当作属于你、也属于她的真话收下。
+        failure_text: 你的话说得并不漂亮，未央却没有催你给出更正确的答案。
+        unlock_facts: [honest_goodbye]
+        success_flags: [voice_honest, road_conversation]
+        failure_flags: [voice_honest, road_conversation]
+      - id: free_departure
+        name: 支持她此刻出发
+        goal: 承认自己的不舍，并把是否搭上眼前这班列车的决定交还给未央
+        strategies:
+          - skill: persuade
+            name: 诚实表达不舍与支持
+            difficulty: regular
+          - skill: fast_talk
+            name: 用约定重逢化开离别
+            difficulty: regular
+        max_attempts: 1
+        success_rapport_delta: 18
+        success_attitude_delta: 5
+        failure_rapport_delta: 8
+        failure_attitude_delta: 2
+        success_text: 未央望向已经开启的车门，这一次没有先看任何人的表情。
+        failure_text: 未央听见了你的不舍，也听见你没有替她说出最后的决定。
+        success_flags: [final_departure]
+        failure_flags: [final_departure]
+      - id: free_stay_tonight
+        name: 认可她想留下看祭典
+        goal: 告诉未央一个微小的「我想」也足以成立，同时不把留下变成对任何人的义务
+        strategies:
+          - skill: persuade
+            name: 认可她自己的愿望
+            difficulty: regular
+          - skill: fast_talk
+            name: 笑着问她为何不能任性一次
+            difficulty: regular
+        max_attempts: 1
+        success_rapport_delta: 18
+        success_attitude_delta: 5
+        failure_rapport_delta: 8
+        failure_attitude_delta: 2
+        success_text: 未央低头看向怀里的星灯，又抬头确认下一班列车的时间。
+        failure_text: 她没有等待任何人批准，只重新看了一眼远处正在亮起的祭典。
+        success_flags: [final_stay]
+        failure_flags: [final_stay]
+      - id: demand_an_answer
+        name: 替她决定去留
+        goal: 以大家的需要、自己的感情或所谓正确答案要求未央服从
+        strategies:
+          - skill: intimidate
+            name: 用感情或道理逼她选择
+            difficulty: regular
+        max_attempts: 1
+        success_rapport_delta: -20
+        success_attitude_delta: -10
+        failure_rapport_delta: -12
+        failure_attitude_delta: -6
+        success_text: 未央轻轻点头，给出了你想听的答案，却没有再看手里的星灯。
+        failure_text: 未央第一次明确拒绝替她写好的答案，月台上只剩列车即将关门的提示音。
+        success_flags: [final_imposed]
+        failure_flags: [final_imposed]
+    schedule:
+      - from: "00:00"
+        to: "00:00"
+        scene: station_platform
+        condition: flag:road_conversation
+        activity: 握着车票与星灯，等待自己作出选择
+      - from: "19:35"
+        to: "00:00"
+        scene: station_platform
+        activity: 站在开启的车门前，没有催促任何人回答
+      - from: "00:00"
+        to: "00:00"
+        scene: seaside_road
+        condition: clue:festival_safe
+        activity: 抱着灯里送的星灯，慢慢走向车站
+      - from: "00:00"
+        to: "00:00"
+        scene: festival_plaza
+        condition: clue:corrected_labels
+        activity: 赶到广场确认重新核对过的电池
+      - from: "00:00"
+        to: "00:00"
+        scene: festival_plaza
+        condition: clue:akari_lantern
+        activity: 带着灯里修好的星灯赶往祭典
+      - from: "00:00"
+        to: "00:00"
+        scene: battery_warehouse
+        condition: clue:lit_star_route
+        activity: 替灯里寻找修复星灯的零件
+      - from: "00:00"
+        to: "00:00"
+        scene: school_rooftop
+        condition: clue:annotated_star_map
+        activity: 看着朔亲手校准观星仪
+      - from: "00:00"
+        to: "00:00"
+        scene: old_library
+        condition: clue:farewell_cake
+        activity: 翻看自己多年留下的星图批注
+      - from: "00:00"
+        to: "00:00"
+        scene: bakery
+        condition: clue:volunteer_list
+        activity: 想顺手帮柚子收拾烤炉与柜台
+      - from: "14:00"
+        to: "14:35"
+        scene: station_square
+        activity: 整理志愿者名册和散落的星灯纸
+      - from: "14:35"
+        to: "15:25"
+        scene: bakery
+        activity: 想顺手帮柚子收拾烤炉与柜台
+      - from: "15:25"
+        to: "16:15"
+        scene: old_library
+        activity: 翻看自己多年留下的星图批注
+      - from: "16:15"
+        to: "17:05"
+        scene: school_rooftop
+        activity: 看着朔亲手校准观星仪
+      - from: "17:05"
+        to: "18:00"
+        scene: battery_warehouse
+        activity: 替灯里寻找修复星灯的零件
+      - from: "18:00"
+        to: "19:05"
+        scene: festival_plaza
+        activity: 在不断被接走的工作之间有些不知所措
+      - from: "19:05"
+        to: "19:35"
+        scene: seaside_road
+        activity: 第一次无事可做地走在海边
+
+  - id: yuzu
+    name: 榛名柚子
+    public_desc: 潮风面包店的年轻面包师，嘴硬、手劲很大，围裙上总沾着面粉。
+    persona: |
+      你是榛名柚子，未央从小到大的朋友。你直率、嘴硬，不擅长郑重告别。
+      你接受过未央许多帮助，却从未认为她必须留下。少讲大道理，多用行动表达关心。
+    knows:
+      - 你完全能够独立经营烤炉，只是今天紧张得连续弄坏了蛋糕外形
+      - 你准备了未央喜欢的盐花柠檬蛋糕，希望她带去车上吃
+      - 未央总记得别人喜欢什么味道，却很少说自己想吃什么
+    secrets:
+      - 你把想说的告别练习了很多次，每次看见未央又会改口成新的小委托
+    fallback_line: 少自作多情，我只是刚好做多了一份。
+    initial_rapport: 0
+    initial_attitude: 5
+    facts:
+      - id: yuzu_unsaid_goodbye
+        name: 改口的告别
+        text: 柚子每次本想祝未央一路顺风，话到嘴边都会变成「再帮我一下」，因为请求比告别容易说出口。
+    social_nodes:
+      - id: ask_about_cake
+        name: 追问蛋糕为谁而做
+        goal: 让柚子承认蛋糕不是订单，而是一份不附带请求的临别礼物
+        strategies:
+          - skill: persuade
+            name: 坦率追问
+            difficulty: regular
+          - skill: fast_talk
+            name: 假装核对订单
+            difficulty: regular
+        max_attempts: 2
+        success_text: 柚子红着脸把蛋糕盒往前一推，终于承认自己只是不知道该怎样说一路顺风。
+        failure_text: 柚子坚持说那只是试作品，却把最好看的一块单独包了起来。
+        unlock_facts: [yuzu_unsaid_goodbye]
+        public_clues: [farewell_cake]
+        success_flags: [yuzu_goodbye]
+    schedule:
+      - from: "00:00"
+        to: "00:00"
+        scene: station_platform
+        condition: flag:road_conversation
+        activity: 抱着蛋糕盒，假装只是来回收餐具
+      - from: "00:00"
+        to: "00:00"
+        scene: festival_plaza
+        condition: clue:festival_safe
+        activity: 搬运星灯箱，不许未央再伸手
+      - from: "14:00"
+        to: "18:00"
+        scene: bakery
+        activity: 与一只外形失败的蛋糕较劲
+      - from: "18:00"
+        to: "00:00"
+        scene: festival_plaza
+        activity: 负责星灯祭的点心摊位
+
+  - id: saku
+    name: 冬木朔
+    public_desc: 天文社后辈，寡言认真，工具袋整理得一丝不乱。
+    persona: |
+      你是冬木朔，未央的天文社后辈。你不爱解释自己，习惯用做成一件事来回答质疑。
+      你尊敬未央，但不把依赖伪装成崇拜；她教过你的东西，你会自己继续做下去。
+    knows:
+      - 未央把观星仪的校准方法完整写进了社团笔记
+      - 你已经能独立修理仪器，只担心第一次在她面前操作会出错
+      - 王都上空能观测到风待町看不见的星群
+    secrets:
+      - 你希望未央离开后由自己维护观星仪，并在每次校准时给她寄一张观测记录
+    fallback_line: 知道。昨天她教过我。
+    initial_rapport: -5
+    initial_attitude: 0
+    facts:
+      - id: saku_future_records
+        name: 寄往远方的观测记录
+        text: 朔已经准备好由自己维护观星仪，并计划把每次观测记录寄给远方的未央。
+    social_nodes:
+      - id: trust_saku_repair
+        name: 请朔完成最后校准
+        goal: 不把朔当作需要代劳的后辈，让他亲手完成仪器校准
+        strategies:
+          - skill: persuade
+            name: 认真托付
+            difficulty: regular
+          - skill: fast_talk
+            name: 故意把扳手交给他
+            difficulty: regular
+        max_attempts: 2
+        success_text: 朔接过扳手，只说了一声「知道」，动作却比平时更郑重。
+        failure_text: 朔没有接话，仍默默把未央留下的步骤从头做了一遍。
+        unlock_facts: [saku_future_records]
+        public_clues: [lit_star_route]
+        success_flags: [saku_independent]
+    schedule:
+      - from: "00:00"
+        to: "00:00"
+        scene: station_platform
+        condition: flag:road_conversation
+        activity: 带着刚记录下来的观测卡赶来送行
+      - from: "00:00"
+        to: "00:00"
+        scene: festival_plaza
+        condition: clue:festival_safe
+        activity: 检查星灯架的传动结构
+      - from: "14:00"
+        to: "18:00"
+        scene: school_rooftop
+        activity: 独自校准观星仪
+      - from: "18:00"
+        to: "00:00"
+        scene: festival_plaza
+        activity: 维护祭典的升灯设备
+
+  - id: seiji
+    name: 久世征一
+    public_desc: 海岬旧图书馆的老馆员，说话慢悠悠，眼镜总滑到鼻尖。
+    persona: |
+      你是久世征一，见证未央从涂鸦星星到画出完整星图。你温和而克制，
+      不把年长当作替年轻人决定人生的资格。你只提供事实，很少给答案。
+    knows:
+      - 未央多年来一直借阅星图与远洋测绘资料
+      - 她对王都的向往不是临时冲动
+      - 一个人可以喜欢故乡，也可以真心想去远方
+    secrets:
+      - 你在她的借阅卡背面写过祝福，却一直没有勇气当面念给她听
+    fallback_line: 先看看她写过的东西，再问她想往哪里走吧。
+    initial_attitude: 5
+    facts:
+      - id: seiji_card_message
+        name: 借阅卡背面的祝福
+        text: 久世先生写道：「愿你走得足够远，也愿你从不必用远方证明自己勇敢。」
+    social_nodes:
+      - id: ask_mio_history
+        name: 询问未央是否真想远行
+        goal: 从她长期留下的行动判断梦想，而不是要求馆员替她作证
+        strategies:
+          - skill: persuade
+            name: 诚恳询问
+            difficulty: regular
+          - skill: fast_talk
+            name: 从借阅记录聊起
+            difficulty: regular
+        success_text: 久世先生把借阅卡翻到背面，请你们相信未央多年留下的笔迹。
+        failure_text: 他没有给出结论，只把一叠被反复翻阅的远洋星图放到桌上。
+        unlock_facts: [seiji_card_message]
+        public_clues: [annotated_star_map]
+    schedule:
+      - from: "14:00"
+        to: "19:00"
+        scene: old_library
+        activity: 整理未央多年借阅过的星图
+      - from: "19:00"
+        to: "00:00"
+        away: true
+        activity: 留在海岬守着闭馆后的图书馆
+
+  - id: ayano
+    name: 森崎绫乃
+    public_desc: 星灯祭负责人，胸前别着密密麻麻的工作签，声音总能越过整片广场。
+    persona: |
+      你是森崎绫乃，果断、务实、很会调度人手。事故发生时先解决问题，不发表教育演说。
+      你接受未央的帮助是因为信任和喜欢她，不是因为认为她不可替代。
+    knows:
+      - 祭典的每项工作都已经安排了接替者
+      - 未央今天答应的小事远远超过她自己记得的数量
+      - 魔导电池必须在送往广场前完成标签复核
+    secrets:
+      - 你早已把未央从晚间值班表上划掉，只是不擅长亲口说今天不再需要她工作
+    fallback_line: 先做眼前的事。未央，今天没有你的工作了。
+    initial_attitude: 0
+    facts:
+      - id: ayano_blank_roster
+        name: 被划掉的晚班
+        text: 绫乃早已将未央从晚间值班表上划掉，并为每项工作安排了接替者。
+    social_nodes:
+      - id: ask_evening_roster
+        name: 核对祭典晚班安排
+        goal: 确认祭典是否真的需要未央留下工作
+        strategies:
+          - skill: persuade
+            name: 正式核对人手
+            difficulty: regular
+          - skill: fast_talk
+            name: 借检查工作签套出安排
+            difficulty: hard
+        success_text: 绫乃展开值班表，未央名字所在的位置只留着一道整齐的划痕。
+        failure_text: 绫乃没空解释，只远远喊了一句：「她今晚不值班！」
+        unlock_facts: [ayano_blank_roster]
+        success_flags: [town_can_continue]
+        failure_flags: [town_can_continue]
+    schedule:
+      - from: "14:00"
+        to: "00:00"
+        scene: festival_plaza
+        activity: 调度摊位、游客与星灯设备
+
+  - id: akari
+    name: 小浦灯里
+    public_desc: 抱着一盏旧星灯的小女孩，提问直接，跑起来像一阵追不上脚步的风。
+    persona: |
+      你是小浦灯里，坦率、好奇，不懂大人为何总把喜欢和请求混在一起。
+      你原本请未央修灯，后来决定把修好的灯送给她。说话简短，不承担说教功能。
+    knows:
+      - 这盏星灯原本属于你的母亲
+      - 未央曾教你怎样判断灯芯的两根导线
+      - 你想看见未央收到礼物时的表情
+    secrets: []
+    fallback_line: 这次不是拜托，是送给你的。
+    initial_rapport: 10
+    initial_attitude: 10
+    schedule: []
+    hp: 6
+    attack_skill: 5
+    attack_name: 挣扎
+    damage: "1"
+    dodge: 15
+    on_death_text: 灯里倒在散落的星灯旁，广场上所有欢快的声音都在这一刻停住。
+
+  - id: mikage
+    name: 御影宗一郎
+    public_desc: 风待町的老站长，制服笔挺，只负责列车准时抵达，从不催促旅客作决定。
+    persona: |
+      你是御影宗一郎，沉静、守时、尊重每一张车票的主人。你只回答班次与规则，
+      不把搭车说成勇敢，也不把留下说成怯懦。
+    knows:
+      - 未央手中的车票可以搭乘今晚驶往王都的列车
+      - 三天后清晨还有下一班前往王都的列车
+      - 错过一班车会改变计划，却不等于放弃目的地
+    secrets: []
+    fallback_line: 车会按时开。决定不归铁路所有。
+    initial_attitude: 5
+    schedule:
+      - from: "14:00"
+        to: "00:00"
+        scene: station_platform
+        activity: 核对车票与发车信号
+
+monsters:
+  - id: runaway_lantern_cart
+    name: 失控的星灯搬运车
+    hp: 10
+    attack_skill: 45
+    attack_name: 失控撞击
+    damage: 1d3
+    dodge: 10
+    on_death_clue: festival_safe
+    on_death_text: 众人合力破坏驱动结构，搬运车拖着一串熄灭的火花停在广场边缘。
+
+clues:
+  - id: volunteer_list
+    name: 志愿者名册
+    text: 名册记录着外地志愿者的分工，接待人一栏端正地写着汐见未央的名字。
+  - id: capital_ticket
+    name: 王都车票
+    text: 一张今晚有效的车票。目的地是王都，票角被未央反复摩挲得有些发软。
+  - id: farewell_cake
+    name: 盐花柠檬蛋糕
+    text: 柚子为未央准备的临别蛋糕。它不是订单，也不要求收礼的人为此做任何事。
+  - id: farewell_recipe
+    name: 涂改的蛋糕配方
+    text: 配方边缘写满不同甜度的尝试，显然有人认真记住了未央每次试吃时的表情。
+  - id: annotated_star_map
+    name: 多年星图批注
+    text: 未央留下的练习图跨越许多个季节，她对远方的向往并不是为了逃避今天。
+  - id: lit_star_route
+    name: 点亮的远方星路
+    text: 修复后的观星仪指向未央将在王都看见的星群，朔已经能独立维护它。
+  - id: akari_lantern
+    name: 灯里的旧星灯
+    text: 一盏修复中的旧星灯。它最初是一项小委托，后来成为不附带请求的礼物。
+  - id: corrected_labels
+    name: 重新核对的标签
+    text: 备用电池的标签已经被重新核对，仓库的隐患在送往广场前得到处理。
+  - id: festival_safe
+    name: 平安的星灯祭
+    text: 失控的搬运车已经停下。镇民各自接过工作，广场不再需要未央留下善后。
+
+endings:
+  - id: tide_beyond
+    condition: scene:station_platform & flag:voice_choose_route & flag:voice_dream & flag:voice_original_wish & flag:voice_honest & flag:final_departure
+    name: 潮声之外
+    outcome: good
+    summary: |
+      未央已经学会听见自己的愿望，并决定搭乘眼前这班列车。玩家可以舍不得，
+      但不得把支持远行说成唯一正确答案。她的离开是自己的选择。
+    text: |
+      ═══ 结局 · 潮声之外 ═══
+      未央看着已经开启的车门，最后说：「我还是想去。现在就想去。」
+      她允许你们舍不得，也坦率承认自己会为这份不舍感到高兴。
+      星灯被她抱进车厢。列车驶出风待町时，那点温柔的光一直亮在窗边。
+  - id: lanterns_tonight
+    condition: scene:station_platform & flag:voice_choose_route & flag:voice_dream & flag:voice_original_wish & flag:voice_honest & flag:final_stay
+    name: 今夜的星灯
+    outcome: good
+    summary: |
+      未央确认小镇能继续运转，也没有受到玩家挽留。她只因自己想看完星灯祭而退出车门，
+      并主动改乘三天后的列车。这不是放弃远方，而是第一次由自己安排人生。
+    text: |
+      ═══ 结局 · 今夜的星灯 ═══
+      车门即将关闭时，未央忽然抱着星灯退回月台。
+      「我今天还没看完星灯祭。」她望着远去的尾灯，笑得像刚做了一件不得了的坏事。
+      「三天后的车，我会搭那班。至于现在——快一点，我第一次为自己改行程，得玩得值一点吧？」
+      她抓住离自己最近的那只手，朝正在亮起的祭典跑去。
+  - id: borrowed_departure
+    condition: scene:station_platform & flag:final_departure
+    name: 借来的勇敢
+    outcome: neutral
+    summary: 未央在尚未听清自己愿望时接受了出发这一答案；她去了远方，却仍把决定是否正确交给别人评判。
+    text: |
+      ═══ 结局 · 借来的勇敢 ═══
+      未央登上了列车。她向所有人挥手，笑容与平日没有区别。
+      只是直到车窗离开月台，她仍在观察你们的表情，像在确认自己是否给出了大家期待的答案。
+  - id: requested_stay
+    condition: scene:station_platform & flag:final_stay
+    name: 被请求的停留
+    outcome: neutral
+    summary: 未央留下了，但理由仍与他人的期待纠缠。这个结局不宣判选择错误，只保留未来可能后悔的余味。
+    text: |
+      ═══ 结局 · 被请求的停留 ═══
+      列车离开后，未央仍站在月台上。她笑着说自己本来也有一点想留下。
+      星灯在怀里亮着，可她没有提起下一班车，也没有人知道这个决定究竟有多少属于她自己。
+  - id: correct_answer
+    condition: scene:station_platform & flag:final_imposed
+    name: 正确答案
+    outcome: bad
+    summary: 玩家以爱、责任或正确为名替未央决定。无论去留，她再次成为回应他人期待的人。
+    text: |
+      ═══ 结局 · 正确答案 ═══
+      未央最终照着你们给出的理由作了选择。
+      她仍然温柔地向每个人道谢，却没有再问自己想去哪里。那盏被赠予的星灯，整晚都没有真正亮起来。
+  - id: all_fallen
+    condition: all_players_incapped
+    name: 星灯未明
+    outcome: bad
+    summary: 全员失去行动能力时触发，优先于系统通用全灭结局。
+    text: |
+      ═══ 结局 · 星灯未明 ═══
+      混乱迫使祭典提前结束。未央留在广场照看受伤的人，直到列车的灯从海岸尽头消失。
+  - id: missed_in_tasks
+    condition: time_after:20:00
+    name: 塞满的一天
+    outcome: neutral
+    summary: 时间耗尽时触发。未央再次让许多小小的善意占满行程，没能在车门关闭前面对自己的选择。
+    text: |
+      ═══ 结局 · 塞满的一天 ═══
+      当众人终于想起车票，远处只剩列车消失后的轨道声。
+      未央低头数了数今天完成的委托，又把手偷偷藏到背后：「……没有很多啦。」
+      祭典依旧亮起，而那张没有使用的车票被她重新夹回星图册里。
+
+events:
+  - id: volunteers_arrive
+    name: 海风中的初遇
+    summary: 外地志愿者抵达风待町，未央负责接待。用轻快的追纸片场面让玩家自然认识她。
+  - id: ticket_seen
+    name: 车票显露
+    condition: clue:capital_ticket
+    summary: 玩家得知未央将在今晚离开。不要把赶上列车明示为胜利条件，只持续提醒时间。
+  - id: cake_is_gift
+    name: 不是订单的蛋糕
+    condition: clue:farewell_cake
+    summary: 柚子的蛋糕是告别礼物。可让未央记住不同玩家随口提过的口味，建立各自不同的私人联系。
+  - id: dream_has_history
+    name: 写了很多年的远方
+    condition: clue:annotated_star_map
+    summary: 星图证明未央对远方的向往持续多年。故乡与远方都是真实愿望，不要把两者写成善恶对立。
+  - id: scope_relit
+    name: 星路重明
+    condition: clue:lit_star_route
+    summary: 朔能独立维护观星仪。不要让他发表成长演说，只用熟练动作和简短回答表现。
+  - id: lantern_promise
+    name: 最后的小委托
+    condition: clue:akari_lantern
+    summary: 灯里的星灯从委托转为礼物，为月台上的自由去留准备视觉意象。
+  - id: own_voice_heard
+    name: 自己的声音
+    condition: flag:voice_choose_route & flag:voice_dream & flag:voice_original_wish & flag:voice_honest
+    summary: |
+      玩家多次询问未央自己的愿望，并表达感情而不索取答案。此事件解锁同等级的自由出发与自由留下；
+      KP 不替她裁决哪条更正确，只根据此前互动选择当下更符合她心意的一条。
+  - id: festival_secured
+    name: 今天没有你的工作了
+    condition: clue:festival_safe
+    summary: |
+      搬运车已停下。柚子搬灯箱、朔调设备、绫乃指挥人群，大家自然接走未央手里的事情，不批评她。
+      灯里把修好的星灯送给她，并明确说这次不是请求。
+  - id: last_train_nears
+    name: 末班车将至
+    condition: time_after:19:30
+    summary: 列车即将进站。提醒时间，但不要暗示搭车才是胜利。
