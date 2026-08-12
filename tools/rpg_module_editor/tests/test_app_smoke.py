@@ -20,11 +20,11 @@ from tools.rpg_module_editor.tabs.report_tab import collect_issues
 from tools.rpg_module_editor.widgets import ConfirmScreen
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
     from textual.pilot import Pilot
     from textual.widget import Widget
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _YUZHAI = modules_dir() / "yuzhai_old_house.yaml"
 
@@ -53,6 +53,20 @@ async def _wait_mounted(pilot: Pilot, widget: Widget) -> None:
     raise AssertionError(msg)
 
 
+async def _wait_until(
+    pilot: Pilot,
+    predicate: Callable[[], bool],
+    *,
+    attempts: int = 50,
+) -> None:
+    """等待 Textual 异步消息队列完成字段回写。"""
+    for _ in range(attempts):
+        if predicate():
+            return
+        await pilot.pause()
+    raise AssertionError("异步字段回写未完成")
+
+
 async def test_all_tabs_mount_and_zero_errors() -> None:
     """遍历全部 Tab 无异常；yuzhai 校验零 ERROR（与引擎口径一致）。"""
     app = ModuleEditorApp(initial_path=_YUZHAI)
@@ -75,8 +89,10 @@ async def test_edit_dirty_and_save_roundtrip(tmp_path: Path) -> None:
         await pilot.pause()
         assert not app.draft.dirty
         app._module_tab._description.input.value = "被冒烟测试修改的简介"
-        await pilot.pause()
-        assert app.draft.data["description"] == "被冒烟测试修改的简介"
+        await _wait_until(
+            pilot,
+            lambda: app.draft.data["description"] == "被冒烟测试修改的简介",
+        )
         assert app.draft.dirty
         target = tmp_path / "roundtrip.yaml"
         app._write_to(target)
@@ -106,10 +122,12 @@ async def test_yaml_source_tab_apply(tmp_path: Path) -> None:  # noqa: ARG001
         assert edited != text
         await _wait_mounted(pilot, app._yaml_tab.area)
         app._yaml_tab.area.text = edited
-        await pilot.pause()
+        await _wait_until(pilot, lambda: app._yaml_tab.area.text == edited)
         assert app._yaml_tab.apply_to_form()
-        await pilot.pause()
-        assert str(app.draft.data["description"]).startswith("源码页直改的简介。")
+        await _wait_until(
+            pilot,
+            lambda: str(app.draft.data["description"]).startswith("源码页直改的简介。"),
+        )
         ModuleDef.model_validate(app.draft.data)
 
 
@@ -130,8 +148,10 @@ async def test_scene_edit_and_rename_cascade() -> None:
         # 文本编辑写回 + priority 保持 int（MRO 双 handler 回归）
         await _wait_mounted(pilot, st._check_form._success.area)
         st._check_form._success.area.text = "冒烟改写的成功文案"
-        await pilot.pause()
-        assert scene["checks"][0]["success_text"] == "冒烟改写的成功文案"
+        await _wait_until(
+            pilot,
+            lambda: scene["checks"][0]["success_text"] == "冒烟改写的成功文案",
+        )
         prio = scene["checks"][0]["priority"]
         assert prio == 1 and isinstance(prio, int)
         # 改名级联：study → study_room
@@ -142,7 +162,15 @@ async def test_scene_edit_and_rename_cascade() -> None:
         st._scene_idx = study_idx
         st._fill_scene_form()
         st._scene_id.input.value = "study_room"
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: "study_room"
+            in [
+                e.get("to_scene")
+                for s in data["scenes"]
+                for e in s.get("exits", [])
+            ],
+        )
         to_scenes = [
             e.get("to_scene") for s in data["scenes"] for e in s.get("exits", [])
         ]
@@ -169,8 +197,10 @@ async def test_npc_schedule_and_secret_leak() -> None:
         await pilot.pause()
         await _wait_mounted(pilot, nt._schedule_form._activity.input)
         nt._schedule_form._activity.input.value = "冒烟改写的活动"
-        await pilot.pause()
-        assert npc["schedule"][0]["activity"] == "冒烟改写的活动"
+        await _wait_until(
+            pilot,
+            lambda: npc["schedule"][0]["activity"] == "冒烟改写的活动",
+        )
         # 把机密复制进 knows → 泄露告警
         secret = str(npc["secrets"][0])
         nt._write_npc_field("knows", [*npc.get("knows", []), secret])
@@ -188,8 +218,7 @@ async def test_quit_guard_shows_confirm() -> None:
     async with app.run_test(size=(140, 44)) as pilot:
         await pilot.pause()
         app._module_tab._description.input.value = "制造脏状态"
-        await pilot.pause()
-        assert app.draft.dirty
+        await _wait_until(pilot, lambda: app.draft.dirty)
         await pilot.press("ctrl+q")
         await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)

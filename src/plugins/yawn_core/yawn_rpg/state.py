@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
+from .. import game_registry  # noqa: TID252
 from .module_schema import ConditionContext
 
 if TYPE_CHECKING:
@@ -467,6 +468,8 @@ def create_game(
     """
     if group_id in _games or host_user_id in _user_index:
         return None
+    if not game_registry.reserve_game("rpg", group_id, host_user_id):
+        return None
     game = Game(
         group_id=group_id,
         host_user_id=host_user_id,
@@ -535,6 +538,8 @@ def join_signup(game: Game, user_id: int) -> bool:
     """报名；已在任意局中或已报名返回 False。"""
     if user_id in _user_index or user_id in game.signup_user_ids:
         return False
+    if not game_registry.reserve_user("rpg", game.group_id, user_id):
+        return False
     _user_index[user_id] = game.group_id
     game.signup_user_ids.append(user_id)
     return True
@@ -547,6 +552,7 @@ def leave_signup(game: Game, user_id: int) -> bool:
     game.signup_user_ids.remove(user_id)
     if _user_index.get(user_id) == game.group_id:
         _user_index.pop(user_id, None)
+    game_registry.release_user("rpg", game.group_id, user_id)
     return True
 
 
@@ -561,6 +567,7 @@ def discard_game(game: Game) -> None:
     for uid, gid in list(_user_index.items()):
         if gid == game.group_id:
             _user_index.pop(uid, None)
+    game_registry.release_game("rpg", game.group_id)
 
 
 async def stop_game(game: Game) -> None:

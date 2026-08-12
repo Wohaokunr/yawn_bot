@@ -56,6 +56,9 @@ class Config(BaseModel):
     # api.py 封装并包 asyncio.wait_for，协议端挂起时降级为 warning，
     # 不卡死引擎任务
     ww_api_timeout: float = 10.0
+    # 行动队列背压：防止重复命令或 AI 迟到行动无限堆积
+    ww_action_queue_max: int = 100
+    ww_user_pending_max: int = 8
 
     # ── AI 玩家 ──
     # AI 玩家总开关

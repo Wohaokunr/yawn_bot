@@ -60,6 +60,7 @@ from .state import (
     note_signup_name,
     remove_ai_signup,
     stop_game,
+    submit_action,
 )
 
 config = get_plugin_config(Config)
@@ -72,6 +73,25 @@ _VOTE_PHASES: frozenset[Phase] = frozenset(
         Phase.PK_VOTE,
     }
 )
+
+
+def _submit(game: Game, action: Action) -> str | None:
+    """提交行动并返回用户可见的背压提示。"""
+    if submit_action(
+        game,
+        action,
+        user_pending_max=config.ww_user_pending_max,
+    ):
+        return None
+    return "当前行动较多或重复，请稍后再试~"
+
+
+async def _finish_action(matcher: Any, game: Game, action: Action) -> None:
+    """提交行动并安全结束命令，避免把空字符串交给 NoneBot。"""
+    error = _submit(game, action)
+    if error:
+        await matcher.finish(error)
+    await matcher.finish()
 
 
 def _is_su(user_id: int) -> bool:
@@ -229,7 +249,11 @@ async def handle_open(
         await wolf_open.finish("本群已经有正在进行的狼人杀对局~")
     if game_of_user(user_id) is not None:
         await wolf_open.finish("你已经在其他对局中，无法开房~")
-    game = create_game(group_id, user_id)
+    game = create_game(
+        group_id,
+        user_id,
+        queue_max=config.ww_action_queue_max,
+    )
     if game is None:
         await wolf_open.finish("开房失败，请稍后重试")
     # 注入收到本事件的 Bot：多机器人在线时 nonebot.get_bot() 会抛
@@ -530,7 +554,9 @@ async def handle_start(
             if add_ai_signup(game) is None:
                 break
             filled += 1
-    game.action_queue.put_nowait(Action(ActionKind.START_GAME, user_id))
+    error = _submit(game, Action(ActionKind.START_GAME, user_id))
+    if error:
+        await start_cmd.finish(error)
     logger.info(
         f"狼人杀群 {int(event.group_id)} {user_id} 请求开始游戏"
         f"（{len(game.signup_user_ids)} 人，AI 补位 {filled}）"
@@ -660,10 +686,11 @@ async def handle_kill(
     seat = _parse_seat(arg)
     if seat is None:
         await kill_cmd.finish("格式：/刀 N（N 为目标座位号）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.KILL, int(event.get_user_id()), seat)
+    await _finish_action(
+        kill_cmd,
+        game,
+        Action(ActionKind.KILL, int(event.get_user_id()), seat),
     )
-    await kill_cmd.finish()
 
 
 check_cmd = on_command("查验", aliases={"验"}, priority=5, block=True)
@@ -684,10 +711,11 @@ async def handle_check(
     seat = _parse_seat(arg)
     if seat is None:
         await check_cmd.finish("格式：/查验 N（N 为目标座位号）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.CHECK, int(event.get_user_id()), seat)
+    await _finish_action(
+        check_cmd,
+        game,
+        Action(ActionKind.CHECK, int(event.get_user_id()), seat),
     )
-    await check_cmd.finish()
 
 
 save_cmd = on_command("救", priority=5, block=True)
@@ -704,8 +732,11 @@ async def handle_save(
         await save_cmd.finish(
             _not_now(game, "救 是女巫的夜间行动，请按私聊提示在夜里回复 救~")
         )
-    game.action_queue.put_nowait(Action(ActionKind.SAVE, int(event.get_user_id())))
-    await save_cmd.finish()
+    await _finish_action(
+        save_cmd,
+        game,
+        Action(ActionKind.SAVE, int(event.get_user_id())),
+    )
 
 
 poison_cmd = on_command("毒", priority=5, block=True)
@@ -726,10 +757,11 @@ async def handle_poison(
     seat = _parse_seat(arg)
     if seat is None:
         await poison_cmd.finish("格式：/毒 N（N 为目标座位号）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.POISON, int(event.get_user_id()), seat)
+    await _finish_action(
+        poison_cmd,
+        game,
+        Action(ActionKind.POISON, int(event.get_user_id()), seat),
     )
-    await poison_cmd.finish()
 
 
 shoot_cmd = on_command("开枪", aliases={"带"}, priority=5, block=True)
@@ -750,10 +782,11 @@ async def handle_shoot(
     seat = _parse_seat(arg)
     if seat is None:
         await shoot_cmd.finish("格式：/开枪 N（N 为目标座位号）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.SHOOT, int(event.get_user_id()), seat)
+    await _finish_action(
+        shoot_cmd,
+        game,
+        Action(ActionKind.SHOOT, int(event.get_user_id()), seat),
     )
-    await shoot_cmd.finish()
 
 
 no_shoot_cmd = on_command(
@@ -775,8 +808,11 @@ async def handle_no_shoot(
         await no_shoot_cmd.finish(
             _not_now(game, "不开枪 是猎人死亡后的决策，请按私聊提示回复 不开枪~")
         )
-    game.action_queue.put_nowait(Action(ActionKind.NO_SHOOT, int(event.get_user_id())))
-    await no_shoot_cmd.finish()
+    await _finish_action(
+        no_shoot_cmd,
+        game,
+        Action(ActionKind.NO_SHOOT, int(event.get_user_id())),
+    )
 
 
 # ── 白天群命令 ────────────────────────────────────────────
@@ -795,8 +831,11 @@ async def handle_run(
         await run_cmd.finish(
             _not_now(game, "上警 仅在警长竞选报名阶段可用，请留意群内竞选播报~")
         )
-    game.action_queue.put_nowait(Action(ActionKind.RUN, int(event.get_user_id())))
-    await run_cmd.finish()
+    await _finish_action(
+        run_cmd,
+        game,
+        Action(ActionKind.RUN, int(event.get_user_id())),
+    )
 
 
 withdraw_cmd = on_command("退水", priority=5, block=True)
@@ -814,8 +853,11 @@ async def handle_withdraw(
         Phase.SHERIFF_SPEECH,
     ):
         await withdraw_cmd.finish(_not_now(game, "退水 仅在警长竞选阶段可用~"))
-    game.action_queue.put_nowait(Action(ActionKind.WITHDRAW, int(event.get_user_id())))
-    await withdraw_cmd.finish()
+    await _finish_action(
+        withdraw_cmd,
+        game,
+        Action(ActionKind.WITHDRAW, int(event.get_user_id())),
+    )
 
 
 order_cmd = on_command("排序", priority=5, block=True)
@@ -839,15 +881,16 @@ async def handle_order(
         await order_cmd.finish("格式：/排序 N 顺 或 /排序 N 逆")
     seat = int(match.group(1))
     aux = "ccw" if match.group(2) == "逆" else "cw"
-    game.action_queue.put_nowait(
+    await _finish_action(
+        order_cmd,
+        game,
         Action(
             ActionKind.ORDER,
             int(event.get_user_id()),
             seat,
             aux,
-        )
+        ),
     )
-    await order_cmd.finish()
 
 
 pass_badge_cmd = on_command("移交警徽", priority=5, block=True)
@@ -868,10 +911,11 @@ async def handle_pass_badge(
     seat = _parse_seat(arg)
     if seat is None:
         await pass_badge_cmd.finish("格式：/移交警徽 N（N 为存活玩家座位）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.PASS_BADGE, int(event.get_user_id()), seat)
+    await _finish_action(
+        pass_badge_cmd,
+        game,
+        Action(ActionKind.PASS_BADGE, int(event.get_user_id()), seat),
     )
-    await pass_badge_cmd.finish()
 
 
 tear_badge_cmd = on_command("撕警徽", priority=5, block=True)
@@ -888,10 +932,11 @@ async def handle_tear_badge(
         await tear_badge_cmd.finish(
             _not_now(game, "撕警徽 仅在死亡警长的移交阶段可用~")
         )
-    game.action_queue.put_nowait(
-        Action(ActionKind.TEAR_BADGE, int(event.get_user_id()))
+    await _finish_action(
+        tear_badge_cmd,
+        game,
+        Action(ActionKind.TEAR_BADGE, int(event.get_user_id())),
     )
-    await tear_badge_cmd.finish()
 
 
 detonate_cmd = on_command("自爆", priority=5, block=True)
@@ -908,10 +953,11 @@ async def handle_detonate(
         await detonate_cmd.finish(
             _not_now(game, "自爆 是狼人的白天行动，可在发言/投票阶段发动~")
         )
-    game.action_queue.put_nowait(
-        Action(ActionKind.SELF_DETONATE, int(event.get_user_id()))
+    await _finish_action(
+        detonate_cmd,
+        game,
+        Action(ActionKind.SELF_DETONATE, int(event.get_user_id())),
     )
-    await detonate_cmd.finish()
 
 
 duel_cmd = on_command("决斗", priority=5, block=True)
@@ -932,10 +978,11 @@ async def handle_duel(
     seat = _parse_seat(arg)
     if seat is None:
         await duel_cmd.finish("格式：/决斗 N（N 为目标座位号）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.DUEL, int(event.get_user_id()), seat)
+    await _finish_action(
+        duel_cmd,
+        game,
+        Action(ActionKind.DUEL, int(event.get_user_id()), seat),
     )
-    await duel_cmd.finish()
 
 
 vote_cmd = on_command("投票", aliases={"票"}, priority=5, block=True)
@@ -954,10 +1001,11 @@ async def handle_vote(
     seat = _parse_seat(arg)
     if seat is None:
         await vote_cmd.finish("格式：/投票 N（N 为目标座位号）")
-    game.action_queue.put_nowait(
-        Action(ActionKind.VOTE, int(event.get_user_id()), seat)
+    await _finish_action(
+        vote_cmd,
+        game,
+        Action(ActionKind.VOTE, int(event.get_user_id()), seat),
     )
-    await vote_cmd.finish()
 
 
 abstain_cmd = on_command("弃票", priority=5, block=True)
@@ -972,8 +1020,11 @@ async def handle_abstain(
     game = get_game(int(event.group_id))
     if game is None or game.phase not in _VOTE_PHASES:
         await abstain_cmd.finish(_not_now(game, "弃票 仅在投票阶段可用~"))
-    game.action_queue.put_nowait(Action(ActionKind.ABSTAIN, int(event.get_user_id())))
-    await abstain_cmd.finish()
+    await _finish_action(
+        abstain_cmd,
+        game,
+        Action(ActionKind.ABSTAIN, int(event.get_user_id())),
+    )
 
 
 skip_cmd = on_command("过", aliases={"跳过"}, priority=5, block=True)
@@ -996,8 +1047,11 @@ async def handle_skip(
         await skip_cmd.finish(
             _not_now(game, "过 用于提前结束自己的发言/遗言，现在没有你的发言窗口~")
         )
-    game.action_queue.put_nowait(Action(ActionKind.SKIP, int(event.get_user_id())))
-    await skip_cmd.finish()
+    await _finish_action(
+        skip_cmd,
+        game,
+        Action(ActionKind.SKIP, int(event.get_user_id())),
+    )
 
 
 # ── 私聊自由文本监听 ──────────────────────────────────────
@@ -1010,6 +1064,8 @@ async def _is_in_game_dm(event: MessageEvent) -> bool:
     user_id = int(event.get_user_id())
     game = game_of_user(user_id)
     if game is None or game.phase in (Phase.SIGNUP, Phase.ENDED):
+        return False
+    if event.get_plaintext().strip().startswith("/"):
         return False
     # 与命令处理器的 require_feature 一致：按私聊解析链查全局用户开关
     async with get_session() as session:
@@ -1026,7 +1082,7 @@ async def _is_in_game_dm(event: MessageEvent) -> bool:
 
 private_listener = on_message(
     rule=Rule(_is_in_game_dm),
-    priority=0,
+    priority=-1,
     block=True,
 )
 
@@ -1060,8 +1116,7 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
         f"狼人杀群 {game.group_id} {seat_desc} 私聊行动："
         f"{action.kind.value}{target_desc}（原文 {text!r}）"
     )
-    game.action_queue.put_nowait(action)
-    await private_listener.finish()
+    await _finish_action(private_listener, game, action)
 
 
 # ── 群发言捕获（供 AI 驱动听取发言）──────────────────────

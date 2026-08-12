@@ -556,11 +556,15 @@ async def _create_reminder(  # noqa: PLR0913
 
     try:
         _schedule_reminder_job(reminder_id, cron_expression)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error(
             f"注册定时提醒任务失败: reminder_id={reminder_id}, "
             f"error={exc!r}"
         )
+        _remove_reminder_job(reminder_id)
+        await session.delete(reminder)
+        await session.commit()
+        raise ValueError("定时提醒调度失败，请稍后重试") from exc
     return reminder
 
 

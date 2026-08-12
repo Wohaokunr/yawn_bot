@@ -21,13 +21,14 @@ class UserChatState:
     # 队列项：(bot, event, override_text)
     # override_text 非 None 时覆盖事件纯文本（命令事件含命令前缀）
     queue: asyncio.Queue[tuple[Any, Any, str | None]] = field(
-        default_factory=asyncio.Queue
+        default_factory=lambda: asyncio.Queue(maxsize=_CHAT_QUEUE_MAX)
     )
     worker: asyncio.Task[None] | None = None
 
 
 _states: dict[int, UserChatState] = {}
 _WORKER_IDLE_TIMEOUT = 600  # 10 分钟无消息自动退出
+_CHAT_QUEUE_MAX = 8
 
 
 def enter_mode(user_id: int) -> UserChatState:
@@ -74,6 +75,18 @@ def is_in_mode(user_id: int) -> bool:
 def get_state(user_id: int) -> UserChatState | None:
     """获取用户状态，不存在则返回 None。"""
     return _states.get(user_id)
+
+
+def enqueue(
+    state: UserChatState,
+    item: tuple[Any, Any, str | None],
+) -> bool:
+    """非阻塞投递对话消息，队列满时让调用方返回背压提示。"""
+    try:
+        state.queue.put_nowait(item)
+    except asyncio.QueueFull:
+        return False
+    return True
 
 
 def ensure_worker(

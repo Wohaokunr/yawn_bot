@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
 from nonebot import get_bot, get_driver
-from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import (
     Bot,
+    FriendRequestEvent,
     Message,
     MessageSegment,
     PrivateMessageEvent,
@@ -64,7 +64,8 @@ logger.debug(superusers)
 
 @friend_request.handle()
 async def handle_friend_request(
-    event: Event, session: async_scoped_session
+    event: FriendRequestEvent,
+    session: async_scoped_session,
 ) -> None:
     bot = get_bot()
 

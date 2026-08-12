@@ -251,6 +251,8 @@ def build_module_overview(
 def build_tools(
     module: Optional["ModuleDef"],
     player_names: list[str],
+    *,
+    ending_ids: Optional[list[str]] = None,
 ) -> list[ChatCompletionToolParam]:
     """生成全静态工具 schema（整局只构建一次，经 Game.tools_cache 复用）。
 
@@ -262,7 +264,11 @@ def build_tools(
     # 空 enum 会被多数 OpenAI 兼容端点拒绝，导致整局工具降级
     player_enum = {"type": "string", "enum": player_names or ["_no_player"]}
     skill_names = [s.name for s in SKILLS if s.key != "cthulhu_mythos"]
-    ending_ids = [e.id for e in module.endings] if module is not None else []
+    ending_ids = (
+        ending_ids
+        if ending_ids is not None
+        else [e.id for e in module.endings] if module is not None else []
+    )
     return [
         _fn(
             "request_check",

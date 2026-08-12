@@ -126,3 +126,66 @@ def test_scheduler_job_uses_stable_id_and_apscheduler_options(
     assert captured["max_instances"] == 1
     assert captured["misfire_grace_time"] == reminder_module._MISFIRE_GRACE_TIME
     assert captured["trigger"].timezone.key == "Asia/Shanghai"
+
+
+@pytest.mark.asyncio
+async def test_create_reminder_rolls_back_when_job_registration_fails(
+    reminder_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.added: Any = None
+            self.deleted: Any = None
+            self.commits = 0
+
+        async def scalar(self, _statement: Any) -> int:
+            return 0
+
+        def add(self, value: Any) -> None:
+            self.added = value
+
+        async def flush(self) -> None:
+            self.added.id = 123
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def refresh(self, _value: Any) -> None:
+            return
+
+        async def delete(self, value: Any) -> None:
+            self.deleted = value
+
+    session = FakeSession()
+    removed: list[int] = []
+
+    def fail_schedule(_reminder_id: int, _cron_expression: str) -> None:
+        raise RuntimeError
+
+    def record_removal(reminder_id: int) -> None:
+        removed.append(reminder_id)
+
+    monkeypatch.setattr(reminder_module, "_schedule_reminder_job", fail_schedule)
+    monkeypatch.setattr(
+        reminder_module,
+        "_remove_reminder_job",
+        record_removal,
+    )
+
+    with pytest.raises(ValueError, match="调度失败"):
+        await reminder_module._create_reminder(
+            session,
+            group_id=456,
+            creator_user_id=789,
+            name="test",
+            cron_expression="0 7 * * *",
+            target_type="group",
+            target_user_id=None,
+            message=Message("hello"),
+        )
+
+    assert removed == [123]
+    assert session.deleted is session.added
+    expected_commits = 2
+    assert session.commits == expected_commits
