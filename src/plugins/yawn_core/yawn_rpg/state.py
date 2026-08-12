@@ -43,6 +43,7 @@ class ActionKind(str, Enum):
     SAY = "say"  # 群自由发言（aux=文本）
     CHECK = "check"  # 显式检定（aux="技能key"，可选 value 保留难度）
     TALK_NPC = "talk_npc"  # 与 NPC 交谈（aux="npc_id|发言内容"）
+    SHARE_FACT = "share_fact"  # 公开个人 NPC 情报（aux="npc_id|fact_id"）
     ATTACK = "attack"  # 攻击怪物（aux=怪物 id）
     MOVE = "move"  # 前往出口（aux=关键词/场景名）
     WAIT = "wait"  # 原地等待（value=分钟数）
@@ -58,6 +59,16 @@ class ActionKind(str, Enum):
     CONFIRM_CARD = "confirm_card"  # 锁定角色卡
 
 
+_RELATION_MIN = -100
+_RELATION_MAX = 100
+_RELATION_BANDS = (
+    (-60, "敌对"),
+    (-21, "警惕"),
+    (20, "中立"),
+    (60, "友善"),
+)
+
+
 @dataclass
 class Action:
     """命令处理器提交给引擎的一次玩家行动。"""
@@ -71,6 +82,14 @@ class Action:
     expected_phase: Optional[Phase] = None
     expected_scene: Optional[str] = None
     result: Optional["asyncio.Future[str]"] = None
+    # SAY 由引擎在消费前分类；这些字段不受玩家输入信任，
+    # 只作为同一串行引擎内的路由快照。
+    route: Optional[str] = None
+    target_id: Optional[str] = None
+    social_node_id: Optional[str] = None
+    social_skill: Optional[str] = None
+    emotion: Optional[str] = None
+    emotion_confidence: float = 0.0
 
 
 class SubmitResult(str, Enum):
@@ -79,6 +98,15 @@ class SubmitResult(str, Enum):
     USER_LIMIT = "user_limit"
     DUPLICATE = "duplicate"
     STALE = "stale"
+
+
+def relationship_band(value: int) -> str:
+    """把内部关系值映射为不暴露裸数值的定性状态。"""
+    value = max(_RELATION_MIN, min(_RELATION_MAX, value))
+    for upper_bound, band in _RELATION_BANDS:
+        if value <= upper_bound:
+            return band
+    return "信任"
 
 
 @dataclass
@@ -149,6 +177,19 @@ class Game:
     dead_npcs: set[str] = field(default_factory=set)
     # 对调查员怀有敌意的 NPC（被攻击而未死）
     npc_hostile: set[str] = field(default_factory=set)
+    # NPC 社交状态（均由引擎单写；关系值钳制在 -100~100）
+    npc_contexts: dict[str, deque[str]] = field(default_factory=dict)
+    npc_rapport: dict[str, dict[int, int]] = field(default_factory=dict)
+    npc_attitude: dict[str, int] = field(default_factory=dict)
+    npc_social_attempts: dict[tuple[str, int, str], int] = field(default_factory=dict)
+    # 已发放过的节点奖励；避免重复成功/失败尝试重复增加 flag 或线索。
+    npc_social_rewards: set[tuple[str, int, str, bool]] = field(default_factory=set)
+    npc_unlocked_facts: dict[tuple[str, int], set[str]] = field(default_factory=dict)
+    npc_public_facts: dict[str, set[str]] = field(default_factory=dict)
+    npc_focus: dict[int, str] = field(default_factory=dict)
+    # 普通情绪微调的探索轮预算；节点结算不受此预算限制。
+    npc_emotion_rapport_delta: dict[tuple[str, int], int] = field(default_factory=dict)
+    npc_emotion_attitude_delta: dict[str, int] = field(default_factory=dict)
     # ── 游戏内时钟与事件标记（仅引擎写入）────────────────
     # 开局游戏内起始时刻（自 0:00 起的分钟数；引擎按 module.time.start 初始化）
     clock_start_minutes: int = 0
@@ -265,9 +306,51 @@ class Game:
         self.explore_acted.clear()
         self.explore_deadline = asyncio.get_running_loop().time() + timeout
         self.assists.clear()
+        self.npc_emotion_rapport_delta.clear()
+        self.npc_emotion_attitude_delta.clear()
 
     def active_user_ids(self) -> set[int]:
         return {p.user_id for p in self.players if not p.incapped}
+
+    # ── NPC 社交状态与独立上下文 ───────────────────────────
+
+    def npc_context(self, npc_id: str) -> deque[str]:
+        """取得单个 NPC 的公开对话上下文；不同 NPC 永不共用队列。"""
+        context = self.npc_contexts.get(npc_id)
+        if context is None:
+            context = deque(maxlen=12)  # 最近 6 轮玩家/NPC 往返
+            self.npc_contexts[npc_id] = context
+        return context
+
+    def append_npc_context(self, npc_id: str, line: str) -> None:
+        """追加一条公开 NPC 上下文；私人情报不得从这里写入。"""
+        text = line.strip()
+        if text:
+            self.npc_context(npc_id).append(text)
+
+    def npc_rapport_value(self, npc_id: str, user_id: int) -> int:
+        """取得个人好感；未初始化时使用模组 NPC 的初始值。"""
+        current = self.npc_rapport.get(npc_id, {}).get(user_id)
+        if current is not None:
+            return max(-100, min(100, current))
+        npc = self.module.npc(npc_id) if self.module is not None else None
+        return npc.initial_rapport if npc is not None else 0
+
+    def npc_attitude_value(self, npc_id: str) -> int:
+        """取得全队公共态度；未初始化时使用模组 NPC 的初始值。"""
+        current = self.npc_attitude.get(npc_id)
+        if current is not None:
+            return max(-100, min(100, current))
+        npc = self.module.npc(npc_id) if self.module is not None else None
+        return npc.initial_attitude if npc is not None else 0
+
+    def npc_rapport_band(self, npc_id: str, user_id: int) -> str:
+        """个人好感的玩家可见分段。"""
+        return relationship_band(self.npc_rapport_value(npc_id, user_id))
+
+    def npc_attitude_band(self, npc_id: str) -> str:
+        """公共态度的玩家可见分段。"""
+        return relationship_band(self.npc_attitude_value(npc_id))
 
     # ── NPC 在场解析（死亡过滤 + HP 幂等初始化的包装层）──────
 
@@ -327,6 +410,29 @@ class Game:
                 self.action_queue.task_done()
             except asyncio.QueueEmpty:  # noqa: PERF203
                 break
+
+    def release_unprocessed_actions(self) -> None:
+        """终局清理仍在缓冲区/队列中的动作，避免玩家配额泄漏。"""
+        actions: list[Action] = []
+        if self.pending is not None:
+            actions.append(self.pending)
+            self.pending = None
+        actions.extend(self.mid_turn_buffer)
+        self.mid_turn_buffer.clear()
+        while True:
+            try:
+                action = self.action_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.action_queue.task_done()
+            actions.append(action)
+        actions.extend(self.pending_actions.values())
+        seen: set[str] = set()
+        for action in actions:
+            if action.action_id in seen:
+                continue
+            seen.add(action.action_id)
+            release_action(self, action, result="ended")
 
 
 # ── 注册表 ────────────────────────────────────────────────

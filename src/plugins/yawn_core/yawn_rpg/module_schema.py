@@ -34,6 +34,8 @@ _VALID_CHECK_SKILLS = frozenset({"san", *(s.key for s in SKILLS)})
 
 # 结局倾向的合法取值（models.RPGGame.outcome 仅 String(8)）
 _VALID_OUTCOMES = ("good", "bad", "neutral")
+_RELATION_MIN = -100
+_RELATION_MAX = 100
 
 
 class CheckDifficulty(str, Enum):
@@ -49,6 +51,103 @@ class CheckMode(str, Enum):
 
     INDIVIDUAL = "individual"
     TEAM = "team"
+
+
+_SOCIAL_SKILLS = frozenset({"persuade", "fast_talk", "intimidate"})
+
+
+class NPCFact(BaseModel):
+    """只可经 NPC 社交解锁的私人情报。"""
+
+    id: str
+    name: str
+    text: str
+
+    @model_validator(mode="after")
+    def _check_text(self) -> "NPCFact":
+        if not self.id.strip() or not self.name.strip() or not self.text.strip():
+            raise ValueError("NPC 情报的 id、name、text 均不能为空")  # noqa: TRY003
+        return self
+
+
+class SocialStrategy(BaseModel):
+    """社交节点的一种交涉策略；技能与成败效果由系统确定性结算。"""
+
+    skill: str
+    difficulty: CheckDifficulty = CheckDifficulty.REGULAR
+    name: str = ""
+    success_rapport_delta: Optional[int] = None
+    success_attitude_delta: Optional[int] = None
+    failure_rapport_delta: Optional[int] = None
+    failure_attitude_delta: Optional[int] = None
+    success_text: Optional[str] = None
+    failure_text: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _check_skill(self) -> "SocialStrategy":
+        if self.skill not in _SOCIAL_SKILLS:
+            allowed = "、".join(sorted(_SOCIAL_SKILLS))
+            raise ValueError(f"社交策略 skill 必须是 {allowed}")  # noqa: TRY003
+        return self
+
+
+class SocialNode(BaseModel):
+    """NPC 的可重复尝试剧情诉求。"""
+
+    id: str
+    name: str
+    # 只给路由器看的安全目标描述，不得写入隐藏奖励或机密正文
+    goal: str
+    strategies: list[SocialStrategy]
+    requires_facts: list[str] = []
+    min_rapport: int = -100
+    min_attitude: int = -100
+    max_attempts: int = 3
+    retry_rapport_penalty: int = 2
+    retry_attitude_penalty: int = 1
+    success_rapport_delta: int = 15
+    success_attitude_delta: int = 5
+    failure_rapport_delta: int = -5
+    failure_attitude_delta: int = -2
+    success_text: str = ""
+    failure_text: str = ""
+    unlock_facts: list[str] = []
+    private_clues: list[str] = []
+    public_clues: list[str] = []
+    success_flags: list[str] = []
+    failure_flags: list[str] = []
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "SocialNode":
+        if not self.id.strip() or not self.name.strip() or not self.goal.strip():
+            raise ValueError("社交节点的 id、name、goal 均不能为空")  # noqa: TRY003
+        if not self.strategies:
+            raise ValueError(f"社交节点 {self.id} 至少需要一种策略")  # noqa: TRY003
+        if self.max_attempts < 1:
+            raise ValueError(  # noqa: TRY003
+                f"社交节点 {self.id} 的 max_attempts 必须至少为 1"
+            )
+        if not _RELATION_MIN <= self.min_rapport <= _RELATION_MAX:
+            raise ValueError(  # noqa: TRY003
+                f"社交节点 {self.id} 的 min_rapport 必须在 -100~100 内"
+            )
+        if not _RELATION_MIN <= self.min_attitude <= _RELATION_MAX:
+            raise ValueError(  # noqa: TRY003
+                f"社交节点 {self.id} 的 min_attitude 必须在 -100~100 内"
+            )
+        for value_name in (
+            "retry_rapport_penalty",
+            "retry_attitude_penalty",
+        ):
+            if getattr(self, value_name) < 0:
+                raise ValueError(  # noqa: TRY003
+                    f"社交节点 {self.id} 的 {value_name} 不能为负数"
+                )
+        return self
+
+    def strategy(self, skill: str) -> Optional[SocialStrategy]:
+        """按技能查找策略。"""
+        return next((item for item in self.strategies if item.skill == skill), None)
 
 
 class CheckPoint(BaseModel):
@@ -337,6 +436,12 @@ class NPC(BaseModel):
     secrets: list[str] = []
     # LLM 失败时的罐头回复
     fallback_line: str = ""
+    # ── 社交状态与剧情节点 ──
+    # 初始值只作为运行时状态的种子；引擎会把关系钳制在 -100~100。
+    initial_rapport: int = 0
+    initial_attitude: int = 0
+    facts: list[NPCFact] = []
+    social_nodes: list[SocialNode] = []
     # ── 生活行程 ──
     # 行程条目（声明序=匹配优先级）；为空表示常驻 scene.npcs 所列场景
     schedule: list[ScheduleEntry] = []
@@ -355,8 +460,29 @@ class NPC(BaseModel):
             (
                 self.persona,
                 self.public_desc,
+                self.fallback_line,
+                self.on_death_text,
                 *self.knows,
                 *(e.activity for e in self.schedule),
+                *(node.name for node in self.social_nodes),
+                *(node.goal for node in self.social_nodes),
+                *(node.success_text for node in self.social_nodes),
+                *(node.failure_text for node in self.social_nodes),
+                *(
+                    strategy.name
+                    for node in self.social_nodes
+                    for strategy in node.strategies
+                ),
+                *(
+                    strategy.success_text or ""
+                    for node in self.social_nodes
+                    for strategy in node.strategies
+                ),
+                *(
+                    strategy.failure_text or ""
+                    for node in self.social_nodes
+                    for strategy in node.strategies
+                ),
             )
         )
         for secret in self.secrets:
@@ -366,6 +492,37 @@ class NPC(BaseModel):
                     "会随 KP 开局概览泄露给 KP"
                 )
                 raise ValueError(msg)
+        for fact in self.facts:
+            if fact.text in haystack or fact.name in haystack:
+                msg = (
+                    f"NPC {self.id}：私人情报 {fact.id} 出现在公开 NPC 字段中，"
+                    "会随 KP 概览或 NPC 场景信息泄露"
+                )
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_social_state(self) -> "NPC":
+        if not _RELATION_MIN <= self.initial_rapport <= _RELATION_MAX:
+            raise ValueError(  # noqa: TRY003
+                f"NPC {self.id}：initial_rapport 必须在 -100~100 内"
+            )
+        if not _RELATION_MIN <= self.initial_attitude <= _RELATION_MAX:
+            raise ValueError(  # noqa: TRY003
+                f"NPC {self.id}：initial_attitude 必须在 -100~100 内"
+            )
+        fact_ids = [fact.id for fact in self.facts]
+        if len(fact_ids) != len(set(fact_ids)):
+            raise ValueError(f"NPC {self.id}：facts id 不能重复")  # noqa: TRY003
+        node_ids = [node.id for node in self.social_nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError(f"NPC {self.id}：social_nodes id 不能重复")  # noqa: TRY003
+        for node in self.social_nodes:
+            skills = [strategy.skill for strategy in node.strategies]
+            if len(skills) != len(set(skills)):
+                raise ValueError(  # noqa: TRY003
+                    f"NPC {self.id} 社交节点 {node.id}：同一技能策略不能重复"
+                )
         return self
 
     @model_validator(mode="after")
@@ -509,6 +666,29 @@ class ModuleDef(BaseModel):
         npcs = set(npc_ids)
         monsters = set(monster_ids)
         clues = set(clue_ids)
+        public_text = " ".join(
+            [
+                self.name,
+                self.description,
+                self.opening,
+                *(
+                    part
+                    for scene in self.scenes
+                    for part in (
+                        scene.name,
+                        scene.id,
+                        scene.narration,
+                        scene.idle_narration or "",
+                        *(exit_.narration for exit_ in scene.exits),
+                        *(
+                            text
+                            for check in scene.checks
+                            for text in (check.success_text, check.failure_text)
+                        ),
+                    )
+                ),
+            ]
+        )
         check_ids: list[str] = []
         for scene in self.scenes:
             for npc_id in scene.npcs:
@@ -554,6 +734,36 @@ class ModuleDef(BaseModel):
             if npc.on_death_clue and npc.on_death_clue not in clues:
                 msg = f"NPC {npc.id} 死亡奖励了未定义的线索"
                 raise ValueError(msg)
+            for secret in npc.secrets:
+                if secret and secret in public_text:
+                    raise ValueError(  # noqa: TRY003
+                        f"NPC {npc.id}：secret 出现在场景公开文案中"
+                    )
+            for fact in npc.facts:
+                if fact.name in public_text or fact.text in public_text:
+                    raise ValueError(  # noqa: TRY003
+                        f"NPC {npc.id}：私人情报 {fact.id} 出现在场景公开文案中"
+                    )
+            fact_ids = {fact.id for fact in npc.facts}
+            for node in npc.social_nodes:
+                missing_facts = sorted(
+                    (set(node.requires_facts) | set(node.unlock_facts)) - fact_ids
+                )
+                if missing_facts:
+                    msg = (
+                        f"NPC {npc.id} 社交节点 {node.id} 引用了未定义的情报 "
+                        f"{'、'.join(missing_facts)}"
+                    )
+                    raise ValueError(msg)
+                missing_clues = sorted(
+                    (set(node.private_clues) | set(node.public_clues)) - clues
+                )
+                if missing_clues:
+                    msg = (
+                        f"NPC {npc.id} 社交节点 {node.id} 引用了未定义的线索 "
+                        f"{'、'.join(missing_clues)}"
+                    )
+                    raise ValueError(msg)
             for entry in npc.schedule:
                 if not entry.away and entry.scene not in scenes:
                     msg = f"NPC {npc.id} 行程引用了未定义的场景 {entry.scene!r}"

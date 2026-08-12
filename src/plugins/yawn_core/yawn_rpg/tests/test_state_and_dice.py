@@ -106,6 +106,33 @@ async def test_action_rejects_stale_phase_and_user_overflow() -> None:
     )
 
 
+def test_release_unprocessed_actions_clears_all_action_buckets() -> None:
+    game = Game(group_id=1, host_user_id=10)
+    actions = [Action(ActionKind.SAY, user_id) for user_id in (10, 11, 12)]
+    for action in actions:
+        assert (
+            submit_action(
+                game,
+                action,
+                queue_max=10,
+                user_pending_max=3,
+                user_say_pending_max=3,
+            )
+            is SubmitResult.ACCEPTED
+        )
+
+    game.pending = game.action_queue.get_nowait()
+    game.action_queue.task_done()
+    game.mid_turn_buffer.append(game.action_queue.get_nowait())
+    game.action_queue.task_done()
+    game.release_unprocessed_actions()
+
+    assert not game.pending_actions
+    assert not game.pending_say_by_user
+    assert not game.mid_turn_buffer
+    assert game.action_queue.empty()
+
+
 def test_bonus_dice_uses_lowest_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
     # 个位 7，三个十位依次为 8/1/4，候选为 87/17/47，应取 17。
     values = iter([7, 8, 1, 4])

@@ -8,6 +8,7 @@ from . import (
     friend_request,
     global_user_feature,
     group_feature,
+    scheduled_reminder,
     user_feature,
     user_group,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "friend_request",
     "global_user_feature",
     "group_feature",
+    "scheduled_reminder",
     "user_feature",
     "user_group",
 ]

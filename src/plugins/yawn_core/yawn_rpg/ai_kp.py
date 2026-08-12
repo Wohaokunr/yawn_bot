@@ -58,6 +58,7 @@ _SYSTEM_PROMPT = """\
 - 绝不透露调查员未到过的场景、未发现的线索与后续剧情。
 - 个人线索只可由持有者主动公开；即使局面中可见其持有人，也不得向其他调查员转述内容或暗示。
 - 绝不替玩家做决定。
+- NPC 的公共态度只作叙事参考；不得自行修改好感、态度、社交节点或情报。
 - 最终旁白须简短（不超过 {max_chars} 字）但包含场景基本要素：地点、人物、\
 发生了什么变化；只输出旁白文本本身。
 - speak_as_npc 只传意图（intent），台词由系统按 NPC 人格生成，不要自写台词。
@@ -117,6 +118,7 @@ def build_scene_block(game: "Game") -> Optional[str]:
         lines.append("[在场 NPC]")
         for npc, activity in npcs:
             block = f"{npc.name}({npc.id})：{npc.public_desc}"
+            block += f"\n  对调查员群体的态度：{game.npc_attitude_band(npc.id)}"
             if activity:
                 block += f"\n  正在：{activity}"
             lines.append(block)

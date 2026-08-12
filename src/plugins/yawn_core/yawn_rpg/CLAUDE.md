@@ -9,7 +9,8 @@
 |---|---|
 | `engine.py` | 游戏引擎：每局一个 asyncio 任务（`run_game`），独占状态变更与群播报；内联 KP 智能体循环与工具执行器；回合中吸纳 / 游戏内时钟 / NPC 进出 / 违规扫描 / 通用结局安全网 |
 | `ai_kp.py` | **无状态**：KP 提示词构造（整局一次的剧本概览 + 每回合动态状态区）、工具 schema（**全静态，整局缓存**）。不建任务、不改状态、不发消息——刻意不是"AI 驱动任务"，勿改 |
-| `ai_npc.py` | **无状态**：NPC 对白智能体——专用 `complete()` 按 NPC 自己的 persona/knows/secrets 生成台词（secrets 附不主动透露指令，KP 提示词永不可见）。不建任务、不改状态、不发消息；台词播报与兜底全在引擎 |
+| `ai_npc.py` | **无状态**：NPC 对白智能体——专用 `complete()` 按 NPC 自己的 persona/knows/secrets、关系分段与独立公开上下文生成台词（secrets 附不主动透露指令，KP 提示词永不可见）。不建任务、不改状态、不发消息；台词播报与兜底全在引擎 |
+| `ai_social.py` | **无状态**：自然语言路由器，只输出严格 JSON 的 `kp_say` / `npc_talk` / `social_action` 候选；不读取机密正文、不改状态、不掷骰，失败由引擎确定性兜底 |
 | `commands.py` | 命令入口：群命令 / 私聊建卡监听 / 群自由文本 SAY 监听，只做校验 + 投入行动 |
 | `state.py` | 内存状态：`Game`/`PlayerState`/`Action`、注册表与身份守卫式清理；游戏内时钟属性与 NPC 在场包装层（死亡过滤 + HP 幂等初始化） |
 | `module_schema.py` | 模组 pydantic 模型、条件表达式求值（`evaluate_condition`）、NPC 在场解析器（时间 + 行程）、YAML 加载器 |
@@ -34,9 +35,17 @@
   （`run_kp_turn`）：`complete_with_tools` → 引擎逐个验证执行 tool_calls
   （`execute_tool`）→ 工具结果回填对话 → 循环至最终旁白或轮数上限。
   AI 从不直接接触状态，工具参数从不被信任。
-- **KP 只给 NPC 意图、不写台词**：`speak_as_npc` 传 intent、`/对话` 传
-  调查员原话，实际台词由独立的 NPC 智能体调用（`ai_npc.generate_npc_line`）
-  按 NPC 自己的 persona/knows/secrets 生成——KP 与 NPC 视角分离。
+- **自然语言统一路由**：PLAY 阶段的玩家自由文本先经 `ai_social` 分类；
+  `kp_say` 进入 KP 合批，`npc_talk` 单独执行 NPC 对话，`social_action`
+  由引擎校验节点/策略/关系门槛后做确定性检定。路由器低置信度、超时、
+  非法 JSON 或目标不在场时回退 KP；AI 关闭时按 NPC 名称/id/玩家焦点兜底。
+- **NPC 视角分离**：`speak_as_npc` 仍只传 intent，台词由独立的 NPC 智能体
+  调用（`ai_npc.generate_npc_line`）按 persona/knows/secrets 生成；该工具
+  只追加公开台词，不得修改好感、公共态度、节点尝试或情报。
+- **NPC 社交隐私**：`Game.npc_contexts[npc_id]` 按 NPC 隔离，保存最近六轮
+  公开往返；`npc_rapport[npc_id][user_id]` 与 `npc_attitude[npc_id]`
+  分开维护。个人情报只私聊解锁者，`/分享情报 NPC名 情报名` 才能公开；
+  KP 只看到公共态度分段，不看到个人好感、私人情报正文或隐藏奖励。
 - **回合中吸纳（步调同步）**：KP 回合内联 await 期间引擎不停消费输入——
   每个工具轮次顶部 `_pump_mid_turn` 非阻塞抽干队列：SAY 走与 `_handle_say`
   相同的 KP 前处理（入群聊、记 flag、tick）并以【插话】注入下一轮对话；
@@ -49,7 +58,8 @@
   `/协助 玩家 技能` 消耗行动并为目标下一次对应检定提供最多两个奖励骰。
   `/跳过` 可主动结束行动；攻击会进入按 DEX、座位号稳定排序的战斗行动序列。
 - **线索权限**：玩家检定发现的线索默认私聊给发现者，只有 `/分享线索 名称`
-  后才群内公开；无发现者的旧工具/死亡奖励线索仍保持全队公开。
+  后才群内公开；社交节点的 `private_clues` 复用该机制，`public_clues`
+  直接全队公开；无发现者的旧工具/死亡奖励线索仍保持全队公开。
 
 ## 工具目录与验证规则（execute_tool）
 
@@ -117,7 +127,7 @@ user 消息前部的场景块与已发生事件在状态未变的回合间接续
 - **解析分层**：`ModuleDef.npc_presence` / `npcs_in_scene` / `npc_schedule_match`
   是纯解析器（不感知死亡）；`Game.npcs_in_scene` / `npc_present` 包装层
   过滤 `dead_npcs` 并幂等初始化 `npc_hp`（仿怪物 HP 初始化）。在场显示、
-  speak_as_npc 校验、/对话 查找、局面提示词四处统一走包装层。
+  自然语言路由、speak_as_npc 校验、局面提示词三处统一走包装层。
 - **进出播报**：`_tick_time` 每次推进后对**当前场景**做在场 diff，合并
   一条消息播报（离场 flavor 取命中条目的 activity）；刚死亡的 NPC 不再
   重复播报离场。
@@ -203,8 +213,8 @@ NPC 战斗数值镜像 `Monster`（`hp` / `attack_skill` / `attack_name` /
    不受 `tools_broken` 影响。
 3. 纯叙述仍失败 → 确定性兜底：命中检定点 `triggers` 的发言自动执行
    检定（时间照常 tick）；否则播报 `scene.idle_narration` → 通用兜底文案。
-4. NPC 台词生成失败（或 AI 关）→ `/对话` 与 `speak_as_npc` 落
-   `fallback_line`；违规世界反应落固定惊呼罐头（**非** `fallback_line`——
+4. NPC 台词生成失败（或 AI 关）→ 自然语言 NPC 对话与 `speak_as_npc`
+   落 `fallback_line`；违规世界反应落固定惊呼罐头（**非** `fallback_line`——
    那是聊天搪塞语，作纵火反应是退化）。
 5. 结局安全网：每轮循环引擎按模组结局 + 通用结局条件确定性扫描，
    不依赖 KP 调用 `end_session`。
@@ -217,6 +227,7 @@ NPC 战斗数值镜像 `Monster`（`hp` / `attack_skill` / `attack_name` /
 - `/攻击 怪物|NPC`：对抗结算（怪物优先；NPC 会反击、可死亡）
 - `/时间`：查询游戏内时钟（只读，不耗时）
 - `/等待 [N]`：原地等待 N 分钟（缺省 `RPG_WAIT_DEFAULT`，钳制 `RPG_WAIT_MAX`）
+- `/分享情报 NPC名 情报名`：把已私聊获得的 NPC 个人情报公开给队伍
 - 模组 `auto: true` 出口：条件满足自动切景
 - 关键词触发提示：`match_trigger` 命中时仅作为**建议**写入 KP 提示词
   （AI 模式下是否检定由 KP 决定；降级模式下自动执行）

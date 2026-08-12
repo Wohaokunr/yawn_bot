@@ -1,7 +1,7 @@
 """AI NPC 对白智能体：按 NPC 人格生成台词（无状态）。
 
 视角分离：KP 只决定「谁说话、什么意图」（speak_as_npc 传 intent、
-/对话 传调查员原话），本模块用专用 llm.complete() 调用生成实际
+自然语言路由传调查员原话），本模块用专用 llm.complete() 调用生成实际
 台词——NPC 只按其自己的 persona / knows / secrets 说话。secrets
 只进该 NPC 自己的提示词（附不主动透露指令），KP 提示词永不含
 secrets。不建任务、不改状态、不发消息——台词播报与兜底全在引擎。
@@ -41,7 +41,12 @@ def sanitize_npc_line(text: str, max_chars: int = _NPC_LINE_MAX) -> str:
     return s
 
 
-def build_npc_system_prompt(npc: "NPC") -> str:
+def build_npc_system_prompt(
+    npc: "NPC",
+    *,
+    rapport_band: str = "中立",
+    attitude_band: str = "中立",
+) -> str:
     """NPC 智能体系统提示词（身份 + 人格 + 可知 + 机密 + 硬规则）。
 
     persona/knows 原样注入；secrets 仅在非空时注入，附「绝不主动
@@ -51,6 +56,8 @@ def build_npc_system_prompt(npc: "NPC") -> str:
         f"你是在 QQ 群 CoC 7版跑团中扮演 {npc.name} 的 NPC。始终以第一人称入戏说话。",
         f"【身份】{npc.public_desc}",
         f"【人格】{_one_line(npc.persona)}",
+        f"【你对当前调查员的态度】{rapport_band}",
+        f"【你对调查员群体的态度】{attitude_band}",
     ]
     if npc.knows:
         lines.append("【你知道（可在对话中自然说出）】" + "；".join(npc.knows))
@@ -71,10 +78,11 @@ def build_npc_system_prompt(npc: "NPC") -> str:
 def build_npc_user_message(
     game: "Game",
     cfg: "Config",
+    npc: "NPC",
     activity: str,
     directive: str,
 ) -> str:
-    """NPC 智能体用户消息：[所在]/[时间]/[近期群聊]/[你正在]/【指令】。"""
+    """NPC 智能体用户消息：只读取当前 NPC 的独立公开上下文。"""
     lines: list[str] = []
     module = game.module
     if module is not None and game.current_scene is not None:
@@ -82,42 +90,65 @@ def build_npc_user_message(
         if scene is not None:
             lines.append(f"[所在] {scene.name}")
     lines.append(f"[时间] {game.clock_text()}")
-    # 近期群聊（窗口小于 KP 的 rpg_max_context_lines，控提示词体积）
-    if game.group_log:
-        lines.append("[近期群聊]")
-        lines.extend(list(game.group_log)[-cfg.rpg_npc_context_lines :])
+    context = list(game.npc_contexts.get(npc.id, ()))
+    context_limit = max(2, cfg.rpg_npc_context_turns * 2)
+    if context:
+        lines.append("[这个 NPC 的近期公开对话]")
+        lines.extend(context[-context_limit:])
     if activity:
         lines.append(f"[你正在] {activity}")
     lines.append(f"【指令】{directive}")
     return "\n".join(lines)
 
 
-async def generate_npc_line(
+async def generate_npc_line(  # noqa: PLR0913, PLR0917
     game: "Game",
     cfg: "Config",
     npc: "NPC",
     activity: str,
     directive: str,
+    user_id: Optional[int] = None,
 ) -> Optional[str]:
     """专用 complete() 生成一句 NPC 台词；任何失败返回 None，调用方兜底。
 
     不复查死亡 / 在场（调用方已出回执）；用 cfg.rpg_npc_timeout /
     rpg_npc_max_tokens / rpg_npc_temperature。
     """
+    rapport_band = (
+        game.npc_rapport_band(npc.id, user_id) if user_id is not None else "未指定"
+    )
+    attitude_band = game.npc_attitude_band(npc.id)
     messages: list[ChatCompletionMessageParam] = [
-        {"role": "system", "content": build_npc_system_prompt(npc)},
+        {
+            "role": "system",
+            "content": build_npc_system_prompt(
+                npc,
+                rapport_band=rapport_band,
+                attitude_band=attitude_band,
+            ),
+        },
         {
             "role": "user",
-            "content": build_npc_user_message(game, cfg, activity, directive),
+            "content": build_npc_user_message(
+                game,
+                cfg,
+                npc,
+                activity,
+                directive,
+            ),
         },
     ]
     logger.debug(f"跑团群 {game.group_id} NPC {npc.name} 指令：{directive}")
-    line = await complete(
-        messages,
-        max_tokens=cfg.rpg_npc_max_tokens,
-        temperature=cfg.rpg_npc_temperature,
-        timeout=cfg.rpg_npc_timeout,
-    )
+    try:
+        line = await complete(
+            messages,
+            max_tokens=cfg.rpg_npc_max_tokens,
+            temperature=cfg.rpg_npc_temperature,
+            timeout=cfg.rpg_npc_timeout,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(f"跑团群 {game.group_id} NPC {npc.name} 对白生成异常")
+        return None
     if line is None:
         return None
     return sanitize_npc_line(line) or None

@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Wire — YawnBot Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@6/dist/echarts.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#F0F0EE;--dark:#1C1C1A;--paper:#F0F0EE;--muted:#8F8E86;--faint:#55554F;
+    --grid:#2E2D29;--grid-soft:#2A2925;--rule:#3F3E38}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);font-family:'Inter',sans-serif;padding:32px;
+    -webkit-font-smoothing:antialiased;display:flex;justify-content:center;color:var(--dark)}
+  .card{background:var(--dark);color:var(--paper);border-radius:24px;padding:34px 34px 24px;
+    width:min(1480px,100%)}
+  h1{font-weight:700;font-size:21px;letter-spacing:-.025em;margin-bottom:5px}
+  .sub{font-size:12px;color:var(--muted);line-height:1.65;margin-bottom:12px}
+  .src{font-size:9.5px;color:var(--faint);margin-top:12px;letter-spacing:.08em;font-weight:500}
+  #ch{height:min(78vh,900px);min-height:650px;cursor:grab}
+  #ch:active{cursor:grabbing}
+  .toolbar{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:14px 0 4px}
+  .toolbar-label{font-size:9px;letter-spacing:.11em;color:var(--faint);font-weight:700;margin-right:4px}
+  .filter{border:0;border-radius:99px;padding:6px 11px;background:var(--grid-soft);color:var(--muted);
+    font:600 10px 'Inter',sans-serif;letter-spacing:.04em;cursor:pointer;transition:background .2s,color .2s}
+  .filter:hover,.filter.active{background:var(--paper);color:var(--dark)}
+  .reading{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:15px}
+  .panel{background:var(--grid-soft);border-radius:16px;padding:16px 18px;color:var(--muted);font-size:11px;line-height:1.7}
+  .panel h3{color:var(--paper);font-size:11px;font-weight:700;letter-spacing:.08em;margin-bottom:7px}
+  .legend{display:flex;flex-wrap:wrap;gap:8px 14px}
+  .legend-item{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .swatch{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .line-swatch{width:20px;height:0;border-top:1px solid var(--muted);display:inline-block}
+  .line-dash{border-top-style:dashed;border-top-color:var(--faint)}
+  .line-dot{border-top-style:dotted;border-top-color:var(--paper)}
+  #detail{min-height:114px}
+  #detail .detail-title{color:var(--paper);font-size:14px;font-weight:700;margin-bottom:4px}
+  #detail .detail-meta{font-size:10px;color:var(--faint);letter-spacing:.06em;margin-bottom:8px}
+  #detail .detail-body{color:var(--muted);max-width:1000px}
+  #detail .detail-files{margin-top:7px;color:#C0BFB7;font-size:10px;word-break:break-word}
+  #detail .detail-warning{margin-top:8px;color:#C0BFB7}
+  details{margin-top:14px;color:var(--muted);font-size:10.5px;line-height:1.7}
+  summary{cursor:pointer;color:var(--faint);letter-spacing:.08em;font-weight:600}
+  details strong{color:var(--paper)}
+  @media (max-width:800px){
+    body{padding:12px}.card{padding:24px 18px 18px}h1{font-size:18px}
+    #ch{height:72vh;min-height:540px}.reading{grid-template-columns:1fr}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .filter{transition:none}
+  }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>一套共享核心，两个隔离的群聊游戏引擎</h1>
+  <div class="sub">
+    YawnBot 的当前工作区架构快照 · 节点 = 实际模块 / 外部边界 · 连线 = 导入关系或运行时数据流 · 节点大小 = 定性架构中心性 ·
+    拖拽查看局部结构，悬停聚焦邻接关系，点击节点查看职责与文件
+  </div>
+  <div class="toolbar" aria-label="图层筛选">
+    <span class="toolbar-label">FILTER LAYER</span>
+    <button class="filter active" data-filter="all">全部</button>
+    <button class="filter" data-filter="platform">边界与运行时</button>
+    <button class="filter" data-filter="bootstrap">启动与装配</button>
+    <button class="filter" data-filter="core">yawn_core</button>
+    <button class="filter" data-filter="data">数据与迁移</button>
+    <button class="filter" data-filter="rpg">yawn_rpg</button>
+    <button class="filter" data-filter="werewolf">yawn_werewolf</button>
+  </div>
+  <div id="ch" aria-label="YawnBot interactive architecture graph"></div>
+
+  <div class="reading">
+    <section class="panel">
+      <h3>READING THE MAP</h3>
+      <div class="legend">
+        <span class="legend-item"><i class="swatch" style="background:#8F8E86"></i>边界与运行时</span>
+        <span class="legend-item"><i class="swatch" style="background:#6E6D66"></i>启动与装配</span>
+        <span class="legend-item"><i class="swatch" style="background:#F5572F"></i>yawn_core · 主角</span>
+        <span class="legend-item"><i class="swatch" style="background:#4A4944"></i>数据与迁移</span>
+        <span class="legend-item"><i class="swatch" style="background:#C0BFB7"></i>yawn_rpg</span>
+        <span class="legend-item"><i class="swatch" style="background:#22211F"></i>yawn_werewolf</span>
+        <span class="legend-item"><i class="line-swatch"></i>运行时流</span>
+        <span class="legend-item"><i class="line-swatch line-dash"></i>持久化 / 可选边</span>
+        <span class="legend-item"><i class="line-swatch line-dot"></i>导入 / 依赖</span>
+      </div>
+    </section>
+    <section class="panel" id="detail" aria-live="polite">
+      <div class="detail-title">点击一个节点开始阅读</div>
+      <div class="detail-meta">DEFAULT VIEW · SHARED CORE → OPTIONAL SUB-PLUGINS → PERSISTENCE / AI</div>
+      <div class="detail-body">建议先看 <strong>yawn_core</strong>、<strong>rpg_engine</strong> 和 <strong>ww_engine</strong>，再用图层筛选查看具体模块。</div>
+    </section>
+  </div>
+
+  <details>
+    <summary>候选图型审计与本图边界</summary>
+    <div style="margin-top:8px">
+      <strong>采用 B2 Force Graph：</strong>项目是跨层、多对多的模块网络，节点数超过 15，且需要逐节点查看文件与邻接关系；因此使用
+      <code>templates/big-force.html</code> 的暗卡、force layout、drag / hover focus / click replay 骨架。
+      <br><strong>淘汰 L2 Dot Cascade：</strong>它编码的是可数单位的排名，不适合表达导入与运行时流。
+      <br><strong>淘汰 L4 Arc Matrix：</strong>它适合小规模“分类 × 分类 + 量”的矩阵，本项目关系不是规则矩阵。
+      <br><strong>数据口径：</strong>节点和主链路来自当前工作区的 Python、YAML、迁移和配置文件；边分为导入、运行时流、持久化、可选加载四类，不把未来规划当成现状。
+      <br><strong>维护提示：</strong>RPG 处理器当前大量使用 <code>require_feature("rpg")</code>，而 <code>permission.py</code> 的现有 <code>FEATURE_REGISTRY</code> 文本未列出 <code>rpg</code>，该边界值得单独复核。
+    </div>
+  </details>
+  <div class="src">FORCE GRAPH · B2 / BIG-FORCE · WIRE EDITORIAL RED · PROJECT ARCHITECTURE · WORKSPACE SNAPSHOT 2026-08-12</div>
+</main>
+
+<script>
+/* ── 内联 MONO TOKENS + WIRE 强调色（结构来自 mono-tokens.js）── */
+(function (global) {
+  'use strict';
+  const INK = '#1F1E1C';
+  const PAPER = '#F0F0EE';
+  const MUTED = 'rgba(31,30,28,.60)';
+  const FAINT = 'rgba(31,30,28,.32)';
+  const GRID = 'rgba(31,30,28,.16)';
+  const L = ['#22211F', '#6E6D66', '#8F8E86', '#C0BFB7', '#DBDAD3', '#F0F0EE', '#F5572F'];
+  const LAD = ['#22211F', '#6E6D66', '#8F8E86', '#C0BFB7', '#DBDAD3'];
+  const DARK = {
+    bg: '#1C1C1A', ink: '#F0EFEB', muted: '#8F8E88', faint: '#55554F',
+    grid: '#2E2D29', gridSoft: '#2A2925',
+    ladder: ['#F0EFEB', '#DCDAD2', '#C9C7BD', '#B3B0A4', '#8F8E88', '#6A6963', '#4A4944'],
+  };
+  const FONT = {
+    family: 'Inter',
+    link: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap',
+    title: {size: 16.5, weight: 700, spacing: '-.02em'},
+    titleBig: {size: 19, weight: 700, spacing: '-.02em'},
+    sub: {size: 11.5, weight: 400},
+    src: {size: 9.5, weight: 500, spacing: '.08em'},
+    value: {weight: 800}, axis: {size: 9.5, weight: 600}, minHalf: 6.5, minWide: 5.5,
+  };
+  const SHAPE = {cardRadius: 24, barRadius: 99, tooltipRadius: 12};
+  const MOTION = {
+    enter: 900, enterSlow: 1200, easing: 'quarticOut', staggerDot: 12, staggerBar: 100,
+    css: `
+      .pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+      @keyframes pop{from{transform:scale(0)}to{transform:none}}
+      .fade{animation:fade .9s ease both}@keyframes fade{from{opacity:0}}
+      .draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+      @keyframes draw{to{stroke-dashoffset:0}}
+      @media (prefers-reduced-motion:reduce){.pop,.fade{animation:none}.draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}}
+    `,
+  };
+  const tipLight = {backgroundColor: INK, borderWidth: 0, padding: [10, 14], textStyle: {color: PAPER, fontFamily: 'Inter', fontSize: 12}};
+  const tipDark = {backgroundColor: PAPER, borderWidth: 0, padding: [10, 14], textStyle: {color: INK, fontFamily: 'Inter', fontSize: 12}};
+  const rnd = (i, k) => Math.abs(((i * 73856093) ^ (k * 19349663)) % 1000) / 1000;
+  const D2R = Math.PI / 180;
+  const pol = (cx, cy, r, deg) => [cx + r * Math.cos(deg * D2R), cy + r * Math.sin(deg * D2R)];
+  const sect = (cx, cy, r0, r1, a0, a1) => {
+    const big = a1 - a0 > 180 ? 1 : 0;
+    const [xa, ya] = pol(cx, cy, r1, a0), [xb, yb] = pol(cx, cy, r1, a1);
+    const [xc, yc] = pol(cx, cy, r0, a1), [xd, yd] = pol(cx, cy, r0, a0);
+    return `M${xa} ${ya} A${r1} ${r1} 0 ${big} 1 ${xb} ${yb} L${xc} ${yc} A${r0} ${r0} 0 ${big} 0 ${xd} ${yd} Z`;
+  };
+  const blob = (x, y, r, seed) => {
+    const n = Math.max(14, Math.round(r * 1.6)), pts = [];
+    for (let t = 0; t < n; t++) {
+      const a = t / n * Math.PI * 2;
+      const w = 1 + .055 * Math.sin(a * 2 + seed * 7) + .04 * Math.sin(a * 3 + seed * 13) + (rnd(seed + t, 3) - .5) * .03;
+      pts.push([x + Math.cos(a) * r * w, y + Math.sin(a) * r * w]);
+    }
+    let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let t = 0; t < n; t++) {
+      const p = pts[t], q = pts[(t + 1) % n];
+      d += ` Q${p[0].toFixed(1)} ${p[1].toFixed(1)} ${((p[0] + q[0]) / 2).toFixed(1)} ${((p[1] + q[1]) / 2).toFixed(1)}`;
+    }
+    return d + ' Z';
+  };
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (p, t, a) => { const n = document.createElementNS(NS, t); for (const k in a) n.setAttribute(k, a[k]); p.appendChild(n); return n; };
+  const txt = (p, a, s) => { const n = el(p, 'text', a); n.textContent = s; return n; };
+  const tip = (n, s) => { const t = document.createElementNS(NS, 'title'); t.textContent = s; n.appendChild(t); };
+  const timers = {};
+  const keep = (id, t) => { (timers[id] = timers[id] || []).push(t); };
+  const obsReveal = (id, fn) => {
+    const n = document.getElementById(id);
+    const go = () => { (timers[id] || []).forEach(clearInterval); timers[id] = []; if (n.tagName === 'svg' || n.tagName === 'SVG') n.innerHTML = ''; fn(n); };
+    const io = new IntersectionObserver(es => { if (es[0].isIntersecting) { go(); io.disconnect(); } }, {threshold: .3});
+    io.observe(n); n.style.cursor = 'pointer'; n.addEventListener('click', go);
+  };
+  const eReveal = (id, opt) => obsReveal(id, elDom => { const g = echarts.getInstanceByDom(elDom) || echarts.init(elDom); g.clear(); g.setOption(opt); });
+  const CARD_CSS = `:root{--bg:${PAPER};--dark:${DARK.bg};--ink:${INK};--muted:${MUTED};--faint:${FAINT};--grid:${GRID}}`;
+  global.MONO = {INK, PAPER, MUTED, FAINT, GRID, L, LAD, DARK, FONT, SHAPE, MOTION, tipLight, tipDark, rnd, pol, sect, blob, el, txt, tip, obsReveal, eReveal, keep, CARD_CSS};
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/* ── 架构数据：节点对应当前仓库的真实文件 / 边对应导入或运行时关系 ── */
+const LAYERS = [
+  {key: 'platform', name: '边界与运行时', shade: '#8F8E88'},
+  {key: 'bootstrap', name: '启动与装配', shade: '#6A6963'},
+  {key: 'core', name: 'yawn_core 通用能力', shade: '#F5572F'},
+  {key: 'data', name: '数据与迁移', shade: '#4A4944'},
+  {key: 'rpg', name: 'yawn_rpg 跑团', shade: '#C0BFB7'},
+  {key: 'werewolf', name: 'yawn_werewolf 狼人杀', shade: '#22211F'},
+];
+const LAYER_INDEX = Object.fromEntries(LAYERS.map((layer, index) => [layer.key, index]));
+const N = (id, name, layer, detail, files, score = 20, tags = [], showLabel = false) => ({
+  id, name, layer, detail, files, score, tags, showLabel,
+});
+
+const NODES = [
+  // 边界与运行时
+  N('pyproject', 'pyproject.toml', 'platform', '项目入口配置：Python 版本、NoneBot 插件目录、OneBot 适配器和第三方插件发现。', ['pyproject.toml'], 72, ['配置', '入口'], true),
+  N('nonebot', 'NoneBot2', 'platform', '事件总线、Matcher、依赖注入、插件生命周期和驱动抽象。', ['pyproject.toml'], 86, ['运行时', '事件'], true),
+  N('onebot', 'OneBot V11', 'platform', 'QQ 群 / 私聊事件入口，以及群播报、私聊、禁言等出站协议。', ['pyproject.toml', 'src/plugins/yawn_core/yawn_rpg/api.py', 'src/plugins/yawn_core/yawn_werewolf/api.py'], 64, ['边界', 'QQ'], true),
+  N('fastapi', 'FastAPI driver', 'platform', 'NoneBot 的 Web 驱动，承载 OneBot 接入。', ['pyproject.toml'], 28, ['运行时']),
+  N('orm', 'nonebot-plugin-orm', 'platform', 'SQLAlchemy 2.0 async session、bind_key 分库和 Alembic 迁移入口。', ['pyproject.toml', 'CLAUDE.md'], 75, ['持久化', 'ORM'], true),
+  N('sqlite', 'SQLite', 'platform', '当前默认的本地持久化；yawn_core、yawn_rpg、yawn_werewolf 分 bind 保存。', ['data/nonebot_plugin_orm/db.sqlite3', 'src/plugins/yawn_core/__init__.py'], 58, ['存储'], true),
+  N('llm_remote', 'OpenAI-compatible LLM', 'platform', '共享 AI 端点：ai_chat、RPG KP / NPC / 社交模块通过统一客户端调用。', ['src/plugins/yawn_core/llm.py', '.env / AI config'], 55, ['AI', '外部服务'], true),
+  N('env', '.env / 环境变量', 'platform', 'ai_*、RPG_* 和狼人杀配置从环境变量 / .env 读取。', ['src/plugins/yawn_core/llm.py', 'src/plugins/yawn_core/yawn_rpg/config.py', 'src/plugins/yawn_core/yawn_werewolf/config.py'], 32, ['配置']),
+  N('status', 'nonebot-plugin-status', 'platform', '声明式外部插件：状态能力由 NoneBot 插件发现加载。', ['pyproject.toml'], 19, ['外部插件']),
+  N('sentry', 'nonebot-plugin-sentry', 'platform', '声明式错误监控插件。', ['pyproject.toml'], 18, ['外部插件']),
+  N('apscheduler', 'nonebot-plugin-apscheduler', 'platform', '声明式定时任务插件；当前数据层已包含 ScheduledReminder 模型。', ['pyproject.toml', 'src/plugins/yawn_core/data_models/scheduled_reminder.py'], 24, ['外部插件']),
+  N('localstore', 'nonebot-plugin-localstore', 'platform', '声明式本地目录 / 数据路径能力。', ['pyproject.toml'], 16, ['外部插件']),
+  N('alconna', 'nonebot-plugin-alconna', 'platform', '声明式命令解析能力；当前核心命令仍主要使用 NoneBot matcher。', ['pyproject.toml'], 16, ['外部插件']),
+  N('htmlkit', 'nonebot-plugin-htmlkit', 'platform', '声明式 HTML / 图片渲染能力。', ['pyproject.toml'], 16, ['外部插件']),
+
+  // 启动与装配
+  N('plugin_discovery', 'NoneBot plugin discovery', 'bootstrap', '从 src/plugins 发现 yawn_core，并加载 pyproject.toml 中声明的适配器 / 第三方插件。', ['pyproject.toml'], 48, ['启动'], true),
+  N('core_init', 'yawn_core/__init__.py', 'bootstrap', '显式导入通用功能；注册 SQLite WAL startup hook；隔离加载两个可选子插件。', ['src/plugins/yawn_core/__init__.py'], 83, ['启动', '隔离'], true),
+  N('startup_wal', 'SQLite startup hook', 'bootstrap', 'on_startup 为 SQLite 连接设置 WAL 和 busy_timeout=30000，失败时保留默认配置。', ['src/plugins/yawn_core/__init__.py'], 42, ['启动', '并发']),
+  N('sub_loader', '_load_sub_plugins()', 'bootstrap', '逐个调用 nonebot.load_plugin；狼人杀或 RPG 缺失 / 导入失败不会阻断 yawn_core 或另一个玩法。', ['src/plugins/yawn_core/__init__.py'], 68, ['可选插件', '隔离'], true),
+  N('data_registry', 'data_models/__init__.py', 'bootstrap', '导入所有 ORM 模型，使 nonebot-plugin-orm 在启动时注册表结构。', ['src/plugins/yawn_core/data_models/__init__.py'], 43, ['ORM', '注册']),
+  N('metadata_scan', 'PluginMetadata command scan', 'bootstrap', 'help_panel 运行时扫描子模块的 __plugin_meta__.extra["commands"]，再按权限过滤展示。', ['src/plugins/yawn_core/help_panel.py', 'src/plugins/yawn_core/yawn_rpg/__init__.py', 'src/plugins/yawn_core/yawn_werewolf/__init__.py'], 45, ['帮助', '元数据']),
+
+  // yawn_core 通用能力
+  N('core_presence', 'presence.py', 'core', 'event_preprocessor：每条消息 upsert BotUser、BotGroup、UserGroup，为权限和签到提供身份基座。', ['src/plugins/yawn_core/presence.py'], 56, ['事件前处理', '身份'], true),
+  N('core_permission', 'permission.py', 'core', 'FEATURE_REGISTRY + require_feature；群聊按 UserFeature → GroupFeature，私聊按 GlobalUserFeature，缺记录默认放行。', ['src/plugins/yawn_core/permission.py'], 78, ['权限', 'Depends'], true),
+  N('core_help', 'help_panel.py', 'core', '扫描所有插件元数据，按用户 / 群管理员权限过滤并生成 /help。', ['src/plugins/yawn_core/help_panel.py'], 39, ['帮助', '元数据']),
+  N('core_panel', 'panel.py', 'core', '管理面板：群 / 用户功能开关、用户与群信息、对话历史查看和删除。', ['src/plugins/yawn_core/panel.py'], 48, ['管理', '查询']),
+  N('core_checkin', 'checkin.py', 'core', '签到命令与每日唯一约束；更新签到汇总、记录奖励并受 checkin 功能开关保护。', ['src/plugins/yawn_core/checkin.py'], 44, ['功能', '签到']),
+  N('core_friend', 'friend_approve.py', 'core', '好友申请记录、待审批查询、同意 / 拒绝和 OneBot 回执。', ['src/plugins/yawn_core/friend_approve.py'], 32, ['功能', '好友申请']),
+  N('core_ai_chat', 'ai_chat.py', 'core', '私聊 AI 对话：/对话 开关、会话创建、历史加载、流式输出、软删除和 idle 退出。', ['src/plugins/yawn_core/ai_chat.py'], 72, ['AI', '私聊'], true),
+  N('core_chat_state', 'chat_state.py', 'core', '每用户 asyncio.Queue + worker；串行化 AI 调用，10 分钟空闲自动退出，worker 使用独立 DB session。', ['src/plugins/yawn_core/chat_state.py'], 55, ['AI', '队列']),
+  N('core_reply_chain', 'reply_chain.py', 'core', '通过 OneBot get_msg 解析 QQ 回复引用链，压缩成可注入 AI prompt 的上下文。', ['src/plugins/yawn_core/reply_chain.py'], 35, ['AI', '上下文']),
+  N('core_llm', 'llm.py', 'core', '共享 AsyncOpenAI 单例；complete / complete_with_tools；全局并发上限 6，失败或超时返回 None 交给调用方降级。', ['src/plugins/yawn_core/llm.py'], 80, ['AI', '并发'], true),
+
+  // 数据与迁移
+  N('identity_models', '身份模型', 'data', 'BotUser、BotGroup、UserGroup：用户 / 群 / 群成员关系、活跃时间和基础成长字段。', ['src/plugins/yawn_core/data_models/bot_user.py', 'bot_group.py', 'user_group.py'], 56, ['yawn_core bind', '身份'], true),
+  N('permission_models', '权限模型', 'data', 'UserFeature、GroupFeature、GlobalUserFeature：三层功能开关与外键级联。', ['src/plugins/yawn_core/data_models/user_feature.py', 'group_feature.py', 'global_user_feature.py'], 56, ['yawn_core bind', '权限']),
+  N('checkin_models', '签到模型', 'data', 'CheckinUser 汇总每群用户积分 / 连续天数；CheckinRecord 保存每日历史并做唯一约束。', ['src/plugins/yawn_core/data_models/checkin_user.py', 'checkin_record.py'], 42, ['yawn_core bind', '签到']),
+  N('chat_models', '对话模型', 'data', 'ChatSession → ChatMessage；支持私聊会话、多轮消息、软删除和按 id 排序。', ['src/plugins/yawn_core/data_models/chat_session.py', 'chat_message.py'], 55, ['yawn_core bind', 'AI']),
+  N('misc_models', '运营模型', 'data', 'FriendRequest 与 ScheduledReminder：好友申请状态、群定时提醒配置和最近运行结果。', ['src/plugins/yawn_core/data_models/friend_request.py', 'scheduled_reminder.py'], 30, ['yawn_core bind', '运营']),
+  N('core_migrations', 'yawn_core migrations', 'data', '正本在 data/nonebot_plugin_orm/migrations/yawn_core；src/plugins 下迁移是副本，勿直接编辑。', ['data/nonebot_plugin_orm/migrations/yawn_core', 'src/plugins/yawn_core/migrations'], 34, ['迁移', 'yawn_core bind']),
+  N('rpg_models', 'RPGGame / RPGPlayer', 'data', 'RPG 两张汇总表：对局基本信息、结局倾向、玩家起止 HP/SAN、生存和倒地状态，bind_key=yawn_rpg。', ['src/plugins/yawn_core/yawn_rpg/models.py'], 48, ['yawn_rpg bind', 'ORM'], true),
+  N('rpg_migrations', 'yawn_rpg migrations', 'data', 'RPGGame / RPGPlayer 的 Alembic 正本；当前长局详细行动仍主要保存在内存状态。', ['data/nonebot_plugin_orm/migrations/d853bca98b7f_rpg.py', 'migrations/versions/d853bca98b7f_rpg.py'], 34, ['迁移', 'yawn_rpg bind']),
+  N('ww_models', 'WerewolfGame / WerewolfPlayer', 'data', '狼人杀对局与玩家汇总表，记录获胜阵营、角色、座位、死亡原因等，bind_key=yawn_werewolf。', ['src/plugins/yawn_core/yawn_werewolf/models.py'], 42, ['yawn_werewolf bind', 'ORM']),
+  N('ww_migrations', 'yawn_werewolf migrations', 'data', '狼人杀游戏表和玩家表的 Alembic 正本；迁移副本位于子插件目录。', ['data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf', 'src/plugins/yawn_core/yawn_werewolf/migrations'], 30, ['迁移', 'yawn_werewolf bind']),
+
+  // yawn_rpg
+  N('rpg_pkg', 'yawn_rpg/__init__.py', 'rpg', '可选 RPG 子插件入口：声明 CoC 7 元数据、注册 commands / models，并把命令清单交给父插件帮助面板。', ['src/plugins/yawn_core/yawn_rpg/__init__.py'], 54, ['插件入口', 'RPG'], true),
+  N('rpg_commands', 'rpg/commands.py', 'rpg', '群命令、群自由文本 SAY、建卡私聊监听；只做轻量校验并通过 submit_action() 入队，不直接写局内状态。', ['src/plugins/yawn_core/yawn_rpg/commands.py'], 72, ['输入', 'RPG'], true),
+  N('rpg_action', 'Action queue / submit_action()', 'rpg', 'state.py 中的唯一入队入口：容量、单用户配额、SAY 合并、action_id 去重、阶段 / 场景快照和消费后 release。', ['src/plugins/yawn_core/yawn_rpg/state.py'], 74, ['队列', '背压'], true),
+  N('rpg_state', 'RPG Game / PlayerState', 'rpg', '单群单局内存状态：SIGNUP → CHAR_CREATE → PLAY → ENDED；引擎独占 phase、场景、线索、HP/SAN、时钟与 flags 写入。', ['src/plugins/yawn_core/yawn_rpg/state.py'], 82, ['状态机', '单写'], true),
+  N('rpg_engine', 'rpg/engine.py', 'rpg', '每局一个 asyncio task 的单写引擎：消费动作、推进场景与时钟、执行工具、处理 NPC / 怪物、结局安全网并持久化摘要。', ['src/plugins/yawn_core/yawn_rpg/engine.py'], 92, ['核心引擎', '单写'], true),
+  N('rpg_schema', 'module_schema.py', 'rpg', 'Pydantic 模组模型、YAML loader、条件表达式求值、NPC 行程 / 在场解析和加载期校验。', ['src/plugins/yawn_core/yawn_rpg/module_schema.py'], 70, ['规则', '模组'], true),
+  N('rpg_module', 'modules/*.yaml', 'rpg', '剧本数据边界：雨夜旧宅定义场景、出口、检定点、NPC、怪物、线索、事件与结局。', ['src/plugins/yawn_core/yawn_rpg/modules/yuzhai_old_house.yaml', 'src/plugins/yawn_core/yawn_rpg/modules/README.md'], 43, ['内容', 'YAML']),
+  N('rpg_dsl', 'dsl.py', 'rpg', '建卡期私聊文本 → Action 的解析器；保持独立，不反向导入 commands / engine，避免循环依赖。', ['src/plugins/yawn_core/yawn_rpg/dsl.py'], 30, ['解析', '建卡']),
+  N('rpg_charsheet', 'charsheet.py', 'rpg', 'CoC 7 人物卡：属性、派生值、技能表、系统掷卡和玩家加减点 / 重置校验。', ['src/plugins/yawn_core/yawn_rpg/charsheet.py'], 42, ['规则', '人物卡']),
+  N('rpg_dice', 'dice.py', 'rpg', '所有数值的唯一来源：d100 检定分级和骰表达式求值；引擎不信任 AI 传入的数字。', ['src/plugins/yawn_core/yawn_rpg/dice.py'], 52, ['规则', '确定性裁决']),
+  N('rpg_ai_kp', 'ai_kp.py', 'rpg', '无状态 KP 提示词与工具 schema 构造；整局缓存，AI 只能请求工具，不能直接接触状态。', ['src/plugins/yawn_core/yawn_rpg/ai_kp.py'], 58, ['AI', '工具调用']),
+  N('rpg_ai_npc', 'ai_npc.py', 'rpg', '无状态 NPC 台词智能体：persona / knows / secrets 只进入 NPC 自己的 prompt；失败返回 None 由引擎兜底。', ['src/plugins/yawn_core/yawn_rpg/ai_npc.py'], 48, ['AI', '防剧透']),
+  N('rpg_ai_social', 'ai_social.py', 'rpg', '无状态 NPC 社交路由 / 情绪与事实处理；调用共享 complete()，结果由引擎写入关系与奖励。', ['src/plugins/yawn_core/yawn_rpg/ai_social.py'], 36, ['AI', '社交']),
+  N('rpg_api', 'rpg/api.py', 'rpg', 'OneBot V11 安全封装：群消息、私聊和管理员查询；不让业务引擎直接散落发送实现。', ['src/plugins/yawn_core/yawn_rpg/api.py'], 42, ['出站', 'QQ']),
+  N('rpg_config', 'rpg/config.py', 'rpg', 'RPG_* 玩法、队列、超时、AI 工具轮数、NPC 生成和输出截断配置。', ['src/plugins/yawn_core/yawn_rpg/config.py'], 30, ['配置']),
+
+  // yawn_werewolf
+  N('ww_pkg', 'yawn_werewolf/__init__.py', 'werewolf', '可选狼人杀子插件入口：声明元数据、导入 commands / models，并由父插件隔离加载。', ['src/plugins/yawn_core/yawn_werewolf/__init__.py'], 45, ['插件入口', '狼人杀'], true),
+  N('ww_commands', 'werewolf/commands.py', 'werewolf', '群报名 / 开局 / 投票和私聊行动监听；经 require_feature("werewolf") 后只校验并投入行动队列。', ['src/plugins/yawn_core/yawn_werewolf/commands.py'], 58, ['输入', '狼人杀'], true),
+  N('ww_state', 'werewolf/state.py', 'werewolf', '狼人杀 Game、PlayerState、Phase、Action 和注册表；引擎任务独占状态变更。', ['src/plugins/yawn_core/yawn_werewolf/state.py'], 55, ['状态机', '单写']),
+  N('ww_engine', 'werewolf/engine.py', 'werewolf', '每局一个 asyncio task：夜晚角色行动、白天发言 / 竞选 / 投票、禁言控场、超时托管和结局持久化。', ['src/plugins/yawn_core/yawn_werewolf/engine.py'], 76, ['核心引擎', '狼人杀'], true),
+  N('ww_roles', 'werewolf/roles.py', 'werewolf', '角色、阵营、死亡原因、角色牌和牌堆构造。', ['src/plugins/yawn_core/yawn_werewolf/roles.py'], 30, ['规则']),
+  N('ww_api', 'werewolf/api.py', 'werewolf', '安全群消息、私聊、禁言 / 解禁和管理员判断封装。', ['src/plugins/yawn_core/yawn_werewolf/api.py'], 40, ['出站', 'QQ']),
+  N('ww_config', 'werewolf/config.py', 'werewolf', '狼人杀玩家人数、阶段超时、AI / 禁言行为等配置。', ['src/plugins/yawn_core/yawn_werewolf/config.py'], 24, ['配置']),
+];
+
+const E = (source, target, type = 'import', label = '') => ({source, target, type, label});
+const LINKS = [
+  // 配置、发现与启动
+  E('pyproject', 'plugin_discovery', 'flow', '插件目录与入口配置'),
+  E('pyproject', 'nonebot', 'config', 'NoneBot 项目配置'),
+  E('pyproject', 'onebot', 'config', 'OneBot V11 adapter'),
+  E('pyproject', 'fastapi', 'config', 'FastAPI driver'),
+  E('pyproject', 'orm', 'config', 'ORM plugin'),
+  E('pyproject', 'status', 'optional', '第三方插件声明'),
+  E('pyproject', 'sentry', 'optional', '第三方插件声明'),
+  E('pyproject', 'apscheduler', 'optional', '第三方插件声明'),
+  E('pyproject', 'localstore', 'optional', '第三方插件声明'),
+  E('pyproject', 'alconna', 'optional', '第三方插件声明'),
+  E('pyproject', 'htmlkit', 'optional', '第三方插件声明'),
+  E('plugin_discovery', 'core_init', 'flow', '发现 yawn_core'),
+  E('nonebot', 'core_init', 'import', '加载插件包'),
+  E('core_init', 'startup_wal', 'flow', 'on_startup'),
+  E('startup_wal', 'orm', 'flow', '连接事件'),
+  E('startup_wal', 'sqlite', 'persist', 'WAL + busy_timeout'),
+  E('core_init', 'sub_loader', 'flow', '_load_sub_plugins'),
+  E('core_init', 'data_registry', 'import', '模型注册'),
+  E('sub_loader', 'rpg_pkg', 'optional', '隔离 load_plugin'),
+  E('sub_loader', 'ww_pkg', 'optional', '隔离 load_plugin'),
+  E('core_init', 'core_presence', 'import'),
+  E('core_init', 'core_permission', 'import'),
+  E('core_init', 'core_help', 'import'),
+  E('core_init', 'core_panel', 'import'),
+  E('core_init', 'core_checkin', 'import'),
+  E('core_init', 'core_friend', 'import'),
+  E('core_init', 'core_ai_chat', 'import'),
+  E('data_registry', 'identity_models', 'import'),
+  E('data_registry', 'permission_models', 'import'),
+  E('data_registry', 'checkin_models', 'import'),
+  E('data_registry', 'chat_models', 'import'),
+  E('data_registry', 'misc_models', 'import'),
+  E('metadata_scan', 'core_help', 'flow', '帮助命令触发扫描'),
+  E('metadata_scan', 'rpg_pkg', 'flow', '__plugin_meta__'),
+  E('metadata_scan', 'ww_pkg', 'flow', '__plugin_meta__'),
+
+  // 外部事件与 yawn_core
+  E('onebot', 'core_presence', 'flow', 'message event'),
+  E('onebot', 'core_ai_chat', 'flow', '私聊 / 对话'),
+  E('onebot', 'core_checkin', 'flow', '签到命令'),
+  E('onebot', 'core_friend', 'flow', '好友请求'),
+  E('onebot', 'core_panel', 'flow', '管理命令'),
+  E('onebot', 'core_help', 'flow', '/help'),
+  E('core_presence', 'identity_models', 'persist', 'upsert 用户 / 群 / 成员'),
+  E('core_permission', 'permission_models', 'persist', '读取三层开关'),
+  E('core_permission', 'identity_models', 'import', '外键身份'),
+  E('core_help', 'core_permission', 'guard', '按功能开关过滤'),
+  E('core_help', 'metadata_scan', 'flow', '读取命令元数据'),
+  E('core_panel', 'core_permission', 'guard', '管理权限'),
+  E('core_panel', 'identity_models', 'import', '用户 / 群信息'),
+  E('core_panel', 'permission_models', 'import', '功能开关'),
+  E('core_panel', 'chat_models', 'import', '查看对话历史'),
+  E('core_panel', 'checkin_models', 'import', '查看签到数据'),
+  E('core_checkin', 'core_permission', 'guard', 'require_feature(checkin)'),
+  E('core_checkin', 'identity_models', 'import', '群成员关系'),
+  E('core_checkin', 'checkin_models', 'persist', '每日记录与汇总'),
+  E('core_friend', 'misc_models', 'persist', '好友申请状态'),
+  E('core_friend', 'onebot', 'flow', '同意 / 拒绝'),
+  E('core_migrations', 'orm', 'persist', 'Alembic bind'),
+  E('identity_models', 'orm', 'persist', 'yawn_core bind'),
+  E('permission_models', 'orm', 'persist', 'yawn_core bind'),
+  E('checkin_models', 'orm', 'persist', 'yawn_core bind'),
+  E('chat_models', 'orm', 'persist', 'yawn_core bind'),
+  E('misc_models', 'orm', 'persist', 'yawn_core bind'),
+  E('orm', 'sqlite', 'persist', 'async session / SQLite'),
+  E('core_migrations', 'sqlite', 'persist', '迁移表结构'),
+
+  // AI chat 主链
+  E('core_ai_chat', 'core_permission', 'guard', 'ai_chat 开关'),
+  E('core_ai_chat', 'core_chat_state', 'flow', '进入 / 退出模式与入队'),
+  E('core_ai_chat', 'core_reply_chain', 'flow', '引用消息上下文'),
+  E('core_ai_chat', 'chat_models', 'persist', '会话 / 消息历史'),
+  E('core_ai_chat', 'core_llm', 'flow', '流式 complete'),
+  E('core_ai_chat', 'onebot', 'flow', '流式回复'),
+  E('core_chat_state', 'core_llm', 'flow', 'worker 调用 AI'),
+  E('core_chat_state', 'chat_models', 'persist', '独立 session 保存'),
+  E('core_chat_state', 'onebot', 'flow', '后台 worker 回消息'),
+  E('core_reply_chain', 'onebot', 'flow', 'get_msg / reply quote'),
+  E('core_llm', 'llm_remote', 'flow', 'OpenAI-compatible API'),
+  E('env', 'core_llm', 'config', 'ai_api_key / base_url / model'),
+
+  // RPG 装配与输入边界
+  E('rpg_pkg', 'rpg_commands', 'import'),
+  E('rpg_pkg', 'rpg_models', 'import'),
+  E('rpg_pkg', 'rpg_config', 'config'),
+  E('rpg_commands', 'core_permission', 'guard', 'require_feature(rpg)'),
+  E('rpg_commands', 'onebot', 'flow', '群命令 / 私聊监听'),
+  E('rpg_commands', 'rpg_action', 'flow', '只校验并入队'),
+  E('rpg_commands', 'rpg_dsl', 'flow', '建卡文本解析'),
+  E('rpg_commands', 'rpg_schema', 'import', '列出可用模组'),
+  E('rpg_commands', 'rpg_state', 'import', '查当前局'),
+  E('rpg_commands', 'rpg_config', 'config', '队列 / 超时配置'),
+  E('rpg_action', 'rpg_state', 'import', 'Action / Phase / Game'),
+  E('rpg_action', 'rpg_engine', 'flow', 'FIFO 串行消费'),
+  E('rpg_dsl', 'rpg_charsheet', 'import', '技能解析'),
+  E('rpg_dsl', 'rpg_state', 'import', '生成建卡 Action'),
+  E('rpg_state', 'rpg_schema', 'import', 'ConditionContext / ModuleDef'),
+  E('rpg_config', 'env', 'config', 'RPG_*'),
+
+  // RPG 引擎、规则与 AI
+  E('rpg_engine', 'rpg_state', 'flow', '引擎独占状态写入'),
+  E('rpg_engine', 'rpg_action', 'flow', 'release_action'),
+  E('rpg_engine', 'rpg_schema', 'import', '场景 / 条件 / NPC / 结局'),
+  E('rpg_engine', 'rpg_dice', 'flow', '系统掷骰与数值裁决'),
+  E('rpg_engine', 'rpg_charsheet', 'import', '角色卡状态'),
+  E('rpg_engine', 'rpg_ai_kp', 'flow', 'KP agent / tools loop'),
+  E('rpg_engine', 'rpg_ai_npc', 'flow', 'NPC 台词与兜底'),
+  E('rpg_engine', 'rpg_ai_social', 'flow', '社交节点处理'),
+  E('rpg_engine', 'rpg_api', 'flow', '群播 / 私聊出站'),
+  E('rpg_engine', 'rpg_models', 'persist', '开局 / 结局摘要'),
+  E('rpg_engine', 'core_llm', 'flow', 'complete_with_tools / complete'),
+  E('rpg_engine', 'rpg_config', 'config', '运行时开关与限额'),
+  E('rpg_ai_kp', 'rpg_schema', 'import', '静态工具 schema'),
+  E('rpg_ai_kp', 'rpg_state', 'import', '局面提示词快照'),
+  E('rpg_ai_npc', 'rpg_schema', 'import', 'NPC persona / secrets'),
+  E('rpg_ai_npc', 'rpg_state', 'import', '公开上下文 / 关系'),
+  E('rpg_ai_npc', 'core_llm', 'flow', '专用 complete()'),
+  E('rpg_ai_social', 'rpg_schema', 'import', '社交节点定义'),
+  E('rpg_ai_social', 'rpg_state', 'import', '关系 / 情绪状态'),
+  E('rpg_ai_social', 'core_llm', 'flow', '专用 complete()'),
+  E('rpg_module', 'rpg_schema', 'flow', 'YAML → ModuleDef'),
+  E('rpg_schema', 'rpg_module', 'import', '加载模块文件'),
+  E('rpg_dice', 'rpg_schema', 'import', '难度枚举 / 检定类型'),
+  E('rpg_api', 'onebot', 'flow', 'safe_group_msg / send_dm'),
+  E('rpg_models', 'orm', 'persist', 'bind_key=yawn_rpg'),
+  E('rpg_migrations', 'orm', 'persist', 'RPG Alembic'),
+  E('rpg_migrations', 'sqlite', 'persist', '创建 RPG 表'),
+
+  // 狼人杀装配与引擎
+  E('ww_pkg', 'ww_commands', 'import'),
+  E('ww_pkg', 'ww_models', 'import'),
+  E('ww_pkg', 'ww_config', 'config'),
+  E('ww_commands', 'core_permission', 'guard', 'require_feature(werewolf)'),
+  E('ww_commands', 'onebot', 'flow', '群命令 / 私聊监听'),
+  E('ww_commands', 'ww_state', 'flow', '提交行动 / 查询对局'),
+  E('ww_commands', 'ww_engine', 'flow', '启动 run_game'),
+  E('ww_commands', 'ww_roles', 'import', '角色参数'),
+  E('ww_commands', 'ww_api', 'flow', '管理员 / 私聊边界'),
+  E('ww_engine', 'ww_state', 'flow', '引擎独占状态变更'),
+  E('ww_engine', 'ww_roles', 'import', '角色牌 / 阵营 / 胜负'),
+  E('ww_engine', 'ww_api', 'flow', '群播 / 私聊 / 禁言'),
+  E('ww_engine', 'ww_models', 'persist', '开局 / 结局摘要'),
+  E('ww_engine', 'ww_config', 'config', '阶段超时与玩法'),
+  E('ww_state', 'ww_engine', 'flow', 'Action queue consumed'),
+  E('ww_api', 'onebot', 'flow', 'safe_group_msg / ban / DM'),
+  E('ww_config', 'env', 'config', '狼人杀配置'),
+  E('ww_models', 'orm', 'persist', 'bind_key=yawn_werewolf'),
+  E('ww_migrations', 'orm', 'persist', '狼人杀 Alembic'),
+  E('ww_migrations', 'sqlite', 'persist', '创建狼人杀表'),
+];
+
+/* ── 渲染：沿用 big-force 的 force graph / roam / focus-adjacency 骨架 ── */
+const graphEl = document.getElementById('ch');
+const detailEl = document.getElementById('detail');
+const graph = echarts.init(graphEl);
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const nodeMap = Object.fromEntries(NODES.map(node => [node.id, node]));
+const nodeIndex = Object.fromEntries(NODES.map((node, index) => [node.id, index]));
+let currentFilter = 'all';
+let selectedId = null;
+
+const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
+const layerFor = node => LAYERS[LAYER_INDEX[node.layer]];
+const relationStyle = type => {
+  const styles = {
+    flow: {color: MONO.DARK.grid, width: 1.35, opacity: .75, type: 'solid'},
+    import: {color: MONO.DARK.gridSoft, width: .65, opacity: .55, type: 'dotted'},
+    config: {color: MONO.DARK.ladder[5], width: .75, opacity: .45, type: 'dotted'},
+    persist: {color: MONO.DARK.faint, width: 1.25, opacity: .72, type: 'dashed'},
+    optional: {color: MONO.DARK.ladder[6], width: .85, opacity: .52, type: 'dashed'},
+    guard: {color: MONO.DARK.ladder[2], width: 1.05, opacity: .65, type: 'solid'},
+  };
+  return styles[type] || styles.import;
+};
+const relationLabel = type => ({flow: '运行时流', import: '导入 / 依赖', config: '配置', persist: '持久化', optional: '可选加载', guard: '权限 / 边界'}[type] || type);
+
+function isVisible(node) { return currentFilter === 'all' || node.layer === currentFilter; }
+
+function graphNode(node, index) {
+  const visible = isVisible(node);
+  const layer = layerFor(node);
+  const baseSize = node.score >= 70 ? 13 : node.score >= 50 ? 9 : 5;
+  return {
+    id: node.id, name: node.name, value: node.score, category: LAYER_INDEX[node.layer],
+    layer: node.layer, detail: node.detail, files: node.files, tags: node.tags,
+    symbolSize: node.score >= 70 ? 16 + Math.sqrt(node.score) * 1.5 : baseSize + Math.sqrt(node.score) * 1.05,
+    x: 260 + (MONO.rnd(index + 3, 17) - .5) * 900,
+    y: 260 + (MONO.rnd(index + 11, 29) - .5) * 520,
+    itemStyle: {color: layer.shade, borderColor: MONO.DARK.bg, borderWidth: node.score >= 70 ? 1.6 : .4, opacity: visible ? 1 : .08},
+    label: {show: visible && (node.showLabel || node.score >= 78), color: MONO.DARK.ink, fontFamily: 'Inter', fontSize: node.score >= 70 ? 9.5 : 8, fontWeight: node.score >= 70 ? 800 : 600, formatter: node.name},
+    emphasis: {itemStyle: {opacity: 1, borderColor: MONO.DARK.ink, borderWidth: 2}, label: {show: true, color: MONO.DARK.ink, fontWeight: 800}},
+  };
+}
+
+function graphLink(link) {
+  const source = nodeMap[link.source], target = nodeMap[link.target];
+  const visible = isVisible(source) || isVisible(target) || currentFilter === 'all';
+  return {
+    source: link.source, target: link.target, type: link.type, labelText: link.label,
+    lineStyle: {...relationStyle(link.type), opacity: visible ? relationStyle(link.type).opacity : .035, curveness: link.type === 'import' ? .04 : .1},
+  };
+}
+
+function tooltipFormatter(params) {
+  if (params.dataType === 'node') {
+    const node = nodeMap[params.data.id];
+    return `<strong>${escapeHtml(node.name)}</strong><br><span style="color:#8F8E86">${escapeHtml(layerFor(node).name)} · ${escapeHtml(node.tags.join(' / '))}</span><br>${escapeHtml(node.detail)}`;
+  }
+  if (params.dataType === 'edge') {
+    const source = nodeMap[params.data.source], target = nodeMap[params.data.target];
+    return `<strong>${escapeHtml(source.name)} → ${escapeHtml(target.name)}</strong><br><span style="color:#8F8E86">${escapeHtml(relationLabel(params.data.type))}</span>${params.data.labelText ? `<br>${escapeHtml(params.data.labelText)}` : ''}`;
+  }
+  return '';
+}
+
+function connected(id) {
+  const outgoing = LINKS.filter(link => link.source === id).map(link => ({direction: 'out', link, node: nodeMap[link.target]}));
+  const incoming = LINKS.filter(link => link.target === id).map(link => ({direction: 'in', link, node: nodeMap[link.source]}));
+  return {outgoing, incoming};
+}
+
+function renderDetail(id) {
+  if (!id || !nodeMap[id]) return;
+  const node = nodeMap[id];
+  const rels = connected(id);
+  const outgoing = rels.outgoing.slice(0, 9).map(item => `${item.node.name}（${relationLabel(item.link.type)}）`).join('、') || '无';
+  const incoming = rels.incoming.slice(0, 9).map(item => `${item.node.name}（${relationLabel(item.link.type)}）`).join('、') || '无';
+  const warning = id === 'rpg_commands'
+    ? '<div class="detail-warning">维护提示：该节点的处理器使用 require_feature("rpg")；当前 permission.py 的 FEATURE_REGISTRY 文本未列出 rpg。</div>'
+    : '';
+  detailEl.innerHTML = `
+    <div class="detail-title">${escapeHtml(node.name)}</div>
+    <div class="detail-meta">${escapeHtml(layerFor(node).name)} · ${escapeHtml(node.tags.join(' / '))} · ${rels.incoming.length} incoming / ${rels.outgoing.length} outgoing</div>
+    <div class="detail-body">${escapeHtml(node.detail)}</div>
+    <div class="detail-files"><strong>FILES</strong> · ${node.files.map(escapeHtml).join(' · ')}</div>
+    <div class="detail-files"><strong>OUT</strong> · ${escapeHtml(outgoing)}</div>
+    <div class="detail-files"><strong>IN</strong> · ${escapeHtml(incoming)}</div>
+    ${warning}`;
+}
+
+function graphOption() {
+  const data = NODES.map(graphNode);
+  const links = LINKS.map(graphLink);
+  return {
+    animation: !prefersReducedMotion,
+    animationDuration: prefersReducedMotion ? 0 : 600,
+    animationDurationUpdate: prefersReducedMotion ? 0 : 450,
+    tooltip: {trigger: 'item', backgroundColor: MONO.PAPER, borderWidth: 0, textStyle: {color: MONO.INK, fontFamily: 'Inter', fontSize: 11}, padding: [10, 14], formatter: tooltipFormatter},
+    legend: [],
+    series: [{
+      type: 'graph', layout: 'force', initLayout: 'circular', roam: true, draggable: true,
+      left: 6, right: 6, top: 6, bottom: 6,
+      data, links, categories: LAYERS.map(layer => ({name: layer.name})),
+      force: {repulsion: 95, edgeLength: [32, 104], gravity: .095, friction: .22, layoutAnimation: !prefersReducedMotion},
+      edgeSymbol: ['none', 'arrow'], edgeSymbolSize: [0, 4],
+      emphasis: {focus: 'adjacency', lineStyle: {color: MONO.DARK.ink, opacity: .94, width: 1.65}, label: {show: true, color: MONO.DARK.ink}},
+      blur: {itemStyle: {opacity: .08}, lineStyle: {opacity: .025}, label: {opacity: .08}},
+      label: {position: 'right'},
+    }],
+  };
+}
+
+function play() {
+  graph.clear();
+  graph.setOption(graphOption(), true);
+  if (selectedId) renderDetail(selectedId);
+}
+
+play();
+graph.on('click', params => {
+  if (params.dataType === 'node') {
+    selectedId = params.data.id;
+    renderDetail(selectedId);
+  } else if (params.dataType === 'edge') {
+    const source = nodeMap[params.data.source], target = nodeMap[params.data.target];
+    detailEl.innerHTML = `<div class="detail-title">${escapeHtml(source.name)} → ${escapeHtml(target.name)}</div><div class="detail-meta">${escapeHtml(relationLabel(params.data.type))}</div><div class="detail-body">${escapeHtml(params.data.labelText || '架构关系')}</div>`;
+  }
+});
+graph.getZr().on('click', event => { if (!event.target) { selectedId = null; play(); } });
+window.addEventListener('resize', () => graph.resize());
+
+document.querySelectorAll('.filter').forEach(button => {
+  button.addEventListener('click', () => {
+    currentFilter = button.dataset.filter;
+    document.querySelectorAll('.filter').forEach(item => item.classList.toggle('active', item === button));
+    play();
+  });
+});
+
+// 滚入视野才播；空白处点击重播，沿用 B2 模板的交互节奏。
+const observer = new IntersectionObserver(entries => {
+  if (entries[0].isIntersecting) { play(); observer.disconnect(); }
+}, {threshold: .25});
+observer.observe(graphEl);
+</script>
+</body>
+</html>
