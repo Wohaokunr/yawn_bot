@@ -15,7 +15,9 @@ class EditorTab(Widget):
     """Tab 基类：refresh 从 dict 状态重填控件（不重建控件树）。"""
 
     def __init__(self) -> None:
-        super().__init__()
+        # Textual 的 CSS 类型选择器不会把基类 ``EditorTab`` 当作子类匹配。
+        # 显式挂一个共享 class，响应式样式才能覆盖所有具体 Tab。
+        super().__init__(classes="editor-tab")
         self._populated = False
 
     @property

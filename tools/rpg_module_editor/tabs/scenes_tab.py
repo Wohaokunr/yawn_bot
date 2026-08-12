@@ -234,12 +234,15 @@ class ScenesTab(EditorTab):
     ScenesTab { height: 1fr; }
     ScenesTab Horizontal.-master { height: 1fr; }
     ScenesTab Vertical.-list-pane { width: 34; }
-    ScenesTab Vertical.-form-pane { width: 1fr; }
+    ScenesTab .-form-pane { width: 1fr; }
     ScenesTab Horizontal.-row { height: 3; }
     ScenesTab Button { margin-right: 1; }
     ScenesTab OptionList.-main-list { height: 1fr; }
     ScenesTab OptionList.-sub-list { width: 34; height: 1fr; }
-    ScenesTab Horizontal.-subedit { height: 1fr; }
+    ScenesTab Horizontal.-subedit { height: 1fr; min-height: 14; }
+    ScenesTab TabbedContent { height: 1fr; min-height: 18; }
+    ScenesTab TabPane { height: 1fr; min-height: 15; }
+    ScenesTab VerticalScroll.-presence-pane { height: 1fr; min-height: 12; }
     ScenesTab Label.-note { height: auto; color: $warning; }
     """
 
@@ -283,7 +286,7 @@ class ScenesTab(EditorTab):
 
     def compose(self) -> Any:
         with Horizontal(classes="-master"):
-            with Vertical(classes="-list-pane"):
+            with Vertical(classes="-list-pane -scene-list-pane"):
                 yield Label("[b]场景列表[/b]", markup=True)
                 yield self._scene_list
                 with Horizontal(classes="-row"):
@@ -292,7 +295,7 @@ class ScenesTab(EditorTab):
                     yield Button("上移", classes="-scene-up")
                     yield Button("下移", classes="-scene-down")
                     yield Button("复制", classes="-scene-copy")
-            with Vertical(classes="-form-pane"):
+            with VerticalScroll(classes="-form-pane -scene-form-pane"):
                 yield self._scene_id
                 yield self._scene_name
                 yield self._scene_narration
@@ -302,7 +305,7 @@ class ScenesTab(EditorTab):
                         TabPane("检定点", id="tab-checks"),
                         Horizontal(classes="-subedit"),
                     ):
-                        with Vertical(classes="-list-pane"):
+                        with Vertical(classes="-list-pane -nested-list-pane"):
                             yield self._check_list
                             with Horizontal(classes="-row"):
                                 yield Button(
@@ -319,7 +322,7 @@ class ScenesTab(EditorTab):
                         TabPane("出口", id="tab-exits"),
                         Horizontal(classes="-subedit"),
                     ):
-                        with Vertical(classes="-list-pane"):
+                        with Vertical(classes="-list-pane -nested-list-pane"):
                             yield self._exit_list
                             with Horizontal(classes="-row"):
                                 yield Button(
@@ -332,7 +335,10 @@ class ScenesTab(EditorTab):
                                 yield Button("下移", classes="-exit-down")
                                 yield Button("复制", classes="-exit-copy")
                         yield self._exit_form
-                    with TabPane("在场成员", id="tab-presence"), VerticalScroll():
+                    with (
+                        TabPane("在场成员", id="tab-presence"),
+                        VerticalScroll(classes="-presence-pane"),
+                    ):
                         yield self._npc_presence
                         yield self._monster_presence
 
