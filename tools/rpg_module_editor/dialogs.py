@@ -15,6 +15,8 @@ from .schema_loader import modules_dir
 from .yaml_io import load_or_error
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from textual.binding import BindingType
 
 _HELP_MD = """
@@ -43,21 +45,50 @@ NPC 名册（public_desc + persona + knows）、全部结局与具名事件的�
 """
 
 
+class ModuleDirectoryTree(DirectoryTree):
+    """只显示目录与 YAML 模组文件的目录树。"""
+
+    _MODULE_SUFFIXES: ClassVar[set[str]] = {".yaml", ".yml"}
+
+    @staticmethod
+    def _is_directory(path: Path) -> bool:
+        try:
+            return path.is_dir()
+        except OSError:
+            return False
+
+    def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
+        """过滤掉非模组文件，避免误选日志、数据库等无关文件。"""
+        for path in paths:
+            if self._is_directory(path) or path.suffix.lower() in self._MODULE_SUFFIXES:
+                yield path
+
+
+def _node_path(node: Any) -> Optional[Path]:
+    """从 DirectoryTree 节点提取路径（节点数据是带 path 的 DirEntry）。"""
+    path = getattr(getattr(node, "data", None), "path", None)
+    return path if isinstance(path, Path) else None
+
+
 class OpenFileScreen(ModalScreen[Optional[Path]]):
-    """打开模组：目录树中双击 / 回车选中 .yaml 文件。"""
+    """打开模组：目录树中回车或按钮确认选中的 YAML 文件。"""
 
     DEFAULT_CSS = """
     OpenFileScreen {
         align: center middle;
         Vertical {
-            width: 90;
+            width: 92%;
+            max-width: 110;
             height: 80%;
             border: thick $primary;
             background: $surface;
             padding: 1 2;
         }
-        Label { height: 1; color: $text-muted; }
+        Label { height: 1; color: $text-muted; overflow-x: hidden; }
+        Label.-selection { color: $accent; }
         DirectoryTree { height: 1fr; }
+        Horizontal.-actions { height: 3; align-horizontal: right; }
+        Button { margin-left: 1; }
     }
     """
 
@@ -66,17 +97,67 @@ class OpenFileScreen(ModalScreen[Optional[Path]]):
     def __init__(self, root: Path) -> None:
         super().__init__()
         self._root = root if root.is_dir() else Path.cwd()
+        self._selected: Optional[Path] = None
 
     def compose(self) -> Any:
         with Vertical() as box:
             box.border_title = "打开模组"
-            yield Label("选中 .yaml 文件后回车打开（Esc 取消）")
-            yield DirectoryTree(self._root)
+            yield Label("只显示 .yaml / .yml；选中文件后按回车或点击「打开」")
+            yield Label(f"浏览目录：{self._root}", classes="-dir")
+            yield Label("尚未选择文件", classes="-selection")
+            yield ModuleDirectoryTree(self._root, id="open-file-tree")
+            with Horizontal(classes="-actions"):
+                yield Button("取消", classes="-cancel")
+                yield Button("打开", variant="primary", classes="-open", disabled=True)
+
+    def on_mount(self) -> None:
+        self.query_one(ModuleDirectoryTree).focus()
+
+    def _set_selected(self, path: Optional[Path]) -> None:
+        self._selected = path
+        label = self.query_one(".-selection", Label)
+        button = self.query_one(".-open", Button)
+        if path is None:
+            label.update("尚未选择文件")
+        else:
+            label.update(f"已选择：{path.name}")
+        button.disabled = path is None
+
+    def on_directory_tree_node_highlighted(
+        self, event: DirectoryTree.NodeHighlighted
+    ) -> None:
+        path = _node_path(event.node)
+        if path is None:
+            return
+        if ModuleDirectoryTree._is_directory(path):
+            self.query_one(".-dir", Label).update(f"浏览目录：{path}")
+            self._set_selected(None)
+        else:
+            self._set_selected(path)
+
+    def on_directory_tree_directory_selected(
+        self, event: DirectoryTree.DirectorySelected
+    ) -> None:
+        path = Path(event.path)
+        self.query_one(".-dir", Label).update(f"浏览目录：{path}")
+        self._set_selected(None)
 
     def on_directory_tree_file_selected(
         self, event: DirectoryTree.FileSelected
     ) -> None:
-        self.dismiss(Path(event.path))
+        path = Path(event.path)
+        self._set_selected(path)
+        self.dismiss(path)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        classes = event.button.classes
+        if "-cancel" in classes:
+            self.dismiss(None)
+        elif "-open" in classes:
+            if self._selected is None:
+                self.notify("请先选择一个 YAML 模组文件", severity="warning")
+            else:
+                self.dismiss(self._selected)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -89,7 +170,8 @@ class SaveFileScreen(ModalScreen[Optional[Path]]):
     SaveFileScreen {
         align: center middle;
         Vertical {
-            width: 90;
+            width: 92%;
+            max-width: 110;
             height: 80%;
             border: thick $primary;
             background: $surface;
@@ -115,12 +197,16 @@ class SaveFileScreen(ModalScreen[Optional[Path]]):
     def compose(self) -> Any:
         with Vertical() as box:
             box.border_title = "另存为"
-            yield Label("在树中进入目标目录（高亮目录即当前保存位置）")
+            yield Label("在树中选择目标目录；仅保存为 YAML 模组文件")
             yield Label(f"保存到：{self._dir}", classes="-dir")
-            yield DirectoryTree(self._root)
+            yield ModuleDirectoryTree(self._root, id="save-file-tree")
             with Horizontal():
                 yield Input(value=self._default_name, placeholder="文件名（.yaml）")
                 yield Button("保存", variant="primary", classes="-save")
+                yield Button("取消", classes="-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
 
     def _dir_label(self) -> Label:
         return self.query_one(".-dir", Label)
@@ -138,18 +224,26 @@ class SaveFileScreen(ModalScreen[Optional[Path]]):
     def on_directory_tree_node_highlighted(
         self, event: DirectoryTree.NodeHighlighted
     ) -> None:
-        data = event.node.data
-        if isinstance(data, Path):
-            self._set_dir(data)
+        path = _node_path(event.node)
+        if path is not None and ModuleDirectoryTree._is_directory(path):
+            self._set_dir(path)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if "-save" not in event.button.classes:
-            return
+        if "-cancel" in event.button.classes:
+            self.dismiss(None)
+        elif "-save" in event.button.classes:
+            self._save()
+
+    def _save(self) -> None:
+        """按输入框内容提交保存路径。"""
         name = self.query_one(Input).value.strip()
         if not name:
             self.notify("请输入文件名", severity="warning")
             return
-        if "." not in name:
+        if "/" in name or "\\" in name or name in {".", ".."}:
+            self.notify("文件名不能包含目录路径", severity="warning")
+            return
+        if Path(name).suffix.lower() not in ModuleDirectoryTree._MODULE_SUFFIXES:
             name += ".yaml"
         self.dismiss(self._dir / name)
 

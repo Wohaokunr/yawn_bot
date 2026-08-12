@@ -8,6 +8,26 @@ Header {
     dock: top;
 }
 
+#editor-toolbar {
+    height: 3;
+    padding: 0 2;
+    background: $surface;
+    border-bottom: solid $panel;
+    align-vertical: middle;
+}
+
+#editor-toolbar Button {
+    min-width: 7;
+    margin-right: 1;
+}
+
+#editor-toolbar .-toolbar-hint {
+    width: 1fr;
+    height: 1;
+    color: $text-muted;
+    content-align: right middle;
+}
+
 TabbedContent {
     height: 1fr;
 }
@@ -30,4 +50,8 @@ Label {
 
 Button {
     min-width: 8;
+}
+
+Footer {
+    height: 1;
 }

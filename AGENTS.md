@@ -31,3 +31,4 @@
 - 2026-08-12：按用户选择将架构图改为 Lieflat `wire` 编辑部红：保留黑灰暗卡结构，仅用荧光橙强调共享 `yawn_core` 层，其余层级保持灰阶。
 - 2026-08-12：新增个人技能 `C:\Users\ASUS\.codex\skills\rpg-module-author`，用于交互式编写覆盖 yawn_rpg 全部当前模组特性的 YAML；技能以 `module_schema.py`、`modules/README.md` 和 `tools/rpg_module_editor --check` 为校验依据，综合模板已通过结构校验与同源加载器注册验证。
 - 2026-08-12：将 `13c4a22` 的 RPG 模组编辑器恢复到主工作树并同步当前 schema；新增团队检定模式/人数、NPC 初始关系、情报、社交节点与三类策略的完整表单，补齐嵌套 YAML 往返、未知键/引用/播报数字诊断、线索与情报改名级联及机密泄露反馈；补回编辑器工具依赖。编辑器 pytest 48 项、Ruff、Pyright 均通过。
+- 2026-08-12：完善 RPG 模组编辑器打开文件体验；文件选择器只显示 `.yaml`/`.yml` 与目录，支持选中文件反馈、打开/取消按钮，并修复另存为目录高亮与 YAML 扩展名处理；主界面新增工具栏、Footer 快捷键提示及 Ctrl+Tab 分区切换。编辑器 pytest 50 项、Ruff、Pyright 均通过。
