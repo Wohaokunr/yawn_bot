@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.widgets import Header, TabbedContent, TabPane
+from textual.containers import Horizontal
+from textual.widgets import Button, Footer, Header, Label, TabbedContent, TabPane
 
 from .dialogs import HelpScreen, NewModuleScreen, OpenFileScreen, SaveFileScreen
 from .schema_loader import modules_dir
@@ -57,6 +58,8 @@ class ModuleEditorApp(App):
         Binding("ctrl+shift+s", "save_as", "另存为"),
         Binding("ctrl+o", "open", "打开"),
         Binding("ctrl+n", "new", "新建"),
+        Binding("ctrl+tab", "next_tab", "下一页"),
+        Binding("ctrl+shift+tab", "previous_tab", "上一页"),
         Binding("f5", "revalidate", "重新校验"),
         Binding("ctrl+q", "quit_guarded", "退出"),
         Binding("f1", "help", "帮助"),
@@ -104,10 +107,19 @@ class ModuleEditorApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with Horizontal(id="editor-toolbar"):
+            yield Button("新建", id="toolbar-new")
+            yield Button("打开", id="toolbar-open", variant="primary")
+            yield Button("保存", id="toolbar-save", variant="success")
+            yield Button("另存为", id="toolbar-save-as")
+            yield Button("校验", id="toolbar-validate")
+            yield Button("帮助", id="toolbar-help")
+            yield Label("快捷键见底部", classes="-toolbar-hint")
         with TabbedContent(initial=_TAB_MODULE):
             for tab_id, tab in self._tabs.items():
                 with TabPane(self._tab_titles[tab_id], id=tab_id):
                     yield tab
+        yield Footer()
 
     def on_mount(self) -> None:
         self._load_initial()
@@ -215,14 +227,11 @@ class ModuleEditorApp(App):
     def _open_result(self, path: Optional[Path]) -> None:
         if path is None:
             return
-        data, err = load_or_error(path)
+        data, header = load_or_error(path)
         if data is None:
-            self.notify(f"无法打开：{err}", severity="error", timeout=8)
+            self.notify(f"无法打开：{header}", severity="error", timeout=8)
             return
-        from .yaml_io import load_module_file
-
-        _, header = load_module_file(path)
-        self._install_draft(ModuleDraft(data, path=path, header=header))
+        self._install_draft(ModuleDraft(data, path=path, header=header or ""))
         self.notify(f"已打开：{path.name}")
 
     def action_new(self) -> None:
@@ -246,6 +255,35 @@ class ModuleEditorApp(App):
         self.notify("已新建模组，请修改 id 与名称后保存")
 
     # ── 其他动作 ──────────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """处理顶部工具栏动作；分区页按钮仍由各自 Tab 处理。"""
+        actions = {
+            "toolbar-new": self.action_new,
+            "toolbar-open": self.action_open,
+            "toolbar-save": self.action_save,
+            "toolbar-save-as": self.action_save_as,
+            "toolbar-validate": self.action_revalidate,
+            "toolbar-help": self.action_help,
+        }
+        action = actions.get(event.button.id or "")
+        if action is not None:
+            action()
+
+    def _switch_tab(self, delta: int) -> None:
+        tabbed = self.query_one(TabbedContent)
+        tab_ids = list(self._tabs)
+        try:
+            current = tab_ids.index(tabbed.active)
+        except ValueError:
+            current = 0
+        tabbed.active = tab_ids[(current + delta) % len(tab_ids)]
+
+    def action_next_tab(self) -> None:
+        self._switch_tab(1)
+
+    def action_previous_tab(self) -> None:
+        self._switch_tab(-1)
 
     def action_revalidate(self) -> None:
         self._report_tab.refresh_tab(self.draft.data)

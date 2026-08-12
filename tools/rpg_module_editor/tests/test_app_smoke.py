@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import yaml
-from textual.widgets import TabbedContent
+from textual.widgets import Button, DirectoryTree, Footer, TabbedContent
 
 from tools.rpg_module_editor.app import ModuleEditorApp
+from tools.rpg_module_editor.dialogs import ModuleDirectoryTree, OpenFileScreen
 from tools.rpg_module_editor.schema_loader import ModuleDef, modules_dir
 from tools.rpg_module_editor.tabs import move_item
 from tools.rpg_module_editor.tabs.report_tab import collect_issues
@@ -206,6 +207,56 @@ async def test_new_module_skeleton_is_clean() -> None:
         issues, ok = collect_issues(app.draft.data)
         assert ok
         assert not [i for i in issues if i.severity == "ERROR"]
+
+
+async def test_module_file_tree_only_exposes_yaml(tmp_path: Path) -> None:
+    """文件选择器过滤非 YAML 文件，但保留目录供继续浏览。"""
+    (tmp_path / "nested").mkdir()
+    paths = [
+        tmp_path / "module.yaml",
+        tmp_path / "module.yml",
+        tmp_path / "notes.txt",
+        tmp_path / "data.sqlite3",
+        tmp_path / "nested",
+    ]
+    app = ModuleEditorApp()
+    async with app.run_test(size=(100, 36)) as pilot:
+        app.push_screen(OpenFileScreen(tmp_path))
+        await pilot.pause()
+        tree = app.screen.query_one(ModuleDirectoryTree)
+        assert list(tree.filter_paths(paths)) == [
+            tmp_path / "module.yaml",
+            tmp_path / "module.yml",
+            tmp_path / "nested",
+        ]
+
+
+async def test_open_toolbar_and_file_picker(tmp_path: Path) -> None:
+    """工具栏 / Ctrl+O 可打开文件面板，并能确认选中文件。"""
+    target = tmp_path / "opened.yaml"
+    target.write_text(_YUZHAI.read_text(encoding="utf-8"), encoding="utf-8")
+    app = ModuleEditorApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.query_one(Footer)
+        assert app.query_one("#toolbar-open", Button)
+        await pilot.press("ctrl+tab")
+        await pilot.pause()
+        assert app.query_one(TabbedContent).active == "tab-scenes"
+        await pilot.press("ctrl+shift+tab")
+        await pilot.pause()
+        assert app.query_one(TabbedContent).active == "tab-module"
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert isinstance(app.screen, OpenFileScreen)
+        screen = cast("OpenFileScreen", app.screen)
+        assert screen.query_one(DirectoryTree)
+        screen._set_selected(target)
+        screen.query_one(".-open", Button).press()
+        await pilot.pause()
+        assert app.draft.path == target
+        assert not app.draft.dirty
 
 
 @pytest.mark.parametrize("terminal_width", [70, 100, 140])
