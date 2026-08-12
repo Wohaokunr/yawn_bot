@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
@@ -52,6 +53,18 @@ from .reply_chain import (
 # handler 的 DI 注入 scoped session，worker 用 get_session() 得普通会话；
 # 辅助函数两者皆收
 _DbSession = Union[AsyncSession, _sa_scoped_session[AsyncSession]]
+
+_chat_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _chat_lock(user_id: int) -> asyncio.Lock:
+    lock = _chat_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _chat_locks[user_id] = lock
+    return lock
 
 __plugin_meta__ = PluginMetadata(
     name="Yawn对话",
@@ -295,16 +308,19 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     致歉提示仅发送、不持久化，避免污染对话上下文。
     """
 
+    delivered: list[str] = []
+
     async def _flush(piece: str) -> None:
         piece = piece.strip()
         if not piece:
             return
         for seg in _split_message(piece):
             await bot.send(event, MessageSegment.text(seg))
+            delivered.append(seg)
 
-    full: list[str] = []  # 全量文本，用于持久化
     pending = ""  # 已生成但尚未发送的文本
     timed_out = False
+    delivery_failed = False
 
     try:
         stream = await _client.chat.completions.create(
@@ -344,7 +360,6 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
             if not delta.content:
                 continue
 
-            full.append(delta.content)
             pending += delta.content
 
             # 段落成型（出现空行且已有足够长度）→ 立即发送
@@ -362,14 +377,30 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
                 pending = ""
     except OpenAIError as e:
         logger.error(f"AI 流中断: {e}")
+    except Exception as e:  # noqa: BLE001
+        # 发送可能在拆分后的任意一段失败。保留此前已经送达的片段，
+        # 丢弃尚未送达的 pending，避免重试导致重复消息或污染历史。
+        delivery_failed = True
+        pending = ""
+        logger.warning(f"AI 流式消息发送中断: {e!r}")
     finally:
-        await stream.close()
+        try:
+            await stream.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"关闭 AI 流失败: {e!r}")
 
     # 发送剩余尾部文本
-    await _flush(pending)
+    if not delivery_failed:
+        try:
+            await _flush(pending)
+        except Exception as e:  # noqa: BLE001
+            delivery_failed = True
+            logger.warning(f"AI 尾部消息发送失败: {e!r}")
 
-    text = "".join(full).strip()
+    text = "\n".join(delivered).strip()
     if not text:
+        if delivery_failed:
+            return None
         await bot.send(
             event,
             MessageSegment.text(
@@ -472,6 +503,21 @@ async def _process_chat(
         await session.commit()
 
 
+async def _run_user_chat(  # noqa: PLR0913
+    bot: Bot,
+    event: MessageEvent,
+    user_id: int,
+    session: _DbSession,
+    user_input: str,
+    *,
+    refresh_session: bool = False,
+) -> None:
+    async with _chat_lock(user_id):
+        if refresh_session:
+            await session.rollback()
+        await _process_chat(bot, event, user_id, session, user_input)
+
+
 async def _worker_process_chat(
     bot: Bot,
     event: MessageEvent,
@@ -488,7 +534,43 @@ async def _worker_process_chat(
             user_input = override_text
         else:
             user_input = event.get_plaintext().strip()
-        await _process_chat(bot, event, user_id, session, user_input)
+        await _run_user_chat(bot, event, user_id, session, user_input)
+
+
+async def _reset_chat_session(session: _DbSession, user_id: int) -> int:
+    stmt = (
+        select(ChatSession)
+        .where(
+            ChatSession.user_id == user_id,
+            ChatSession.group_id == None,  # noqa: E711
+            ChatSession.is_deleted == False,  # noqa: E712
+        )
+        .order_by(ChatSession.updated_at.desc().nullslast())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    old_session = result.scalar_one_or_none()
+    if old_session is not None:
+        old_session.is_deleted = True
+
+    new_session = ChatSession(
+        user_id=user_id,
+        group_id=None,
+        created_at=_now_bj(),
+        updated_at=_now_bj(),
+    )
+    session.add(new_session)
+    await session.flush()
+    new_session_id = new_session.id
+    await session.commit()
+    return new_session_id
+
+
+async def _reset_user_chat(session: _DbSession, user_id: int) -> int:
+    async with _chat_lock(user_id):
+        await stop_worker(user_id)
+        await session.rollback()
+        return await _reset_chat_session(session, user_id)
 
 
 # ── 事件处理 ──────────────────────────────────────────────
@@ -531,7 +613,14 @@ async def handle_ai_chat(
         await ai_chat_cmd.finish()
 
     # 有参数且非模式 → 一次性对话（向后兼容）
-    await _process_chat(bot, event, user_id, session, user_input)
+    await _run_user_chat(
+        bot,
+        event,
+        user_id,
+        session,
+        user_input,
+        refresh_session=True,
+    )
     await ai_chat_cmd.finish()
 
 
@@ -548,37 +637,7 @@ async def handle_new_session(
     user_id = int(event.get_user_id())
 
     # 先停掉 worker，避免在途消息写进即将软删除的会话
-    await stop_worker(user_id)
-
-    # 软删除当前会话
-    stmt = (
-        select(ChatSession)
-        .where(
-            ChatSession.user_id == user_id,
-            ChatSession.group_id == None,  # noqa: E711
-            ChatSession.is_deleted == False,  # noqa: E712
-        )
-        .order_by(ChatSession.updated_at.desc().nullslast())
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    old_session = result.scalar_one_or_none()
-
-    if old_session is not None:
-        old_session.is_deleted = True
-
-    # 创建新会话
-    new_sess = ChatSession(
-        user_id=user_id,
-        group_id=None,
-        created_at=_now_bj(),
-        updated_at=_now_bj(),
-    )
-    session.add(new_sess)
-    # flush 获取自增 id 后缓存，避免 commit 后惰性加载
-    await session.flush()
-    new_sess_id = new_sess.id
-    await session.commit()
+    new_sess_id = await _reset_user_chat(session, user_id)
 
     logger.info(f"用户 {user_id} 重置了对话，新会话 #{new_sess_id}")
 

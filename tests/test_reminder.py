@@ -6,11 +6,14 @@ import importlib
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nonebot
 import pytest
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,8 +23,12 @@ def reminder_module() -> Any:
     """通过 NoneBot 正式插件发现流程加载提醒模块。"""
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
-    nonebot.init()
-    nonebot.load_from_toml("pyproject.toml")
+    try:
+        nonebot.get_driver()
+    except ValueError:
+        nonebot.init()
+    if nonebot.get_plugin("yawn_core") is None:
+        nonebot.load_from_toml("pyproject.toml")
     return importlib.import_module("src.plugins.yawn_core.reminder")
 
 
@@ -212,3 +219,39 @@ async def test_create_reminder_rolls_back_when_job_registration_fails(
     assert session.deleted is session.added
     expected_commits = 2
     assert session.commits == expected_commits
+
+
+@pytest.mark.asyncio
+async def test_once_job_finalizes_when_feature_is_disabled(
+    reminder_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeReminder:
+        schedule_type = "once"
+
+    class FakeSession:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, *_args: object) -> FakeReminder:
+            return FakeReminder()
+
+    finalized: list[tuple[int, str]] = []
+
+    async def deliver(_reminder_id: int, *, force: bool) -> str:
+        assert not force
+        return "feature_disabled"
+
+    async def finalize(reminder_id: int, status: str) -> None:
+        finalized.append((reminder_id, status))
+
+    monkeypatch.setattr(reminder_module, "get_session", FakeSession)
+    monkeypatch.setattr(reminder_module, "_deliver_reminder", deliver)
+    monkeypatch.setattr(reminder_module, "_finalize_once", finalize)
+
+    await reminder_module._run_reminder_job(42)
+
+    assert finalized == [(42, "feature_disabled")]

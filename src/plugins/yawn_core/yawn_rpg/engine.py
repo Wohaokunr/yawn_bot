@@ -407,6 +407,7 @@ async def _get_action(game: Game, step: float) -> Optional[Action]:
     except asyncio.TimeoutError:
         return None
     game.action_queue.task_done()
+    action.in_flight = True
     return action
 
 
@@ -542,6 +543,12 @@ async def _run_signup(game: Game, cfg: Config) -> None:
                         game, MessageSegment.at(action.actor_user_id) + " 已退出报名~"
                     )
             elif action.kind is ActionKind.MODULE_SELECT and action.aux:
+                if (
+                    action.authority not in {"admin", "superuser"}
+                    and action.actor_user_id != game.host_user_id
+                ):
+                    await _announce(game, "房主已变更，这条选择模组请求已失效~")
+                    continue
                 module = _find_module(action.aux)
                 if module is None:
                     await _announce(game, "没有这个编号的模组，发送 /模组列表 查看")
@@ -553,6 +560,12 @@ async def _run_signup(game: Game, cfg: Config) -> None:
                         f"已选定模组《{module.name}》（{module.min_players}-{module.max_players} 人）",
                     )
             elif action.kind is ActionKind.START_GAME:
+                if (
+                    action.authority not in {"admin", "superuser"}
+                    and action.actor_user_id != game.host_user_id
+                ):
+                    await _announce(game, "房主已变更，这条开局请求已失效。")
+                    continue
                 break
         finally:
             release_action(game, action)
@@ -1564,6 +1577,7 @@ async def _pump_mid_turn(
         except asyncio.QueueEmpty:
             break
         game.action_queue.task_done()
+        action.in_flight = True
         await _absorb_action(game, cfg, action, interjections, offenses)
 
 
@@ -2674,12 +2688,23 @@ async def _advance_combat(game: Game, cfg: Config) -> None:
         game.start_explore_round(cfg.rpg_explore_round_timeout)
         await _announce(game, "战斗结束，重新进入探索轮次。")
         return
+    current_uid = (
+        game.combat_order[game.combat_index]
+        if game.combat_order and 0 <= game.combat_index < len(game.combat_order)
+        else None
+    )
+    old_index = game.combat_index
     game.combat_order = [
         uid for uid in game.combat_order if uid in game.active_user_ids()
     ]
     if not game.combat_order:
         return
-    game.combat_index = (game.combat_index + 1) % len(game.combat_order)
+    if current_uid in game.combat_order:
+        game.combat_index = (game.combat_order.index(current_uid) + 1) % len(
+            game.combat_order
+        )
+    else:
+        game.combat_index = old_index % len(game.combat_order)
     if game.combat_index == 0:
         game.combat_round += 1
     game.combat_deadline = _loop_time() + cfg.rpg_combat_turn_timeout
@@ -2713,6 +2738,25 @@ async def _process_action(
     player: PlayerState,
 ) -> None:
     """PLAY 阶段行动分发。"""
+    if game.combat_order:
+        # 群消息本身已经对全群可见；战斗中不再把自然语言交给
+        # KP/NPC 工具链，避免借发言触发检定、社交或切换场景。
+        if action.kind is ActionKind.SAY:
+            return
+        current_uid = game.combat_order[game.combat_index]
+        if action.kind not in {ActionKind.ATTACK, ActionKind.PASS_TURN}:
+            await _announce(
+                game,
+                MessageSegment.at(player.user_id)
+                + " 战斗中只能攻击或结束当前回合。",
+            )
+            return
+        if current_uid != player.user_id:
+            await _announce(
+                game,
+                MessageSegment.at(player.user_id) + " 现在不是你的战斗行动时机。",
+            )
+            return
     if action.kind is ActionKind.SAY:
         await _handle_say(game, cfg, action)
     elif action.kind is ActionKind.CHECK:
@@ -2882,7 +2926,7 @@ async def _run_play(game: Game, cfg: Config) -> None:
                     MessageSegment.at(player.user_id) + " 你已失去行动能力，无法行动。",
                 )
                 continue
-            if action.kind is ActionKind.SAY:
+            if action.kind is ActionKind.SAY and not game.combat_order:
                 await _classify_say(game, cfg, action)
                 # SAY 在分类前无法判断是否属于主要行动；分类后重新
                 # 检查 TTL，避免等待路由器期间放过过期 NPC 对话。

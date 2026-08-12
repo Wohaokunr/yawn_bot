@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -43,9 +44,22 @@ if TYPE_CHECKING:
 
 config = get_plugin_config(Config)
 
+_AI_PHASE_TOKEN: ContextVar[Optional[int]] = ContextVar(
+    "ww_ai_phase_token", default=None
+)
+
 
 def _enqueue_action(game: Game, action: Action) -> bool:
     """通过统一入口投递 AI 行动，队列拥塞时安全降级。"""
+    token = action.phase_token
+    if token is None:
+        token = _AI_PHASE_TOKEN.get()
+    if token is not None and token != game.phase_token:
+        logger.debug(
+            f"狼人杀 {game.group_id} 丢弃过期 AI 行动：{action.kind.value} "
+            f"token={token}, current={game.phase_token}"
+        )
+        return False
     accepted = submit_action(
         game,
         action,
@@ -234,13 +248,18 @@ def start_driver(game: Game) -> None:
 def _spawn(driver: AIDriver, coro: Coroutine[Any, Any, None]) -> None:
     """并发决策以后台任务执行，异常统一记日志（防未取回告警）。"""
 
+    token = driver.game.phase_token
+
     async def _guarded() -> None:
+        reset = _AI_PHASE_TOKEN.set(token)
         try:
             await coro
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.exception(f"狼人杀群 {driver.game.group_id} AI 后台决策出错")
+        finally:
+            _AI_PHASE_TOKEN.reset(reset)
 
     task = asyncio.create_task(_guarded())
     driver.bg_tasks.add(task)
@@ -282,12 +301,16 @@ async def _driver_loop(driver: AIDriver) -> None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(driver.wake.wait(), timeout=_TICK_INTERVAL)
             driver.wake.clear()
+            token = game.phase_token
+            reset = _AI_PHASE_TOKEN.set(token)
             try:
                 await _process_phase(driver)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 logger.exception(f"狼人杀群 {game.group_id} AI 驱动单帧处理出错")
+            finally:
+                _AI_PHASE_TOKEN.reset(reset)
     except asyncio.CancelledError:
         logger.info(f"狼人杀群 {game.group_id} AI 驱动任务结束")
         raise
@@ -679,6 +702,7 @@ async def _llm_decide(
     更短超时的场景可显式覆盖。
     """
     game = driver.game
+    phase_token = game.phase_token
     messages = _build_decision_messages(driver, player, instruction)
     logger.debug(
         f"狼人杀群 {game.group_id} {player.seat}号 AI 决策提示词：{instruction}"
@@ -697,7 +721,12 @@ async def _llm_decide(
             return None
         logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 决策回复：{text!r}")
         action = parse_dm_action(text, player.user_id, allow_votes=True)
-        if action is not None and _is_valid_action(game, player, action):
+        if (
+            action is not None
+            and phase_token == game.phase_token
+            and _is_valid_action(game, player, action)
+        ):
+            action.phase_token = phase_token
             return action
         if attempt == 0:
             logger.info(
@@ -790,12 +819,15 @@ def _is_valid_action(  # noqa: C901,PLR0911,PLR0912
 async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
     """AI 发言窗口：生成发言代发群消息后投入 SKIP 结束发言。"""
     game = driver.game
+    token = game.phase_token
     key = (game.round_no, game.phase, player.seat, "speech")
     if key in driver.handled:
         return
     driver.handled.add(key)
     name = player.display_name or f"{player.seat}号"
     text = await _llm_speech(driver, player)
+    if token != game.phase_token or game.current_speaker != player.seat:
+        return
     sent = False
     if text:
         text = text.strip().lstrip("/").strip()[:SPEECH_TRUNCATE]
@@ -811,6 +843,7 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
             await asyncio.sleep(_SPEECH_LINGER)
     if (
         not sent
+        and token == game.phase_token
         and game.phase in _SPEECH_PHASES
         and game.current_speaker == player.seat
     ):
@@ -827,7 +860,11 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
                 f"【{player.seat}号 {name}】\n（思考超时，跳过本次发言）",
             )
     # 阶段可能已在 LLM 调用期间超时切换，仅当仍在本座位发言窗口时收尾
-    if game.phase in _SPEECH_PHASES and game.current_speaker == player.seat:
+    if (
+        token == game.phase_token
+        and game.phase in _SPEECH_PHASES
+        and game.current_speaker == player.seat
+    ):
         _enqueue_action(game, Action(ActionKind.SKIP, player.user_id))
 
 

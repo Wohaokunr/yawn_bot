@@ -1,5 +1,6 @@
 """跑团多人机制的纯状态回归测试。"""
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -23,9 +24,111 @@ from yawn_core.yawn_rpg.state import (
     Game,
     Phase,
     SubmitResult,
+    create_game,
+    discard_game,
+    game_of_user,
+    get_game,
     release_action,
+    stop_game,
     submit_action,
 )
+
+
+def test_say_after_in_flight_action_is_queued_for_next_batch() -> None:
+    game = Game(group_id=1, host_user_id=10)
+    first = Action(ActionKind.SAY, 10, aux="第一句", expected_phase=Phase.SIGNUP)
+    assert (
+        submit_action(
+            game,
+            first,
+            queue_max=10,
+            user_pending_max=1,
+            user_say_pending_max=1,
+        )
+        is SubmitResult.ACCEPTED
+    )
+    consumed = game.action_queue.get_nowait()
+    game.action_queue.task_done()
+    consumed.in_flight = True
+    second = Action(ActionKind.SAY, 10, aux="第二句", expected_phase=Phase.SIGNUP)
+    assert (
+        submit_action(
+            game,
+            second,
+            queue_max=10,
+            user_pending_max=1,
+            user_say_pending_max=1,
+        )
+        is SubmitResult.ACCEPTED
+    )
+    assert consumed.aux == "第一句"
+    assert game.action_queue.qsize() == 1
+    release_action(game, consumed)
+    queued = game.action_queue.get_nowait()
+    game.action_queue.task_done()
+    release_action(game, queued)
+
+
+def test_stowed_say_is_not_rewritten_by_later_submission() -> None:
+    game = Game(group_id=1, host_user_id=10)
+    first = Action(ActionKind.SAY, 10, aux="切景前", expected_phase=Phase.SIGNUP)
+    assert (
+        submit_action(
+            game,
+            first,
+            queue_max=10,
+            user_pending_max=1,
+            user_say_pending_max=1,
+        )
+        is SubmitResult.ACCEPTED
+    )
+
+    game.stow_actions()
+    second = Action(ActionKind.SAY, 10, aux="切景后", expected_phase=Phase.SIGNUP)
+    assert (
+        submit_action(
+            game,
+            second,
+            queue_max=10,
+            user_pending_max=1,
+            user_say_pending_max=1,
+        )
+        is SubmitResult.ACCEPTED
+    )
+
+    assert list(game.mid_turn_buffer) == [first]
+    assert first.in_flight
+    assert first.aux == "切景前"
+    assert game.action_queue.get_nowait() is second
+    game.action_queue.task_done()
+    release_action(game, first)
+    release_action(game, second)
+
+
+@pytest.mark.asyncio
+async def test_stop_game_cleans_worker_cancelled_before_first_run() -> None:
+    game = create_game(91001, 92001)
+    assert game is not None
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    game.worker = asyncio.create_task(wait_forever())
+
+    await stop_game(game)
+
+    assert get_game(game.group_id) is None
+
+
+def test_stale_discard_does_not_remove_replacement_game() -> None:
+    replacement = create_game(91002, 92002)
+    assert replacement is not None
+    stale = Game(group_id=replacement.group_id, host_user_id=93002)
+
+    discard_game(stale)
+
+    assert get_game(replacement.group_id) is replacement
+    assert game_of_user(replacement.host_user_id) is replacement
+    discard_game(replacement)
 
 
 @pytest.mark.asyncio

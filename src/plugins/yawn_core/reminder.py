@@ -1028,7 +1028,7 @@ async def _deliver_reminder(
 
 
 async def _finalize_once(reminder_id: int, status: str) -> None:
-    if status not in {"success", "error"}:
+    if status not in {"success", "error", "feature_disabled"}:
         return
     async with get_session() as session:
         reminder = await session.get(ScheduledReminder, reminder_id)
@@ -1042,6 +1042,9 @@ async def _finalize_once(reminder_id: int, status: str) -> None:
             == _SCHEDULE_ONCE
         ):
             reminder.enabled = False
+            if status == "feature_disabled":
+                reminder.last_run_at = _now_bj()
+                reminder.last_error = "功能「定时提醒」已关闭，已跳过一次性提醒"
             await session.commit()
             _remove_reminder_job(reminder_id)
 
@@ -1060,7 +1063,7 @@ async def _run_reminder_job(reminder_id: int) -> None:
     if status == "missing":
         _remove_reminder_job(reminder_id)
         return
-    if is_once and status in {"success", "error"}:
+    if is_once and status in {"success", "error", "feature_disabled"}:
         await _finalize_once(reminder_id, status)
     elif status == "feature_disabled":
         logger.info(f"定时提醒因功能开关关闭而跳过: reminder_id={reminder_id}")

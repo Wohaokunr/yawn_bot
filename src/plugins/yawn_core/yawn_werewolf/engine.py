@@ -141,6 +141,7 @@ def _enter_phase(game: Game, phase: Phase) -> None:
         f"狼人杀群 {game.group_id} 进入阶段 {phase.value}（第 {game.round_no} 回合）"
     )
     game.phase = phase
+    game.phase_token += 1
 
 
 async def _announce(game: Game, text: Union[str, "Message"]) -> None:
@@ -811,6 +812,36 @@ async def _resolve_hunter_shot(
         await _badge_transfer(game, cfg, victim)
 
 
+async def _resolve_pending_day_effects(
+    game: Game,
+    cfg: Config,
+    pending: list[PlayerState],
+) -> None:
+    """按死亡队列结算猎人连锁开枪和警徽，保证放逐/遗言/自爆路径一致。"""
+    processed: set[int] = set()
+    index = 0
+    while index < len(pending):
+        dead = pending[index]
+        index += 1
+        if dead.role is Role.HUNTER and dead.death_cause is not DeathCause.WITCH_POISON:
+            if dead.user_id in processed:
+                continue
+            processed.add(dead.user_id)
+            shot = await _hunter_prompt(game, cfg, dead)
+            if shot is not None:
+                await _resolve_hunter_shot(game, cfg, shot, dead.seat)
+                victim = game.player_by_seat(shot)
+                if victim is not None:
+                    pending.append(victim)
+        if not dead.is_sheriff:
+            continue
+        if dead.death_cause is DeathCause.WITCH_POISON:
+            dead.is_sheriff = False
+            await _announce(game, f"警长 {dead.seat}号 被毒杀，警徽随其一同失效")
+        else:
+            await _badge_transfer(game, cfg, dead)
+
+
 async def _resolve_knight_duel(
     game: Game,
     cfg: Config,
@@ -1422,19 +1453,18 @@ async def _execute_exile(game: Game, cfg: Config, seat: int) -> None:
         game,
         f"{player.seat}号 被放逐，其身份是 {player.role.value}",
     )
-    await _last_words(game, cfg, player)
-    if player.role is Role.HUNTER:
-        shot = await _hunter_prompt(game, cfg, player)
-        if shot is not None:
-            await _resolve_hunter_shot(game, cfg, shot, player.seat)
-    if player.is_sheriff:
-        await _badge_transfer(game, cfg, player)
+    try:
+        await _last_words(game, cfg, player)
+    except _DetonatedError:
+        await _resolve_pending_day_effects(game, cfg, [player])
+        raise
+    await _resolve_pending_day_effects(game, cfg, [player])
 
 
 # ── 白天主流程 ────────────────────────────────────────────
 
 
-async def _run_day(  # noqa: C901,PLR0912
+async def _run_day(  # noqa: C901
     game: Game,
     cfg: Config,
     night_deaths: list[PlayerState],
@@ -1472,43 +1502,14 @@ async def _run_day(  # noqa: C901,PLR0912
     pending = list(night_deaths)
     # 第 1 夜死者有遗言
     if game.round_no == 1:
-        for dead in night_deaths:
-            await _last_words(game, cfg, dead)
-    # 猎人开枪（开枪致死同样进入待处理队列）
-    processed: set[int] = set()
-    while True:
-        hunter = next(
-            (
-                p
-                for p in pending
-                if p.role is Role.HUNTER
-                and p.death_cause is not DeathCause.WITCH_POISON
-                and p.user_id not in processed
-            ),
-            None,
-        )
-        if hunter is None:
-            break
-        processed.add(hunter.user_id)
-        shot = await _hunter_prompt(game, cfg, hunter)
-        if shot is not None:
-            await _resolve_hunter_shot(game, cfg, shot, hunter.seat)
-            victim = game.player_by_seat(shot)
-            if victim is not None:
-                pending.append(victim)
-    # 警徽移交（所有非毒死的警长，含被枪杀者）
-    for dead in pending:
-        if not dead.is_sheriff:
-            continue
-        if dead.death_cause is DeathCause.WITCH_POISON:
-            # 毒死无法移交警徽，警徽直接失效，避免死人长期占据 sheriff()
-            dead.is_sheriff = False
-            await _announce(
-                game,
-                f"警长 {dead.seat}号 被毒杀，警徽随其一同失效",
-            )
-        else:
-            await _badge_transfer(game, cfg, dead)
+        try:
+            for dead in night_deaths:
+                await _last_words(game, cfg, dead)
+        except _DetonatedError:
+            await _resolve_pending_day_effects(game, cfg, pending)
+            raise
+    # 猎人开枪与警徽移交（枪杀目标同样进入递归待处理队列）
+    await _resolve_pending_day_effects(game, cfg, pending)
     winner = _check_winner(game)
     if winner is not None:
         return winner
@@ -1525,13 +1526,19 @@ async def _run_day(  # noqa: C901,PLR0912
     return _check_winner(game)
 
 
-async def _handle_detonation(game: Game, player: PlayerState) -> None:
+async def _handle_detonation(
+    game: Game,
+    cfg: Config,
+    player: PlayerState,
+) -> None:
     """处理狼人自爆：死亡公示并直接进入夜晚。"""
     _kill(game, player, DeathCause.SELF_DETONATION)
     await _announce(
         game,
         f"{player.seat}号 玩家自爆！其身份是 狼人。\n白天流程立即结束，进入夜晚。",
     )
+    if player.is_sheriff:
+        await _badge_transfer(game, cfg, player)
 
 
 # ── 持久化 ────────────────────────────────────────────────
@@ -1711,6 +1718,8 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
                 f"（板子「{board.key}」支持 {supported} 人），本局流局~",
             )
             return
+        # 发牌前锁定报名名单、房主和板子；后续命令仅允许进入行动队列。
+        _enter_phase(game, Phase.DEALING)
         deck = build_role_deck(game.board, len(game.signup_user_ids))
         # 身份请求先按份数结算，如愿者从牌堆取走对应角色，
         # 剩余角色洗牌后随机分给其余座位
@@ -1782,7 +1791,7 @@ async def run_game(  # noqa: C901,PLR0912,PLR0915
             try:
                 winner = await _run_day(game, cfg, night_deaths)
             except _DetonatedError as detonated:
-                await _handle_detonation(game, detonated.player)
+                await _handle_detonation(game, cfg, detonated.player)
                 winner = _check_winner(game)
             except _DuelNightError:
                 winner = _check_winner(game)

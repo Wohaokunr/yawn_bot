@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from nonebot import get_bot, get_driver
 from nonebot.adapters.onebot.v11 import (
@@ -52,15 +53,37 @@ __plugin_meta__ = PluginMetadata(
     },
 )
 
-superusers = get_driver().config.superusers
-num = int(next(iter(superusers)))
-friend_request= on_request()
+superusers = frozenset(get_driver().config.superusers)
+_superuser_ids = tuple(int(user_id) for user_id in superusers if str(user_id).isdigit())
+friend_request = on_request()
 
 approve_cmd = on_command("approve", aliases={"同意"}, priority=1, block=True)
 reject_cmd = on_command("reject", aliases={"拒绝"}, priority=1, block=True)
 list_cmd = on_command("pending", aliases={"待审批"}, priority=1, block=True)
 
 logger.debug(superusers)
+
+
+def _is_superuser(user_id: int) -> bool:
+    return str(user_id) in superusers
+
+
+async def _notify_one_superuser(bot: Any, user_id: int, message: Message) -> None:
+    try:
+        await bot.send_private_msg(user_id=user_id, message=message)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            f"发送好友申请通知失败: user_id={user_id}, error={exc!r}"
+        )
+
+
+async def _notify_superusers(bot: Any, message: Message) -> None:
+    """通知所有已配置超管；未配置超管时只记录日志，不阻断好友申请入库。"""
+    if not _superuser_ids:
+        logger.warning("未配置 SUPERUSERS，跳过好友申请通知")
+        return
+    for user_id in _superuser_ids:
+        await _notify_one_superuser(bot, user_id, message)
 
 @friend_request.handle()
 async def handle_friend_request(
@@ -95,7 +118,7 @@ async def handle_friend_request(
         MessageSegment.text(f"/approve {user_id} 同意 | /reject {user_id} 拒绝\n")
         )
 
-    await bot.send_private_msg(user_id= num, message=message)
+    await _notify_superusers(bot, message)
 
 
 @list_cmd.handle()
@@ -103,8 +126,8 @@ async def handle_list(
     event: PrivateMessageEvent,
     session: async_scoped_session,
 ) -> None:
-    if str(event.user_id) not in superusers:
-        return
+    if not _is_superuser(int(event.user_id)):
+        await list_cmd.finish("你没有好友申请审批权限")
 
     stmt = select(FriendRequest).where(
         FriendRequest.status == "pending"
@@ -133,8 +156,8 @@ async def handle_approve(
     session: async_scoped_session,
     args: Message = CommandArg(),
 ) -> None:
-    if str(event.user_id) not in superusers:
-        return
+    if not _is_superuser(int(event.user_id)):
+        await approve_cmd.finish("你没有好友申请审批权限")
 
     text = args.extract_plain_text().strip()
     if not text.isdigit():
@@ -163,8 +186,8 @@ async def handle_reject(
     session: async_scoped_session,
     args: Message = CommandArg(),
 ) -> None:
-    if str(event.user_id) not in superusers:
-        return
+    if not _is_superuser(int(event.user_id)):
+        await reject_cmd.finish("你没有好友申请审批权限")
 
     text = args.extract_plain_text().strip()
     if not text.isdigit():
