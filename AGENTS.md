@@ -41,3 +41,4 @@
 - 2026-08-12：按最新工作区重绘 `docs/yawnbot-architecture.html`；保持 Lieflat `wire` 编辑部红配色，补入定时提醒、RPG《潮声停靠之前》与 Textual 编辑器、狼人杀四种板子 / AI 玩家及 board/is_ai 迁移，并增加手机安全区布局、横向筛选、单指拖动 / 双指缩放说明、缩放 / 重置 / 适应屏幕按钮。HTML 脚本、宽屏渲染和 390×844 窄屏交互检查通过，窄屏无横向溢出。
 - 2026-08-12：将更新后的架构图发布到公开 Pages 仓库 `Wohaokunr/Wohaokunr.github.io` 的 `main` 分支，提交 `090110436135`；Pages Actions 部署成功，线上地址为 `https://wohaokunr.github.io/yawnbot-architecture.html`，并确认线上内容包含移动端控件、RPG 新模组和狼人杀 AI 节点。
 - 2026-08-12：修复狼人杀 AI 合并后的迁移链：`cc9ace87b0ea` 接续狼人杀基础迁移 `155f2713d519`，`33d3f5e9af32` 改为接续 `cc9ace87b0ea`，并移除已由主线 RPG 迁移覆盖的误生成字段类型变更；`is_ai` 迁移通过临时服务端默认值兼容已有战绩。数据库仍按项目约定由维护者手动执行 `uv run nb orm upgrade heads`。
+- 2026-08-12：完成项目代码审查：确认 RPG 动作配额释放遗漏、AI 切场景不推进时间、切场景不清理战斗状态；狼人杀白天会解禁死者、RPG/狼人杀命令与私聊监听存在路由冲突；狼人杀与 Yawn 对话队列缺少背压；定时提醒注册失败仍可能提示创建成功。RPG 核心 11 项测试、目标插件 Ruff/Pyright（Python 3.10）与 compileall 通过；编辑器回归 66 项通过，`test_scene_edit_and_rename_cascade` 存在偶发时序失败，后续修复前需保留该风险记录。
