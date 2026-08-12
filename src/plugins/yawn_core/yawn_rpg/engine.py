@@ -531,6 +531,7 @@ async def _run_signup(game: Game, cfg: Config) -> None:
                         game, MessageSegment.at(action.actor_user_id) + " 你还没有报名~"
                     )
                 elif not game.signup_user_ids:
+                    _enter_phase(game, Phase.ENDED)
                     await _announce(game, "房间已解散")
                     return
                 elif game.host_user_id == action.actor_user_id:
@@ -968,6 +969,12 @@ async def enter_scene(
         return False
     game.current_scene = scene_id
     game.stow_actions()
+    # 场景切换会使旧场景的战斗轮次与敌对目标失效，避免把战斗状态带入新场景。
+    game.combat_order.clear()
+    game.combat_index = 0
+    game.combat_round = 0
+    game.combat_deadline = 0.0
+    game.npc_hostile.clear()
     # 场景变更使旧移动/攻击目标失效，并从新探索轮开始。
     if game.phase is Phase.PLAY:
         game.start_explore_round(config.rpg_explore_round_timeout)
@@ -1042,7 +1049,9 @@ async def _do_move(game: Game, player: PlayerState, target_text: str) -> None:
     await _transition_exit(game, player, chosen)
 
 
-async def _transition_exit(game: Game, player: PlayerState, ex: "Exit") -> bool:
+async def _transition_exit(
+    game: Game, player: Optional[PlayerState], ex: "Exit"
+) -> bool:
     """校验出口条件并切景；成功返回 True。供工具与 /前往 共用。"""
     if game.module is None:
         return False
@@ -1054,7 +1063,9 @@ async def _transition_exit(game: Game, player: PlayerState, ex: "Exit") -> bool:
         return False
     ok = await enter_scene(game, ex.to_scene, transition=ex.narration)
     if ok:
-        name = player.sheet.name if player.sheet else str(player.seat)
+        name = (
+            player.sheet.name if player is not None and player.sheet else "KP"
+        )
         logger.info(f"跑团群 {game.group_id} {name} 前往 {target_name}")
         cost = ex.time_cost if ex.time_cost is not None else _time_cost(game, "move")
         await _tick_time(game, cost)
@@ -1589,11 +1600,12 @@ async def run_kp_turn(
     # 剧本概览：整局惰性构建一次拼在系统提示词后（整局逐字节
     # 稳定，落在前缀缓存内）。endings 由引擎组装（模组结局 +
     # 开启时的通用结局），避免 ai_kp 反向导入 engine
-    if not game.kp_overview and game.module is not None:
-        endings = list(game.module.endings)
-        if game.module.generic_endings:
+    module = game.module
+    if not game.kp_overview and module is not None:
+        endings = list(module.endings)
+        if module.generic_endings:
             endings.extend(_GENERIC_ENDINGS)
-        game.kp_overview = ai_kp.build_module_overview(game.module, endings)
+        game.kp_overview = ai_kp.build_module_overview(module, endings)
     system_content = ai_kp.build_system_prompt(cfg)
     if game.kp_overview:
         system_content = f"{system_content}\n{game.kp_overview}"
@@ -1647,12 +1659,28 @@ async def run_kp_turn(
                 )
                 break
             if game.tools_cache is None:
+                module = game.module
+                if module is None:
+                    final_text = await complete(
+                        messages,
+                        max_tokens=cfg.rpg_kp_max_tokens,
+                        temperature=cfg.rpg_kp_temperature,
+                        timeout=timeout,
+                    )
+                    break
                 # 工具 schema 全静态：整局惰性构建一次后复用，
                 # 使 wire 前缀（tools + 系统提示词）逐字节稳定
                 player_names = [
                     p.sheet.name for p in game.players if p.sheet is not None
                 ]
-                game.tools_cache = ai_kp.build_tools(game.module, player_names)
+                ending_ids = [ending.id for ending in module.endings]
+                if module.generic_endings:
+                    ending_ids.extend(ending.id for ending in _GENERIC_ENDINGS)
+                game.tools_cache = ai_kp.build_tools(
+                    module,
+                    player_names,
+                    ending_ids=ending_ids,
+                )
             msg = await complete_with_tools(
                 messages,
                 game.tools_cache,
@@ -1767,7 +1795,7 @@ async def execute_tool(  # noqa: PLR0911
         if name == "heal":
             return await _tool_damage(game, cfg, args, actor, heal=True)
         if name == "transition_scene":
-            return await _tool_transition(game, args)
+            return await _tool_transition(game, args, actor)
         if name == "grant_clue":
             return await _tool_grant_clue(game, args)
         if name == "speak_as_npc":
@@ -1906,7 +1934,11 @@ async def _tool_damage(  # noqa: PLR0911
     return f"已造成 {amount} 点伤害（系统单次上限 {cfg.rpg_ai_max_damage_per_call}）。"
 
 
-async def _tool_transition(game: Game, args: dict[str, object]) -> str:
+async def _tool_transition(
+    game: Game,
+    args: dict[str, object],
+    actor: Optional[PlayerState],
+) -> str:
     """transition_scene：出口存在性与条件校验。"""
     if game.module is None or game.current_scene is None:
         return "当前不在场景中。"
@@ -1919,7 +1951,7 @@ async def _tool_transition(game: Game, args: dict[str, object]) -> str:
         return "目标不是当前场景的出口，不能切换。"
     target = game.module.scene(target_id)
     if evaluate_condition(chosen.condition, game.condition_context()):
-        if not await enter_scene(game, target_id, transition=chosen.narration):
+        if not await _transition_exit(game, actor, chosen):
             return "场景切换失败（目标场景缺失），请重新查询局面。"
         name = target.name if target is not None else target_id
         return f"已切换到场景「{name}」，转场文案已播报。"
@@ -2030,10 +2062,10 @@ async def _tool_end_session(game: Game, args: dict[str, object]) -> str:
     if game.module is None:
         return "对局未就绪。"
     ending_id = str(args.get("ending_id", ""))
-    ending = next(
-        (e for e in game.module.endings if e.id == ending_id),
-        None,
-    )
+    endings = list(game.module.endings)
+    if game.module.generic_endings:
+        endings.extend(_GENERIC_ENDINGS)
+    ending = next((e for e in endings if e.id == ending_id), None)
     if ending is None:
         return "结局不存在。"
     if not evaluate_condition(ending.condition, game.condition_context()):
@@ -2668,7 +2700,10 @@ def _combat_has_targets(game: Game) -> bool:
         return False
     if any(monster_id not in game.dead_monsters for monster_id in scene.monsters):
         return True
-    return any(npc_id not in game.dead_npcs for npc_id in game.npc_hostile)
+    return any(
+        npc_id not in game.dead_npcs and game.npc_present(npc_id) is not None
+        for npc_id in game.npc_hostile
+    )
 
 
 async def _process_action(
@@ -2903,6 +2938,7 @@ async def _get_action_idle(game: Game, cfg: Config) -> Optional[Action]:
         if action is None:
             continue
         if game.player_by_user(action.actor_user_id) is None:
+            release_action(game, action)
             continue  # 局外人的命令不重置空闲计时（否则可无限续命）
         return action
 

@@ -45,6 +45,7 @@ from .state import (
     discard_game,
     display_name_of,
     is_ai_uid,
+    release_action,
 )
 
 if TYPE_CHECKING:
@@ -128,6 +129,7 @@ async def _get_action(game: Game, step: float) -> Optional[Action]:
     except asyncio.TimeoutError:
         return None
     game.action_queue.task_done()
+    release_action(game, action)
     return action
 
 
@@ -192,9 +194,12 @@ async def _whole_ban(game: Game, *, enable: bool) -> None:
 
 
 async def _unban_all_players(game: Game) -> None:
-    """解禁所有玩家。"""
-    for p in game.players:
+    """恢复白天发言权限：解禁存活者并重新单独禁言死者。"""
+    for p in game.alive_players():
         await _unban(game, p.user_id)
+    for p in game.players:
+        if not p.alive:
+            await _ban(game, p.user_id, 1800)
 
 
 async def _ban_living_except(
@@ -1257,6 +1262,7 @@ async def _sheriff_campaign(  # noqa: C901,PLR0912,PLR0915
     while not game.action_queue.empty():
         action = game.action_queue.get_nowait()
         game.action_queue.task_done()
+        release_action(game, action)
         player = game.player_by_user(action.actor_user_id)
         if player is None or not player.alive:
             continue

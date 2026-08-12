@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
+from .. import game_registry  # noqa: TID252
 from .roles import DEFAULT_BOARD_KEY
 
 if TYPE_CHECKING:
@@ -101,6 +102,16 @@ class Action:
     aux: Optional[str] = None
 
 
+def _same_action(left: Action, right: Action) -> bool:
+    """判断仍在队列中的重复行动。"""
+    return (
+        left.kind is right.kind
+        and left.actor_user_id == right.actor_user_id
+        and left.value == right.value
+        and left.aux == right.aux
+    )
+
+
 @dataclass
 class PlayerState:
     """玩家在局内的内存状态。"""
@@ -151,7 +162,11 @@ class Game:
     # 报名顺序（退报名移除）
     signup_user_ids: list[int] = field(default_factory=list)
     # 命令处理器投入、引擎串行消费的行动队列
-    action_queue: asyncio.Queue[Action] = field(default_factory=asyncio.Queue)
+    action_queue: asyncio.Queue[Action] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=100)
+    )
+    pending_actions: dict[int, Action] = field(default_factory=dict)
+    pending_by_user: dict[int, int] = field(default_factory=dict)
     worker: Optional[asyncio.Task[None]] = None
     # 持久化 WerewolfGame 行主键
     game_row_id: Optional[int] = None
@@ -210,8 +225,9 @@ class Game:
         """非阻塞清空行动队列（阶段切换时防上一阶段指令泄漏）。"""
         while not self.action_queue.empty():
             try:
-                self.action_queue.get_nowait()
+                action = self.action_queue.get_nowait()
                 self.action_queue.task_done()
+                release_action(self, action)
             except asyncio.QueueEmpty:  # noqa: PERF203
                 break
 
@@ -313,14 +329,25 @@ def game_of_user(user_id: int) -> Optional[Game]:
     return _games.get(group_id)
 
 
-def create_game(group_id: int, host_user_id: int) -> Optional[Game]:
+def create_game(
+    group_id: int,
+    host_user_id: int,
+    *,
+    queue_max: int = 100,
+) -> Optional[Game]:
     """创建对局并把房主登记为首位报名者。
 
     群内已有对局或房主已在其他局中时返回 None。
     """
     if group_id in _games or host_user_id in _user_index:
         return None
-    game = Game(group_id=group_id, host_user_id=host_user_id)
+    if not game_registry.reserve_game("werewolf", group_id, host_user_id):
+        return None
+    game = Game(
+        group_id=group_id,
+        host_user_id=host_user_id,
+        action_queue=asyncio.Queue(maxsize=max(1, queue_max)),
+    )
     _games[group_id] = game
     _user_index[host_user_id] = group_id
     game.signup_user_ids.append(host_user_id)
@@ -330,6 +357,8 @@ def create_game(group_id: int, host_user_id: int) -> Optional[Game]:
 def join_signup(game: Game, user_id: int) -> bool:
     """报名；已在任意局中或已报名返回 False。"""
     if user_id in _user_index or user_id in game.signup_user_ids:
+        return False
+    if not game_registry.reserve_user("werewolf", game.group_id, user_id):
         return False
     _user_index[user_id] = game.group_id
     game.signup_user_ids.append(user_id)
@@ -345,7 +374,39 @@ def leave_signup(game: Game, user_id: int) -> bool:
     game.role_requests.pop(user_id, None)
     if _user_index.get(user_id) == game.group_id:
         _user_index.pop(user_id, None)
+    game_registry.release_user("werewolf", game.group_id, user_id)
     return True
+
+
+def submit_action(game: Game, action: Action, *, user_pending_max: int) -> bool:
+    """唯一行动入队入口，提供容量、单用户配额与重复行动去重。"""
+    if any(
+        _same_action(existing, action)
+        for existing in game.pending_actions.values()
+    ):
+        return False
+    if game.pending_by_user.get(action.actor_user_id, 0) >= max(user_pending_max, 1):
+        return False
+    try:
+        game.action_queue.put_nowait(action)
+    except asyncio.QueueFull:
+        return False
+    game.pending_actions[id(action)] = action
+    game.pending_by_user[action.actor_user_id] = (
+        game.pending_by_user.get(action.actor_user_id, 0) + 1
+    )
+    return True
+
+
+def release_action(game: Game, action: Action) -> None:
+    """引擎取走或清理行动后释放配额。"""
+    if game.pending_actions.pop(id(action), None) is None:
+        return
+    count = game.pending_by_user.get(action.actor_user_id, 0) - 1
+    if count > 0:
+        game.pending_by_user[action.actor_user_id] = count
+    else:
+        game.pending_by_user.pop(action.actor_user_id, None)
 
 
 def note_signup_name(game: Game, user_id: int, name: str) -> None:
@@ -370,6 +431,7 @@ def discard_game(game: Game) -> None:
     for uid, gid in list(_user_index.items()):
         if gid == game.group_id:
             _user_index.pop(uid, None)
+    game_registry.release_game("werewolf", game.group_id)
 
 
 async def stop_game(game: Game) -> None:

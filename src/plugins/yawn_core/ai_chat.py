@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_scoped_session as _sa_scoped_session
 
 from .chat_state import (
+    enqueue,
     ensure_worker,
     enter_mode,
     exit_mode,
@@ -39,6 +40,7 @@ from .chat_state import (
 )
 from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
+from .llm import _COMPLETION_CONCURRENCY
 from .llm import ai_config as _ai_config
 from .llm import client as _client
 from .permission import check_feature_permission, require_feature
@@ -105,6 +107,7 @@ _SEGMENT_CHAR_LIMIT = 1500
 _STREAM_FLUSH_MIN = 200
 # 流式读取空闲超时（秒）：超过该时长无新分块则中止
 _STREAM_IDLE_TIMEOUT = 60
+_STREAM_ACQUIRE_TIMEOUT = 5
 # 系统提示词
 _SYSTEM_PROMPT = (
     "你是 YawnBot，一个友好、有趣的 QQ 聊天机器人。请用简洁自然的中文回复用户。"
@@ -253,7 +256,34 @@ async def _load_history(
     return history
 
 
-async def _stream_and_send(  # noqa: C901, PLR0912, PLR0915
+async def _stream_and_send(
+    bot: Bot,
+    event: MessageEvent,
+    history: list[dict[str, str]],
+) -> Optional[str]:
+    """在全局 AI 并发额度内执行流式对话。"""
+    acquired = False
+    try:
+        await asyncio.wait_for(
+            _COMPLETION_CONCURRENCY.acquire(),
+            timeout=_STREAM_ACQUIRE_TIMEOUT,
+        )
+        acquired = True
+    except asyncio.TimeoutError:
+        await bot.send(
+            event,
+            MessageSegment.text("当前 AI 请求较多，请稍后再试~"),
+        )
+        return None
+
+    try:
+        return await _stream_and_send_impl(bot, event, history)
+    finally:
+        if acquired:
+            _COMPLETION_CONCURRENCY.release()
+
+
+async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     bot: Bot,
     event: MessageEvent,
     history: list[dict[str, str]],
@@ -495,7 +525,8 @@ async def handle_ai_chat(
     # 避免与在途消息并发写同一会话
     state = get_state(user_id)
     if state is not None and state.in_mode:
-        await state.queue.put((bot, event, user_input))
+        if not enqueue(state, (bot, event, user_input)):
+            await ai_chat_cmd.finish("当前对话消息较多，请稍后再试~")
         ensure_worker(user_id, _worker_process_chat)
         await ai_chat_cmd.finish()
 
@@ -626,5 +657,10 @@ async def _handle_chat_mode_msg(
     state = get_state(user_id)
     if state is None:
         return
-    await state.queue.put((bot, event, None))
+    if not enqueue(state, (bot, event, None)):
+        await bot.send(
+            event,
+            MessageSegment.text("当前对话消息较多，请稍后再试~"),
+        )
+        return
     ensure_worker(user_id, _worker_process_chat)

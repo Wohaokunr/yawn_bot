@@ -57,6 +57,13 @@ if TYPE_CHECKING:
 config = get_plugin_config(Config)
 
 
+def _player_required(game: "Game", user_id: int) -> str | None:
+    """拒绝局外人把局内行动写入队列。"""
+    if game.player_by_user(user_id) is None:
+        return "你不是本局调查员~"
+    return None
+
+
 def _submit(game: "Game", action: Action) -> str | None:
     """命令层唯一入队入口；只反馈背压，业务裁决由引擎完成。
 
@@ -363,10 +370,13 @@ async def handle_check(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await check_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await check_cmd.finish(error)
     error = _submit(
         game,
         _action(
-            ActionKind.CHECK, int(event.get_user_id()), game=game, aux=str(arg).strip()
+            ActionKind.CHECK, user_id, game=game, aux=str(arg).strip()
         ),
     )
     await check_cmd.finish(error)
@@ -385,12 +395,15 @@ async def handle_attack(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await attack_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await attack_cmd.finish(error)
     target = str(arg).strip()
     if not target:
         await attack_cmd.finish("格式：/攻击 目标名")
     error = _submit(
         game,
-        _action(ActionKind.ATTACK, int(event.get_user_id()), game=game, aux=target),
+        _action(ActionKind.ATTACK, user_id, game=game, aux=target),
     )
     await attack_cmd.finish(error)
 
@@ -408,11 +421,14 @@ async def handle_move(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await move_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await move_cmd.finish(error)
     target = str(arg).strip()
     if not target:
         await move_cmd.finish("格式：/前往 地点名")
     error = _submit(
-        game, _action(ActionKind.MOVE, int(event.get_user_id()), game=game, aux=target)
+        game, _action(ActionKind.MOVE, user_id, game=game, aux=target)
     )
     await move_cmd.finish(error)
 
@@ -445,6 +461,9 @@ async def handle_wait(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await wait_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await wait_cmd.finish(error)
     text = str(arg).strip()
     if text:
         if not (text.isascii() and text.isdigit()):
@@ -455,7 +474,7 @@ async def handle_wait(
         minutes = max(1, min(config.rpg_wait_default, config.rpg_wait_max))
     error = _submit(
         game,
-        _action(ActionKind.WAIT, int(event.get_user_id()), game=game, value=minutes),
+        _action(ActionKind.WAIT, user_id, game=game, value=minutes),
     )
     await wait_cmd.finish(error)
 
@@ -548,6 +567,9 @@ async def handle_assist(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await assist_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await assist_cmd.finish(error)
     target, sep, skill = str(arg).strip().partition(" ")
     if not sep or not target or not skill.strip():
         await assist_cmd.finish("格式：/协助 玩家 技能（如 /协助 阿明 侦查）")
@@ -555,7 +577,7 @@ async def handle_assist(
         game,
         _action(
             ActionKind.ASSIST,
-            int(event.get_user_id()),
+            user_id,
             game=game,
             aux=f"{target}|{skill.strip()}",
         ),
@@ -576,12 +598,15 @@ async def handle_share_clue(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await share_clue_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await share_clue_cmd.finish(error)
     clue = str(arg).strip()
     if not clue:
         await share_clue_cmd.finish("格式：/分享线索 线索名")
     error = _submit(
         game,
-        _action(ActionKind.SHARE_CLUE, int(event.get_user_id()), game=game, aux=clue),
+        _action(ActionKind.SHARE_CLUE, user_id, game=game, aux=clue),
     )
     await share_clue_cmd.finish(error)
 
@@ -599,6 +624,9 @@ async def handle_share_fact(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await share_fact_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await share_fact_cmd.finish(error)
     npc, sep, fact = str(arg).strip().partition(" ")
     if not sep or not npc or not fact.strip():
         await share_fact_cmd.finish("格式：/分享情报 NPC名 情报名")
@@ -606,7 +634,7 @@ async def handle_share_fact(
         game,
         _action(
             ActionKind.SHARE_FACT,
-            int(event.get_user_id()),
+            user_id,
             game=game,
             aux=f"{npc}|{fact.strip()}",
         ),
@@ -626,8 +654,11 @@ async def handle_pass_turn(
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await pass_turn_cmd.finish("现在不在跑团进行中")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await pass_turn_cmd.finish(error)
     error = _submit(
-        game, _action(ActionKind.PASS_TURN, int(event.get_user_id()), game=game)
+        game, _action(ActionKind.PASS_TURN, user_id, game=game)
     )
     await pass_turn_cmd.finish(error)
 

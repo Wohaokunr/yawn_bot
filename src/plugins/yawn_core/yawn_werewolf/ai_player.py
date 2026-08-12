@@ -26,7 +26,15 @@ from . import api
 from .config import Config
 from .dsl import parse_dm_action
 from .roles import BOARDS, Faction, Role, build_role_card
-from .state import DUEL_PHASES, Action, ActionKind, Game, Phase, PlayerState
+from .state import (
+    DUEL_PHASES,
+    Action,
+    ActionKind,
+    Game,
+    Phase,
+    PlayerState,
+    submit_action,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -34,6 +42,21 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
 
 config = get_plugin_config(Config)
+
+
+def _enqueue_action(game: Game, action: Action) -> bool:
+    """通过统一入口投递 AI 行动，队列拥塞时安全降级。"""
+    accepted = submit_action(
+        game,
+        action,
+        user_pending_max=config.ww_user_pending_max,
+    )
+    if not accepted:
+        logger.debug(
+            f"狼人杀 {game.group_id} {action.actor_user_id} AI 行动队列已满或重复："
+            f"{action.kind.value}"
+        )
+    return accepted
 
 # 公共记录与私聊记录保留条数上限（控制提示词规模）
 _PUBLIC_LOG_MAX = 200
@@ -519,14 +542,14 @@ async def _simple_decide(
     game = driver.game
     action = await _llm_decide(driver, player, instruction)
     if action is not None:
-        game.action_queue.put_nowait(action)
+        _enqueue_action(game, action)
         return
     if fallback is not None:
         logger.info(
             f"狼人杀群 {game.group_id} {player.seat}号 "
             f"AI 决策失败，托管行动：{fallback.value}"
         )
-        game.action_queue.put_nowait(Action(fallback, player.user_id))
+        _enqueue_action(game, Action(fallback, player.user_id))
 
 
 async def _wolf_discuss(driver: AIDriver, wolf: PlayerState) -> None:
@@ -544,7 +567,7 @@ async def _wolf_discuss(driver: AIDriver, wolf: PlayerState) -> None:
         driver, wolf, instruction, timeout=config.ww_ai_discuss_timeout
     )
     if action is not None and action.kind is ActionKind.SAY:
-        game.action_queue.put_nowait(action)
+        _enqueue_action(game, action)
     else:
         logger.info(
             f"狼人杀群 {game.group_id} {wolf.seat}号 AI 狼队讨论跳过（未产出有效发言）"
@@ -564,7 +587,7 @@ async def _wolf_decide(driver: AIDriver, wolf: PlayerState) -> None:
     )
     action = await _llm_decide(driver, wolf, instruction)
     if action is not None:
-        game.action_queue.put_nowait(action)
+        _enqueue_action(game, action)
     else:
         logger.info(
             f"狼人杀群 {game.group_id} {wolf.seat}号 "
@@ -580,7 +603,7 @@ async def _run_decide(driver: AIDriver, player: PlayerState) -> None:
         "警长竞选报名中：决定是否参加竞选。",
     )
     if action is not None and action.kind is ActionKind.RUN:
-        driver.game.action_queue.put_nowait(action)
+        _enqueue_action(driver.game, action)
     elif action is None:
         logger.info(
             f"狼人杀群 {driver.game.group_id} {player.seat}号 AI 竞选决策失败，放弃上警"
@@ -621,7 +644,7 @@ async def _knight_decide(driver: AIDriver, knight: PlayerState) -> None:
         timeout=config.ww_ai_discuss_timeout,
     )
     if action is not None and action.kind is ActionKind.DUEL:
-        game.action_queue.put_nowait(action)
+        _enqueue_action(game, action)
     else:
         logger.info(f"狼人杀群 {game.group_id} {knight.seat}号 AI 骑士决定不决斗")
 
@@ -635,10 +658,10 @@ async def _vote_decide(driver: AIDriver, player: PlayerState) -> None:
     )
     action = await _llm_decide(driver, player, instruction)
     if action is not None:
-        game.action_queue.put_nowait(action)
+        _enqueue_action(game, action)
         return
     logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 投票决策失败，托管：弃票")
-    game.action_queue.put_nowait(Action(ActionKind.ABSTAIN, player.user_id))
+    _enqueue_action(game, Action(ActionKind.ABSTAIN, player.user_id))
 
 
 async def _llm_decide(
@@ -805,7 +828,7 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
             )
     # 阶段可能已在 LLM 调用期间超时切换，仅当仍在本座位发言窗口时收尾
     if game.phase in _SPEECH_PHASES and game.current_speaker == player.seat:
-        game.action_queue.put_nowait(Action(ActionKind.SKIP, player.user_id))
+        _enqueue_action(game, Action(ActionKind.SKIP, player.user_id))
 
 
 async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:

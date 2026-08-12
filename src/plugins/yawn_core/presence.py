@@ -13,10 +13,14 @@ from .data_models.user_group import UserGroup
 
 # 北京时间 UTC+8
 _CST = timezone(timedelta(hours=8))
+_MAX_COMMIT_ATTEMPTS = 3
 
 
 @event_preprocessor
-async def track_user(event: Event, session: async_scoped_session):
+async def track_user(  # noqa: C901, PLR0912, PLR0915
+    event: Event,
+    session: async_scoped_session,
+) -> None:
     if event.get_type() != "message":
         return
 
@@ -61,7 +65,7 @@ async def track_user(event: Event, session: async_scoped_session):
                     "get_group_info", group_id=group_id
                 )
                 group_name = info.get("group_name")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning(f"获取群 {group_id} 信息失败")
             bot_group = BotGroup(
                 group_id=group_id,
@@ -82,7 +86,7 @@ async def track_user(event: Event, session: async_scoped_session):
                     bot_group.group_name = ginfo.get(
                         "group_name"
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
 
         user_group = await session.get(UserGroup, (group_id, user_id))
@@ -102,13 +106,13 @@ async def track_user(event: Event, session: async_scoped_session):
                 user_group.group_nickname = nickname
 
     # 重试提交，防止 SQLite 并发写锁导致 OperationalError
-    for attempt in range(3):
+    for attempt in range(_MAX_COMMIT_ATTEMPTS):
         try:
             await session.commit()
             break
         except OperationalError:
             await session.rollback()
-            if attempt == 2:
+            if attempt == _MAX_COMMIT_ATTEMPTS - 1:
                 logger.warning(
                     f"track_user: 数据库写入失败(用户 {user_id})，已跳过"
                 )

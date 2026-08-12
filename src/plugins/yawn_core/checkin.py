@@ -62,7 +62,7 @@ def _get_group_nickname(event: GroupMessageEvent) -> Optional[str]:
 async def handle_checkin(  # noqa: PLR0915
     event: GroupMessageEvent,
     session: async_scoped_session,
-    _perm: None = require_feature("checkin"),
+    _perm: None = require_feature("checkin"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     now = datetime.now(CHECKIN_TIMEZONE)
     today = now.date()
