@@ -62,6 +62,8 @@ AI 模式下它只是给 KP 的**建议**（是否检定由 KP 决定）；AI �
 | `id` | ✔ | — | **全局唯一（跨所有场景）**。引擎用单一集合记录已触发检定，id 撞车会使后写检定点的 `once` 被前者永久占用 |
 | `skill` | ✔ | — | `san` 或技能 key（见下表） |
 | `difficulty` | | `regular` | `regular` / `hard`（技能值 ×½）/ `extreme`（×⅕） |
+| `mode` | | `individual` | `individual` 保持单人检定；`team` 令全部在场调查员共同检定 |
+| `required_successes` | | 多数通过 | 仅 `mode: team` 可用；达到该成功人数即团队成功 |
 | `triggers` | | `[]` | 触发关键词：大小写不敏感的子串匹配。每句发言至多触发一个检定点 |
 | `priority` | | `0` | 多检定点同时命中时高者优先，同分按声明序。SAN 检点建议给 `1` |
 | `once` | | `false` | 整局至多触发一次（线索/伤害/SAN 检点务必开启） |

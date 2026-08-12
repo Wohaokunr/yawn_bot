@@ -39,7 +39,7 @@ from ..widgets import (  # noqa: TID252
     LabeledTextArea,
     StrListEditor,
 )
-from . import EditorTab
+from . import EditorTab, move_item
 
 _SKILL_OPTIONS = [("SAN 理智检定", "san")] + [
     (f"{skill.name}（{skill.key}）", skill.key) for skill in SKILLS
@@ -402,9 +402,11 @@ class ScenesTab(EditorTab):
         self._scene_narration.set_value(_str_text(scene.get("narration")))
         self._scene_idle.set_value(_str_text(scene.get("idle_narration")))
 
-    def _fill_check_list(self) -> None:
+    def _fill_check_list(self, selected_idx: Optional[int] = None) -> None:
         scene = self._current_scene()
         checks = get_list(scene, "checks") if scene else []
+        if selected_idx is None:
+            selected_idx = self._check_idx
         self._check_list.clear_options()
         for i, check in enumerate(checks):
             if isinstance(check, dict):
@@ -412,9 +414,11 @@ class ScenesTab(EditorTab):
                 if check.get("once"):
                     label += " · once"
                 self._check_list.add_option(Option(label, id=str(i)))
-        self._check_idx = 0 if checks else None
         if checks:
-            self._check_list.highlighted = 0
+            self._check_idx = min(max(selected_idx or 0, 0), len(checks) - 1)
+            self._check_list.highlighted = self._check_idx
+        else:
+            self._check_idx = None
         self._fill_check_form()
 
     def _fill_check_form(self) -> None:
@@ -423,9 +427,11 @@ class ScenesTab(EditorTab):
             return
         self._check_form.fill(check, self._clue_options())
 
-    def _fill_exit_list(self) -> None:
+    def _fill_exit_list(self, selected_idx: Optional[int] = None) -> None:
         scene = self._current_scene()
         exits = get_list(scene, "exits") if scene else []
+        if selected_idx is None:
+            selected_idx = self._exit_idx
         self._exit_list.clear_options()
         for i, exit_ in enumerate(exits):
             if isinstance(exit_, dict):
@@ -434,9 +440,11 @@ class ScenesTab(EditorTab):
                 self._exit_list.add_option(
                     Option(f"#{i + 1} → {target}{mark}", id=str(i))
                 )
-        self._exit_idx = 0 if exits else None
         if exits:
-            self._exit_list.highlighted = 0
+            self._exit_idx = min(max(selected_idx or 0, 0), len(exits) - 1)
+            self._exit_list.highlighted = self._exit_idx
+        else:
+            self._exit_idx = None
         self._fill_exit_form()
 
     def _fill_exit_form(self) -> None:
@@ -497,11 +505,6 @@ class ScenesTab(EditorTab):
         classes = event.button.classes
         data = self.editor.draft.data
 
-        def move(items: list[Any], index: Optional[int], delta: int) -> None:
-            if index is None or not (0 <= index + delta < len(items)):
-                return
-            items[index], items[index + delta] = items[index + delta], items[index]
-
         if "-scene-add" in classes:
             new_id = generate_unique_id(
                 "new_scene",
@@ -521,10 +524,10 @@ class ScenesTab(EditorTab):
         elif "-scene-up" in classes or "-scene-down" in classes:
             scenes = self._scenes()
             delta = -1 if "-scene-up" in classes else 1
-            move(scenes, self._scene_idx, delta)
-            if self._scene_idx is not None:
-                self._scene_idx += delta
-            self.editor.refresh_all()
+            new_idx = move_item(scenes, self._scene_idx, delta)
+            if new_idx is not None:
+                self._scene_idx = new_idx
+                self.editor.refresh_all()
         elif "-check-add" in classes:
             scene = self._current_scene()
             if scene is None:
@@ -538,7 +541,7 @@ class ScenesTab(EditorTab):
             ]
             check_id = generate_unique_id("new_check", set(all_ids))
             scene.setdefault("checks", []).append(new_check_dict(check_id))
-            self.refresh_tab(data)
+            self._fill_check_list(len(get_list(scene, "checks")) - 1)
             self.editor.on_data_changed()
         elif "-check-del" in classes:
             scene = self._current_scene()
@@ -546,7 +549,7 @@ class ScenesTab(EditorTab):
             if scene is None or check is None or self._check_idx is None:
                 return
             del get_list(scene, "checks")[self._check_idx]
-            self.refresh_tab(data)
+            self._fill_check_list(self._check_idx)
             self.editor.on_data_changed()
         elif "-check-up" in classes or "-check-down" in classes:
             scene = self._current_scene()
@@ -554,11 +557,10 @@ class ScenesTab(EditorTab):
                 return
             checks = get_list(scene, "checks")
             delta = -1 if "-check-up" in classes else 1
-            move(checks, self._check_idx, delta)
-            if self._check_idx is not None:
-                self._check_idx += delta
-            self._fill_check_list()
-            self.editor.on_data_changed()
+            new_idx = move_item(checks, self._check_idx, delta)
+            if new_idx is not None:
+                self._fill_check_list(new_idx)
+                self.editor.on_data_changed()
         elif "-exit-add" in classes:
             scene = self._current_scene()
             if scene is None:
@@ -568,7 +570,7 @@ class ScenesTab(EditorTab):
                 "",
             )
             scene.setdefault("exits", []).append(new_exit_dict(first_scene))
-            self._fill_exit_list()
+            self._fill_exit_list(len(get_list(scene, "exits")) - 1)
             self.editor.on_data_changed()
         elif "-exit-del" in classes:
             scene = self._current_scene()
@@ -577,7 +579,7 @@ class ScenesTab(EditorTab):
             exits = get_list(scene, "exits")
             if 0 <= self._exit_idx < len(exits):
                 del exits[self._exit_idx]
-            self._fill_exit_list()
+            self._fill_exit_list(self._exit_idx)
             self.editor.on_data_changed()
         elif "-exit-up" in classes or "-exit-down" in classes:
             scene = self._current_scene()
@@ -585,11 +587,10 @@ class ScenesTab(EditorTab):
                 return
             exits = get_list(scene, "exits")
             delta = -1 if "-exit-up" in classes else 1
-            move(exits, self._exit_idx, delta)
-            if self._exit_idx is not None:
-                self._exit_idx += delta
-            self._fill_exit_list()
-            self.editor.on_data_changed()
+            new_idx = move_item(exits, self._exit_idx, delta)
+            if new_idx is not None:
+                self._fill_exit_list(new_idx)
+                self.editor.on_data_changed()
 
     def _confirm_delete_scene(self, scene: dict[str, Any]) -> None:
         ident = str(scene.get("id", "?"))

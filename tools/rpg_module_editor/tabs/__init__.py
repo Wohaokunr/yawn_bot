@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from textual.widget import Widget
 
@@ -27,3 +27,14 @@ class EditorTab(Widget):
 
     def on_field_changed(self, event: FieldChanged) -> None:
         """子类覆写：把 FieldChanged 写回 draft.data。"""
+
+
+def move_item(items: list[Any], index: Optional[int], delta: int) -> Optional[int]:
+    """移动列表项并返回新索引；边界或无选中时不修改并返回 ``None``。"""
+    if index is None or not (0 <= index < len(items)):
+        return None
+    target = index + delta
+    if not (0 <= target < len(items)):
+        return None
+    items[index], items[target] = items[target], items[index]
+    return target

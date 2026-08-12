@@ -24,7 +24,7 @@ from ..widgets import (  # noqa: TID252
     LabeledSelect,
     LabeledTextArea,
 )
-from . import EditorTab
+from . import EditorTab, move_item
 
 
 def _str_text(value: Any) -> str:
@@ -172,11 +172,6 @@ class MonstersTab(EditorTab):
         classes = event.button.classes
         data = self.editor.draft.data
 
-        def move(items: list[Any], index: Optional[int], delta: int) -> None:
-            if index is None or not (0 <= index + delta < len(items)):
-                return
-            items[index], items[index + delta] = items[index + delta], items[index]
-
         if "-monster-add" in classes:
             new_id = generate_unique_id(
                 "new_monster",
@@ -196,10 +191,10 @@ class MonstersTab(EditorTab):
         elif "-monster-up" in classes or "-monster-down" in classes:
             monsters = self._monsters()
             delta = -1 if "-monster-up" in classes else 1
-            move(monsters, self._monster_idx, delta)
-            if self._monster_idx is not None:
-                self._monster_idx += delta
-            self.editor.refresh_all()
+            new_idx = move_item(monsters, self._monster_idx, delta)
+            if new_idx is not None:
+                self._monster_idx = new_idx
+                self.editor.refresh_all()
 
     def _confirm_delete(self, monster: dict[str, Any]) -> None:
         ident = str(monster.get("id", "?"))

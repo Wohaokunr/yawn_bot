@@ -44,6 +44,13 @@ class CheckDifficulty(str, Enum):
     EXTREME = "extreme"
 
 
+class CheckMode(str, Enum):
+    """检定结算方式；缺省个人检定以兼容既有模组。"""
+
+    INDIVIDUAL = "individual"
+    TEAM = "team"
+
+
 class CheckPoint(BaseModel):
     """场景检定点：玩家发言关键词命中或 KP 工具调用时触发。"""
 
@@ -51,6 +58,9 @@ class CheckPoint(BaseModel):
     # 技能 key（charsheet.SKILLS 的键）；"san" 表示理智检定
     skill: str
     difficulty: CheckDifficulty = CheckDifficulty.REGULAR
+    mode: CheckMode = CheckMode.INDIVIDUAL
+    # 团队检定成功所需人数；缺省为参与者过半。
+    required_successes: Optional[int] = None
     # 玩家发言关键词（子串匹配，大小写不敏感）
     triggers: list[str] = []
     # 多个检定点同时命中时大者优先
@@ -71,6 +81,12 @@ class CheckPoint(BaseModel):
 
     @model_validator(mode="after")
     def _check_fields(self) -> "CheckPoint":
+        if self.required_successes is not None and self.required_successes < 1:
+            msg = f"检定点 {self.id}：required_successes 必须至少为 1"
+            raise ValueError(msg)
+        if self.mode is CheckMode.INDIVIDUAL and self.required_successes is not None:
+            msg = f"检定点 {self.id}：仅团队检定可设置 required_successes"
+            raise ValueError(msg)
         if self.skill == "san" and not self.san_loss:
             msg = f"检定点 {self.id}：san 检定必须给出 san_loss"
             raise ValueError(msg)

@@ -1,3 +1,4 @@
+# ruff: noqa: C901, E501
 """AI 主持人（KP）：提示词构造与工具目录（无状态）。
 
 引擎内联 KP 智能体循环：组装提示词 → llm.complete_with_tools
@@ -55,6 +56,7 @@ _SYSTEM_PROMPT = """\
 - 旁白中绝不输出任何数字（HP/SAN/伤害/检定值——系统会自行播报）。
 - 绝不宣布场景切换、线索发现、结局——这些由系统负责。
 - 绝不透露调查员未到过的场景、未发现的线索与后续剧情。
+- 个人线索只可由持有者主动公开；即使局面中可见其持有人，也不得向其他调查员转述内容或暗示。
 - 绝不替玩家做决定。
 - 最终旁白须简短（不超过 {max_chars} 字）但包含场景基本要素：地点、人物、\
 发生了什么变化；只输出旁白文本本身。
@@ -126,12 +128,22 @@ def build_scene_block(game: "Game") -> Optional[str]:
     ]
     if monster_labels:
         lines.append(f"[在场怪物] {'、'.join(monster_labels)}")
-    # 已发现线索只给名称（+ id）
+    # KP 可见线索归属以保持叙事一致，但硬规则禁止向非持有人泄漏。
     clue_names = []
     for cid in sorted(game.discovered_clues):
         clue = module.clue(cid)
         if clue is not None:
-            clue_names.append(f"{clue.name}({cid})")
+            if cid in game.public_clues:
+                clue_names.append(f"{clue.name}({cid})：已公开")
+            else:
+                owners = [
+                    p.sheet.name if p.sheet else str(p.user_id)
+                    for p in game.players
+                    if p.user_id in game.clue_owners.get(cid, set())
+                ]
+                clue_names.append(
+                    f"{clue.name}({cid})：个人线索，持有人 {'、'.join(owners) or '未知'}"
+                )
     lines.append(f"[已发现线索] {'、'.join(clue_names) if clue_names else '无'}")
     # 出口：目标名(id) + 通行性（不透露具体条件）
     exit_parts = []
@@ -271,6 +283,27 @@ def build_tools(
                 "reason": {
                     "type": "string",
                     "description": "为何需要这次检定（不展示给玩家）",
+                },
+            },
+            ["skill"],
+        ),
+        _fn(
+            "request_team_check",
+            "请求当前场景全体可行动调查员进行团队技能检定；系统决定参与者并播报结果",
+            {
+                "skill": {
+                    "type": "string",
+                    "enum": skill_names,
+                    "description": "团队共同使用的技能",
+                },
+                "difficulty": {
+                    "type": "string",
+                    "enum": ["regular", "hard", "extreme"],
+                    "description": "难度，缺省常规",
+                },
+                "required_successes": {
+                    "type": "integer",
+                    "description": "需要的成功人数；系统会钳制到有效参与人数范围",
                 },
             },
             ["skill"],

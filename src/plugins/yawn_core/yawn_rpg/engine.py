@@ -1,3 +1,4 @@
+# ruff: noqa: C901, E501, PLR0912, PLR0915, PLR2004, SIM103
 """跑团游戏引擎：每局一个 asyncio 任务。
 
 引擎独占所有状态变更与群播报；命令处理器只做校验，
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -48,6 +50,7 @@ from .models import RPGGame, RPGPlayer
 from .module_schema import (
     NPC,
     CheckDifficulty,
+    CheckMode,
     Ending,
     evaluate_condition,
     list_modules,
@@ -60,6 +63,9 @@ from .state import (
     Phase,
     PlayerState,
     discard_game,
+    join_signup,
+    leave_signup,
+    release_action,
 )
 
 if TYPE_CHECKING:
@@ -277,20 +283,59 @@ async def _run_signup(game: Game, cfg: Config) -> None:
         action = await _get_action(game, step)
         if action is None:
             continue
-        if action.kind is ActionKind.MODULE_SELECT and action.aux:
-            module = _find_module(action.aux)
-            if module is None:
-                await _announce(game, "没有这个编号的模组，发送 /模组列表 查看")
-            else:
-                game.module = module
-                logger.info(f"跑团群 {game.group_id} 选定模组：{module.name}")
-                await _announce(
-                    game,
-                    f"已选定模组《{module.name}》（{module.min_players}"
-                    f"-{module.max_players} 人）",
+        try:
+            if action.kind is ActionKind.JOIN_GAME:
+                cap = (
+                    min(cfg.rpg_max_players, game.module.max_players)
+                    if game.module
+                    else cfg.rpg_max_players
                 )
-        elif action.kind is ActionKind.START_GAME:
-            break
+                if len(game.signup_user_ids) >= cap:
+                    await _announce(
+                        game, MessageSegment.at(action.actor_user_id) + " 报名已满员~"
+                    )
+                elif join_signup(game, action.actor_user_id):
+                    await _announce(
+                        game,
+                        MessageSegment.at(action.actor_user_id)
+                        + f" 报名成功！当前 {len(game.signup_user_ids)}/{cap} 人",
+                    )
+                else:
+                    await _announce(
+                        game,
+                        MessageSegment.at(action.actor_user_id)
+                        + " 你已经在其他对局中或已报名~",
+                    )
+            elif action.kind is ActionKind.LEAVE_GAME:
+                if not leave_signup(game, action.actor_user_id):
+                    await _announce(
+                        game, MessageSegment.at(action.actor_user_id) + " 你还没有报名~"
+                    )
+                elif not game.signup_user_ids:
+                    await _announce(game, "房间已解散")
+                    return
+                elif game.host_user_id == action.actor_user_id:
+                    game.host_user_id = game.signup_user_ids[0]
+                    await _announce(game, f"已退出报名，房主移交给 {game.host_user_id}")
+                else:
+                    await _announce(
+                        game, MessageSegment.at(action.actor_user_id) + " 已退出报名~"
+                    )
+            elif action.kind is ActionKind.MODULE_SELECT and action.aux:
+                module = _find_module(action.aux)
+                if module is None:
+                    await _announce(game, "没有这个编号的模组，发送 /模组列表 查看")
+                else:
+                    game.module = module
+                    logger.info(f"跑团群 {game.group_id} 选定模组：{module.name}")
+                    await _announce(
+                        game,
+                        f"已选定模组《{module.name}》（{module.min_players}-{module.max_players} 人）",
+                    )
+            elif action.kind is ActionKind.START_GAME:
+                break
+        finally:
+            release_action(game, action)
 
 
 def _find_module(text: str) -> Optional["ModuleDef"]:
@@ -364,8 +409,12 @@ async def _run_char_create(game: Game, cfg: Config) -> None:
             continue
         player = game.player_by_user(action.actor_user_id)
         if player is None or player.confirmed or player.sheet is None:
+            release_action(game, action)
             continue
-        await _handle_card_action(game, cfg, player, action)
+        try:
+            await _handle_card_action(game, cfg, player, action)
+        finally:
+            release_action(game, action)
     unconfirmed = [p for p in game.players if not p.confirmed]
     for p in unconfirmed:
         p.confirmed = True
@@ -493,7 +542,8 @@ async def do_skill_check(
     value = _player_skill(player, skill_key)
     if value is None:
         return None
-    result = skill_check(value, difficulty)
+    bonus_dice = _consume_assists(game, player, skill_key)
+    result = skill_check(value, difficulty, bonus_dice=bonus_dice)
     skill = resolve_skill(skill_key)
     skill_name = skill.name if skill is not None else skill_key
     await _announce(game, result.describe(skill_name))
@@ -502,6 +552,23 @@ async def do_skill_check(
         f"d100={result.roll}/{value} {result.tier.value}"
     )
     return result.success
+
+
+def _consume_assists(game: Game, player: PlayerState, skill_key: str) -> int:
+    """取走本探索轮中匹配的协助；每次检定最多两个奖励骰。"""
+    matched = [
+        item
+        for item in game.assists
+        if item[0] == player.user_id
+        and item[1] == skill_key
+        and item[2] == (game.current_scene or "")
+        and item[3] == game.explore_round
+    ][:2]
+    if not matched:
+        return 0
+    matched_set = set(matched)
+    game.assists = [item for item in game.assists if item not in matched_set]
+    return len(matched)
 
 
 # ── 检定触发器（确定性提示 / 降级裁决）───────────────────
@@ -557,6 +624,10 @@ async def resolve_check_point(
             cp.san_loss or "0/1",
             source=cp.id,
         )
+    elif cp.mode is CheckMode.TEAM:
+        success = await do_team_skill_check(
+            game, cp.skill, cp.difficulty, cp.required_successes
+        )
     else:
         success = await do_skill_check(game, player, cp.skill, cp.difficulty)
         if success is None:
@@ -565,7 +636,7 @@ async def resolve_check_point(
     if text:
         await _announce(game, text)
     if success and cp.clue is not None:
-        await discover_clue(game, cp.clue)
+        await discover_clue(game, cp.clue, owner=player)
     if not success and cp.damage_on_fail:
         amount = roll_dice(cp.damage_on_fail)
         await apply_damage(game, player, amount, source=cp.id)
@@ -577,6 +648,26 @@ async def resolve_check_point(
     # 降级模式的关键词自动检定走这里，时间照常流动）
     cost = cp.time_cost if cp.time_cost is not None else _time_cost(game, "check")
     await _tick_time(game, cost)
+
+
+async def do_team_skill_check(
+    game: Game,
+    skill_key: str,
+    difficulty: CheckDifficulty,
+    required_successes: Optional[int] = None,
+) -> bool:
+    """同场存活调查员共同检定，达到人数阈值即成功。"""
+    participants = [p for p in game.players if not p.incapped]
+    needed = required_successes or math.ceil(len(participants) / 2)
+    successes = 0
+    for participant in participants:
+        success = await do_skill_check(game, participant, skill_key, difficulty)
+        successes += int(success is True)
+    await _announce(
+        game,
+        f"〔团队检定〕{successes}/{len(participants)} 人成功（需要 {needed} 人）。",
+    )
+    return successes >= needed
 
 
 async def _roll_san(
@@ -607,8 +698,13 @@ async def _roll_san(
     return result.success
 
 
-async def discover_clue(game: Game, clue_id: str) -> bool:
-    """发现线索并播报；重复发现返回 False。"""
+async def discover_clue(
+    game: Game,
+    clue_id: str,
+    *,
+    owner: Optional[PlayerState] = None,
+) -> bool:
+    """发现线索；有发现者时私有投递，旧系统路径保持全队公开。"""
     if game.module is None or clue_id in game.discovered_clues:
         return False
     clue = game.module.clue(clue_id)
@@ -616,14 +712,29 @@ async def discover_clue(game: Game, clue_id: str) -> bool:
         return False
     game.discovered_clues.add(clue_id)
     logger.info(f"跑团群 {game.group_id} 发现线索：{clue.name}")
-    await _announce(game, f"〔线索〕{clue.name}\n{clue.text}")
+    if owner is None:
+        game.public_clues.add(clue_id)
+        await _announce(game, f"〔线索〕{clue.name}\n{clue.text}")
+    else:
+        game.clue_owners[clue_id] = {owner.user_id}
+        sent = await _dm(
+            game,
+            owner,
+            f"〔个人线索〕{clue.name}\n{clue.text}\n可用 /分享线索 {clue.name} 公开给队伍。",
+        )
+        message = (
+            "获得了一条个人线索，请查看私聊。"
+            if sent
+            else "获得了一条个人线索（私聊失败，请加机器人为好友）。"
+        )
+        await _announce(game, MessageSegment.at(owner.user_id) + message)
     return True
 
 
 # ── 场景与移动 ────────────────────────────────────────────
 
 
-async def enter_scene(  # noqa: C901
+async def enter_scene(
     game: Game,
     scene_id: str,
     *,
@@ -638,6 +749,9 @@ async def enter_scene(  # noqa: C901
         return False
     game.current_scene = scene_id
     game.stow_actions()
+    # 场景变更使旧移动/攻击目标失效，并从新探索轮开始。
+    if game.phase is Phase.PLAY:
+        game.start_explore_round(config.rpg_explore_round_timeout)
     # 出场怪物按模组数值初始化 HP（已出现过的沿用现值）
     for mid in scene.monsters:
         monster = game.module.monster(mid)
@@ -1213,7 +1327,7 @@ async def _pump_mid_turn(
         await _absorb_action(game, cfg, action, interjections, offenses)
 
 
-async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
+async def run_kp_turn(
     game: Game,
     cfg: Config,
     actor: Optional[PlayerState],
@@ -1387,7 +1501,7 @@ async def run_kp_turn(  # noqa: C901, PLR0912, PLR0915
         await _world_reaction(game, cfg, offenses)
 
 
-async def execute_tool(  # noqa: C901, PLR0911, PLR0912
+async def execute_tool(  # noqa: PLR0911
     game: Game,
     cfg: Config,
     actor: Optional[PlayerState],
@@ -1415,6 +1529,8 @@ async def execute_tool(  # noqa: C901, PLR0911, PLR0912
     try:
         if name == "request_check":
             return await _tool_request_check(game, args, actor)
+        if name == "request_team_check":
+            return await _tool_request_team_check(game, args)
         if name == "san_check":
             return await _tool_san_check(game, cfg, args, actor)
         if name == "deal_damage":
@@ -1483,6 +1599,24 @@ async def _tool_request_check(
     if success is None:
         return "该调查员没有这项技能。"
     return f"系统已播报检定结果：{'成功' if success else '失败'}。"
+
+
+async def _tool_request_team_check(game: Game, args: dict[str, object]) -> str:
+    """KP 触发的团队检定：参与者和成功数均由系统确定与钳制。"""
+    skill = resolve_skill(str(args.get("skill", "")))
+    if skill is None or skill.key in {"san", "cthulhu_mythos"}:
+        return "技能不存在或不能用于团队检定。"
+    participants = [p for p in game.players if not p.incapped]
+    if not participants:
+        return "当前没有可参与的调查员。"
+    raw_required = args.get("required_successes", math.ceil(len(participants) / 2))
+    try:
+        requested = int(str(raw_required))
+    except (TypeError, ValueError):
+        requested = math.ceil(len(participants) / 2)
+    needed = max(1, min(requested, len(participants)))
+    success = await do_team_skill_check(game, skill.key, _difficulty_arg(args), needed)
+    return f"团队检定已结算：{'成功' if success else '失败'}。"
 
 
 async def _tool_san_check(
@@ -1792,6 +1926,8 @@ async def _handle_say(game: Game, cfg: Config, first: Action) -> None:
         if offense is not None and offense not in offenses:
             offenses.append(offense)
     if not lines:
+        for queued in batch[1:]:
+            release_action(game, queued)
         return
     # 违规标记先于 tick 记录：flag 驱动的行程变化（如 NPC 吓跑）
     # 能在本次 tick 的进出 diff 里立即体现
@@ -1807,6 +1943,8 @@ async def _handle_say(game: Game, cfg: Config, first: Action) -> None:
     if offenses:
         await _world_reaction(game, cfg, offenses)
     await run_kp_turn(game, cfg, speaker, instruction, hint=hint)
+    for queued in batch[1:]:
+        release_action(game, queued)
 
 
 async def _handle_explicit_check(game: Game, player: PlayerState, aux: str) -> None:
@@ -1904,6 +2042,153 @@ async def _handle_wait(game: Game, minutes: int) -> None:
     await _tick_time(game, minutes)
 
 
+def _is_major_action(action: Action) -> bool:
+    return action.kind in {
+        ActionKind.CHECK,
+        ActionKind.TALK_NPC,
+        ActionKind.ATTACK,
+        ActionKind.MOVE,
+        ActionKind.WAIT,
+        ActionKind.ASSIST,
+        ActionKind.PASS_TURN,
+    }
+
+
+def _action_stale(game: Game, cfg: Config, action: Action) -> bool:
+    """执行前复核动作快照，避免旧局面下的命令改变新场景。"""
+    if action.expected_phase is not None and action.expected_phase is not game.phase:
+        return True
+    if (
+        action.expected_scene is not None
+        and action.expected_scene != game.current_scene
+    ):
+        return True
+    if (
+        _is_major_action(action)
+        and _loop_time() - action.submitted_at > cfg.rpg_action_ttl
+    ):
+        return True
+    return False
+
+
+async def _handle_assist(game: Game, player: PlayerState, aux: str) -> None:
+    """登记一次同场景协助，供目标下一次匹配检定取奖励骰。"""
+    target_text, sep, skill_text = aux.partition("|")
+    skill = resolve_skill(skill_text.strip())
+    if not sep or skill is None or skill.key in {"san", "cthulhu_mythos"}:
+        await _announce(game, "格式：/协助 玩家 技能（如 /协助 阿明 侦查）")
+        return
+    target = next(
+        (
+            p
+            for p in game.players
+            if p.sheet is not None and target_text.strip() in p.sheet.name
+        ),
+        None,
+    )
+    if target is None or target.incapped or target.user_id == player.user_id:
+        await _announce(game, "协助目标必须是另一名可行动的调查员。")
+        return
+    matching = [
+        item
+        for item in game.assists
+        if item[0] == target.user_id and item[1] == skill.key
+    ]
+    if len(matching) >= 2:
+        await _announce(game, "这次检定已经获得两名调查员协助。")
+        return
+    game.assists.append(
+        (
+            target.user_id,
+            skill.key,
+            game.current_scene or "",
+            game.explore_round,
+            player.user_id,
+        )
+    )
+    await _announce(
+        game,
+        f"{player.sheet.name if player.sheet else player.seat} 协助 {target.sheet.name if target.sheet else target.seat} 进行{skill.name}检定。",
+    )
+
+
+async def _handle_share_clue(game: Game, player: PlayerState, aux: str) -> None:
+    if game.module is None:
+        return
+    needle = aux.strip()
+    clue_id = next(
+        (
+            cid
+            for cid, owners in game.clue_owners.items()
+            if player.user_id in owners
+            and (
+                cid == needle
+                or ((clue := game.module.clue(cid)) is not None and needle in clue.name)
+            )
+        ),
+        None,
+    )
+    if clue_id is None:
+        await _announce(
+            game, MessageSegment.at(player.user_id) + " 你没有这条个人线索。"
+        )
+        return
+    clue = game.module.clue(clue_id)
+    if clue is None:
+        return
+    game.public_clues.add(clue_id)
+    await _announce(game, f"〔线索分享〕{clue.name}\n{clue.text}")
+
+
+def _start_combat(game: Game, cfg: Config) -> None:
+    if game.combat_order:
+        return
+    combatants = [p for p in game.players if not p.incapped and p.sheet is not None]
+    combatants.sort(
+        key=lambda p: (-(p.sheet.attributes["dex"] if p.sheet else 0), p.seat)
+    )
+    game.combat_order = [p.user_id for p in combatants]
+    game.combat_index = 0
+    game.combat_round = 1
+    game.combat_deadline = _loop_time() + cfg.rpg_combat_turn_timeout
+
+
+async def _advance_combat(game: Game, cfg: Config) -> None:
+    if not _combat_has_targets(game):
+        game.combat_order.clear()
+        game.combat_index = 0
+        game.start_explore_round(cfg.rpg_explore_round_timeout)
+        await _announce(game, "战斗结束，重新进入探索轮次。")
+        return
+    game.combat_order = [
+        uid for uid in game.combat_order if uid in game.active_user_ids()
+    ]
+    if not game.combat_order:
+        return
+    game.combat_index = (game.combat_index + 1) % len(game.combat_order)
+    if game.combat_index == 0:
+        game.combat_round += 1
+    game.combat_deadline = _loop_time() + cfg.rpg_combat_turn_timeout
+    next_player = game.player_by_user(game.combat_order[game.combat_index])
+    if next_player is not None:
+        await _announce(
+            game,
+            f"〔战斗第 {game.combat_round} 轮〕轮到 {next_player.sheet.name if next_player.sheet else next_player.seat} 行动。",
+        )
+
+
+def _combat_has_targets(game: Game) -> bool:
+    """当前场景仍有存活怪物或敌对 NPC 时才保持战斗状态。"""
+    if game.module is None or game.current_scene is None:
+        return False
+    scene = game.module.scene(game.current_scene)
+    if scene is None:
+        return False
+    if any(monster_id not in game.dead_monsters for monster_id in scene.monsters):
+        return True
+    return any(npc_id not in game.dead_npcs for npc_id in game.npc_hostile)
+
+
 async def _process_action(
     game: Game,
     cfg: Config,
@@ -1921,7 +2206,14 @@ async def _process_action(
         target = _find_attack_target(game, action.aux or "")
         if target is None:
             await _announce(game, "这个场景里没有你说的目标。")
-        elif isinstance(target, NPC):
+            return
+        _start_combat(game, cfg)
+        if game.combat_order and game.combat_order[game.combat_index] != player.user_id:
+            await _announce(
+                game, MessageSegment.at(player.user_id) + " 现在不是你的战斗行动时机。"
+            )
+            return
+        if isinstance(target, NPC):
             # 攻击 NPC 是暴力行为：assault 标记先于 tick 记录
             # （镜像 SAY 路径的"先于 tick"契约），flag 驱动的行程
             # 变化（如 NPC 吓跑）才能在本次 tick 的进出 diff 里立即
@@ -1935,13 +2227,35 @@ async def _process_action(
         else:
             await _tick_time(game, _time_cost(game, "attack"))
             await do_player_attack(game, player, target)
+        await _advance_combat(game, cfg)
     elif action.kind is ActionKind.MOVE:
         await _do_move(game, player, action.aux or "")
     elif action.kind is ActionKind.WAIT:
         await _handle_wait(game, action.value or cfg.rpg_wait_default)
+    elif action.kind is ActionKind.ASSIST:
+        await _handle_assist(game, player, action.aux or "")
+    elif action.kind is ActionKind.SHARE_CLUE:
+        await _handle_share_clue(game, player, action.aux or "")
+    elif action.kind is ActionKind.PASS_TURN:
+        if game.combat_order:
+            if game.combat_order[game.combat_index] != player.user_id:
+                await _announce(
+                    game,
+                    MessageSegment.at(player.user_id) + " 现在不是你的战斗行动时机。",
+                )
+            else:
+                await _announce(
+                    game,
+                    f"{player.sheet.name if player.sheet else player.seat} 采取防御姿态。",
+                )
+                await _advance_combat(game, cfg)
+        else:
+            await _announce(
+                game, MessageSegment.at(player.user_id) + " 结束了本轮行动。"
+            )
 
 
-async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901, PLR0912
+async def _run_play(game: Game, cfg: Config) -> None:
     """PLAY 主循环：结局安全网 → 自动出口 → 取行动 → 处理。"""
     _enter_phase(game, Phase.PLAY)
     if game.module is None:
@@ -1985,6 +2299,26 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901, PLR0912
                 return
             continue
         auto_hops = 0
+        if game.combat_order and _loop_time() >= game.combat_deadline:
+            uid = game.combat_order[game.combat_index]
+            waiting = game.player_by_user(uid)
+            if waiting is not None:
+                await _announce(
+                    game,
+                    f"{waiting.sheet.name if waiting.sheet else waiting.seat} 行动超时，采取防御姿态。",
+                )
+            await _advance_combat(game, cfg)
+            continue
+        if (
+            not game.combat_order
+            and game.explore_deadline
+            and _loop_time() >= game.explore_deadline
+        ):
+            skipped = game.active_user_ids() - game.explore_acted
+            if skipped:
+                await _announce(game, "本轮等待结束，未行动的调查员自动跳过。")
+            game.start_explore_round(cfg.rpg_explore_round_timeout)
+            continue
         # 消费顺序：回合中吸纳缓冲（KP 回合 / 切景收存的行动，按原序）
         # → 单槽 pending（SAY 合批窗口暂存）→ 等待队列
         if game.mid_turn_buffer:
@@ -1999,17 +2333,42 @@ async def _run_play(game: Game, cfg: Config) -> None:  # noqa: C901, PLR0912
             return
         player = game.player_by_user(action.actor_user_id)
         if player is None:
+            release_action(game, action)
             continue
-        if player.incapped:
-            if action.kind is ActionKind.SAY:
-                continue  # 倒地玩家的发言静默忽略
-            # 命令层不校验在局状态与是否倒地，由引擎统一拦截
-            await _announce(
-                game,
-                MessageSegment.at(player.user_id) + " 你已失去行动能力，无法行动。",
-            )
-            continue
-        await _process_action(game, cfg, action, player)
+        try:
+            if _action_stale(game, cfg, action):
+                await _announce(
+                    game,
+                    MessageSegment.at(player.user_id)
+                    + " 这条行动已过期，请按当前局面重新操作。",
+                )
+                continue
+            if player.incapped:
+                if action.kind is ActionKind.SAY:
+                    continue  # 倒地玩家的发言静默忽略
+                await _announce(
+                    game,
+                    MessageSegment.at(player.user_id) + " 你已失去行动能力，无法行动。",
+                )
+                continue
+            if _is_major_action(action) and not game.combat_order:
+                if player.user_id in game.explore_acted:
+                    await _announce(
+                        game,
+                        MessageSegment.at(player.user_id)
+                        + " 你本轮已经完成主要行动，请等待下一轮。",
+                    )
+                    continue
+                game.explore_acted.add(player.user_id)
+            await _process_action(game, cfg, action, player)
+            if not game.combat_order and game.active_user_ids() <= game.explore_acted:
+                game.start_explore_round(cfg.rpg_explore_round_timeout)
+                await _announce(
+                    game,
+                    f"〔探索第 {game.explore_round} 轮〕开始，所有调查员可各行动一次。",
+                )
+        finally:
+            release_action(game, action)
 
 
 async def _get_action_idle(game: Game, cfg: Config) -> Optional[Action]:

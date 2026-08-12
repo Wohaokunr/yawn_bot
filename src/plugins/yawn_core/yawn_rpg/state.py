@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -35,12 +37,18 @@ class ActionKind(str, Enum):
 
     START_GAME = "start_game"  # 房主/管理员请求开局
     MODULE_SELECT = "module_select"  # 选定模组（aux=模组 id）
+    JOIN_GAME = "join_game"
+    LEAVE_GAME = "leave_game"
+    TRANSFER_HOST = "transfer_host"
     SAY = "say"  # 群自由发言（aux=文本）
     CHECK = "check"  # 显式检定（aux="技能key"，可选 value 保留难度）
     TALK_NPC = "talk_npc"  # 与 NPC 交谈（aux="npc_id|发言内容"）
     ATTACK = "attack"  # 攻击怪物（aux=怪物 id）
     MOVE = "move"  # 前往出口（aux=关键词/场景名）
     WAIT = "wait"  # 原地等待（value=分钟数）
+    ASSIST = "assist"  # 协助（aux="目标玩家|技能"）
+    SHARE_CLUE = "share_clue"  # 公开本人持有线索（aux=线索名/id）
+    PASS_TURN = "pass_turn"
     # ── 建卡期私聊行动 ──
     REROLL = "reroll"  # 整卡重掷
     ADD_SKILL = "add_skill"  # 加点（aux=技能 key，value=点数）
@@ -58,6 +66,19 @@ class Action:
     actor_user_id: int
     value: Optional[int] = None
     aux: Optional[str] = None
+    action_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    submitted_at: float = field(default_factory=time.monotonic)
+    expected_phase: Optional[Phase] = None
+    expected_scene: Optional[str] = None
+    result: Optional["asyncio.Future[str]"] = None
+
+
+class SubmitResult(str, Enum):
+    ACCEPTED = "accepted"
+    QUEUE_FULL = "queue_full"
+    USER_LIMIT = "user_limit"
+    DUPLICATE = "duplicate"
+    STALE = "stale"
 
 
 @dataclass
@@ -102,7 +123,9 @@ class Game:
     # 报名顺序（退报名移除）
     signup_user_ids: list[int] = field(default_factory=list)
     # 命令处理器投入、引擎串行消费的行动队列
-    action_queue: asyncio.Queue[Action] = field(default_factory=asyncio.Queue)
+    action_queue: asyncio.Queue[Action] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=100)
+    )
     worker: Optional[asyncio.Task[None]] = None
     # 持久化 RPGGame 行主键
     game_row_id: Optional[int] = None
@@ -111,6 +134,9 @@ class Game:
     # ── 局内状态（仅引擎写入）──────────────────────────
     current_scene: Optional[str] = None
     discovered_clues: set[str] = field(default_factory=set)
+    # 线索发现后归属发现者；未指定发现者的旧路径直接公开。
+    clue_owners: dict[str, set[int]] = field(default_factory=dict)
+    public_clues: set[str] = field(default_factory=set)
     # 已触发的 once 检定点 id
     fired_checks: set[str] = field(default_factory=set)
     # 检定成功的检定点 id（grant_clue 据此拒绝覆盖失败检定的线索）
@@ -151,6 +177,21 @@ class Game:
     # pending 与 queue 消费；不复用单槽 pending——那是 SAY 合批窗口
     # 专用，且多条会乱序）
     mid_turn_buffer: deque[Action] = field(default_factory=deque)
+    # 探索软轮次：每名可行动调查员每轮一次主要行动。
+    explore_round: int = 0
+    explore_acted: set[int] = field(default_factory=set)
+    explore_deadline: float = 0.0
+    # target_user_id, skill_key, scene_id, round_number, helper_user_id
+    assists: list[tuple[int, str, str, int, int]] = field(default_factory=list)
+    # 进入战斗后的稳定行动顺序；当前版本仅约束玩家行动，敌方仍由既有反击逻辑处理。
+    combat_order: list[int] = field(default_factory=list)
+    combat_index: int = 0
+    combat_round: int = 0
+    combat_deadline: float = 0.0
+    # 输入层背压与去重账本；动作被引擎取走时释放。
+    pending_actions: dict[str, Action] = field(default_factory=dict)
+    pending_by_user: dict[int, int] = field(default_factory=dict)
+    pending_say_by_user: dict[int, int] = field(default_factory=dict)
     # ── 监听规则缓存（命令层读写）──────────────────────
     # 特性开关判定缓存：(user_id, group_id|None) → (判定, 过期循环时刻)
     feature_ok_cache: dict[tuple[int, Optional[int]], tuple[bool, float]] = field(
@@ -217,6 +258,16 @@ class Game:
             elapsed_minutes=self.elapsed_minutes,
             flags=dict(self.flags),
         )
+
+    def start_explore_round(self, timeout: float) -> None:
+        """开始新探索轮，并清除上一轮未消耗的协助。"""
+        self.explore_round += 1
+        self.explore_acted.clear()
+        self.explore_deadline = asyncio.get_running_loop().time() + timeout
+        self.assists.clear()
+
+    def active_user_ids(self) -> set[int]:
+        return {p.user_id for p in self.players if not p.incapped}
 
     # ── NPC 在场解析（死亡过滤 + HP 幂等初始化的包装层）──────
 
@@ -298,18 +349,80 @@ def game_of_user(user_id: int) -> Optional[Game]:
     return _games.get(group_id)
 
 
-def create_game(group_id: int, host_user_id: int) -> Optional[Game]:
+def create_game(
+    group_id: int,
+    host_user_id: int,
+    *,
+    queue_max: int = 100,
+) -> Optional[Game]:
     """创建对局并把房主登记为首位报名者。
 
     群内已有对局或房主已在其他局中时返回 None。
     """
     if group_id in _games or host_user_id in _user_index:
         return None
-    game = Game(group_id=group_id, host_user_id=host_user_id)
+    game = Game(
+        group_id=group_id,
+        host_user_id=host_user_id,
+        action_queue=asyncio.Queue(maxsize=max(1, queue_max)),
+    )
     _games[group_id] = game
     _user_index[host_user_id] = group_id
     game.signup_user_ids.append(host_user_id)
     return game
+
+
+def submit_action(
+    game: Game,
+    action: Action,
+    *,
+    queue_max: int,
+    user_pending_max: int,
+    user_say_pending_max: int,
+) -> SubmitResult:
+    """唯一入队入口：执行轻量背压/去重，状态裁决仍留给引擎。"""
+    if action.expected_phase is not None and action.expected_phase is not game.phase:
+        return SubmitResult.STALE
+    if action.action_id in game.pending_actions:
+        return SubmitResult.DUPLICATE
+    is_say = action.kind is ActionKind.SAY
+    per_user = game.pending_say_by_user if is_say else game.pending_by_user
+    limit = user_say_pending_max if is_say else user_pending_max
+    if per_user.get(action.actor_user_id, 0) >= limit:
+        if is_say:
+            # SAY 不丢弃：将新内容并入同一玩家尚未结算的最后一条发言。
+            pending_says = [
+                candidate
+                for candidate in game.pending_actions.values()
+                if candidate.actor_user_id == action.actor_user_id
+                and candidate.kind is ActionKind.SAY
+            ]
+            if pending_says:
+                last = max(pending_says, key=lambda candidate: candidate.submitted_at)
+                last.aux = "\n".join(part for part in (last.aux, action.aux) if part)
+                return SubmitResult.ACCEPTED
+        return SubmitResult.USER_LIMIT
+    if game.action_queue.qsize() >= min(queue_max, game.action_queue.maxsize):
+        return SubmitResult.QUEUE_FULL
+    game.pending_actions[action.action_id] = action
+    per_user[action.actor_user_id] = per_user.get(action.actor_user_id, 0) + 1
+    game.action_queue.put_nowait(action)
+    return SubmitResult.ACCEPTED
+
+
+def release_action(game: Game, action: Action, result: str = "done") -> None:
+    """引擎消费动作后释放背压账本，并完成可选结果 Future。"""
+    if game.pending_actions.pop(action.action_id, None) is None:
+        return
+    is_say = action.kind is ActionKind.SAY
+    per_user = game.pending_say_by_user if is_say else game.pending_by_user
+    count = per_user.get(action.actor_user_id, 0) - 1
+    if count > 0:
+        per_user[action.actor_user_id] = count
+    else:
+        per_user.pop(action.actor_user_id, None)
+    if action.result is not None and not action.result.done():
+        action.result.set_result(result)
 
 
 def join_signup(game: Game, user_id: int) -> bool:
