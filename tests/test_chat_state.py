@@ -11,7 +11,11 @@ PACKAGE = types.ModuleType("yawn_core")
 PACKAGE.__path__ = [str(PLUGIN_ROOT)]
 sys.modules.setdefault("yawn_core", PACKAGE)
 
-from yawn_core.chat_state import enqueue, enter_mode, exit_mode
+from yawn_core.chat_state import (  # pyright: ignore[reportMissingImports]
+    enqueue,
+    enter_mode,
+    exit_mode,
+)
 
 
 def test_chat_queue_rejects_burst_and_exit_drains() -> None:

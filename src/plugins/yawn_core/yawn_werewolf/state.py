@@ -23,6 +23,7 @@ class Phase(str, Enum):
     """游戏阶段。"""
 
     SIGNUP = "SIGNUP"  # 报名
+    DEALING = "DEALING"  # 发牌及身份下发（锁定报名状态）
     NIGHT_HALFBLOOD = "NIGHT_HALFBLOOD"  # 混血儿认主（仅首夜，率先睁眼）
     NIGHT_WOLVES = "NIGHT_WOLVES"  # 狼人行动
     NIGHT_WITCH = "NIGHT_WITCH"  # 女巫行动
@@ -100,6 +101,8 @@ class Action:
     actor_user_id: int
     value: Optional[int] = None
     aux: Optional[str] = None
+    # AI 后台任务创建时的阶段代币；人类命令为 None。
+    phase_token: Optional[int] = None
 
 
 def _same_action(left: Action, right: Action) -> bool:
@@ -152,6 +155,7 @@ class Game:
     group_id: int
     host_user_id: int
     phase: Phase = Phase.SIGNUP
+    phase_token: int = 0
     round_no: int = 0
     # 板子键名（roles.BOARDS 的键；报名阶段可由房主 /板子 切换）
     board: str = DEFAULT_BOARD_KEY
@@ -378,8 +382,27 @@ def leave_signup(game: Game, user_id: int) -> bool:
     return True
 
 
-def submit_action(game: Game, action: Action, *, user_pending_max: int) -> bool:
+def submit_action(
+    game: Game,
+    action: Action,
+    *,
+    user_pending_max: int,
+    allow_nonmember: bool = False,
+) -> bool:
     """唯一行动入队入口，提供容量、单用户配额与重复行动去重。"""
+    members = (
+        game.signup_user_ids
+        if game.phase in (Phase.SIGNUP, Phase.DEALING)
+        else [player.user_id for player in game.players]
+    )
+    if action.actor_user_id not in members:
+        allowed_admin_start = (
+            allow_nonmember
+            and game.phase is Phase.SIGNUP
+            and action.kind is ActionKind.START_GAME
+        )
+        if not allowed_admin_start:
+            return False
     if any(
         _same_action(existing, action)
         for existing in game.pending_actions.values()
@@ -426,8 +449,9 @@ def discard_game(game: Game) -> None:
     由引擎任务的 finally 调用；热重载后残留的对局对象
     不会误删新对局的注册信息。
     """
-    if _games.get(game.group_id) is game:
-        _games.pop(game.group_id, None)
+    if _games.get(game.group_id) is not game:
+        return
+    _games.pop(game.group_id, None)
     for uid, gid in list(_user_index.items()):
         if gid == game.group_id:
             _user_index.pop(uid, None)
@@ -444,3 +468,6 @@ async def stop_game(game: Game) -> None:
         # wait() 不抛出被取消任务的 CancelledError（引擎 finally 里的
         # 清理因此不会被打断），而外部对本协程的取消照常传播
         await asyncio.wait([task])
+    # 任务若在首次调度前被取消，不会进入 run_game 的 finally。
+    if _games.get(game.group_id) is game:
+        discard_game(game)

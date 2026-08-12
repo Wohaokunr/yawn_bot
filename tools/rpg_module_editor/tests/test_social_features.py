@@ -97,6 +97,7 @@ async def test_social_forms_edit_and_yaml_roundtrip() -> None:
         assert "✗" in str(npcs._leak_feedback.render())
         social._fact_text.area.text = original_fact_text
         await pilot.pause()
+        await pilot.pause()
         assert npc["facts"][0]["text"] == original_fact_text
         assert "✓" in str(npcs._leak_feedback.render())
         ModuleDef.model_validate(app.draft.data)

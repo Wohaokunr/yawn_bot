@@ -43,6 +43,36 @@ from .permission import (
 if TYPE_CHECKING:
     from .data_models.bot_group import BotGroup
 
+
+async def _ensure_scope_records(
+    session: async_scoped_session,
+    *,
+    user_id: int,
+    group_id: int | None = None,
+) -> None:
+    """Ensure administration targets have the ORM parents required by FKs."""
+    bot_user = await session.get(BotUser, user_id)
+    if bot_user is None:
+        session.add(BotUser(user_id=user_id))
+    if group_id is None:
+        await session.flush()
+        return
+    await _ensure_group_record(session, group_id)
+    if await session.get(UserGroup, (group_id, user_id)) is None:
+        session.add(UserGroup(group_id=group_id, user_id=user_id))
+    await session.flush()
+
+
+async def _ensure_group_record(
+    session: async_scoped_session,
+    group_id: int,
+) -> None:
+    from .data_models.bot_group import BotGroup
+
+    if await session.get(BotGroup, group_id) is None:
+        session.add(BotGroup(group_id=group_id))
+        await session.flush()
+
 __plugin_meta__ = PluginMetadata(
     name="管理面板",
     description="个人面板与群管理面板",
@@ -1110,6 +1140,9 @@ async def handle_group_admin_choice(
         target_uid = int(parts[1])
 
         # 确保 UserGroup 存在（FK 约束）
+        await _ensure_scope_records(
+            session, user_id=target_uid, group_id=group_id
+        )
         ug = await session.get(
             UserGroup, (group_id, target_uid)
         )
@@ -1219,6 +1252,9 @@ async def _admin_view_user_feature(  # noqa: PLR0913, PLR0917
 
         feat_key, display = features[idx - 1]
 
+        await _ensure_scope_records(
+            session, user_id=target_uid, group_id=group_id
+        )
         # 确保 UserGroup 存在
         ug = await session.get(
             UserGroup, (group_id, target_uid)
@@ -1303,6 +1339,7 @@ async def handle_global_group_feature(
             "格式：/全局群功能 <群号> 开启/关闭 <功能名>"
         )
 
+    await _ensure_group_record(session, group_id)
     gf = await session.get(
         GroupFeature,
         {"group_id": group_id, "feature": feature_key},
@@ -1377,6 +1414,9 @@ async def handle_global_user_feature(
 
     if group_id is not None:
         # 群内用户级覆盖
+        await _ensure_scope_records(
+            session, user_id=target_user_id, group_id=group_id
+        )
         ug = await session.get(
             UserGroup, (group_id, target_user_id)
         )
@@ -1409,6 +1449,7 @@ async def handle_global_user_feature(
         scope_text = f"群 {group_id} 内"
     else:
         # 全局用户开关
+        await _ensure_scope_records(session, user_id=target_user_id)
         record_g = await session.get(
             GlobalUserFeature,
             {

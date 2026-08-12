@@ -55,6 +55,7 @@ def test_werewolf_action_queue_is_bounded_deduplicated_and_released() -> None:
     game = ww_state.Game(
         group_id=2001,
         host_user_id=21,
+        signup_user_ids=[21, 22, 23],
         action_queue=asyncio.Queue(maxsize=2),
     )
     first = ww_state.Action(ww_state.ActionKind.KILL, 21, 2)
@@ -85,3 +86,18 @@ def test_werewolf_action_queue_is_bounded_deduplicated_and_released() -> None:
         ww_state.Action(ww_state.ActionKind.SKIP, 23),
         user_pending_max=1,
     )
+
+
+def test_werewolf_action_queue_rejects_non_member() -> None:
+    game = ww_state.Game(
+        group_id=2002,
+        host_user_id=31,
+        signup_user_ids=[31],
+    )
+
+    assert not ww_state.submit_action(
+        game,
+        ww_state.Action(ww_state.ActionKind.VOTE, 999, 1),
+        user_pending_max=1,
+    )
+    assert game.action_queue.empty()

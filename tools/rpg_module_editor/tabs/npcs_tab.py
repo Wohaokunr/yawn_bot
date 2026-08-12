@@ -101,7 +101,7 @@ class ScheduleCoverage(Static):
             # 每列取其所代表区间的中点；宽度 96 时恰为每个 15 分钟槽位。
             slot = min(24 * 60 - 1, int((column + 0.5) * 24 * 60 / width))
             mark, styled = "·", "dim"
-            for idx, (entry, bound) in enumerate(zip(entries, bounds)):
+            for idx, (entry, bound) in enumerate(zip(entries, bounds, strict=True)):
                 if bound is None:
                     continue
                 if in_window(slot, bound[0], bound[1]):

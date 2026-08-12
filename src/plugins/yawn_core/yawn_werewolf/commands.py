@@ -75,12 +75,18 @@ _VOTE_PHASES: frozenset[Phase] = frozenset(
 )
 
 
-def _submit(game: Game, action: Action) -> str | None:
+def _submit(
+    game: Game,
+    action: Action,
+    *,
+    allow_nonmember: bool = False,
+) -> str | None:
     """提交行动并返回用户可见的背压提示。"""
     if submit_action(
         game,
         action,
         user_pending_max=config.ww_user_pending_max,
+        allow_nonmember=allow_nonmember,
     ):
         return None
     return "当前行动较多或重复，请稍后再试~"
@@ -130,6 +136,7 @@ def _parse_seat(text: object) -> Optional[int]:
 # 报错与提示不得暴露当前轮到哪个角色行动
 _PHASE_CN: dict[Phase, str] = {
     Phase.SIGNUP: "报名中",
+    Phase.DEALING: "发牌中",
     Phase.NIGHT_HALFBLOOD: "夜晚",
     Phase.NIGHT_WOLVES: "夜晚",
     Phase.NIGHT_WITCH: "夜晚",
@@ -327,10 +334,7 @@ async def handle_leave(
         # 空房：直接取消引擎任务。阶段置 ENDED 后命令层自播"房间已解散"，
         # 引擎取消分支见到 ENDED 不再重复播报"对局已被强制结束"
         game.phase = Phase.ENDED
-        task = game.worker
-        game.worker = None
-        if task is not None and not task.done():
-            task.cancel()
+        _spawn_background(stop_game(game))
         logger.info(f"狼人杀群 {int(event.group_id)} 空房解散")
         await leave_cmd.finish("房间已解散")
     if game.host_user_id == user_id:
@@ -554,7 +558,11 @@ async def handle_start(
             if add_ai_signup(game) is None:
                 break
             filled += 1
-    error = _submit(game, Action(ActionKind.START_GAME, user_id))
+    error = _submit(
+        game,
+        Action(ActionKind.START_GAME, user_id),
+        allow_nonmember=user_id not in game.signup_user_ids,
+    )
     if error:
         await start_cmd.finish(error)
     logger.info(

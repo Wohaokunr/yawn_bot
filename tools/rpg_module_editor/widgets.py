@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, cast
 
 from rich.markup import escape
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -22,6 +22,8 @@ from textual.widgets.option_list import Option
 from .schema_loader import parse_hhmm
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from textual.binding import BindingType
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")

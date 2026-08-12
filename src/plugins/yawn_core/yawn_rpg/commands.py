@@ -88,13 +88,14 @@ def _submit(game: "Game", action: Action) -> str | None:
     return messages[result]
 
 
-def _action(
+def _action(  # noqa: PLR0913
     kind: ActionKind,
     user_id: int,
     *,
     game: "Game",
     value: int | None = None,
     aux: str | None = None,
+    authority: str = "player",
 ) -> Action:
     """构造带阶段/场景快照的动作，供引擎拒绝过期操作。"""
     scene = game.current_scene if game.phase is Phase.PLAY else None
@@ -105,6 +106,7 @@ def _action(
         aux=aux,
         expected_phase=game.phase,
         expected_scene=scene,
+        authority=authority,
     )
 
 
@@ -210,8 +212,18 @@ async def handle_select_module(
     text = str(arg).strip()
     if not text:
         await select_module_cmd.finish("格式：/选择模组 N（发送 /模组列表 查看）")
+    authority = (
+        "superuser" if _is_su(user_id) else "admin" if is_group_admin(event) else "host"
+    )
     error = _submit(
-        game, _action(ActionKind.MODULE_SELECT, user_id, game=game, aux=text)
+        game,
+        _action(
+            ActionKind.MODULE_SELECT,
+            user_id,
+            game=game,
+            aux=text,
+            authority=authority,
+        ),
     )
     await select_module_cmd.finish(error)
 
@@ -317,7 +329,13 @@ async def handle_start(
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await start_cmd.finish("只有房主、群管理员或超管可以开始游戏~")
-    error = _submit(game, _action(ActionKind.START_GAME, user_id, game=game))
+    authority = (
+        "superuser" if _is_su(user_id) else "admin" if is_group_admin(event) else "host"
+    )
+    error = _submit(
+        game,
+        _action(ActionKind.START_GAME, user_id, game=game, authority=authority),
+    )
     if error:
         await start_cmd.finish(error)
     logger.info(

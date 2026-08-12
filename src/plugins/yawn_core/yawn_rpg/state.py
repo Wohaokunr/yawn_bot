@@ -91,6 +91,10 @@ class Action:
     social_skill: Optional[str] = None
     emotion: Optional[str] = None
     emotion_confidence: float = 0.0
+    # Privilege checked by the command layer and revalidated by the signup engine.
+    authority: str = "player"
+    # Set when an action leaves the queue; in-flight SAY must not be rewritten.
+    in_flight: bool = False
 
 
 class SubmitResult(str, Enum):
@@ -407,7 +411,9 @@ class Game:
             self.pending = None
         while not self.action_queue.empty():
             try:
-                self.mid_turn_buffer.append(self.action_queue.get_nowait())
+                action = self.action_queue.get_nowait()
+                action.in_flight = True
+                self.mid_turn_buffer.append(action)
                 self.action_queue.task_done()
             except asyncio.QueueEmpty:  # noqa: PERF203
                 break
@@ -497,19 +503,26 @@ def submit_action(
     is_say = action.kind is ActionKind.SAY
     per_user = game.pending_say_by_user if is_say else game.pending_by_user
     limit = user_say_pending_max if is_say else user_pending_max
-    if per_user.get(action.actor_user_id, 0) >= limit:
-        if is_say:
-            # SAY 不丢弃：将新内容并入同一玩家尚未结算的最后一条发言。
-            pending_says = [
-                candidate
-                for candidate in game.pending_actions.values()
-                if candidate.actor_user_id == action.actor_user_id
-                and candidate.kind is ActionKind.SAY
-            ]
-            if pending_says:
-                last = max(pending_says, key=lambda candidate: candidate.submitted_at)
-                last.aux = "\n".join(part for part in (last.aux, action.aux) if part)
-                return SubmitResult.ACCEPTED
+    pending_says = (
+        [
+            candidate
+            for candidate in game.pending_actions.values()
+            if candidate.actor_user_id == action.actor_user_id
+            and candidate.kind is ActionKind.SAY
+            and not candidate.in_flight
+        ]
+        if is_say
+        else []
+    )
+    pending_count = (
+        len(pending_says) if is_say else per_user.get(action.actor_user_id, 0)
+    )
+    if pending_count >= limit and is_say and pending_says:
+        # SAY 不丢弃：将新内容并入同一玩家尚未结算的最后一条发言。
+        last = max(pending_says, key=lambda candidate: candidate.submitted_at)
+        last.aux = "\n".join(part for part in (last.aux, action.aux) if part)
+        return SubmitResult.ACCEPTED
+    if pending_count >= limit:
         return SubmitResult.USER_LIMIT
     if game.action_queue.qsize() >= min(queue_max, game.action_queue.maxsize):
         return SubmitResult.QUEUE_FULL
@@ -562,8 +575,9 @@ def discard_game(game: Game) -> None:
     由引擎任务的 finally 调用；热重载后残留的对局对象
     不会误删新对局的注册信息。
     """
-    if _games.get(game.group_id) is game:
-        _games.pop(game.group_id, None)
+    if _games.get(game.group_id) is not game:
+        return
+    _games.pop(game.group_id, None)
     for uid, gid in list(_user_index.items()):
         if gid == game.group_id:
             _user_index.pop(uid, None)
@@ -580,3 +594,7 @@ async def stop_game(game: Game) -> None:
         # wait() 不抛出被取消任务的 CancelledError（引擎 finally 里的
         # 清理因此不会被打断），而外部对本协程的取消照常传播
         await asyncio.wait([task])
+    # A task cancelled before its first scheduling point never enters
+    # run_game(), so its finally block cannot release the registries.
+    if _games.get(game.group_id) is game:
+        discard_game(game)
