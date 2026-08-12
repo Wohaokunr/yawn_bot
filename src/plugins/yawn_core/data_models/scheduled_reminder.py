@@ -23,7 +23,18 @@ class ScheduledReminder(Model):
     creator_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
     name: Mapped[str] = mapped_column(String(64))
-    cron_expression: Mapped[str] = mapped_column(String(128))
+
+    # recurring 使用 Cron；once 使用 run_at。
+    schedule_type: Mapped[str] = mapped_column(
+        String(16),
+        default="recurring",
+        server_default="recurring",
+    )
+    cron_expression: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    run_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
     # group：发送到所属群；private：发送给所属群内的指定用户
     target_type: Mapped[str] = mapped_column(String(16))

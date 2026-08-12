@@ -89,22 +89,36 @@ def test_countdown_placeholder_and_invalid_date(
         )
 
 
-def test_single_line_fields_keep_message_segments(
+def test_interactive_schedule_formats(reminder_module: Any) -> None:
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc).replace(
+        tzinfo=None
+    )
+    every_day = reminder_module._parse_schedule("每天 07:00", now=now)
+    assert every_day.schedule_type == "recurring"
+    assert every_day.cron_expression == "0 7 * * *"
+
+    once = reminder_module._parse_schedule(
+        "一次 2026-08-20 15:30",
+        now=now,
+    )
+    assert once.schedule_type == "once"
+    assert once.run_at == datetime(
+        2026,
+        8,
+        20,
+        15,
+        30,
+        tzinfo=timezone.utc,
+    ).replace(tzinfo=None)
+
+
+def test_interactive_action_parser_only_accepts_menu_actions(
     reminder_module: Any,
 ) -> None:
-    source = Message("高考 | 0 7 * * * | 群聊 | 倒计时：")
-    source += MessageSegment.at(123456)
-    source += MessageSegment.text(" {{倒计时:2027-06-07}}")
-
-    name, cron, target, message = reminder_module._parse_add_fields(
-        source
-    )
-    assert name == "高考"
-    assert cron == "0 7 * * *"
-    assert target == "群聊"
-    assert message[0].is_text()
-    assert message[1].type == "at"
-    assert message[2].data["text"].strip() == "{{倒计时:2027-06-07}}"
+    assert reminder_module._parse_action("编辑 12") == ("edit", 12)
+    assert reminder_module._parse_action("删除 12") == ("delete", 12)
+    assert reminder_module._parse_action("delete 12") == (None, 12)
+    assert reminder_module._parse_action("编辑") == (None, None)
 
 
 def test_scheduler_job_uses_stable_id_and_apscheduler_options(
@@ -118,7 +132,13 @@ def test_scheduler_job_uses_stable_id_and_apscheduler_options(
         captured.update(kwargs)
 
     monkeypatch.setattr(reminder_module.scheduler, "add_job", add_job)
-    reminder_module._schedule_reminder_job(42, "0 7 * * *")
+    reminder_module._schedule_reminder_job(
+        42,
+        reminder_module.ScheduleSpec(
+            schedule_type="recurring",
+            cron_expression="0 7 * * *",
+        ),
+    )
 
     assert captured["id"] == "yawn_core_reminder:42"
     assert captured["args"] == [42]
@@ -160,7 +180,7 @@ async def test_create_reminder_rolls_back_when_job_registration_fails(
     session = FakeSession()
     removed: list[int] = []
 
-    def fail_schedule(_reminder_id: int, _cron_expression: str) -> None:
+    def fail_schedule(_reminder_id: int, _schedule: Any) -> None:
         raise RuntimeError
 
     def record_removal(reminder_id: int) -> None:
@@ -179,7 +199,10 @@ async def test_create_reminder_rolls_back_when_job_registration_fails(
             group_id=456,
             creator_user_id=789,
             name="test",
-            cron_expression="0 7 * * *",
+            schedule=reminder_module.ScheduleSpec(
+                schedule_type="recurring",
+                cron_expression="0 7 * * *",
+            ),
             target_type="group",
             target_user_id=None,
             message=Message("hello"),
