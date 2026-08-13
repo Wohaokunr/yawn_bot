@@ -47,6 +47,7 @@ class SubPluginLoadStatus:
 _SUB_PLUGIN_SPECS = (
     ("yawn_werewolf", "狼人杀"),
     ("yawn_rpg", "跑团"),
+    ("yawn_fanqie", "番茄小说"),
 )
 _SUB_PLUGIN_LOAD_REPORT: tuple[SubPluginLoadStatus, ...] = ()
 

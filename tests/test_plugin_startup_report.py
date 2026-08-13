@@ -50,7 +50,7 @@ def test_sub_plugins_are_loaded_independently(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    for dirname in ("yawn_werewolf", "yawn_rpg"):
+    for dirname in ("yawn_werewolf", "yawn_rpg", "yawn_fanqie"):
         (tmp_path / dirname).mkdir()
 
     calls: list[str] = []
@@ -71,8 +71,9 @@ def test_sub_plugins_are_loaded_independently(
     assert calls == [
         "src.plugins.yawn_core.yawn_werewolf",
         "src.plugins.yawn_core.yawn_rpg",
+        "src.plugins.yawn_core.yawn_fanqie",
     ]
-    assert [item.state for item in report] == ["failed", "loaded"]
+    assert [item.state for item in report] == ["failed", "loaded", "loaded"]
     assert report[0].detail == "_BrokenDependencyError: broken dependency"
     assert "已跳过" in logger.warning_messages[0]
 
@@ -91,7 +92,7 @@ def test_missing_and_unregistered_plugins_are_reported(
         package_dir=tmp_path,
     )
 
-    assert [item.state for item in report] == ["failed", "missing"]
+    assert [item.state for item in report] == ["failed", "missing", "missing"]
     assert report[0].detail == "NoneBot 未返回已注册插件"
     assert report[1].detail == "目录不存在"
 

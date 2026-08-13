@@ -48,6 +48,12 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 `AI_API_KEY` 可选。需要私聊 AI 对话或正常的狼人杀 AI 时才应配置。无 key 的 RPG
 部署建议设置 `RPG_AI_ENABLED=false`，以明确启用确定性模式。
 
+番茄小说子插件也是可选功能。它只处理番茄站公开可访问的内容，不登录、不绕过
+验证码或付费/访问控制；群聊任务的 TXT 成品只会私发给请求者。默认队列上限为 20，
+每用户 1 个、每群 3 个活动任务，章节请求间隔 1.5 秒，成品和章节临时文件默认保留
+24 小时。可用 `FANQIE_*` 环境变量调整超时、重试、队列和保留时间，正文不会写入
+数据库。相关来源与使用边界见 [`docs/fanqie-notice.md`](fanqie-notice.md)。
+
 ## 4. 迁移
 
 受版本控制的 canonical 迁移位于：
@@ -81,6 +87,10 @@ uv run nb orm revision -m "简短描述"
 `data/nonebot_plugin_orm/migrations/` 中已提交的 canonical 迁移为准。不要手工修改
 `src/plugins/yawn_core/**/migrations/` 下的历史副本。
 
+番茄子插件的迁移位于 `data/nonebot_plugin_orm/migrations/yawn_core/yawn_fanqie/`，
+首次部署或升级时必须由维护者审查后手动执行 `uv run nb orm upgrade heads`；本项目
+不会在插件启动时自动升级数据库。
+
 ## 5. 发布前检查
 
 ```bash
@@ -92,10 +102,10 @@ uv run python -m compileall -q src tools/rpg_module_editor
 git diff --check
 ```
 
-然后验证 NoneBot 按正式 `pyproject.toml` 发现三个业务插件：
+然后验证 NoneBot 按正式 `pyproject.toml` 发现四个业务插件：
 
 ```bash
-uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_rpg','yawn_core:yawn_werewolf'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
+uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_rpg','yawn_core:yawn_werewolf','yawn_core:yawn_fanqie'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
 ```
 
 此检查只验证导入和注册，不会连接 QQ 或请求 AI 服务。启动日志还应显示 yawn_core
