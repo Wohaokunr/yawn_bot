@@ -86,8 +86,12 @@ async def _ensure_worker() -> None:
     async with _queue_lock:
         if _queue is None:
             _queue = asyncio.Queue(maxsize=config.fanqie_queue_max)
+            logger.debug(
+                f"番茄任务队列初始化：maxsize={config.fanqie_queue_max}"
+            )
         if _worker_task is None or _worker_task.done():
             _worker_task = asyncio.create_task(_worker_loop(), name="fanqie-worker")
+            logger.debug("番茄任务 worker 已启动")
 
 
 async def _enqueue(job_id: int) -> bool:
@@ -95,12 +99,20 @@ async def _enqueue(job_id: int) -> bool:
     assert _queue is not None
     async with _queue_lock:
         if job_id in _queued_ids:
+            logger.debug(f"番茄任务重复入队请求：job_id={job_id}")
             return True
         try:
             _queue.put_nowait(job_id)
         except asyncio.QueueFull:
+            logger.debug(
+                f"番茄任务入队失败：job_id={job_id} reason=queue_full "
+                f"maxsize={_queue.maxsize}"
+            )
             return False
         _queued_ids.add(job_id)
+        logger.debug(
+            f"番茄任务已入队：job_id={job_id} queue_size={_queue.qsize()}"
+        )
         return True
 
 
@@ -121,6 +133,10 @@ async def _fill_waiting_queue() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("补入番茄小说等待任务失败")
         return
+    logger.debug(
+        f"番茄任务恢复入队扫描：候选数={len(waiting_ids)} queue_size={_queue.qsize()}"
+    )
+    enqueued = 0
     async with _queue_lock:
         if _queue is None:
             return
@@ -131,6 +147,8 @@ async def _fill_waiting_queue() -> None:
                 continue
             _queue.put_nowait(job_id)
             _queued_ids.add(job_id)
+            enqueued += 1
+    logger.debug(f"番茄任务恢复入队完成：enqueued={enqueued}")
 
 
 async def _worker_loop() -> None:
@@ -138,15 +156,19 @@ async def _worker_loop() -> None:
         assert _queue is not None
         job_id = await _queue.get()
         _queued_ids.discard(job_id)
+        logger.debug(
+            f"番茄任务 worker 取出任务：job_id={job_id} queue_size={_queue.qsize()}"
+        )
         try:
             await _run_job(job_id)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
-            logger.exception("番茄小说任务 worker 处理失败: job_id=%s", job_id)
+            logger.exception(f"番茄小说任务 worker 处理失败：job_id={job_id}")
             await _mark_job_failed(job_id, "任务 worker 异常，请重试")
         finally:
             _queue.task_done()
+            logger.debug(f"番茄任务 worker 完成任务槽位：job_id={job_id}")
         await _fill_waiting_queue()
 
 
@@ -160,9 +182,16 @@ async def submit_job(
 ) -> tuple[int | None, str | None]:
     """校验配额、持久化任务并入有界队列。"""
 
+    logger.debug(
+        f"番茄任务创建开始：user_id={requester_user_id} group_id={group_id} "
+        f"book_id={book.book_id} start={start_chapter} end={end_chapter} "
+        f"chapter_count={len(chapters)}"
+    )
     if not chapters or not 1 <= start_chapter <= end_chapter <= len(chapters):
+        logger.debug("番茄任务创建拒绝：reason=invalid_range")
         return None, "章节范围无效"
     if end_chapter - start_chapter + 1 > config.fanqie_max_chapters:
+        logger.debug("番茄任务创建拒绝：reason=max_chapters")
         return None, f"单次最多下载 {config.fanqie_max_chapters} 章"
 
     async with _submit_lock:
@@ -174,6 +203,10 @@ async def submit_job(
                 )
             )
             if int(user_count or 0) >= config.fanqie_user_active_max:
+                logger.debug(
+                    f"番茄任务创建拒绝：reason=user_quota user_id={requester_user_id} "
+                    f"active_count={user_count}"
+                )
                 return None, "你已有活动中的番茄任务，请先完成或取消后再创建"
             if group_id is not None:
                 group_count = await session.scalar(
@@ -183,6 +216,10 @@ async def submit_job(
                     )
                 )
                 if int(group_count or 0) >= config.fanqie_group_active_max:
+                    logger.debug(
+                        f"番茄任务创建拒绝：reason=group_quota group_id={group_id} "
+                        f"active_count={group_count}"
+                    )
                     return None, "本群活动中的番茄任务已达上限，请稍后再试"
 
             book_row = await session.scalar(
@@ -226,10 +263,16 @@ async def submit_job(
                 )
             await session.commit()
             job_id = job.id
+            logger.debug(
+                f"番茄任务已持久化：job_id={job_id} book_id={book.book_id} "
+                f"chapter_count={job.total_chapters}"
+            )
 
         if not await _enqueue(job_id):
             await _mark_job_failed(job_id, "任务队列已满，请稍后重试")
+            logger.debug(f"番茄任务创建后入队失败：job_id={job_id}")
             return None, "任务队列已满，请稍后再试"
+    logger.debug(f"番茄任务创建完成：job_id={job_id}")
     return job_id, None
 
 
@@ -237,7 +280,9 @@ async def _set_status(job_id: int, status: str, error: str | None = None) -> Non
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None:
+            logger.debug(f"番茄任务状态更新跳过：job_id={job_id} reason=missing")
             return
+        previous = job.status
         job.status = status
         job.last_error = error[:_MAX_ERROR_LENGTH] if error else None
         job.updated_at = _now_bj()
@@ -246,6 +291,10 @@ async def _set_status(job_id: int, status: str, error: str | None = None) -> Non
         if status in {"completed", "failed", "cancelled"}:
             job.completed_at = _now_bj()
         await session.commit()
+    logger.debug(
+        f"番茄任务状态更新：job_id={job_id} previous={previous} status={status} "
+        f"has_error={bool(error)}"
+    )
 
 
 async def _mark_job_failed(job_id: int, error: str) -> None:
@@ -281,7 +330,12 @@ async def _mark_chapter(
         job = await session.get(FanqieJob, job_id)
         chapter = await session.get(FanqieJobChapter, chapter_id)
         if job is None or chapter is None:
+            logger.debug(
+                f"番茄章节状态更新跳过：job_id={job_id} chapter_id={chapter_id} "
+                "reason=missing"
+            )
             return
+        previous = chapter.status
         chapter.status = status
         chapter.temp_path = temp_path
         chapter.last_error = error[:_MAX_ERROR_LENGTH] if error else None
@@ -290,17 +344,29 @@ async def _mark_chapter(
         )
         await _refresh_progress(session, job)
         await session.commit()
+        progress = f"{job.completed_chapters}/{job.total_chapters}"
+    logger.debug(
+        f"番茄章节状态更新：job_id={job_id} chapter_id={chapter_id} "
+        f"chapter_index={chapter.chapter_index} previous={previous} status={status} "
+        f"progress={progress} has_error={bool(error)}"
+    )
 
 
 async def _run_job(job_id: int) -> None:
+    logger.debug(f"番茄任务执行开始：job_id={job_id}")
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None or job.status not in ACTIVE_STATUSES:
+            logger.debug(
+                f"番茄任务执行跳过：job_id={job_id} "
+                f"reason=missing_or_inactive status={job.status if job else None}"
+            )
             return
         if job.cancel_requested:
             job.status = "cancelled"
             job.completed_at = _now_bj()
             await session.commit()
+            logger.debug(f"番茄任务执行取消：job_id={job_id} reason=cancel_requested")
             return
         book = await session.get(FanqieBook, job.book_record_id)
         chapters = list(
@@ -316,6 +382,7 @@ async def _run_job(job_id: int) -> None:
         )
         if book is None:
             await session.commit()
+            logger.debug(f"番茄任务执行失败：job_id={job_id} reason=missing_book")
             await _mark_job_failed(job_id, "任务关联的书籍元数据不存在")
             return
         job.status = "running"
@@ -324,10 +391,18 @@ async def _run_job(job_id: int) -> None:
         await session.commit()
         book_title = book.title
         book_author = book.author or "未知作者"
+        logger.debug(
+            f"番茄任务进入下载：job_id={job_id} book_id={book.book_id} "
+            f"chapter_count={len(chapters)}"
+        )
 
     async with FanqieProvider(config) as provider:
         for position, chapter in enumerate(chapters):
             if await _is_cancelled(job_id):
+                logger.debug(
+                    f"番茄任务下载中取消：job_id={job_id} "
+                    f"chapter_index={chapter.chapter_index}"
+                )
                 await _set_status(job_id, "cancelled", "用户取消任务")
                 return
             async with get_session() as check_session:
@@ -341,6 +416,10 @@ async def _run_job(job_id: int) -> None:
                     cast("async_scoped_session", check_session),
                 )
                 if not allowed:
+                    logger.debug(
+                        f"番茄任务后台权限拦截：job_id={job_id} "
+                        f"user_id={current_job.requester_user_id} group_id={current_job.group_id}"
+                    )
                     current_job.status = "failed"
                     current_job.last_error = "功能「番茄小说」已关闭，任务已暂停"
                     await check_session.commit()
@@ -358,11 +437,19 @@ async def _run_job(job_id: int) -> None:
                     and chapter_row.temp_path
                     and _has_owned_file(chapter_row.temp_path)
                 ) or chapter_row.status == "unavailable":
+                    logger.debug(
+                        f"番茄章节复用或跳过：job_id={job_id} "
+                        f"chapter_index={chapter_row.chapter_index} status={chapter_row.status}"
+                    )
                     continue
                 is_locked = chapter_row.is_locked
                 item_id = chapter_row.item_id
                 chapter_title = chapter_row.title
             if is_locked:
+                logger.debug(
+                    f"番茄章节标记不可用：job_id={job_id} "
+                    f"chapter_index={chapter.chapter_index} reason=locked"
+                )
                 await _mark_chapter(
                     job_id,
                     chapter.id,
@@ -371,14 +458,26 @@ async def _run_job(job_id: int) -> None:
                 )
                 continue
             try:
+                logger.debug(
+                    f"番茄章节请求开始：job_id={job_id} "
+                    f"chapter_index={chapter.chapter_index} item_id={item_id}"
+                )
                 content = await provider.fetch_chapter(item_id)
             except ChapterUnavailable as exc:
+                logger.debug(
+                    f"番茄章节不可用：job_id={job_id} "
+                    f"chapter_index={chapter.chapter_index} reason={exc}"
+                )
                 await _mark_chapter(job_id, chapter.id, "unavailable", error=str(exc))
                 if position + 1 < len(chapters):
                     await asyncio.sleep(config.fanqie_request_delay)
                 continue
             except Exception as exc:  # noqa: BLE001
                 error = f"第{chapter.chapter_index}章请求失败：{exc}"
+                logger.exception(
+                    f"番茄章节请求失败：job_id={job_id} "
+                    f"chapter_index={chapter.chapter_index} error_type={type(exc).__name__}"
+                )
                 await _mark_chapter(job_id, chapter.id, "failed", error=error)
                 await _mark_job_failed(
                     job_id,
@@ -399,12 +498,19 @@ async def _run_job(job_id: int) -> None:
             )
             partial.replace(path)
             await _mark_chapter(job_id, chapter.id, "completed", temp_path=str(path))
+            logger.debug(
+                f"番茄章节写入完成：job_id={job_id} "
+                f"chapter_index={chapter.chapter_index} temp_path={path} "
+                f"content_chars={len(content.content)}"
+            )
             if position + 1 < len(chapters):
                 await asyncio.sleep(config.fanqie_request_delay)
 
     if await _is_cancelled(job_id):
+        logger.debug(f"番茄任务合并前取消：job_id={job_id}")
         await _set_status(job_id, "cancelled", "用户取消任务")
         return
+    logger.debug(f"番茄任务开始合并投递：job_id={job_id}")
     await _assemble_and_deliver(job_id, book_title, book_author)
 
 
@@ -419,6 +525,9 @@ async def _assemble_and_deliver(
     book_title: str,
     book_author: str,
 ) -> None:
+    logger.debug(
+        f"番茄任务合并开始：job_id={job_id} book_title={book_title[:80]!r}"
+    )
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None:
@@ -438,6 +547,7 @@ async def _assemble_and_deliver(
         group_id = job.group_id
         if not chapters:
             await session.commit()
+            logger.debug(f"番茄任务合并失败：job_id={job_id} reason=no_chapters")
             await _mark_job_failed(job_id, "任务没有可合并的章节")
             return
 
@@ -464,8 +574,15 @@ async def _assemble_and_deliver(
                         f"生成文件超过 {config.fanqie_max_file_bytes // (1024 * 1024)} MiB"
                     )
         partial.replace(output)
+        logger.debug(
+            f"番茄任务文件合并完成：job_id={job_id} output_path={output} "
+            f"bytes={output.stat().st_size}"
+        )
     except Exception as exc:  # noqa: BLE001
         partial.unlink(missing_ok=True)
+        logger.exception(
+            f"番茄任务文件合并失败：job_id={job_id} error_type={type(exc).__name__}"
+        )
         await _mark_job_failed(job_id, str(exc))
         await notify_group(get_bot(), group_id, f"番茄任务 #{job_id} 合并失败：{exc}")
         return
@@ -481,6 +598,9 @@ async def _assemble_and_deliver(
         job.last_error = None
         job.completed_at = _now_bj()
         await session.commit()
+    logger.debug(
+        f"番茄任务状态已完成：job_id={job_id} output_path={output} send_status=pending"
+    )
 
     async with get_session() as permission_session:
         job = await permission_session.get(FanqieJob, job_id)
@@ -493,14 +613,23 @@ async def _assemble_and_deliver(
             cast("async_scoped_session", permission_session),
         )
     if not allowed:
+        logger.debug(f"番茄任务完成后发送被权限拦截：job_id={job_id}")
         await _set_send_error(job_id, "功能「番茄小说」已关闭，请开启后使用发送命令")
         await notify_group(
             get_bot(), group_id, f"番茄任务 #{job_id} 已完成，但当前功能开关关闭"
         )
         return
     try:
+        logger.debug(
+            f"番茄任务私聊发送开始：job_id={job_id} requester={requester} "
+            f"filename={filename!r}"
+        )
         await send_file_to_user(get_bot(), requester, output, filename)
     except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            f"番茄任务私聊发送失败：job_id={job_id} "
+            f"error_type={type(exc).__name__}"
+        )
         await _set_send_error(job_id, str(exc))
         await notify_group(
             get_bot(),
@@ -509,6 +638,7 @@ async def _assemble_and_deliver(
         )
     else:
         await _set_send_sent(job_id)
+        logger.debug(f"番茄任务私聊发送完成：job_id={job_id} requester={requester}")
         await notify_group(
             get_bot(), group_id, f"番茄任务 #{job_id} 已完成，成品已私发给请求者"
         )
@@ -522,6 +652,7 @@ async def _set_send_error(job_id: int, error: str) -> None:
         job.send_status = "failed"
         job.send_error = error[:_MAX_ERROR_LENGTH]
         await session.commit()
+    logger.debug(f"番茄任务发送状态更新：job_id={job_id} status=failed")
 
 
 async def _set_send_sent(job_id: int) -> None:
@@ -532,27 +663,39 @@ async def _set_send_sent(job_id: int) -> None:
         job.send_status = "sent"
         job.send_error = None
         await session.commit()
+    logger.debug(f"番茄任务发送状态更新：job_id={job_id} status=sent")
 
 
 async def cancel_job(job_id: int) -> bool:
+    logger.debug(f"番茄任务取消开始：job_id={job_id}")
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None or job.status not in ACTIVE_STATUSES:
+            logger.debug(
+                f"番茄任务取消拒绝：job_id={job_id} "
+                f"status={job.status if job else None}"
+            )
             return False
         job.cancel_requested = True
         if job.status == "queued":
             job.status = "cancelled"
             job.completed_at = _now_bj()
         await session.commit()
+    logger.debug(f"番茄任务取消标记完成：job_id={job_id}")
     return True
 
 
 async def retry_job(job_id: int) -> tuple[bool, str | None]:
+    logger.debug(f"番茄任务重试开始：job_id={job_id}")
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None:
+            logger.debug(f"番茄任务重试拒绝：job_id={job_id} reason=missing")
             return False, "任务不存在"
         if job.status not in {"failed", "cancelled"}:
+            logger.debug(
+                f"番茄任务重试拒绝：job_id={job_id} status={job.status}"
+            )
             return False, "只有失败或已取消的任务可以重试"
         job.status = "queued"
         job.cancel_requested = False
@@ -577,18 +720,29 @@ async def retry_job(job_id: int) -> tuple[bool, str | None]:
                 chapter.last_error = None
         await _refresh_progress(session, job)
         await session.commit()
+        logger.debug(
+            f"番茄任务已重置为排队：job_id={job_id} chapters={len(chapters)}"
+        )
     if not await _enqueue(job_id):
         await _mark_job_failed(job_id, "任务队列已满，请稍后重试")
+        logger.debug(f"番茄任务重试入队失败：job_id={job_id}")
         return False, "任务队列已满，请稍后再试"
+    logger.debug(f"番茄任务重试入队完成：job_id={job_id}")
     return True, None
 
 
 async def deliver_job(job_id: int) -> tuple[bool, str]:
+    logger.debug(f"番茄任务手动发送开始：job_id={job_id}")
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None:
+            logger.debug(f"番茄任务手动发送拒绝：job_id={job_id} reason=missing")
             return False, "任务不存在"
         if job.status != "completed" or not job.output_path or not job.output_name:
+            logger.debug(
+                f"番茄任务手动发送拒绝：job_id={job_id} status={job.status} "
+                f"has_output={bool(job.output_path)}"
+            )
             return False, "任务尚未完成或成品已失效"
         allowed = await check_feature_permission(
             job.requester_user_id,
@@ -597,6 +751,7 @@ async def deliver_job(job_id: int) -> tuple[bool, str]:
             cast("async_scoped_session", session),
         )
         if not allowed:
+            logger.debug(f"番茄任务手动发送被权限拦截：job_id={job_id}")
             return False, "功能「番茄小说」当前未开启"
         path = _owned_path(job.output_path)
         if path is None or not path.is_file():
@@ -605,23 +760,30 @@ async def deliver_job(job_id: int) -> tuple[bool, str]:
             job.send_status = "failed"
             job.send_error = job.last_error
             await session.commit()
+            logger.debug(f"番茄任务手动发送失败：job_id={job_id} reason=file_expired")
             return False, "成品文件已过期，任务已转为失败状态，请重试"
         requester = job.requester_user_id
         filename = job.output_name
     try:
         await send_file_to_user(get_bot(), requester, path, filename)
     except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            f"番茄任务手动发送失败：job_id={job_id} error_type={type(exc).__name__}"
+        )
         await _set_send_error(job_id, str(exc))
         return False, "文件发送失败，请稍后重试"
     await _set_send_sent(job_id)
+    logger.debug(f"番茄任务手动发送完成：job_id={job_id}")
     return True, "文件已发送到你的私聊"
 
 
 async def delete_job(job_id: int) -> bool:
+    logger.debug(f"番茄任务删除开始：job_id={job_id}")
     files: list[Path] = []
     async with get_session() as session:
         job = await session.get(FanqieJob, job_id)
         if job is None:
+            logger.debug(f"番茄任务删除跳过：job_id={job_id} reason=missing")
             return False
         if job.output_path:
             path = _owned_path(job.output_path)
@@ -647,6 +809,7 @@ async def delete_job(job_id: int) -> bool:
     for path in files:
         path.unlink(missing_ok=True)
         path.with_suffix(path.suffix + ".part").unlink(missing_ok=True)
+    logger.debug(f"番茄任务删除完成：job_id={job_id} file_count={len(files)}")
     return True
 
 
@@ -663,6 +826,10 @@ def cleanup_expired_files() -> int:
             continue
         path.unlink(missing_ok=True)
         removed += 1
+    logger.debug(
+        f"番茄过期文件清理完成：root={root} removed={removed} "
+        f"retention_hours={config.fanqie_file_retention_hours}"
+    )
     return removed
 
 
@@ -682,6 +849,9 @@ async def _restore_jobs() -> None:
                     job.status = "queued"
                     job.updated_at = _now_bj()
             await session.commit()
+        logger.debug(
+            f"番茄任务恢复扫描完成：active_count={len(jobs)} cleaned_files={removed}"
+        )
         await _ensure_worker()
         await _fill_waiting_queue()
         logger.info(
@@ -702,6 +872,7 @@ async def _stop_worker() -> None:
     except asyncio.CancelledError:
         pass
     _worker_task = None
+    logger.debug("番茄任务 worker 已停止")
 
 
 __all__ = [
