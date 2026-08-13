@@ -251,10 +251,12 @@ async def submit_job(
             )
             session.add(job)
             await session.flush()
+            job_id = int(job.id)
+            chapter_count = job.total_chapters
             for chapter in chapters[start_chapter - 1 : end_chapter]:
                 session.add(
                     FanqieJobChapter(
-                        job_id=job.id,
+                        job_id=job_id,
                         chapter_index=chapter.index,
                         item_id=chapter.item_id,
                         title=chapter.title[:256],
@@ -262,10 +264,9 @@ async def submit_job(
                     )
                 )
             await session.commit()
-            job_id = job.id
             logger.debug(
                 f"番茄任务已持久化：job_id={job_id} book_id={book.book_id} "
-                f"chapter_count={job.total_chapters}"
+                f"chapter_count={chapter_count}"
             )
 
         if not await _enqueue(job_id):

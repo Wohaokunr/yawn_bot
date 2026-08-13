@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import nonebot
@@ -17,6 +18,43 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _RETRY_RESPONSES = 3
 _OK_STATUS = 200
 _EXPECTED_CALLS = 4
+_TEST_BOOK_RECORD_ID = 7
+_TEST_JOB_ID = 42
+
+
+class _CommitExpiringSession:
+    def __init__(self, book_type: type[object], job_type: type[object]) -> None:
+        self.book_type = book_type
+        self.job_type = job_type
+        self.items: list[Any] = []
+        self.job: Any = None
+        self.scalar_calls = 0
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def scalar(self, _statement: object) -> Any:
+        self.scalar_calls += 1
+        return 0 if self.scalar_calls == 1 else None
+
+    def add(self, item: Any) -> None:
+        self.items.append(item)
+        if isinstance(item, self.job_type):
+            self.job = item
+
+    async def flush(self) -> None:
+        for item in self.items:
+            if isinstance(item, self.book_type) and item.id is None:
+                item.id = _TEST_BOOK_RECORD_ID
+            if isinstance(item, self.job_type) and item.id is None:
+                item.id = _TEST_JOB_ID
+
+    async def commit(self) -> None:
+        assert self.job is not None
+        cast("Any", self.job).__dict__.pop("id", None)
 
 
 @pytest.fixture(scope="module")
@@ -305,6 +343,40 @@ async def test_choice_state_machine_does_not_repeat_search(
     assert submissions and submissions[0][0:2] == (10001, 20002)
     assert finishes and "#42" in str(finishes[-1][0])
     assert [args[0] for args in prompts] == ["fanqie_choice"] * 3
+
+
+@pytest.mark.asyncio
+async def test_submit_job_caches_ids_before_commit(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = fanqie_modules.state
+    provider_module = fanqie_modules.provider
+    session = _CommitExpiringSession(state.FanqieBook, state.FanqieJob)
+    queued_ids: list[int] = []
+
+    def fake_get_session() -> _CommitExpiringSession:
+        return session
+
+    async def fake_enqueue(job_id: int) -> bool:
+        queued_ids.append(job_id)
+        return True
+
+    monkeypatch.setattr(state, "get_session", fake_get_session)
+    monkeypatch.setattr(state, "_enqueue", fake_enqueue)
+
+    book = provider_module.BookSummary("123456", "Target book", "Author")
+    chapters = [provider_module.ChapterRef("654321", "Chapter 1", 1)]
+    job_id, error = await state.submit_job(10001, None, book, chapters, 1, 1)
+
+    assert (job_id, error) == (_TEST_JOB_ID, None)
+    assert queued_ids == [_TEST_JOB_ID]
+    created_chapters = [
+        item
+        for item in session.items
+        if isinstance(item, state.FanqieJobChapter)
+    ]
+    assert created_chapters[0].job_id == _TEST_JOB_ID
 
 
 @pytest.mark.asyncio
