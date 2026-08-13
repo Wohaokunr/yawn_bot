@@ -107,7 +107,8 @@ class PlaytestTab(EditorTab):
     PlaytestTab { layout: vertical; }
     PlaytestTab .-intro { height: auto; color: $text-muted; margin-bottom: 1; }
     PlaytestTab .-settings { height: auto; min-height: 8; }
-    PlaytestTab .-setting { width: 1fr; min-width: 12; margin-right: 1; }
+    PlaytestTab .-settings-row { height: auto; min-height: 5; }
+    PlaytestTab .-setting { width: 1fr; height: auto; min-width: 12; margin-right: 1; }
     PlaytestTab .-setting Label { height: 1; color: $text-muted; }
     PlaytestTab Input { width: 1fr; min-width: 8; }
     PlaytestTab Select { width: 1fr; min-width: 16; }
