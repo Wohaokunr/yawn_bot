@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.10
+
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+
+      - name: Test
+        run: uv run --python 3.10 pytest -q
+
+      - name: Lint
+        run: uv run --python 3.10 ruff check src tests tools/rpg_module_editor
+
+      - name: Type check
+        run: uv run --python 3.10 pyright src tools/rpg_module_editor
+
+      - name: Compile
+        run: uv run --python 3.10 python -m compileall -q src tools/rpg_module_editor
+
+      - name: Load configured plugins
+        shell: bash
+        run: |
+          uv run --python 3.10 python - <<'PY'
+          import nonebot
+
+          nonebot.init()
+          nonebot.load_from_toml("pyproject.toml")
+          required = (
+              "yawn_core",
+              "yawn_core:yawn_rpg",
+              "yawn_core:yawn_werewolf",
+          )
+          missing = [name for name in required if nonebot.get_plugin(name) is None]
+          if missing:
+              raise SystemExit(f"missing configured plugins: {', '.join(missing)}")
+          PY
