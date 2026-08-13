@@ -25,6 +25,8 @@ class Config(BaseModel):
     # ── 建卡（私聊）──
     # 建卡窗口（秒）：超时未确认的角色卡自动确认
     rpg_char_create_timeout: int = 180
+    # 建卡剩余多少秒时提醒尚未确认的玩家
+    rpg_char_create_warn_remain: int = 60
     # 每人整卡重掷次数上限
     rpg_char_reroll_max: int = 3
     # 可自由分配的技能点总量；None 表示按 CoC 惯例取 INT×2
@@ -43,8 +45,6 @@ class Config(BaseModel):
     rpg_action_queue_max: int = 100
     rpg_user_pending_max: int = 5
     rpg_user_say_pending_max: int = 10
-    # 有场景依赖的确定性行动超过此秒数后不再执行
-    rpg_action_ttl: float = 30.0
     # 探索软轮次与战斗行动超时
     rpg_explore_round_timeout: float = 60.0
     rpg_combat_turn_timeout: float = 45.0
@@ -78,6 +78,8 @@ class Config(BaseModel):
     rpg_kp_max_output_chars: int = 250
     # 两次 KP 调用之间的最小间隔（秒）：宁延长合批窗口也不丢发言
     rpg_kp_min_interval: float = 3.0
+    # 自然语言行动超过此时长仍未完成时，群内给一次不入上下文的等待提示
+    rpg_ai_wait_notice_delay: float = 3.0
     # AI 工具 deal_damage/heal 单次生效上限（钳制 AI 数值权）
     rpg_ai_max_damage_per_call: int = 5
     # AI 工具 san_check 单次损失上限

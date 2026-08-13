@@ -18,7 +18,8 @@ __plugin_meta__ = PluginMetadata(
     description="CoC 7版群聊跑团：AI 主持人主持，按模组推进剧情",
     usage=(
         "发送 /跑团 开房，/选择模组 N 选定剧本，/报名 加入；"
-        "开局后直接用自然语言行动或与 NPC 交谈，个人情报可用 /分享情报 公开"
+        "开局后可用 /局面 查看状态，直接用自然语言行动或与 NPC 交谈，"
+        "个人线索可用 /分享线索 公开"
     ),
     config=Config,
     extra={
@@ -146,7 +147,39 @@ __plugin_meta__ = PluginMetadata(
             {
                 "name": "线索",
                 "aliases": ["已发现线索"],
-                "description": "列出已发现的线索",
+                "description": "群内查看公共线索，私聊查看自己的完整调查手记",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "局面",
+                "aliases": ["当前局面", "跑团状态"],
+                "description": "查看公开局面，并私聊接收自己的状态与私人信息",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "协助",
+                "aliases": ["帮忙"],
+                "description": "协助同场景调查员的下一次技能检定",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "分享线索",
+                "aliases": ["公开线索"],
+                "description": "把自己的个人线索公开给队伍",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "跳过",
+                "aliases": ["结束行动"],
+                "description": "结束本探索轮或当前战斗行动",
                 "feature": "rpg",
                 "scope": "group",
                 "superuser": False,

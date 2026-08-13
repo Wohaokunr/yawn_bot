@@ -99,6 +99,12 @@ def _action(  # noqa: PLR0913
 ) -> Action:
     """构造带阶段/场景快照的动作，供引擎拒绝过期操作。"""
     scene = game.current_scene if game.phase is Phase.PLAY else None
+    combat_active = bool(game.combat_order)
+    combat_actor = (
+        game.combat_order[game.combat_index]
+        if combat_active and 0 <= game.combat_index < len(game.combat_order)
+        else None
+    )
     return Action(
         kind,
         user_id,
@@ -106,6 +112,9 @@ def _action(  # noqa: PLR0913
         aux=aux,
         expected_phase=game.phase,
         expected_scene=scene,
+        expected_explore_round=game.explore_round if game.phase is Phase.PLAY else None,
+        expected_combat_round=game.combat_round if combat_active else None,
+        expected_combat_actor=combat_actor,
         authority=authority,
     )
 
@@ -212,6 +221,13 @@ async def handle_select_module(
     text = str(arg).strip()
     if not text:
         await select_module_cmd.finish("格式：/选择模组 N（发送 /模组列表 查看）")
+    module = engine.find_module(text)
+    if module is None:
+        await select_module_cmd.finish("没有这个编号的模组，发送 /模组列表 查看")
+    if (
+        selection_error := engine.module_selection_error(game, module, config)
+    ) is not None:
+        await select_module_cmd.finish(selection_error)
     authority = (
         "superuser" if _is_su(user_id) else "admin" if is_group_admin(event) else "host"
     )
@@ -308,6 +324,33 @@ async def handle_view(
     await view_cmd.finish("\n".join(lines))
 
 
+situation_cmd = on_command(
+    "局面",
+    aliases={"当前局面", "跑团状态"},
+    rule=Rule(_rpg_game_in_group),
+    priority=4,
+    block=True,
+)
+
+
+@situation_cmd.handle()
+async def handle_situation(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """群内发送公开局面，并把请求者的私人摘要单独发到私聊。"""
+    game = get_game(int(event.group_id))
+    if game is None:
+        await situation_cmd.finish("本群当前没有跑团对局")
+    public_text = engine.public_situation_text(game)
+    player = game.player_by_user(int(event.get_user_id()))
+    if player is not None and game.phase in {Phase.CHAR_CREATE, Phase.PLAY}:
+        private_text = engine.private_situation_text(game, player)
+        if not await engine.send_private_text(game, player, private_text):
+            public_text += "\n私聊局面未送达，请加机器人好友后重试 /局面。"
+    await situation_cmd.finish(public_text)
+
+
 start_cmd = on_command(
     "开始游戏",
     aliases={"发车"},
@@ -329,6 +372,8 @@ async def handle_start(
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await start_cmd.finish("只有房主、群管理员或超管可以开始游戏~")
+    if (start_error := engine.signup_start_error(game, config)) is not None:
+        await start_cmd.finish(start_error)
     authority = (
         "superuser" if _is_su(user_id) else "admin" if is_group_admin(event) else "host"
     )
@@ -553,23 +598,48 @@ clue_cmd = on_command("线索", aliases={"已发现线索"}, priority=5, block=T
 @clue_cmd.handle()
 async def handle_clues(
     event: GroupMessageEvent,
+    arg: Message = CommandArg(),
     _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
 ) -> None:
-    """列出已发现的线索。"""
+    """公共线索群内回看，个人线索只私聊发送给请求者。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase is not Phase.PLAY:
         await clue_cmd.finish("现在不在跑团进行中")
-    module = game.module
-    if not game.discovered_clues or module is None:
-        await clue_cmd.finish("还没有发现任何线索~")
     user_id = int(event.get_user_id())
-    names = [
-        clue.name
-        for cid in sorted(game.discovered_clues)
-        if (clue := module.clue(cid)) is not None
-        and (cid in game.public_clues or user_id in game.clue_owners.get(cid, set()))
-    ]
-    await clue_cmd.finish("你可查看的线索：" + ("、".join(names) if names else "无"))
+    player = game.player_by_user(user_id)
+    needle = str(arg).strip()
+    if not needle:
+        public_text = engine.public_clue_list_text(game)
+        if player is None:
+            await clue_cmd.finish(public_text)
+        sent = await engine.send_private_text(
+            game,
+            player,
+            engine.private_journal_text(game, player),
+        )
+        if not sent:
+            public_text += "\n完整调查手记未送达，请加机器人好友后重试 /线索。"
+        await clue_cmd.finish(public_text)
+    clue, visibility = engine.lookup_visible_clue(game, player, needle)
+    if visibility == "ambiguous":
+        await clue_cmd.finish("匹配到多条线索，请输入更完整的名称。")
+    if clue is None or visibility is None:
+        await clue_cmd.finish("没有找到你可查看的这条线索。")
+    if visibility == "public":
+        await clue_cmd.finish(f"〔公共线索〕{clue.name}\n{clue.text}")
+    if player is None:
+        await clue_cmd.finish("这条线索只对发现者可见。")
+    sent = await engine.send_private_text(
+        game,
+        player,
+        f"〔个人线索〕{clue.name}\n{clue.text}",
+    )
+    message = (
+        f"已将个人线索「{clue.name}」发送到你的私聊。"
+        if sent
+        else "这条个人线索未能私聊送达，请加机器人好友后重试。"
+    )
+    await clue_cmd.finish(message)
 
 
 assist_cmd = on_command("协助", aliases={"帮忙"}, priority=5, block=True)

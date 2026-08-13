@@ -258,6 +258,7 @@ def render_card(
     sheet: CharacterSheet,
     *,
     pool: int,
+    skill_cap: int,
     rerolls_left: int,
     confirmed: bool,
 ) -> str:
@@ -284,12 +285,12 @@ def render_card(
     )
     lines.append("──────────────")
     if confirmed:
-        lines.append("角色卡已锁定。")
+        lines.append(f"角色卡已锁定（单项技能上限 {skill_cap}）。")
     else:
         spent = spent_points(sheet.adjustments)
         lines.append(
             f"可分配技能点：{pool - spent}/{pool}"
-            f"（单项上限见群内说明）\n"
+            f"（单项技能上限 {skill_cap}）\n"
             f"加点 侦查 20 或 侦查+20｜减点同理｜重掷（剩 {rerolls_left} 次）\n"
             "查看 重发本卡｜确认 锁定角色卡"
         )
