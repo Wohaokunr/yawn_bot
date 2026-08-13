@@ -86,6 +86,15 @@ uv run python -m tools.rpg_module_editor --check \
   src/plugins/yawn_core/yawn_rpg/modules/before_tide_departs.yaml
 ```
 
+打开编辑器后切换到“试玩”页（也可按 `F6`），可以选择当前草稿或已保存文件，
+填写固定 `seed` 和目标结局，然后查看可复现的动作轨迹与 JSON。试玩器在后台运行，
+不会启动 NoneBot、ORM 或 LLM；命令行也可以单独运行：
+
+```bash
+uv run python -m tools.rpg_playtest MODULE.yaml \
+  --seed SEED --ending ENDING_ID [--players N] [--json]
+```
+
 模组格式说明见
 [`src/plugins/yawn_core/yawn_rpg/modules/README.md`](src/plugins/yawn_core/yawn_rpg/modules/README.md)。
 
@@ -93,9 +102,9 @@ uv run python -m tools.rpg_module_editor --check \
 
 ```bash
 uv run pytest -q
-uv run ruff check src tests tools/rpg_module_editor
-uv run pyright src tools/rpg_module_editor
-uv run python -m compileall -q src tools/rpg_module_editor
+uv run ruff check src tests tools/rpg_module_editor tools/rpg_playtest
+uv run pyright src tools/rpg_module_editor tools/rpg_playtest
+uv run python -m compileall -q src tools/rpg_module_editor tools/rpg_playtest
 git diff --check
 ```
 
