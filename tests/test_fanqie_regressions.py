@@ -57,6 +57,71 @@ class _CommitExpiringSession:
         cast("Any", self.job).__dict__.pop("id", None)
 
 
+class _FakeResult:
+    def __init__(self, values: list[Any]) -> None:
+        self.values = values
+
+    def scalars(self) -> Self:
+        return self
+
+    def all(self) -> list[Any]:
+        return self.values
+
+
+class _WorkerSession:
+    def __init__(
+        self,
+        *,
+        job: Any,
+        book: Any = None,
+        chapter_rows: list[Any] | None = None,
+        chapter_row: Any = None,
+        expire_on_commit: bool = False,
+    ) -> None:
+        self.job = job
+        self.book = book
+        self.chapter_rows = chapter_rows or []
+        self.chapter_row = chapter_row
+        self.expire_on_commit = expire_on_commit
+        self.commits = 0
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def get(self, model: type[object], _key: int) -> Any:
+        if model.__name__ == "FanqieBook":
+            return self.book
+        if model.__name__ == "FanqieJobChapter":
+            return self.chapter_row
+        return self.job
+
+    async def execute(self, _statement: object) -> _FakeResult:
+        return _FakeResult(self.chapter_rows)
+
+    async def scalar(self, _statement: object) -> int:
+        return 1
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if not self.expire_on_commit:
+            return
+        if self.book is not None:
+            for field in ("title", "author", "book_id"):
+                self.book.__dict__.pop(field, None)
+        for item in [self.job, *self.chapter_rows, self.chapter_row]:
+            if item is not None:
+                for field in (
+                    "id",
+                    "chapter_index",
+                    "completed_chapters",
+                    "total_chapters",
+                ):
+                    item.__dict__.pop(field, None)
+
+
 @pytest.fixture(scope="module")
 def fanqie_modules() -> SimpleNamespace:
     if str(PROJECT_ROOT) not in sys.path:
@@ -377,6 +442,165 @@ async def test_submit_job_caches_ids_before_commit(
         if isinstance(item, state.FanqieJobChapter)
     ]
     assert created_chapters[0].job_id == _TEST_JOB_ID
+
+
+@pytest.mark.asyncio
+async def test_run_job_snapshots_values_before_commit(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = fanqie_modules.state
+    provider_module = fanqie_modules.provider
+    job = state.FanqieJob(
+        book_record_id=_TEST_BOOK_RECORD_ID,
+        requester_user_id=10001,
+        group_id=None,
+        start_chapter=1,
+        end_chapter=1,
+        total_chapters=1,
+        status="queued",
+        cancel_requested=False,
+    )
+    job.id = _TEST_JOB_ID
+    book = state.FanqieBook(
+        book_id="123456",
+        title="Target book",
+        author="Author",
+        url="https://fanqienovel.com/page/123456",
+    )
+    book.id = _TEST_BOOK_RECORD_ID
+    chapter = state.FanqieJobChapter(
+        job_id=_TEST_JOB_ID,
+        chapter_index=3,
+        item_id="654321",
+        title="Chapter 3",
+        is_locked=False,
+        status="pending",
+    )
+    chapter.id = 99
+    current_job = state.FanqieJob(
+        book_record_id=_TEST_BOOK_RECORD_ID,
+        requester_user_id=10001,
+        group_id=None,
+        start_chapter=1,
+        end_chapter=1,
+        total_chapters=1,
+        status="running",
+        cancel_requested=False,
+    )
+    current_job.id = _TEST_JOB_ID
+    current_chapter = state.FanqieJobChapter(
+        job_id=_TEST_JOB_ID,
+        chapter_index=3,
+        item_id="654321",
+        title="Chapter 3",
+        is_locked=False,
+        status="pending",
+    )
+    current_chapter.id = 99
+    sessions = iter(
+        [
+            _WorkerSession(
+                job=job,
+                book=book,
+                chapter_rows=[chapter],
+                expire_on_commit=True,
+            ),
+            _WorkerSession(job=current_job, chapter_row=current_chapter),
+        ]
+    )
+    assembled: list[tuple[int, str, str]] = []
+
+    class FakeProvider:
+        def __init__(self, _config: object) -> None:
+            return None
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_chapter(self, item_id: str) -> object:
+            assert item_id == "654321"
+            return provider_module.ChapterContent("654321", "Chapter 3", "正文")
+
+    async def allow_feature(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def not_cancelled(_job_id: int) -> bool:
+        return False
+
+    async def mark_chapter(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def assemble(job_id: int, title: str, author: str) -> None:
+        assembled.append((job_id, title, author))
+
+    monkeypatch.setattr(state, "get_session", lambda: next(sessions))
+    monkeypatch.setattr(state, "FanqieProvider", FakeProvider)
+    monkeypatch.setattr(state, "check_feature_permission", allow_feature)
+    monkeypatch.setattr(state, "_is_cancelled", not_cancelled)
+    monkeypatch.setattr(state, "_mark_chapter", mark_chapter)
+    monkeypatch.setattr(state, "_assemble_and_deliver", assemble)
+    monkeypatch.setattr(
+        state,
+        "_chapter_temp_path",
+        lambda _job_id, _chapter_index: tmp_path / "chapter.txt",
+    )
+
+    await state._run_job(_TEST_JOB_ID)
+
+    assert assembled == [(_TEST_JOB_ID, "Target book", "Author")]
+    assert (tmp_path / "chapter.txt").read_text(encoding="utf-8") == (
+        "第3章 Chapter 3\n\n正文\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_chapter_caches_values_before_commit(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = fanqie_modules.state
+    job = state.FanqieJob(
+        book_record_id=_TEST_BOOK_RECORD_ID,
+        requester_user_id=10001,
+        group_id=None,
+        start_chapter=1,
+        end_chapter=1,
+        total_chapters=1,
+        status="running",
+        cancel_requested=False,
+    )
+    job.id = _TEST_JOB_ID
+    chapter = state.FanqieJobChapter(
+        job_id=_TEST_JOB_ID,
+        chapter_index=3,
+        item_id="654321",
+        title="Chapter 3",
+        is_locked=False,
+        status="pending",
+    )
+    chapter.id = 99
+    session = _WorkerSession(
+        job=job,
+        chapter_row=chapter,
+        expire_on_commit=True,
+    )
+    monkeypatch.setattr(state, "get_session", lambda: session)
+
+    await state._mark_chapter(
+        _TEST_JOB_ID,
+        99,
+        "completed",
+        temp_path="chapter.txt",
+    )
+
+    assert session.commits == 1
+    assert chapter.status == "completed"
+    assert chapter.temp_path == "chapter.txt"
 
 
 @pytest.mark.asyncio

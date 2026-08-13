@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -39,6 +40,12 @@ _worker_task: asyncio.Task[None] | None = None
 _queued_ids: set[int] = set()
 _queue_lock = asyncio.Lock()
 _submit_lock = asyncio.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _ChapterSnapshot:
+    id: int
+    index: int
 
 
 def safe_filename(name: str, *, fallback: str = "番茄小说") -> str:
@@ -344,11 +351,12 @@ async def _mark_chapter(
             _now_bj() if status in TERMINAL_CHAPTER_STATUSES else None
         )
         await _refresh_progress(session, job)
-        await session.commit()
+        chapter_index = chapter.chapter_index
         progress = f"{job.completed_chapters}/{job.total_chapters}"
+        await session.commit()
     logger.debug(
         f"番茄章节状态更新：job_id={job_id} chapter_id={chapter_id} "
-        f"chapter_index={chapter.chapter_index} previous={previous} status={status} "
+        f"chapter_index={chapter_index} previous={previous} status={status} "
         f"progress={progress} has_error={bool(error)}"
     )
 
@@ -370,7 +378,7 @@ async def _run_job(job_id: int) -> None:
             logger.debug(f"番茄任务执行取消：job_id={job_id} reason=cancel_requested")
             return
         book = await session.get(FanqieBook, job.book_record_id)
-        chapters = list(
+        chapter_rows = list(
             (
                 await session.execute(
                     select(FanqieJobChapter)
@@ -381,28 +389,33 @@ async def _run_job(job_id: int) -> None:
             .scalars()
             .all()
         )
+        chapter_snapshots = [
+            _ChapterSnapshot(id=int(chapter.id), index=chapter.chapter_index)
+            for chapter in chapter_rows
+        ]
         if book is None:
             await session.commit()
             logger.debug(f"番茄任务执行失败：job_id={job_id} reason=missing_book")
             await _mark_job_failed(job_id, "任务关联的书籍元数据不存在")
             return
+        book_title = book.title
+        book_author = book.author or "未知作者"
+        book_id = book.book_id
         job.status = "running"
         job.started_at = job.started_at or _now_bj()
         job.last_error = None
         await session.commit()
-        book_title = book.title
-        book_author = book.author or "未知作者"
         logger.debug(
-            f"番茄任务进入下载：job_id={job_id} book_id={book.book_id} "
-            f"chapter_count={len(chapters)}"
+            f"番茄任务进入下载：job_id={job_id} book_id={book_id} "
+            f"chapter_count={len(chapter_snapshots)}"
         )
 
     async with FanqieProvider(config) as provider:
-        for position, chapter in enumerate(chapters):
+        for position, chapter in enumerate(chapter_snapshots):
             if await _is_cancelled(job_id):
                 logger.debug(
                     f"番茄任务下载中取消：job_id={job_id} "
-                    f"chapter_index={chapter.chapter_index}"
+                    f"chapter_index={chapter.index}"
                 )
                 await _set_status(job_id, "cancelled", "用户取消任务")
                 return
@@ -449,7 +462,7 @@ async def _run_job(job_id: int) -> None:
             if is_locked:
                 logger.debug(
                     f"番茄章节标记不可用：job_id={job_id} "
-                    f"chapter_index={chapter.chapter_index} reason=locked"
+                    f"chapter_index={chapter.index} reason=locked"
                 )
                 await _mark_chapter(
                     job_id,
@@ -461,23 +474,23 @@ async def _run_job(job_id: int) -> None:
             try:
                 logger.debug(
                     f"番茄章节请求开始：job_id={job_id} "
-                    f"chapter_index={chapter.chapter_index} item_id={item_id}"
+                    f"chapter_index={chapter.index} item_id={item_id}"
                 )
                 content = await provider.fetch_chapter(item_id)
             except ChapterUnavailable as exc:
                 logger.debug(
                     f"番茄章节不可用：job_id={job_id} "
-                    f"chapter_index={chapter.chapter_index} reason={exc}"
+                    f"chapter_index={chapter.index} reason={exc}"
                 )
                 await _mark_chapter(job_id, chapter.id, "unavailable", error=str(exc))
-                if position + 1 < len(chapters):
+                if position + 1 < len(chapter_snapshots):
                     await asyncio.sleep(config.fanqie_request_delay)
                 continue
             except Exception as exc:  # noqa: BLE001
-                error = f"第{chapter.chapter_index}章请求失败：{exc}"
+                error = f"第{chapter.index}章请求失败：{exc}"
                 logger.exception(
                     f"番茄章节请求失败：job_id={job_id} "
-                    f"chapter_index={chapter.chapter_index} error_type={type(exc).__name__}"
+                    f"chapter_index={chapter.index} error_type={type(exc).__name__}"
                 )
                 await _mark_chapter(job_id, chapter.id, "failed", error=error)
                 await _mark_job_failed(
@@ -487,24 +500,24 @@ async def _run_job(job_id: int) -> None:
                 await notify_group(
                     get_bot(),
                     (await _job_group_id(job_id)),
-                    f"番茄任务 #{job_id} 下载失败：第{chapter.chapter_index}章，请使用“番茄任务 {job_id} 重试”",
+                    f"番茄任务 #{job_id} 下载失败：第{chapter.index}章，请使用“番茄任务 {job_id} 重试”",
                 )
                 return
 
-            path = _chapter_temp_path(job_id, chapter.chapter_index)
+            path = _chapter_temp_path(job_id, chapter.index)
             partial = path.with_suffix(path.suffix + ".part")
             partial.write_text(
-                f"第{chapter.chapter_index}章 {content.title or chapter_title}\n\n{content.content}\n",
+                f"第{chapter.index}章 {content.title or chapter_title}\n\n{content.content}\n",
                 encoding="utf-8",
             )
             partial.replace(path)
             await _mark_chapter(job_id, chapter.id, "completed", temp_path=str(path))
             logger.debug(
                 f"番茄章节写入完成：job_id={job_id} "
-                f"chapter_index={chapter.chapter_index} temp_path={path} "
+                f"chapter_index={chapter.index} temp_path={path} "
                 f"content_chars={len(content.content)}"
             )
-            if position + 1 < len(chapters):
+            if position + 1 < len(chapter_snapshots):
                 await asyncio.sleep(config.fanqie_request_delay)
 
     if await _is_cancelled(job_id):
