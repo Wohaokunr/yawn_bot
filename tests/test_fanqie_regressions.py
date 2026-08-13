@@ -20,6 +20,8 @@ _OK_STATUS = 200
 _EXPECTED_CALLS = 4
 _TEST_BOOK_RECORD_ID = 7
 _TEST_JOB_ID = 42
+_DEFAULT_FANQIE_REQUEST_DELAY = 0.5
+_MIN_FANQIE_REQUEST_DELAY = 0.2
 
 
 class _CommitExpiringSession:
@@ -156,6 +158,20 @@ def test_source_and_page_url_parsing(fanqie_modules: SimpleNamespace) -> None:
     )
     with pytest.raises(ValueError):
         parse_source("https://example.com/page/123456")
+
+
+def test_fanqie_request_delay_default_is_short_but_bounded(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    settings = fanqie_modules.config.Config()
+
+    assert settings.fanqie_request_delay == _DEFAULT_FANQIE_REQUEST_DELAY
+    assert (
+        fanqie_modules.config.Config(
+            fanqie_request_delay=_MIN_FANQIE_REQUEST_DELAY
+        ).fanqie_request_delay
+        == _MIN_FANQIE_REQUEST_DELAY
+    )
 
 
 def test_initial_state_html_cleaning_and_pua(fanqie_modules: SimpleNamespace) -> None:

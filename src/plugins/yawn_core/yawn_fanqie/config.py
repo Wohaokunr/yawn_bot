@@ -8,7 +8,7 @@ class Config(BaseModel):
 
     fanqie_request_timeout: float = Field(default=30.0, gt=0, le=120)
     fanqie_request_retries: int = Field(default=2, ge=0, le=5)
-    fanqie_request_delay: float = Field(default=1.5, ge=0.2, le=60)
+    fanqie_request_delay: float = Field(default=0.5, ge=0.2, le=60)
     fanqie_queue_max: int = Field(default=20, ge=1, le=1000)
     fanqie_user_active_max: int = Field(default=1, ge=1, le=10)
     fanqie_group_active_max: int = Field(default=3, ge=1, le=50)
