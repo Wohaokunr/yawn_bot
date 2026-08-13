@@ -36,6 +36,7 @@ class Phase(str, Enum):
     SHERIFF_REGISTER = "SHERIFF_REGISTER"  # 警长竞选报名
     SHERIFF_SPEECH = "SHERIFF_SPEECH"  # 竞选发言
     SHERIFF_VOTE = "SHERIFF_VOTE"  # 警长投票
+    SHERIFF_FINAL_SPEECH = "SHERIFF_FINAL_SPEECH"  # 警长平票终辩
     SHERIFF_REVOTE = "SHERIFF_REVOTE"  # 警长平票重投
     DAY_SPEECH = "DAY_SPEECH"  # 白天轮流发言
     DAY_VOTE = "DAY_VOTE"  # 放逐投票
@@ -51,6 +52,7 @@ SELF_DETONATE_PHASES: frozenset[Phase] = frozenset(
         Phase.SHERIFF_REGISTER,
         Phase.SHERIFF_SPEECH,
         Phase.SHERIFF_VOTE,
+        Phase.SHERIFF_FINAL_SPEECH,
         Phase.SHERIFF_REVOTE,
         Phase.DAY_SPEECH,
         Phase.DAY_VOTE,
