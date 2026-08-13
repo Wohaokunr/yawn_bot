@@ -25,7 +25,7 @@ from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata, on_command, on_message
 from nonebot.rule import Rule
 from nonebot_plugin_orm import async_scoped_session, get_session
-from openai import OpenAIError
+from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_scoped_session as _sa_scoped_session
@@ -43,7 +43,7 @@ from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
 from .llm import _COMPLETION_CONCURRENCY
 from .llm import ai_config as _ai_config
-from .llm import client as _client
+from .llm import get_client as _get_client
 from .permission import check_feature_permission, require_feature
 from .reply_chain import (
     format_chain_for_prompt,
@@ -107,8 +107,11 @@ __plugin_meta__ = PluginMetadata(
 logger.info("Yawn对话模块已加载")
 
 # ── AI 客户端配置 ─────────────────────────────────────────
-# 配置（AIChatConfig）与 AsyncOpenAI 客户端单例由 llm.py 统一管理，
-# 与狼人杀 AI 共用；此处以原名 _ai_config/_client 引用。
+# 配置（AIChatConfig）与惰性 AsyncOpenAI 客户端由 llm.py 统一管理，
+# 与狼人杀 AI 共用。
+
+# 测试和部署方可显式覆盖；默认在首次请求时从 llm.py 获取客户端。
+_client: Optional[AsyncOpenAI] = None
 
 # ── 对话参数 ──────────────────────────────────────────────
 
@@ -323,7 +326,14 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     delivery_failed = False
 
     try:
-        stream = await _client.chat.completions.create(
+        llm_client = _client or _get_client()
+        if llm_client is None:
+            await bot.send(
+                event,
+                MessageSegment.text("抱歉，AI 服务尚未配置，请联系管理员~"),
+            )
+            return None
+        stream = await llm_client.chat.completions.create(
             model=_ai_config.ai_model,
             messages=history,  # type: ignore[arg-type]
             stream=True,
