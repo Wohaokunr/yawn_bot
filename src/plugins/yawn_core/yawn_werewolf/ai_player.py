@@ -87,6 +87,11 @@ _SETTLE_DELAY = 1.0
 _TICK_INTERVAL = 0.75
 # AI 代发发言后的停顿，模拟真人阅读/节奏
 _SPEECH_LINGER = 3.0
+# 模型调用只占用阶段窗口的九成，为驱动唤醒、行动入队和
+# 引擎收尾留出余量，避免 AI 回复刚好落在下一阶段。
+_PHASE_WINDOW_RATIO = 0.9
+# 警长平票终辩由引擎使用固定 60 秒发言窗口。
+_SHERIFF_FINAL_SPEECH_WINDOW = 60.0
 
 _PHASE_DESC: dict[Phase, str] = {
     Phase.NIGHT_HALFBLOOD: "夜晚-混血儿认主",
@@ -101,6 +106,7 @@ _PHASE_DESC: dict[Phase, str] = {
     Phase.SHERIFF_REGISTER: "警长竞选报名",
     Phase.SHERIFF_SPEECH: "竞选发言",
     Phase.SHERIFF_VOTE: "警长投票",
+    Phase.SHERIFF_FINAL_SPEECH: "警长平票终辩",
     Phase.SHERIFF_REVOTE: "警长平票重投",
     Phase.DAY_SPEECH: "白天轮流发言",
     Phase.DAY_VOTE: "放逐投票",
@@ -112,11 +118,24 @@ _SPEECH_PHASES: frozenset[Phase] = frozenset(
     {
         Phase.LAST_WORDS,
         Phase.SHERIFF_SPEECH,
-        Phase.SHERIFF_REVOTE,
+        Phase.SHERIFF_FINAL_SPEECH,
         Phase.DAY_SPEECH,
         Phase.PK_SPEECH,
     }
 )
+
+
+def _clip_timeout_to_window(preferred: float, window: float) -> float:
+    """把 AI 调用总预算限制在引擎阶段窗口内。"""
+    return min(
+        max(float(preferred), 0.0),
+        max(float(window), 0.0) * _PHASE_WINDOW_RATIO,
+    )
+
+
+def _decision_timeout(window: float) -> float:
+    """当前配置下，单次决策在指定引擎窗口内的可用总预算。"""
+    return _clip_timeout_to_window(config.ww_ai_decision_timeout, window)
 
 _VOTE_PHASES: frozenset[Phase] = frozenset(
     {
@@ -225,6 +244,22 @@ def record_speech(game: Game, seat: int, text: str) -> None:
     if driver is None:
         return
     driver.public_log.append(f"[{seat}号发言] {text[:SPEECH_TRUNCATE]}")
+    driver.wake.set()
+
+
+def on_phase_change(game: Game) -> None:
+    """引擎切换阶段时，取消本局尚在运行的旧阶段后台决策。
+
+    主驱动 ``worker`` 不属于阶段任务，只唤醒它立即处理新阶段；
+    后台任务由 ``_spawn`` 捕获创建时的 phase token，切阶段后
+    即使取消尚未完成，``_enqueue_action`` 也会二次拒绝过期行动。
+    """
+    driver = _drivers.get(game.group_id)
+    if driver is None:
+        return
+    for task in tuple(driver.bg_tasks):
+        if not task.done():
+            task.cancel()
     driver.wake.set()
 
 
@@ -346,32 +381,17 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
     # ── 夜晚：DM 提示驱动 ──
     if phase is Phase.NIGHT_WOLVES:
         wolves = [p for p in game.alive_players_of_role(Role.WEREWOLF) if p.is_ai]
-        # 阶段一：并行讨论（各自 说XXX 提议，引擎转发给队友狼）。
-        # 夜晚无发言窗口竞争，可直接 gather（信号量 6 限流）——
-        # 「批量决策用 _spawn、勿 gather」仅针对有发言窗口的上警/投票阶段
-        if config.ww_ai_wolf_discuss:
-            discuss_todo = [
-                w
-                for w in wolves
-                if (round_no, phase, w.seat, "discuss") not in driver.handled
-                and _has_phase_dm(driver, w.seat, phase)
-            ]
-            for w in discuss_todo:
-                driver.handled.add((round_no, phase, w.seat, "discuss"))
-            if discuss_todo:
-                await asyncio.sleep(_SETTLE_DELAY)
-                await asyncio.gather(
-                    *(_wolf_discuss(driver, w) for w in discuss_todo),
-                    return_exceptions=True,
-                )
-        # 阶段二：串行出刀（后手狼读到队友提议 + 引擎刀型统计，天然共识）
-        for wolf in wolves:
-            key = (round_no, phase, wolf.seat, "kill")
-            if key in driver.handled or not _has_phase_dm(driver, wolf.seat, phase):
-                continue
-            driver.handled.add(key)
-            await asyncio.sleep(_SETTLE_DELAY)
-            await _wolf_decide(driver, wolf)
+        flow_key = (round_no, phase, "wolf-flow")
+        # 整段「并行讨论 → 串行出刀」都交给带 phase token 的
+        # 后台任务。主循环不再被狼队多次 LLM 调用占住，因此能
+        # 立即响应引擎的阶段切换。
+        if (
+            wolves
+            and flow_key not in driver.handled
+            and all(_has_phase_dm(driver, wolf.seat, phase) for wolf in wolves)
+        ):
+            driver.handled.add(flow_key)
+            _spawn(driver, _wolf_phase_flow(driver, wolves))
         return
     if phase is Phase.NIGHT_WITCH:
         witches = [p for p in game.alive_players_of_role(Role.WITCH) if p.is_ai]
@@ -386,6 +406,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                     witch,
                     "请根据私聊提示决定今晚用药。",
                     fallback=ActionKind.SKIP,
+                    timeout=_decision_timeout(config.ww_night_timeout),
                 )
         return
     if phase is Phase.NIGHT_SEER:
@@ -402,6 +423,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                     seer,
                     f"可查验目标：{_fmt_seats(others)}，选择一名查验。",
                     fallback=None,  # 不查验等价于超时，阶段自然结束
+                    timeout=_decision_timeout(config.ww_night_timeout),
                 )
         return
     if phase is Phase.NIGHT_HALFBLOOD:
@@ -428,6 +450,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                     "选择一位主人（回复 认主N）——你不知道 TA 的身份，"
                     "本局你的胜负随主人所在阵营。",
                     fallback=None,  # 未认主由引擎随机指定
+                    timeout=_decision_timeout(config.ww_night_timeout),
                 )
         return
     if phase is Phase.NIGHT_ELDER:
@@ -455,6 +478,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                     "结合场上局势选择今晚禁言谁（回复 禁言N），"
                     "也可以回复 过 放弃。",
                     fallback=ActionKind.SKIP,
+                    timeout=_decision_timeout(config.ww_night_timeout),
                 )
         return
 
@@ -473,6 +497,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                 p,
                 "结合场上局势决定是否开枪（可带走一名存活玩家）。",
                 fallback=ActionKind.NO_SHOOT,
+                timeout=_decision_timeout(config.ww_hunter_timeout),
             )
         return
     if phase is Phase.BADGE_TRANSFER:
@@ -489,6 +514,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                 p,
                 "决定警徽流向：移交警徽给信任的存活玩家，或撕警徽。",
                 fallback=ActionKind.TEAR_BADGE,
+                timeout=_decision_timeout(config.ww_badge_timeout),
             )
         return
 
@@ -526,6 +552,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                 "请决定发言顺序：回复 排序N顺（N号起顺时针）"
                 "或 排序N逆（N号起逆时针）。",
                 fallback=None,  # 不定序则引擎随机决定
+                timeout=_decision_timeout(config.ww_badge_timeout),
             )
         return
 
@@ -560,10 +587,11 @@ async def _simple_decide(
     instruction: str,
     *,
     fallback: Optional[ActionKind],
+    timeout: Optional[float] = None,
 ) -> None:
     """通用单行动决策：LLM → 解析 → 校验 → 投入，失败按 fallback。"""
     game = driver.game
-    action = await _llm_decide(driver, player, instruction)
+    action = await _llm_decide(driver, player, instruction, timeout=timeout)
     if action is not None:
         _enqueue_action(game, action)
         return
@@ -575,7 +603,84 @@ async def _simple_decide(
         _enqueue_action(game, Action(fallback, player.user_id))
 
 
-async def _wolf_discuss(driver: AIDriver, wolf: PlayerState) -> None:
+def _phase_token_is_current(game: Game, token: int) -> bool:
+    """后台决策是否仍属于创建它的阶段。"""
+    return game.phase is Phase.NIGHT_WOLVES and game.phase_token == token
+
+
+def _enqueue_wolf_skip(game: Game, wolf: PlayerState) -> None:
+    """狼刀无法产出时显式交给引擎按空刀托管。"""
+    logger.info(
+        f"狼人杀群 {game.group_id} {wolf.seat}号 "
+        "AI 狼刀决策失败，托管：过（空刀）"
+    )
+    _enqueue_action(game, Action(ActionKind.SKIP, wolf.user_id))
+
+
+async def _wolf_phase_flow(
+    driver: AIDriver,
+    wolves: list[PlayerState],
+) -> None:
+    """后台运行完整狼队流程，并在阶段总预算内按狼数分享时间。"""
+    game = driver.game
+    token = _AI_PHASE_TOKEN.get()
+    if token is None:
+        token = game.phase_token
+    loop = asyncio.get_running_loop()
+    phase_budget = _clip_timeout_to_window(
+        config.ww_wolf_timeout,
+        config.ww_wolf_timeout,
+    )
+    deadline = loop.time() + phase_budget
+
+    if config.ww_ai_wolf_discuss and _phase_token_is_current(game, token):
+        await asyncio.sleep(min(_SETTLE_DELAY, max(deadline - loop.time(), 0.0)))
+        remaining = deadline - loop.time()
+        # 讨论并行执行，但只占一个时间切片；后面每头狼各保留
+        # 一个串行出刀切片。
+        discuss_timeout = min(
+            config.ww_ai_discuss_timeout,
+            max(remaining, 0.0) / (len(wolves) + 1),
+        )
+        if discuss_timeout > 0:
+            await asyncio.gather(
+                *(
+                    _wolf_discuss(driver, wolf, timeout=discuss_timeout)
+                    for wolf in wolves
+                ),
+                return_exceptions=True,
+            )
+
+    # 出刀串行：后手狼可以读到前手狼的刀型统计。每次决策前
+    # 重新计算余量，留出后续狼的 settle 时间后均分。
+    for index, wolf in enumerate(wolves):
+        if not _phase_token_is_current(game, token):
+            return
+        sleep_for = min(_SETTLE_DELAY, max(deadline - loop.time(), 0.0))
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+        if not _phase_token_is_current(game, token):
+            return
+        wolves_left = len(wolves) - index
+        future_settle = max(wolves_left - 1, 0) * _SETTLE_DELAY
+        available = max(deadline - loop.time() - future_settle, 0.0)
+        decision_timeout = min(
+            config.ww_ai_decision_timeout,
+            available / wolves_left,
+        )
+        if decision_timeout <= 0:
+            for pending_wolf in wolves[index:]:
+                _enqueue_wolf_skip(game, pending_wolf)
+            return
+        await _wolf_decide(driver, wolf, timeout=decision_timeout)
+
+
+async def _wolf_discuss(
+    driver: AIDriver,
+    wolf: PlayerState,
+    *,
+    timeout: float,
+) -> None:
     """狼队讨论：提议今晚刀谁（说XXX），引擎转发给其他狼；失败不影响出刀。"""
     game = driver.game
     teammates = [w.seat for w in game.alive_players_of_role(Role.WEREWOLF)]
@@ -586,9 +691,7 @@ async def _wolf_discuss(driver: AIDriver, wolf: PlayerState) -> None:
         "请用一条 说XXX 向队友提议今晚刀谁并给出简短理由，"
         "这一轮不要直接出刀。"
     )
-    action = await _llm_decide(
-        driver, wolf, instruction, timeout=config.ww_ai_discuss_timeout
-    )
+    action = await _llm_decide(driver, wolf, instruction, timeout=timeout)
     if action is not None and action.kind is ActionKind.SAY:
         _enqueue_action(game, action)
     else:
@@ -597,8 +700,13 @@ async def _wolf_discuss(driver: AIDriver, wolf: PlayerState) -> None:
         )
 
 
-async def _wolf_decide(driver: AIDriver, wolf: PlayerState) -> None:
-    """狼人刀决策：非法目标直接放弃（等价空刀托管）。"""
+async def _wolf_decide(
+    driver: AIDriver,
+    wolf: PlayerState,
+    *,
+    timeout: float,
+) -> None:
+    """狼人刀决策：失败/非刀口回复显式投入 SKIP 空刀。"""
     game = driver.game
     teammates = [w.seat for w in game.alive_players_of_role(Role.WEREWOLF)]
     targets = [p.seat for p in game.alive_players() if p.faction is not Faction.WOLF]
@@ -608,14 +716,14 @@ async def _wolf_decide(driver: AIDriver, wolf: PlayerState) -> None:
         "结合[你的私聊]中队友的讨论（【狼队】…）与刀型统计，"
         "尽量与队友统一目标出刀。"
     )
-    action = await _llm_decide(driver, wolf, instruction)
-    if action is not None:
-        _enqueue_action(game, action)
-    else:
-        logger.info(
-            f"狼人杀群 {game.group_id} {wolf.seat}号 "
-            "AI 狼刀决策失败，放弃出刀（等价空刀托管）"
-        )
+    action = await _llm_decide(driver, wolf, instruction, timeout=timeout)
+    if (
+        action is not None
+        and action.kind is ActionKind.KILL
+        and _enqueue_action(game, action)
+    ):
+        return
+    _enqueue_wolf_skip(game, wolf)
 
 
 async def _run_decide(driver: AIDriver, player: PlayerState) -> None:
@@ -624,6 +732,9 @@ async def _run_decide(driver: AIDriver, player: PlayerState) -> None:
         driver,
         player,
         "警长竞选报名中：决定是否参加竞选。",
+        timeout=_decision_timeout(
+            config.ww_sheriff_register_timeout + config.ww_ai_register_buffer
+        ),
     )
     if action is not None and action.kind is ActionKind.RUN:
         _enqueue_action(driver.game, action)
@@ -664,7 +775,10 @@ async def _knight_decide(driver: AIDriver, knight: PlayerState) -> None:
         instruction,
         # 发言窗口有限，夹取到更短的超时；迟到的决斗会被引擎阶段门
         # 安全丢弃，等价于不决斗
-        timeout=config.ww_ai_discuss_timeout,
+        timeout=_clip_timeout_to_window(
+            config.ww_ai_discuss_timeout,
+            config.ww_speech_timeout,
+        ),
     )
     if action is not None and action.kind is ActionKind.DUEL:
         _enqueue_action(game, action)
@@ -679,7 +793,12 @@ async def _vote_decide(driver: AIDriver, player: PlayerState) -> None:
         f"本轮可投对象：{_fmt_seats(list(game.vote_targets))}，"
         "结合场上记录决定投给谁（可弃票）。"
     )
-    action = await _llm_decide(driver, player, instruction)
+    action = await _llm_decide(
+        driver,
+        player,
+        instruction,
+        timeout=_decision_timeout(config.ww_vote_timeout),
+    )
     if action is not None:
         _enqueue_action(game, action)
         return
@@ -687,7 +806,7 @@ async def _vote_decide(driver: AIDriver, player: PlayerState) -> None:
     _enqueue_action(game, Action(ActionKind.ABSTAIN, player.user_id))
 
 
-async def _llm_decide(
+async def _llm_decide(  # noqa: PLR0911
     driver: AIDriver,
     player: PlayerState,
     instruction: str,
@@ -699,7 +818,8 @@ async def _llm_decide(
     LLM 调用本身失败（超时/错误）时不重试，立即返回 None 由
     调用方降级——阶段窗口有限，重试只会让托管行动更晚到达。
     `timeout` 缺省时用 `ww_ai_decision_timeout`；狼队讨论等需要
-    更短超时的场景可显式覆盖。
+    更短超时的场景可显式覆盖。该值是「首次 + 纠正」共享的
+    整段总预算，不是每次调用各用一遍。
     """
     game = driver.game
     phase_token = game.phase_token
@@ -708,31 +828,57 @@ async def _llm_decide(
         f"狼人杀群 {game.group_id} {player.seat}号 AI 决策提示词：{instruction}"
         f"\n{messages[-1].get('content', '')}"
     )
-    call_timeout = timeout if timeout is not None else config.ww_ai_decision_timeout
+    total_timeout = timeout if timeout is not None else config.ww_ai_decision_timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(total_timeout, 0.0)
     for attempt in range(2):
-        text = await complete(
-            messages,
-            max_tokens=config.ww_ai_max_tokens,
-            timeout=call_timeout,
-            temperature=0.4,
-        )
+        # 阶段已切换时不发起新请求，也不再为旧阶段格式纠错。
+        if phase_token != game.phase_token:
+            return None
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.info(
+                f"狼人杀群 {game.group_id} {player.seat}号 "
+                f"AI 决策耗尽总预算（{total_timeout:.1f}s）"
+            )
+            return None
+        try:
+            # complete() 自带单请求超时；外层 wait_for 再保证即使
+            # 测试替身/兼容客户端忽略 timeout，也不会突破总预算。
+            text = await asyncio.wait_for(
+                complete(
+                    messages,
+                    max_tokens=config.ww_ai_max_tokens,
+                    timeout=remaining,
+                    temperature=0.4,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                f"狼人杀群 {game.group_id} {player.seat}号 "
+                f"AI 决策超过总预算（{total_timeout:.1f}s）"
+            )
+            return None
+        # 请求期间可能已进入下一阶段；此时既不解析，也不重试。
+        if phase_token != game.phase_token:
+            return None
         if text is None:
             logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 决策调用失败")
             return None
         logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 决策回复：{text!r}")
         action = parse_dm_action(text, player.user_id, allow_votes=True)
         if (
-            action is not None
-            and phase_token == game.phase_token
-            and _is_valid_action(game, player, action)
+            action is not None and _is_valid_action(game, player, action)
         ):
             action.phase_token = phase_token
             return action
-        if attempt == 0:
-            logger.info(
-                f"狼人杀群 {game.group_id} {player.seat}号 "
-                f"AI 决策无效（解析结果={action}），追加纠正提示重试"
-            )
+        if attempt != 0 or phase_token != game.phase_token:
+            return None
+        logger.info(
+            f"狼人杀群 {game.group_id} {player.seat}号 "
+            f"AI 决策无效（解析结果={action}），追加纠正提示重试"
+        )
         messages = [
             *messages,
             {"role": "assistant", "content": text},
@@ -873,7 +1019,10 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
     game = driver.game
     if game.phase is Phase.LAST_WORDS:
         scene = "你已死亡，现在发表遗言。"
-    elif game.phase in (Phase.SHERIFF_SPEECH, Phase.SHERIFF_REVOTE):
+    elif game.phase in (
+        Phase.SHERIFF_SPEECH,
+        Phase.SHERIFF_FINAL_SPEECH,
+    ):
         scene = "现在是警长竞选发言，说明大家该投你的理由。"
     else:
         scene = "现在轮到你发言。"
@@ -883,11 +1032,18 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
         "狼人伪装好人、带节奏；好人分析局势、找狼。"
     )
     user = _render_context(driver, player) + f"\n\n{scene}请发言："
-    # 终辩（警长平票重投）的引擎窗口只有 60 秒（engine._FINAL_SPEECH_TIMEOUT），
-    # 夹取调用超时，避免发言生成完时窗口已关闭、把话发到下一阶段
-    speech_timeout = config.ww_ai_speech_timeout
-    if game.phase is Phase.SHERIFF_REVOTE:
-        speech_timeout = min(speech_timeout, 50.0)
+    if game.phase is Phase.LAST_WORDS:
+        speech_window = float(config.ww_last_words_timeout)
+    elif game.phase is Phase.SHERIFF_FINAL_SPEECH:
+        speech_window = _SHERIFF_FINAL_SPEECH_WINDOW
+    else:
+        speech_window = float(config.ww_speech_timeout)
+    # 遗言、终辩与普通发言分别夹到它们各自的引擎窗口内，
+    # 避免模型完成时发言权已转给下一位玩家。
+    speech_timeout = _clip_timeout_to_window(
+        config.ww_ai_speech_timeout,
+        speech_window,
+    )
     return await complete(
         [
             {"role": "system", "content": system},

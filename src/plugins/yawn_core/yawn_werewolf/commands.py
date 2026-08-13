@@ -39,7 +39,7 @@ from . import ai_player, api, engine
 from .config import Config
 from .dsl import _DM_HINT, parse_dm_action
 from .models import WerewolfPlayer
-from .roles import BOARDS, Role, parse_role
+from .roles import BOARDS, Role, build_role_card, parse_role
 from .state import (
     DUEL_PHASES,
     SELF_DETONATE_PHASES,
@@ -126,6 +126,81 @@ def _eff_limits(game: Game) -> tuple[int, int]:
     )
 
 
+_NIGHT_PHASES: frozenset[Phase] = frozenset(
+    {
+        Phase.NIGHT_HALFBLOOD,
+        Phase.NIGHT_WOLVES,
+        Phase.NIGHT_WITCH,
+        Phase.NIGHT_SEER,
+        Phase.NIGHT_ELDER,
+    }
+)
+
+
+def _seat_list_text(seats: list[int]) -> str:
+    """把座位号渲染成公开播报用的短列表。"""
+    return "、".join(f"{seat}号" for seat in seats) if seats else "无"
+
+
+def format_game_status(game: Game) -> str:
+    """生成不泄露身份和夜间行动细节的公开进度。"""
+    if game.phase is Phase.SIGNUP:
+        eff_min, eff_max = _eff_limits(game)
+        lines = [
+            "═══ 狼人杀 · 当前进度 ═══",
+            "阶段：报名中",
+            f"板子：{game.board}",
+            "报名名单：",
+        ]
+        if game.signup_user_ids:
+            lines.extend(
+                f"{index}. {display_name_of(game, user_id)}"
+                for index, user_id in enumerate(game.signup_user_ids, start=1)
+            )
+        else:
+            lines.append("暂无")
+        lines.extend(
+            (
+                "──────────────",
+                f"当前 {len(game.signup_user_ids)}/{eff_max} 人，至少 {eff_min} 人开局",
+                "房主可发送 /开始游戏；发送 /板子 查看或切换板子",
+            )
+        )
+        return "\n".join(lines)
+
+    phase_name = _PHASE_CN.get(game.phase, game.phase.value)
+    if game.phase in _NIGHT_PHASES:
+        round_text = f"第 {game.round_no} 夜"
+    elif game.phase is Phase.DEALING:
+        round_text = "开局准备中"
+    else:
+        round_text = f"第 {game.round_no} 天"
+    alive = [player.seat for player in game.players if player.alive]
+    dead = [player.seat for player in game.players if not player.alive]
+    sheriff = game.sheriff()
+    sheriff_text = "无"
+    if sheriff is not None:
+        sheriff_text = f"{sheriff.seat}号"
+        if not sheriff.alive:
+            sheriff_text += "（已死亡，警徽处理中）"
+    lines = [
+        "═══ 狼人杀 · 当前进度 ═══",
+        f"板子：{game.board}",
+        f"回合：{round_text}",
+        f"阶段：{phase_name}",
+        f"存活座位：{_seat_list_text(alive)}",
+        f"倒牌座位：{_seat_list_text(dead)}",
+        f"警长：{sheriff_text}",
+    ]
+    if game.phase in _VOTE_PHASES and game.vote_targets:
+        lines.append(f"当前可投：{_seat_list_text(game.vote_targets)}")
+    elif game.current_speaker is not None:
+        lines.append(f"当前发言：{game.current_speaker}号")
+    if game.phase in _NIGHT_PHASES:
+        lines.append("夜间行动不会在群内显示，请按私聊提示操作。")
+    return "\n".join(lines)
+
+
 def _parse_seat(text: object) -> Optional[int]:
     """从参数文本解析座位号（支持 "3" 与 "3号"）。"""
     match = re.fullmatch(r"(\d+)\s*号?", str(text).strip())
@@ -149,7 +224,8 @@ _PHASE_CN: dict[Phase, str] = {
     Phase.SHERIFF_REGISTER: "警长竞选报名",
     Phase.SHERIFF_SPEECH: "竞选发言",
     Phase.SHERIFF_VOTE: "警长投票",
-    Phase.SHERIFF_REVOTE: "警长终辩投票",
+    Phase.SHERIFF_FINAL_SPEECH: "警长平票终辩",
+    Phase.SHERIFF_REVOTE: "警长平票重投",
     Phase.DAY_SPEECH: "白天发言",
     Phase.DAY_VOTE: "放逐投票",
     Phase.PK_SPEECH: "PK 发言",
@@ -167,7 +243,7 @@ def _not_now(game: Optional[Game], guidance: str) -> str:
 
 # 各角色可用的私聊行动（提示用；白天行动走群命令，不在此列）
 _ROLE_DM_ACTIONS: dict[Role, str] = {
-    Role.WEREWOLF: "刀N（击杀）/ 说XXX（与狼队友讨论）",
+    Role.WEREWOLF: "刀N（击杀）/ 过（空刀）/ 说XXX（与狼队友讨论）",
     Role.WITCH: "救 / 毒N / 过",
     Role.SEER: "查验N",
     Role.HUNTER: "开枪N / 不开枪（死亡后）",
@@ -200,7 +276,9 @@ def _dm_hint_for(game: Game, player: Optional[PlayerState], raw: str) -> str:
 # 报错文案不暴露当前轮到哪个角色
 _DM_ALLOWED: dict[Phase, frozenset[ActionKind]] = {
     Phase.NIGHT_HALFBLOOD: frozenset({ActionKind.CHOOSE_OWNER}),
-    Phase.NIGHT_WOLVES: frozenset({ActionKind.KILL, ActionKind.SAY}),
+    Phase.NIGHT_WOLVES: frozenset(
+        {ActionKind.KILL, ActionKind.SKIP, ActionKind.SAY}
+    ),
     Phase.NIGHT_WITCH: frozenset({ActionKind.SAVE, ActionKind.POISON, ActionKind.SKIP}),
     Phase.NIGHT_SEER: frozenset({ActionKind.CHECK}),
     Phase.NIGHT_ELDER: frozenset({ActionKind.SILENCE, ActionKind.SKIP}),
@@ -216,7 +294,10 @@ _DM_ALLOWED: dict[Phase, frozenset[ActionKind]] = {
         {ActionKind.SKIP, ActionKind.WITHDRAW, ActionKind.SELF_DETONATE}
     ),
     Phase.SHERIFF_VOTE: frozenset({ActionKind.SELF_DETONATE}),
-    Phase.SHERIFF_REVOTE: frozenset({ActionKind.SKIP, ActionKind.SELF_DETONATE}),
+    Phase.SHERIFF_FINAL_SPEECH: frozenset(
+        {ActionKind.SKIP, ActionKind.SELF_DETONATE}
+    ),
+    Phase.SHERIFF_REVOTE: frozenset({ActionKind.SELF_DETONATE}),
     Phase.DAY_SPEECH: frozenset(
         {ActionKind.SKIP, ActionKind.DUEL, ActionKind.ORDER, ActionKind.SELF_DETONATE}
     ),
@@ -269,7 +350,8 @@ async def handle_open(
     note_signup_name(game, user_id, _sender_display(event))
     game.worker = asyncio.create_task(engine.run_game(game))
     logger.info(f"狼人杀群 {group_id} 由 {user_id} 开房")
-    await wolf_open.finish("狼人杀房间已创建，房主已自动报名~")
+    hint = "可私聊 /选身份 身份名请求期望角色~" if config.ww_role_request else ""
+    await wolf_open.finish(f"狼人杀房间已创建，房主已自动报名~\n{hint}".rstrip())
 
 
 signup_cmd = on_command(
@@ -299,12 +381,15 @@ async def handle_signup(
         f"狼人杀群 {int(event.group_id)} {int(event.get_user_id())} 报名"
         f"（{len(game.signup_user_ids)}/{eff_max}）"
     )
-    await signup_cmd.finish(
+    response = (
         MessageSegment.at(event.user_id)
         + f"报名成功！当前 {len(game.signup_user_ids)}"
         + f"/{eff_max} 人"
         + f"（至少 {eff_min} 人开局）"
     )
+    if config.ww_role_request:
+        response += "\n可私聊 /选身份 身份名请求期望角色~"
+    await signup_cmd.finish(response)
 
 
 leave_cmd = on_command(
@@ -371,7 +456,29 @@ async def handle_view(
     lines.append(
         f"当前 {len(game.signup_user_ids)}/{eff_max} 人，至少 {eff_min} 人开局"
     )
+    if config.ww_role_request:
+        lines.append("报名后可私聊 /选身份 身份名，未请求则随机发牌")
     await view_cmd.finish("\n".join(lines))
+
+
+status_cmd = on_command(
+    "狼人状态",
+    aliases={"狼局状态", "狼人进度"},
+    priority=5,
+    block=True,
+)
+
+
+@status_cmd.handle()
+async def handle_status(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """查看当前公开进度，不显示身份或夜间行动细节。"""
+    game = get_game(int(event.group_id))
+    if game is None:
+        await status_cmd.finish("本群当前没有狼人杀对局（发送 /狼人杀 开房）")
+    await status_cmd.finish(format_game_status(game))
 
 
 board_cmd = on_command(
@@ -635,8 +742,15 @@ async def handle_wish(
     board = BOARDS[game.board]
     role = parse_role(str(arg))
     if role is None:
+        current = game.role_requests.get(user_id)
+        current_note = (
+            f"\n当前请求：{current.value}（发送 /取消选身份 可清除）"
+            if current is not None
+            else "\n当前请求：无（未请求则随机发牌）"
+        )
         await wish_cmd.finish(
             f"格式：/选身份 身份名。可选身份：{board.roles_summary()}"
+            f"{current_note}"
         )
     if role not in board.all_roles():
         await wish_cmd.finish(
@@ -672,6 +786,119 @@ async def handle_unwish(
         await unwish_cmd.finish("你当前没有选身份请求~")
     logger.info(f"狼人杀群 {game.group_id} {user_id} 取消选身份请求：{prev.value}")
     await unwish_cmd.finish(f"已取消【{prev.value}】的请求，发牌将按随机分配。")
+
+
+# ── 身份卡补发（仅私聊）───────────────────────────────────
+
+identity_cmd = on_command(
+    "身份",
+    aliases={"重发身份卡"},
+    priority=5,
+    block=True,
+)
+
+
+@identity_cmd.handle()
+async def handle_identity(
+    event: PrivateMessageEvent,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """私聊重发自己的身份卡，解决首次私聊投递失败或消息遗失。"""
+    user_id = int(event.get_user_id())
+    game = game_of_user(user_id)
+    if game is None:
+        await identity_cmd.finish("你当前不在狼人杀对局中~")
+    if game.phase in (Phase.SIGNUP, Phase.ENDED) or not game.players:
+        await identity_cmd.finish("身份卡将在发牌后提供，请等待游戏开始~")
+    player = game.player_by_user(user_id)
+    if player is None or player.is_ai:
+        await identity_cmd.finish("当前无法为你补发身份卡~")
+    board = BOARDS[game.board]
+    roster = [(item.seat, display_name_of(game, item.user_id)) for item in game.players]
+    delivered = await engine._dm(
+        game,
+        player,
+        build_role_card(
+            player.seat,
+            player.role,
+            len(game.players),
+            silence_mode=board.silence_mode,
+            roster=roster,
+        ),
+    )
+    if delivered:
+        await identity_cmd.finish("身份卡已私聊重发，请查收~")
+    await identity_cmd.finish("身份卡发送失败，请先加机器人为好友后再发送 /身份~")
+
+
+# ── 仅私聊的特殊夜间行动命令 ──────────────────────────────
+
+choose_owner_cmd = on_command(
+    "认主",
+    aliases={"选主"},
+    priority=5,
+    block=True,
+)
+
+
+@choose_owner_cmd.handle()
+async def handle_choose_owner(
+    event: PrivateMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """混血儿首夜选择主人。"""
+    user_id = int(event.get_user_id())
+    game = game_of_user(user_id)
+    if game is None or game.phase is not Phase.NIGHT_HALFBLOOD:
+        await choose_owner_cmd.finish(
+            _not_now(game, "认主 是混血儿首夜行动，请私聊发送 /认主 N~")
+        )
+    player = game.player_by_user(user_id)
+    if player is None or player.role is not Role.HALFBLOOD:
+        await choose_owner_cmd.finish("当前只有混血儿可以认主~")
+    seat = _parse_seat(arg)
+    if seat is None:
+        await choose_owner_cmd.finish("格式：/认主 N（N 为主人座位号）")
+    await _finish_action(
+        choose_owner_cmd,
+        game,
+        Action(ActionKind.CHOOSE_OWNER, user_id, seat),
+    )
+
+
+silence_cmd = on_command(
+    "禁言",
+    aliases={"禁票"},
+    priority=5,
+    block=True,
+)
+
+
+@silence_cmd.handle()
+async def handle_silence(
+    event: PrivateMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """禁言/禁票长老夜间选择目标。"""
+    user_id = int(event.get_user_id())
+    game = game_of_user(user_id)
+    if game is None or game.phase is not Phase.NIGHT_ELDER:
+        await silence_cmd.finish(
+            _not_now(game, "禁言（禁票板为禁票）是长老夜间行动，请私聊发送 /禁言 N~")
+        )
+    player = game.player_by_user(user_id)
+    if player is None or player.role is not Role.SILENT_ELDER:
+        await silence_cmd.finish("当前只有禁言长老可以使用这条指令~")
+    seat = _parse_seat(arg)
+    if seat is None:
+        await silence_cmd.finish("格式：/禁言 N（禁票板也可用 /禁票 N）")
+    await _finish_action(
+        silence_cmd,
+        game,
+        Action(ActionKind.SILENCE, user_id, seat),
+    )
 
 
 # ── 夜间私聊命令 ──────────────────────────────────────────
@@ -1035,7 +1262,7 @@ async def handle_abstain(
     )
 
 
-skip_cmd = on_command("过", aliases={"跳过"}, priority=5, block=True)
+skip_cmd = on_command("过", priority=5, block=True)
 
 
 @skip_cmd.handle()
@@ -1047,7 +1274,7 @@ async def handle_skip(
     game = get_game(int(event.group_id))
     if game is None or game.phase not in (
         Phase.SHERIFF_SPEECH,
-        Phase.SHERIFF_REVOTE,
+        Phase.SHERIFF_FINAL_SPEECH,
         Phase.DAY_SPEECH,
         Phase.PK_SPEECH,
         Phase.LAST_WORDS,
@@ -1133,7 +1360,7 @@ _SPEECH_CAPTURE_PHASES: frozenset[Phase] = frozenset(
     {
         Phase.LAST_WORDS,
         Phase.SHERIFF_SPEECH,
-        Phase.SHERIFF_REVOTE,
+        Phase.SHERIFF_FINAL_SPEECH,
         Phase.DAY_SPEECH,
         Phase.PK_SPEECH,
     }
