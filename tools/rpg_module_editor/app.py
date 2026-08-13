@@ -30,6 +30,7 @@ from .tabs.events_tab import EventsTab
 from .tabs.module_tab import ModuleTab
 from .tabs.monsters_tab import MonstersTab
 from .tabs.npcs_tab import NpcsTab
+from .tabs.playtest_tab import PlaytestTab
 from .tabs.report_tab import ReportTab
 from .tabs.scenes_tab import ScenesTab
 from .tabs.yaml_tab import YamlTab
@@ -54,6 +55,7 @@ _TAB_ENDINGS = "tab-endings"
 _TAB_EVENTS = "tab-events"
 _TAB_YAML = "tab-yaml"
 _TAB_REPORT = "tab-report"
+_TAB_PLAYTEST = "tab-playtest"
 _WIDE_WIDTH = 130
 _COMPACT_WIDTH = 90
 _SHORT_HEIGHT = 32
@@ -73,6 +75,7 @@ class ModuleEditorApp(App):
         Binding("ctrl+tab", "next_tab", "下一页"),
         Binding("ctrl+shift+tab", "previous_tab", "上一页"),
         Binding("f5", "revalidate", "重新校验"),
+        Binding("f6", "playtest", "试玩"),
         Binding("ctrl+q", "quit_guarded", "退出"),
         Binding("f1", "help", "帮助"),
         Binding("ctrl+f", "search", "搜索"),
@@ -93,6 +96,7 @@ class ModuleEditorApp(App):
         self._events_tab = EventsTab()
         self._yaml_tab = YamlTab()
         self._report_tab = ReportTab()
+        self._playtest_tab = PlaytestTab()
         # tab id → 控件；新增分区页在这里登记一行
         self._tabs: dict[str, EditorTab] = {
             _TAB_MODULE: self._module_tab,
@@ -104,6 +108,7 @@ class ModuleEditorApp(App):
             _TAB_EVENTS: self._events_tab,
             _TAB_YAML: self._yaml_tab,
             _TAB_REPORT: self._report_tab,
+            _TAB_PLAYTEST: self._playtest_tab,
         }
         self._tab_titles = {
             _TAB_MODULE: "模组",
@@ -115,6 +120,7 @@ class ModuleEditorApp(App):
             _TAB_EVENTS: "事件",
             _TAB_YAML: "YAML 源码",
             _TAB_REPORT: "校验",
+            _TAB_PLAYTEST: "试玩",
         }
         self._layout_mode = "wide"
         self._base_screen: Optional[Screen] = None
@@ -129,6 +135,7 @@ class ModuleEditorApp(App):
             yield Button("保存", id="toolbar-save", variant="success")
             yield Button("另存为", id="toolbar-save-as")
             yield Button("校验", id="toolbar-validate")
+            yield Button("试玩", id="toolbar-playtest", variant="primary")
             yield Button("搜索", id="toolbar-search")
             yield Button("帮助", id="toolbar-help")
             yield Label("快捷键见底部", classes="-toolbar-hint")
@@ -201,6 +208,7 @@ class ModuleEditorApp(App):
         if self._title_timer is not None:
             self._title_timer.stop()
         self._title_timer = self.set_timer(0.3, self._update_title)
+        self._playtest_tab.refresh_tab(self.draft.data)
 
     def _update_title(self) -> None:
         self.sub_title = self.draft.display_title()
@@ -209,7 +217,7 @@ class ModuleEditorApp(App):
         self, event: TabbedContent.TabActivated
     ) -> None:
         pane_id = event.pane.id or ""
-        if pane_id in (_TAB_YAML, _TAB_REPORT):
+        if pane_id in (_TAB_YAML, _TAB_REPORT, _TAB_PLAYTEST):
             self._tabs[pane_id].refresh_tab(self.draft.data)
 
     # ── 文件流 ────────────────────────────────────────────
@@ -314,6 +322,7 @@ class ModuleEditorApp(App):
             "toolbar-save": self.action_save,
             "toolbar-save-as": self.action_save_as,
             "toolbar-validate": self.action_revalidate,
+            "toolbar-playtest": self.action_playtest,
             "toolbar-search": self.action_search,
             "toolbar-help": self.action_help,
         }
@@ -339,6 +348,10 @@ class ModuleEditorApp(App):
     def action_revalidate(self) -> None:
         self._report_tab.refresh_tab(self.draft.data)
         self.query_one(TabbedContent).active = _TAB_REPORT
+
+    def action_playtest(self) -> None:
+        self._playtest_tab.refresh_tab(self.draft.data)
+        self.query_one(TabbedContent).active = _TAB_PLAYTEST
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())

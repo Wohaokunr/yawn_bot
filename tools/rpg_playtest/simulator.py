@@ -1261,6 +1261,26 @@ def _failure_result(
     )
 
 
+def search_module_data(
+    data: Any,
+    config: SearchConfig,
+) -> SearchResult:
+    """Validate an in-memory YAML mapping and search it without disk I/O."""
+    try:
+        module = ModuleDef.model_validate(data)
+    except Exception as error:  # noqa: BLE001
+        return SearchResult(
+            ok=False,
+            reason="invalid_module",
+            message=f"模组读取或校验失败：{error}",
+            seed=config.seed,
+            target_ending=config.ending_id,
+            max_depth=config.max_depth,
+            max_states=config.max_states,
+        )
+    return search_module(module, config)
+
+
 def search_module(
     module: Any,
     config: SearchConfig,

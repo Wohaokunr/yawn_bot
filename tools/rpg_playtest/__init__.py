@@ -1,5 +1,6 @@
 """Fixed-seed, offline playtesting for yawn_rpg modules."""
 
+from .output import render_result_json, render_result_text
 from .simulator import (
     DEFAULT_MAX_DEPTH,
     DEFAULT_MAX_STATES,
@@ -9,6 +10,7 @@ from .simulator import (
     SearchResult,
     load_module,
     search_module,
+    search_module_data,
 )
 
 __all__ = [
@@ -19,5 +21,8 @@ __all__ = [
     "SearchConfig",
     "SearchResult",
     "load_module",
+    "render_result_json",
+    "render_result_text",
     "search_module",
+    "search_module_data",
 ]

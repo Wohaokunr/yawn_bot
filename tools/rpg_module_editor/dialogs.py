@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from textual.binding import BindingType
 
 _HELP_MD = """
+## 固定种子试玩（F6）
+
+切换到“试玩”页后，可选择当前草稿或已保存文件，填写 seed、目标结局、玩家人数和搜索上限。
+试玩在后台运行，结果包含可复现轨迹与 JSON；当前草稿发生变化时，旧结果会标记为过期。
+
 ## 防剧透可见性速查（摘自 modules/README.md）
 
 | 时机 | KP 能看到 |
