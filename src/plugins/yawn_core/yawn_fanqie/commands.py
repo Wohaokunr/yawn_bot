@@ -9,8 +9,9 @@ from __future__ import annotations
 import re
 from typing import cast
 
-from nonebot import get_driver, get_plugin_config, on_command
+from nonebot import get_driver, get_plugin_config, logger, on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent
+from nonebot.exception import RejectedException
 from nonebot.matcher import Matcher
 from nonebot.params import Arg, CommandArg
 from nonebot_plugin_orm import async_scoped_session
@@ -43,6 +44,11 @@ config = get_plugin_config(Config)
 
 def _plain(value: Message) -> str:
     return str(value).strip()
+
+
+def _debug_text(value: object, limit: int = 160) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
 def _user_id(event: MessageEvent) -> int:
@@ -84,12 +90,18 @@ def _parse_range(
 
 
 async def _feature_ok(event: MessageEvent, session: async_scoped_session) -> bool:
-    return await check_feature_permission(
-        _user_id(event),
-        _group_id(event),
+    user_id = _user_id(event)
+    group_id = _group_id(event)
+    allowed = await check_feature_permission(
+        user_id,
+        group_id,
         "fanqie",
         session,
     )
+    logger.debug(
+        f"番茄权限检查：user_id={user_id} group_id={group_id} allowed={allowed}"
+    )
+    return allowed
 
 
 async def _set_book_and_ask_range(
@@ -99,6 +111,10 @@ async def _set_book_and_ask_range(
 ) -> None:
     matcher.state["book"] = book
     matcher.state["chapters"] = chapters
+    logger.debug(
+        f"番茄交互状态转移：选择书籍 book_id={book.book_id} "
+        f"chapter_count={len(chapters)}"
+    )
     await fanqie_cmd.reject_arg(
         "fanqie_range",
         f"已选择《{book.title}》（作者：{book.author}），共 {len(chapters)} 章。\n"
@@ -127,18 +143,46 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
         source_kind, _source_id = parse_source(value)
     except ValueError:
         source_kind = "search"
-    async with FanqieProvider(config) as provider:
-        try:
-            if source_kind in {"page", "reader"}:
+    logger.debug(
+        f"番茄查询开始：source_kind={source_kind} value={_debug_text(value)!r}"
+    )
+    if source_kind in {"page", "reader"}:
+        async with FanqieProvider(config) as provider:
+            try:
                 book = await provider.resolve_book_reference(value)
                 chapters = await provider.list_chapters(book.book_id)
-                await _set_book_and_ask_range(matcher, book, chapters)
+            except RejectedException:
+                logger.debug("番茄查询交互异常继续向 NoneBot 状态机传播")
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    f"番茄书籍链接查询失败：source_kind={source_kind} "
+                    f"value={_debug_text(value)!r} error_type={type(exc).__name__}"
+                )
+                await fanqie_cmd.reject_arg("fanqie_input", f"查询失败：{exc}")
                 return
+        logger.debug(
+            f"番茄书籍链接查询完成：book_id={book.book_id} "
+            f"chapter_count={len(chapters)}"
+        )
+        await _set_book_and_ask_range(matcher, book, chapters)
+        return
+
+    async with FanqieProvider(config) as provider:
+        try:
             results = await provider.search(value)
+        except RejectedException:
+            logger.debug("番茄搜索交互异常继续向 NoneBot 状态机传播")
+            raise
         except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                f"番茄书名查询失败：value={_debug_text(value)!r} "
+                f"error_type={type(exc).__name__}"
+            )
             await fanqie_cmd.reject_arg("fanqie_input", f"查询失败：{exc}")
             return
     if not results:
+        logger.debug(f"番茄搜索完成但无结果：value={_debug_text(value)!r}")
         await fanqie_cmd.reject_arg(
             "fanqie_input", "没有找到公开书籍，请换个书名或直接输入链接。"
         )
@@ -150,6 +194,10 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
         for index, book in enumerate(results, 1)
     )
     lines.append("发送“取消”退出。")
+    logger.debug(
+        f"番茄搜索完成：value={_debug_text(value)!r} result_count={len(results)} "
+        f"book_ids={[book.book_id for book in results]}"
+    )
     await fanqie_cmd.reject_arg("fanqie_book", "\n".join(lines))
 
 
@@ -184,10 +232,17 @@ async def handle_fanqie_book(
     if not text.isdigit() or not 1 <= int(text) <= len(results):
         await fanqie_cmd.reject_arg("fanqie_book", "请输入搜索结果编号，例如 1。")
     book = results[int(text) - 1]
+    logger.debug(
+        f"番茄搜索结果选择：selection={text} book_id={book.book_id}"
+    )
     async with FanqieProvider(config) as provider:
         try:
             chapters = await provider.list_chapters(book.book_id)
         except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                f"番茄目录读取失败：book_id={book.book_id} "
+                f"error_type={type(exc).__name__}"
+            )
             await fanqie_cmd.reject_arg("fanqie_book", f"读取目录失败：{exc}")
             return
     await _set_book_and_ask_range(matcher, book, chapters)
@@ -211,6 +266,9 @@ async def handle_fanqie_range(
         start, end = _parse_range(text, len(chapters), config.fanqie_max_chapters)
     except ValueError as exc:
         await fanqie_cmd.reject_arg("fanqie_range", str(exc))
+    logger.debug(
+        f"番茄章节范围选择：book_id={book.book_id} start={start} end={end}"
+    )
     matcher.state["start_chapter"] = start
     matcher.state["end_chapter"] = end
     await fanqie_cmd.reject_arg(
@@ -238,6 +296,11 @@ async def handle_fanqie_confirm(
         )
     book = cast("BookSummary", matcher.state["book"])
     chapters = cast("list[ChapterRef]", matcher.state["chapters"])
+    logger.debug(
+        f"番茄任务提交：user_id={_user_id(event)} group_id={_group_id(event)} "
+        f"book_id={book.book_id} start={matcher.state['start_chapter']} "
+        f"end={matcher.state['end_chapter']}"
+    )
     job_id, error = await submit_job(
         _user_id(event),
         _group_id(event),
@@ -247,7 +310,9 @@ async def handle_fanqie_confirm(
         int(matcher.state["end_chapter"]),
     )
     if error:
+        logger.debug(f"番茄任务提交拒绝：error={error}")
         await fanqie_cmd.finish(error)
+    logger.debug(f"番茄任务提交成功：job_id={job_id}")
     await fanqie_cmd.finish(
         f"番茄任务 #{job_id} 已创建，将在后台下载。群聊只播报状态，成品会私发给你。"
     )
@@ -276,13 +341,20 @@ async def _can_manage(
     job: FanqieJob,
 ) -> bool:
     user_id = _user_id(event)
-    if _is_superuser(user_id) or user_id == job.requester_user_id:
-        return True
-    return (
+    is_superuser = _is_superuser(user_id)
+    is_owner = user_id == job.requester_user_id
+    is_group_admin_user = (
         isinstance(event, GroupMessageEvent)
         and job.group_id == int(event.group_id)
         and is_group_admin(event)
     )
+    allowed = is_superuser or is_owner or is_group_admin_user
+    logger.debug(
+        f"番茄任务权限检查：job_id={job.id} user_id={user_id} "
+        f"allowed={allowed} superuser={is_superuser} owner={is_owner} "
+        f"group_admin={is_group_admin_user}"
+    )
+    return allowed
 
 
 async def _list_text(event: MessageEvent, session: async_scoped_session) -> str:
@@ -297,6 +369,9 @@ async def _list_text(event: MessageEvent, session: async_scoped_session) -> str:
         query = query.where(FanqieJob.group_id == group_id)
     result = await session.execute(query)
     jobs = list(result.scalars().all())
+    logger.debug(
+        f"番茄任务列表查询：user_id={user_id} group_id={group_id} count={len(jobs)}"
+    )
     if not jobs:
         return "暂无可见番茄任务。"
     lines = ["番茄任务："]
@@ -321,6 +396,10 @@ async def handle_task_entry(
     _perm: None = require_feature("fanqie"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     text = _plain(arg)
+    logger.debug(
+        f"番茄任务命令：user_id={_user_id(event)} group_id={_group_id(event)} "
+        f"arg={_debug_text(text)!r}"
+    )
     if not text:
         await task_cmd.finish(await _list_text(event, session))
     parts = text.split(maxsplit=1)
@@ -329,8 +408,13 @@ async def handle_task_entry(
     job_id = int(parts[0])
     job = await _get_job(session, job_id)
     if job is None or not await _can_manage(event, job):
+        logger.debug(
+            f"番茄任务访问拒绝或不存在：job_id={job_id} "
+            f"user_id={_user_id(event)}"
+        )
         await task_cmd.finish("找不到该任务，或你没有管理权限。")
     if len(parts) == 1:
+        logger.debug(f"番茄任务详情查询：job_id={job_id}")
         title = await _book_title(session, job)
         await task_cmd.finish(
             f"任务 #{job.id}\n书籍：{title}\n"
@@ -339,6 +423,7 @@ async def handle_task_entry(
             f"错误：{job.last_error or '无'}\n发送：{job.send_status}"
         )
     action = parts[1].strip()
+    logger.debug(f"番茄任务操作：job_id={job_id} action={action}")
     if action in {"删除", "delete"}:
         matcher.state["delete_job_id"] = job_id
         await task_cmd.reject_arg(
@@ -346,13 +431,16 @@ async def handle_task_entry(
             f"删除任务 #{job_id} 及其本地文件后不可恢复。发送“确认删除”继续，或“取消”。",
         )
     if action in {"取消", "cancel"}:
+        logger.debug(f"番茄任务取消请求：job_id={job_id}")
         await task_cmd.finish(
             "任务已取消。" if await cancel_job(job_id) else "任务当前不能取消。"
         )
     if action in {"重试", "retry"}:
+        logger.debug(f"番茄任务重试请求：job_id={job_id}")
         ok, error = await retry_job(job_id)
         await task_cmd.finish("任务已重新排队。" if ok else (error or "任务重试失败。"))
     if action in {"发送", "send"}:
+        logger.debug(f"番茄任务发送请求：job_id={job_id}")
         _ok, message = await deliver_job(job_id)
         await task_cmd.finish(message)
     await task_cmd.finish("未知操作，请使用：取消、重试、发送、删除。")
@@ -375,7 +463,12 @@ async def handle_task_confirm(
         await task_cmd.reject_arg("task_confirm", "请发送“确认删除”继续，或“取消”。")
     job = await _get_job(session, job_id)
     if job is None or not await _can_manage(event, job):
+        logger.debug(
+            f"番茄任务二次确认后访问拒绝或不存在：job_id={job_id} "
+            f"user_id={_user_id(event)}"
+        )
         await task_cmd.finish("任务不存在，或你已没有管理权限。")
+    logger.debug(f"番茄任务删除请求确认：job_id={job_id}")
     await task_cmd.finish(
         "任务及本地文件已删除。"
         if await delete_job(job_id)

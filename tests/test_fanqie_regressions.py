@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import httpx
 import nonebot
 import pytest
+from nonebot.exception import RejectedException
+from typing_extensions import Self
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _RETRY_RESPONSES = 3
@@ -114,6 +116,109 @@ def test_search_and_book_chapter_parsers(fanqie_modules: SimpleNamespace) -> Non
     assert book.title == "公开的书"
     assert [chapter.item_id for chapter in chapters] == ["111111", "222222"]
     assert chapters[1].is_locked
+
+
+@pytest.mark.asyncio
+async def test_search_uses_current_public_path(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    provider_module = fanqie_modules.provider
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "search": {
+                    "books": [
+                        {
+                            "bookId": "123456",
+                            "bookName": "Target book",
+                            "author": "Author",
+                        }
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+    seen_urls: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(request.url)
+        return httpx.Response(200, text=page, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(), client
+    ) as provider:
+        books = await provider.search("十日终焉")
+    await client.aclose()
+
+    assert books[0].book_id == "123456"
+    assert seen_urls[0].raw_path == (
+        b"/search/%E5%8D%81%E6%97%A5%E7%BB%88%E7%84%89"
+    )
+    assert seen_urls[0].query == b""
+
+
+@pytest.mark.asyncio
+async def test_link_query_propagates_state_rejection(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = fanqie_modules.commands
+    provider_module = fanqie_modules.provider
+    book = provider_module.BookSummary("123456", "Target book", "Author")
+    chapters = [provider_module.ChapterRef("654321", "Chapter 1", 1)]
+
+    class FakeProvider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def resolve_book_reference(self, _value: str) -> object:
+            return book
+
+        async def list_chapters(self, _book_id: str) -> list[object]:
+            return chapters
+
+    rejection_calls: list[tuple[object, ...]] = []
+
+    async def fake_reject_arg(*args: object) -> None:
+        rejection_calls.append(args)
+
+    async def fake_set_book_and_ask_range(
+        _matcher: object,
+        _book: object,
+        _chapters: object,
+    ) -> None:
+        raise RejectedException
+
+    monkeypatch.setattr(commands, "FanqieProvider", FakeProvider)
+    monkeypatch.setattr(
+        commands,
+        "_set_book_and_ask_range",
+        fake_set_book_and_ask_range,
+    )
+    monkeypatch.setattr(
+        commands.fanqie_cmd,
+        "reject_arg",
+        fake_reject_arg,
+        raising=False,
+    )
+
+    with pytest.raises(RejectedException):
+        await commands._begin_fanqie_input(
+            SimpleNamespace(state={}),
+            "https://fanqienovel.com/page/123456",
+        )
+
+    assert rejection_calls == []
 
 
 @pytest.mark.asyncio

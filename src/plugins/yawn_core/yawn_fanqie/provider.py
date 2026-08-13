@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 from dataclasses import dataclass
 from html import unescape
+from time import perf_counter
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -35,6 +37,7 @@ _FONT_URL_RE = re.compile(
     r"url\(\s*['\"]?(https?://[^)'\"\s]+?\.woff2(?:\?[^)'\"\s]*)?)['\"]?\s*\)",
     re.IGNORECASE,
 )
+logger = logging.getLogger(__name__)
 
 
 class FanqieProviderError(RuntimeError):
@@ -157,6 +160,11 @@ def parse_search_results(page: str, limit: int = 5) -> list[BookSummary]:
                 results.append(book)
                 seen.add(book.book_id)
                 if len(results) >= limit:
+                    logger.debug(
+                        "fanqie parse search results: result_count=%d limit=%d",
+                        len(results),
+                        limit,
+                    )
                     return results
 
     pattern = re.compile(
@@ -177,6 +185,9 @@ def parse_search_results(page: str, limit: int = 5) -> list[BookSummary]:
         seen.add(book_id)
         if len(results) >= limit:
             break
+    logger.debug(
+        "fanqie parse search results: result_count=%d limit=%d", len(results), limit
+    )
     return results
 
 
@@ -311,11 +322,29 @@ class FanqieProvider:
         last_error: Exception | None = None
         total = self.settings.fanqie_request_retries + 1
         for attempt in range(total):
+            started = perf_counter()
+            logger.debug(
+                "fanqie request start: url=%s params=%s attempt=%d/%d",
+                url,
+                params or {},
+                attempt + 1,
+                total,
+            )
             try:
                 response = await self._client.get(
                     url,
                     params=params,
                     timeout=self.settings.fanqie_request_timeout,
+                )
+                logger.debug(
+                    "fanqie request response: url=%s status=%d bytes=%d "
+                    "elapsed_ms=%.1f attempt=%d/%d",
+                    url,
+                    response.status_code,
+                    len(response.content),
+                    (perf_counter() - started) * 1000,
+                    attempt + 1,
+                    total,
                 )
                 if response.status_code == 429 or response.status_code >= 500:
                     last_error = FanqieProviderError(f"HTTP {response.status_code}")
@@ -325,15 +354,48 @@ class FanqieProvider:
                             delay = min(float(retry_after), 10.0)
                         except ValueError:
                             delay = min(2**attempt, 5.0)
+                        logger.debug(
+                            "fanqie request retry scheduled: url=%s status=%d "
+                            "delay=%.2fs next_attempt=%d/%d",
+                            url,
+                            response.status_code,
+                            delay,
+                            attempt + 2,
+                            total,
+                        )
                         await asyncio.sleep(delay)
                         continue
                     raise last_error
                 if response.status_code >= 400:
+                    logger.warning(
+                        "fanqie request rejected: url=%s status=%d elapsed_ms=%.1f",
+                        url,
+                        response.status_code,
+                        (perf_counter() - started) * 1000,
+                    )
                     raise FanqieProviderError(f"HTTP {response.status_code}")
                 return response
             except httpx.RequestError as exc:
                 last_error = exc
+                logger.debug(
+                    "fanqie request network error: url=%s error_type=%s "
+                    "elapsed_ms=%.1f attempt=%d/%d",
+                    url,
+                    type(exc).__name__,
+                    (perf_counter() - started) * 1000,
+                    attempt + 1,
+                    total,
+                    exc_info=True,
+                )
                 if attempt + 1 < total:
+                    logger.debug(
+                        "fanqie request retry scheduled after network error: "
+                        "url=%s delay=%.2fs next_attempt=%d/%d",
+                        url,
+                        min(2**attempt, 5.0),
+                        attempt + 2,
+                        total,
+                    )
                     await asyncio.sleep(min(2**attempt, 5.0))
                     continue
                 raise FanqieProviderError("网络请求失败") from exc
@@ -349,17 +411,35 @@ class FanqieProvider:
         keyword = keyword.strip()
         if not keyword:
             return []
+        search_path = f"/search/{quote(keyword, safe='')}"
+        logger.debug(
+            "fanqie search start: keyword=%r path=%s limit=%d",
+            keyword[:80],
+            search_path,
+            self.settings.fanqie_search_limit,
+        )
         response = await self._request(
-            self._page_url("/search"),
-            params={"keyword": keyword},
+            self._page_url(search_path),
         )
         page = response.text
-        return parse_search_results(page, self.settings.fanqie_search_limit)
+        results = parse_search_results(page, self.settings.fanqie_search_limit)
+        logger.debug(
+            "fanqie search complete: keyword=%r result_count=%d book_ids=%s "
+            "page_bytes=%d",
+            keyword[:80],
+            len(results),
+            [book.book_id for book in results],
+            len(response.content),
+        )
+        return results
 
     async def resolve_book_reference(self, value: str) -> BookSummary:
         """解析书籍页、阅读页 URL 或 ID 并取得书籍摘要。"""
 
         kind, value_id = parse_source(value)
+        logger.debug(
+            "fanqie resolve book reference: kind=%s value_id=%s", kind, value_id
+        )
         if kind == "page":
             return await self.get_book(value_id)
         page = await self._page(f"/reader/{value_id}")
@@ -367,6 +447,11 @@ class FanqieProvider:
         chapter = _first_value(state, ("chapterData",))
         if not isinstance(chapter, dict) or not chapter.get("bookId"):
             raise FanqieProviderError("阅读页缺少所属书籍信息")
+        logger.debug(
+            "fanqie reader reference resolved: item_id=%s book_id=%s",
+            value_id,
+            chapter["bookId"],
+        )
         return await self.get_book(str(chapter["bookId"]))
 
     async def get_book(self, book_id: str) -> BookSummary:
@@ -374,14 +459,28 @@ class FanqieProvider:
 
         if not _BOOK_ID_RE.fullmatch(book_id):
             raise ValueError("非法 book ID")
-        return parse_book_page(await self._page(f"/page/{book_id}"), book_id)
+        book = parse_book_page(await self._page(f"/page/{book_id}"), book_id)
+        logger.debug(
+            "fanqie book parsed: book_id=%s title=%r author=%r",
+            book.book_id,
+            book.title[:80],
+            book.author[:80],
+        )
+        return book
 
     async def list_chapters(self, book_id: str) -> list[ChapterRef]:
         """取得书籍目录。"""
 
         if not _BOOK_ID_RE.fullmatch(book_id):
             raise ValueError("非法 book ID")
-        return parse_chapter_list(await self._page(f"/page/{book_id}"))
+        chapters = parse_chapter_list(await self._page(f"/page/{book_id}"))
+        logger.debug(
+            "fanqie chapter list parsed: book_id=%s chapter_count=%d locked_count=%d",
+            book_id,
+            len(chapters),
+            sum(chapter.is_locked for chapter in chapters),
+        )
+        return chapters
 
     async def _font_mapping(self, page: str, state: dict[str, Any]) -> dict[str, str]:
         css_parts = [page]
@@ -390,9 +489,15 @@ class FanqieProvider:
                 css_parts.append(item)
         match = _FONT_URL_RE.search("\n".join(css_parts))
         if match is None:
+            logger.debug("fanqie chapter font mapping absent")
             return {}
         url = self._validate_font_url(match.group(1))
         if url in self._font_cache:
+            logger.debug(
+                "fanqie chapter font mapping cache hit: url=%s entries=%d",
+                url,
+                len(self._font_cache[url]),
+            )
             return self._font_cache[url]
         response = await self._request(url)
         try:
@@ -410,6 +515,11 @@ class FanqieProvider:
             if (decoded := font_glyph_to_text(str(glyph_name))) is not None
         }
         self._font_cache[url] = mapping
+        logger.debug(
+            "fanqie chapter font mapping parsed: url=%s entries=%d",
+            url,
+            len(mapping),
+        )
         return mapping
 
     async def fetch_chapter(self, item_id: str) -> ChapterContent:
@@ -417,6 +527,7 @@ class FanqieProvider:
 
         if not re.fullmatch(r"\d{6,32}", item_id):
             raise ValueError("非法章节 ID")
+        logger.debug("fanqie chapter fetch start: item_id=%s", item_id)
         page = await self._page(f"/reader/{item_id}")
         state = extract_initial_state(page)
         chapter_data = _first_value(state, ("chapterData",))
@@ -439,6 +550,14 @@ class FanqieProvider:
                 raise ChapterUnavailable("章节字体映射缺失，未尝试绕过访问控制")
         if not content:
             raise ChapterUnavailable("章节正文为空")
+        logger.debug(
+            "fanqie chapter fetch complete: item_id=%s title=%r "
+            "content_chars=%d pua=%s",
+            item_id,
+            title[:80],
+            len(content),
+            contains_pua(content),
+        )
         return ChapterContent(item_id=item_id, title=title, content=content)
 
 
