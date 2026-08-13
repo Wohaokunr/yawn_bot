@@ -41,6 +41,12 @@ task_cmd = on_command(
 )
 config = get_plugin_config(Config)
 
+_FANQIE_CHOICE_KEY = "fanqie_choice"
+_FANQIE_STEP_INPUT = "input"
+_FANQIE_STEP_BOOK = "book"
+_FANQIE_STEP_RANGE = "range"
+_FANQIE_STEP_CONFIRM = "confirm"
+
 
 def _plain(value: Message) -> str:
     return str(value).strip()
@@ -111,12 +117,13 @@ async def _set_book_and_ask_range(
 ) -> None:
     matcher.state["book"] = book
     matcher.state["chapters"] = chapters
+    matcher.state["fanqie_step"] = _FANQIE_STEP_RANGE
     logger.debug(
         f"番茄交互状态转移：选择书籍 book_id={book.book_id} "
         f"chapter_count={len(chapters)}"
     )
     await fanqie_cmd.reject_arg(
-        "fanqie_range",
+        _FANQIE_CHOICE_KEY,
         f"已选择《{book.title}》（作者：{book.author}），共 {len(chapters)} 章。\n"
         "请输入章节范围：全书，或 起始章-结束章（例如 1-20）。",
     )
@@ -128,14 +135,12 @@ async def handle_fanqie_entry(
     arg: Message = CommandArg(),
     _perm: None = require_feature("fanqie"),  # pyright: ignore[reportArgumentType]
 ) -> None:
+    matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
     value = _plain(arg)
     if value:
-        await _begin_fanqie_input(matcher, value)
-        return
-    await fanqie_cmd.reject_arg(
-        "fanqie_input",
-        "请输入书名、fanqienovel.com 书籍/阅读页链接，或 book ID。发送“取消”退出。",
-    )
+        # 将命令同行参数交给统一 got handler，避免入口 handler 在 reject_arg
+        # 后被 NoneBot 重新执行，导致下一条消息再次走搜索分支。
+        matcher.set_arg(_FANQIE_CHOICE_KEY, arg)
 
 
 async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
@@ -159,7 +164,8 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
                     f"番茄书籍链接查询失败：source_kind={source_kind} "
                     f"value={_debug_text(value)!r} error_type={type(exc).__name__}"
                 )
-                await fanqie_cmd.reject_arg("fanqie_input", f"查询失败：{exc}")
+                matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+                await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, f"查询失败：{exc}")
                 return
         logger.debug(
             f"番茄书籍链接查询完成：book_id={book.book_id} "
@@ -179,15 +185,18 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
                 f"番茄书名查询失败：value={_debug_text(value)!r} "
                 f"error_type={type(exc).__name__}"
             )
-            await fanqie_cmd.reject_arg("fanqie_input", f"查询失败：{exc}")
+            matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+            await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, f"查询失败：{exc}")
             return
     if not results:
         logger.debug(f"番茄搜索完成但无结果：value={_debug_text(value)!r}")
+        matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
         await fanqie_cmd.reject_arg(
-            "fanqie_input", "没有找到公开书籍，请换个书名或直接输入链接。"
+            _FANQIE_CHOICE_KEY, "没有找到公开书籍，请换个书名或直接输入链接。"
         )
         return
     matcher.state["search_results"] = results
+    matcher.state["fanqie_step"] = _FANQIE_STEP_BOOK
     lines = ["请选择小说编号："]
     lines.extend(
         f"{index}. 《{book.title}》｜作者：{book.author}｜ID：{book.book_id}"
@@ -198,39 +207,48 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
         f"番茄搜索完成：value={_debug_text(value)!r} result_count={len(results)} "
         f"book_ids={[book.book_id for book in results]}"
     )
-    await fanqie_cmd.reject_arg("fanqie_book", "\n".join(lines))
+    await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, "\n".join(lines))
 
 
-@fanqie_cmd.got("fanqie_input")
-async def handle_fanqie_input(
+@fanqie_cmd.got(
+    _FANQIE_CHOICE_KEY,
+    prompt="请输入书名、fanqienovel.com 书籍/阅读页链接，或 book ID。发送“取消”退出。",
+)
+async def handle_fanqie_choice(
     event: MessageEvent,
     matcher: Matcher,
     session: async_scoped_session,
-    value: Message = Arg("fanqie_input"),
+    value: Message = Arg(_FANQIE_CHOICE_KEY),
 ) -> None:
     if not await _feature_ok(event, session):
         await fanqie_cmd.finish("功能「番茄小说」当前未开启哦~")
     text = _plain(value)
     if text in {"取消", "退出"}:
         await fanqie_cmd.finish("已退出番茄小说下载。")
-    await _begin_fanqie_input(matcher, text)
+
+    step = matcher.state.get("fanqie_step", _FANQIE_STEP_INPUT)
+    if step == _FANQIE_STEP_INPUT:
+        await _begin_fanqie_input(matcher, text)
+        return
+    if step == _FANQIE_STEP_BOOK:
+        await _handle_fanqie_book(matcher, text)
+        return
+    if step == _FANQIE_STEP_RANGE:
+        await _handle_fanqie_range(matcher, text)
+        return
+    if step == _FANQIE_STEP_CONFIRM:
+        await _handle_fanqie_confirm(event, matcher, text)
+        return
+    await fanqie_cmd.finish("番茄小说会话已过期，请重新发送 /番茄小说。")
 
 
-@fanqie_cmd.got("fanqie_book")
-async def handle_fanqie_book(
-    event: MessageEvent,
-    matcher: Matcher,
-    session: async_scoped_session,
-    value: Message = Arg("fanqie_book"),
-) -> None:
-    if not await _feature_ok(event, session):
-        await fanqie_cmd.finish("功能「番茄小说」当前未开启哦~")
-    text = _plain(value)
-    if text in {"取消", "退出"}:
-        await fanqie_cmd.finish("已退出番茄小说下载。")
+async def _handle_fanqie_book(matcher: Matcher, text: str) -> None:
     results = cast("list[BookSummary]", matcher.state.get("search_results", []))
     if not text.isdigit() or not 1 <= int(text) <= len(results):
-        await fanqie_cmd.reject_arg("fanqie_book", "请输入搜索结果编号，例如 1。")
+        matcher.state["fanqie_step"] = _FANQIE_STEP_BOOK
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY, "请输入搜索结果编号，例如 1。"
+        )
     book = results[int(text) - 1]
     logger.debug(
         f"番茄搜索结果选择：selection={text} book_id={book.book_id}"
@@ -243,56 +261,41 @@ async def handle_fanqie_book(
                 f"番茄目录读取失败：book_id={book.book_id} "
                 f"error_type={type(exc).__name__}"
             )
-            await fanqie_cmd.reject_arg("fanqie_book", f"读取目录失败：{exc}")
+            matcher.state["fanqie_step"] = _FANQIE_STEP_BOOK
+            await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, f"读取目录失败：{exc}")
             return
     await _set_book_and_ask_range(matcher, book, chapters)
 
 
-@fanqie_cmd.got("fanqie_range")
-async def handle_fanqie_range(
-    event: MessageEvent,
-    matcher: Matcher,
-    session: async_scoped_session,
-    value: Message = Arg("fanqie_range"),
-) -> None:
-    if not await _feature_ok(event, session):
-        await fanqie_cmd.finish("功能「番茄小说」当前未开启哦~")
-    text = _plain(value)
-    if text in {"取消", "退出"}:
-        await fanqie_cmd.finish("已退出番茄小说下载。")
+async def _handle_fanqie_range(matcher: Matcher, text: str) -> None:
     chapters = cast("list[ChapterRef]", matcher.state.get("chapters", []))
     book = cast("BookSummary", matcher.state.get("book"))
     try:
         start, end = _parse_range(text, len(chapters), config.fanqie_max_chapters)
     except ValueError as exc:
-        await fanqie_cmd.reject_arg("fanqie_range", str(exc))
+        matcher.state["fanqie_step"] = _FANQIE_STEP_RANGE
+        await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, str(exc))
     logger.debug(
         f"番茄章节范围选择：book_id={book.book_id} start={start} end={end}"
     )
     matcher.state["start_chapter"] = start
     matcher.state["end_chapter"] = end
+    matcher.state["fanqie_step"] = _FANQIE_STEP_CONFIRM
     await fanqie_cmd.reject_arg(
-        "fanqie_confirm",
+        _FANQIE_CHOICE_KEY,
         f"将下载《{book.title}》第 {start}-{end} 章，共 {end - start + 1} 章。\n"
         "发送“确认”开始后台下载，发送“取消”退出。",
     )
 
 
-@fanqie_cmd.got("fanqie_confirm")
-async def handle_fanqie_confirm(
+async def _handle_fanqie_confirm(
     event: MessageEvent,
     matcher: Matcher,
-    session: async_scoped_session,
-    value: Message = Arg("fanqie_confirm"),
+    text: str,
 ) -> None:
-    if not await _feature_ok(event, session):
-        await fanqie_cmd.finish("功能「番茄小说」当前未开启哦~")
-    text = _plain(value)
-    if text in {"取消", "退出"}:
-        await fanqie_cmd.finish("已退出番茄小说下载。")
     if text not in {"确认", "确定", "是", "yes", "Y"}:
         await fanqie_cmd.reject_arg(
-            "fanqie_confirm", "请发送“确认”开始，或发送“取消”退出。"
+            _FANQIE_CHOICE_KEY, "请发送“确认”开始，或发送“取消”退出。"
         )
     book = cast("BookSummary", matcher.state["book"])
     chapters = cast("list[ChapterRef]", matcher.state["chapters"])
