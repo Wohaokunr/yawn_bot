@@ -52,6 +52,21 @@ _KNOWN_KEYS: dict[type, set[str]] = {
 # 引擎发言关键词与行动直接写入的固定 flag。
 _ENGINE_FLAGS = frozenset({"arson", "threat", "destroy", "assault", "murder"})
 
+_CONDITION_KINDS = frozenset(
+    {
+        "always",
+        "all_players_incapped",
+        "clue",
+        "clues",
+        "monster_dead",
+        "scene",
+        "time_after",
+        "time_before",
+        "time_between",
+        "flag",
+    }
+)
+
 
 def _declared_social_flags(data: dict[str, Any]) -> set[str]:
     """收集社交节点明确声明的运行时 flag 写入目标。"""
@@ -69,6 +84,144 @@ def _declared_social_flags(data: dict[str, Any]) -> set[str]:
                         value for value in values if isinstance(value, str) and value
                     )
     return declared
+
+
+def _condition_terms(condition: Any) -> Optional[list[tuple[str, str]]]:
+    """Parse the runtime condition vocabulary without evaluating it.
+
+    ``None`` means the draft is malformed (the authoritative schema will
+    report the actual error).  An empty list is an unconditional condition.
+    The static analysis only needs the flag name, so ``>=N`` is stripped from
+    flag values while preserving names such as ``npc_dead:butler``.
+    """
+
+    if condition is None:
+        return []
+    if not isinstance(condition, str):
+        return None
+    terms: list[tuple[str, str]] = []
+    for raw in condition.split("&"):
+        term = raw.strip()
+        if not term:
+            return None
+        kind, separator, value = term.partition(":")
+        if separator:
+            value = value.partition(">=")[0]
+        terms.append((kind, value))
+    return terms
+
+
+def _condition_possible(  # noqa: C901,PLR0911,PLR0912,PLR0913
+    condition: Any,
+    *,
+    current_scene: Optional[str],
+    reachable_scenes: set[str],
+    clues: set[str],
+    flags: set[str],
+    dead_monsters: set[str],
+) -> Optional[bool]:
+    """Return whether a condition is possibly true under an over-approximation.
+
+    This intentionally returns ``None`` for malformed/unknown terms so a
+    half-written draft is left to schema validation instead of producing a
+    misleading reachability warning.
+    """
+
+    terms = _condition_terms(condition)
+    if terms is None:
+        return None
+    for kind, value in terms:
+        if kind not in _CONDITION_KINDS:
+            return None
+        if kind in {"always", "all_players_incapped"}:
+            continue
+        if kind == "clue" and value not in clues:
+            return False
+        if kind == "clues":
+            required = {item for item in value.split("+") if item}
+            if not required or not required.issubset(clues):
+                return False
+        elif kind == "monster_dead" and value not in dead_monsters:
+            return False
+        elif kind == "scene":
+            if current_scene is not None and value != current_scene:
+                return False
+            if current_scene is None and value not in reachable_scenes:
+                return False
+        elif kind == "flag" and value not in flags:
+            return False
+        elif kind.startswith("time_"):
+            # Clock progress is deliberately optimistic here.  Exact timing
+            # belongs to the fixed-seed playtest, not this structural lint.
+            continue
+    return True
+
+
+def _condition_source_maps(  # noqa: C901,PLR0912
+    data: dict[str, Any],
+) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
+    """Collect possible clue, flag, and monster-death source declarations."""
+
+    clue_sources: dict[str, set[str]] = {}
+    flag_sources: dict[str, set[str]] = {
+        name: {"引擎固定写入"} for name in _ENGINE_FLAGS
+    }
+    monster_sources: dict[str, set[str]] = {}
+
+    def add(target: dict[str, set[str]], key: Any, source: str) -> None:
+        if isinstance(key, str) and key:
+            target.setdefault(key, set()).add(source)
+
+    scenes = get_list(data, "scenes")
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_label = f"场景{_tag(scene)}"
+        for check in get_list(scene, "checks"):
+            if isinstance(check, dict):
+                add(
+                    clue_sources,
+                    check.get("clue"),
+                    f"{scene_label} 检定点{_tag(check)}",
+                )
+        for monster_id in get_list(scene, "monsters"):
+            add(
+                monster_sources,
+                monster_id,
+                f"{scene_label} 怪物出场",
+            )
+
+    for kind in ("monsters", "npcs"):
+        for item in get_list(data, kind):
+            if not isinstance(item, dict):
+                continue
+            label = "怪物" if kind == "monsters" else "NPC"
+            add(
+                clue_sources,
+                item.get("on_death_clue"),
+                f"{label}{_tag(item)} 死亡奖励",
+            )
+
+    for npc in get_list(data, "npcs"):
+        if not isinstance(npc, dict):
+            continue
+        npc_label = f"NPC{_tag(npc)}"
+        npc_id = npc.get("id")
+        if isinstance(npc_id, str) and npc_id:
+            add(flag_sources, f"npc_dead:{npc_id}", f"{npc_label} 死亡")
+            add(flag_sources, "murder", f"{npc_label} 死亡")
+        for node in get_list(npc, "social_nodes"):
+            if not isinstance(node, dict):
+                continue
+            node_label = f"{npc_label} 社交节点{_tag(node)}"
+            for field_name in ("private_clues", "public_clues"):
+                for clue_id in get_list(node, field_name):
+                    add(clue_sources, clue_id, node_label)
+            for field_name in ("success_flags", "failure_flags"):
+                for flag in get_list(node, field_name):
+                    add(flag_sources, flag, node_label)
+
+    return clue_sources, flag_sources, monster_sources
 
 
 def _tag(item: Any, fallback: str = "?") -> str:
@@ -538,43 +691,257 @@ def _ending_rules_lint(data: dict[str, Any], issues: list[Issue]) -> None:
             )
 
 
-def _graph_lint(  # noqa: C901,PLR0912
+def _npc_can_be_in_scene(  # noqa: PLR0913
+    npc: dict[str, Any],
+    scene_id: str,
+    *,
+    scenes: list[Any],
+    reachable_scenes: set[str],
+    clues: set[str],
+    flags: set[str],
+    dead_monsters: set[str],
+) -> bool:
+    """Over-approximate runtime NPC presence using the schema's precedence."""
+
+    schedule = get_list(npc, "schedule")
+    if not schedule:
+        return any(
+            isinstance(scene, dict)
+            and npc.get("id") in get_list(scene, "npcs")
+            and scene.get("id") == scene_id
+            for scene in scenes
+        )
+    for entry in schedule:
+        if not isinstance(entry, dict) or entry.get("away"):
+            continue
+        if str(entry.get("scene", "")) != scene_id:
+            continue
+        possible = _condition_possible(
+            entry.get("condition"),
+            current_scene=None,
+            reachable_scenes=reachable_scenes,
+            clues=clues,
+            flags=flags,
+            dead_monsters=dead_monsters,
+        )
+        if possible is not False:
+            return True
+    return False
+
+
+def _graph_lint(  # noqa: C901,PLR0912,PLR0915
     data: dict[str, Any], issues: list[Issue]
 ) -> None:
-    """可达性 / 线索引用图：不可达场景、未使用线索。"""
+    """条件感知的场景 / 结局可达性与线索引用图检查。"""
+
     scenes = get_list(data, "scenes")
-    scene_ids = [str(s.get("id", "")) for s in scenes if isinstance(s, dict)]
+    scene_by_id = {
+        str(scene.get("id")): scene
+        for scene in scenes
+        if isinstance(scene, dict) and isinstance(scene.get("id"), str)
+    }
     start = data.get("start_scene")
-    if isinstance(start, str) and start in scene_ids:
-        adjacency: dict[str, list[str]] = {sid: [] for sid in scene_ids}
-        for scene in scenes:
-            if not isinstance(scene, dict):
-                continue
-            for exit_ in get_list(scene, "exits"):
-                if isinstance(exit_, dict):
-                    target = str(exit_.get("to_scene", ""))
-                    if target in adjacency:
-                        adjacency[str(scene.get("id", ""))].append(target)
-        reachable: set[str] = set()
-        queue = [start]
-        while queue:
-            current = queue.pop()
-            if current in reachable:
-                continue
-            reachable.add(current)
-            queue.extend(adjacency.get(current, []))
-        for scene in scenes:
-            if isinstance(scene, dict):
-                sid = str(scene.get("id", ""))
-                if sid not in reachable:
-                    issues.append(
-                        _issue(
-                            SEVERITY_WARNING,
-                            "场景",
-                            f"场景{_tag(scene)}",
-                            "自起始场景经出口不可达：玩家永远到不了这里",
-                        )
+    clue_sources, flag_sources, monster_sources = _condition_source_maps(data)
+
+    reachable: set[str] = set()
+    available_clues: set[str] = set()
+    available_flags: set[str] = set(_ENGINE_FLAGS)
+    possible_dead_monsters: set[str] = set()
+    possible_npcs: set[str] = set()
+    possible_npc_facts: set[tuple[str, str]] = set()
+
+    def add_values(target: set[Any], values: Any) -> bool:
+        before = len(target)
+        if isinstance(values, (list, tuple, set, frozenset)):
+            target.update(value for value in values if value)
+        elif values:
+            target.add(values)
+        return len(target) != before
+
+    # The fixed point is intentionally optimistic: once a scene is reachable,
+    # every check/kill/social outcome that can be performed there is considered
+    # available. This catches dependency cycles without modelling dice or
+    # relationship values and therefore cannot reject a legal path merely for
+    # being hard to discover.
+    if isinstance(start, str) and start in scene_by_id:
+        reachable.add(start)
+        changed = True
+        while changed:
+            changed = False
+            for scene_id in tuple(reachable):
+                scene = scene_by_id[scene_id]
+                for check in get_list(scene, "checks"):
+                    if isinstance(check, dict):
+                        changed |= add_values(available_clues, check.get("clue"))
+
+                for monster_id in get_list(scene, "monsters"):
+                    monster = next(
+                        (
+                            item
+                            for item in get_list(data, "monsters")
+                            if isinstance(item, dict) and item.get("id") == monster_id
+                        ),
+                        None,
                     )
+                    if monster is None:
+                        continue
+                    changed |= add_values(possible_dead_monsters, monster_id)
+                    changed |= add_values(
+                        available_clues, monster.get("on_death_clue")
+                    )
+
+                for npc in get_list(data, "npcs"):
+                    if not isinstance(npc, dict):
+                        continue
+                    npc_id = npc.get("id")
+                    if not isinstance(npc_id, str) or not _npc_can_be_in_scene(
+                        npc,
+                        scene_id,
+                        scenes=scenes,
+                        reachable_scenes=reachable,
+                        clues=available_clues,
+                        flags=available_flags,
+                        dead_monsters=possible_dead_monsters,
+                    ):
+                        continue
+                    changed |= add_values(possible_npcs, npc_id)
+                    changed |= add_values(available_flags, "murder")
+                    changed |= add_values(available_flags, f"npc_dead:{npc_id}")
+                    changed |= add_values(
+                        available_clues, npc.get("on_death_clue")
+                    )
+                    for node in get_list(npc, "social_nodes"):
+                        if not isinstance(node, dict):
+                            continue
+                        required = {
+                            (npc_id, str(fact))
+                            for fact in get_list(node, "requires_facts")
+                            if fact
+                        }
+                        if not required.issubset(possible_npc_facts):
+                            continue
+                        changed |= add_values(
+                            possible_npc_facts,
+                            {
+                                (npc_id, str(fact))
+                                for fact in get_list(node, "unlock_facts")
+                                if fact
+                            },
+                        )
+                        for field_name in ("private_clues", "public_clues"):
+                            changed |= add_values(
+                                available_clues, get_list(node, field_name)
+                            )
+                        for field_name in ("success_flags", "failure_flags"):
+                            changed |= add_values(
+                                available_flags, get_list(node, field_name)
+                            )
+
+            for scene_id in tuple(reachable):
+                scene = scene_by_id[scene_id]
+                for exit_ in get_list(scene, "exits"):
+                    if not isinstance(exit_, dict):
+                        continue
+                    target = exit_.get("to_scene")
+                    if not isinstance(target, str) or target not in scene_by_id:
+                        continue
+                    possible = _condition_possible(
+                        exit_.get("condition"),
+                        current_scene=scene_id,
+                        reachable_scenes=reachable,
+                        clues=available_clues,
+                        flags=available_flags,
+                        dead_monsters=possible_dead_monsters,
+                    )
+                    if possible and target not in reachable:
+                        reachable.add(target)
+                        changed = True
+
+        issues.extend(
+            _issue(
+                SEVERITY_WARNING,
+                "场景",
+                f"场景{_tag(scene)}",
+                "自起始场景经满足条件的出口不可达：玩家可能永远到不了这里",
+                hint="P1-2 可达性检查",
+            )
+            for scene in scenes
+            if isinstance(scene, dict) and scene.get("id") not in reachable
+        )
+
+        ending_possibility: list[bool] = []
+        for ending in get_list(data, "endings"):
+            if not isinstance(ending, dict):
+                continue
+            possible = _condition_possible(
+                ending.get("condition"),
+                current_scene=None,
+                reachable_scenes=reachable,
+                clues=available_clues,
+                flags=available_flags,
+                dead_monsters=possible_dead_monsters,
+            )
+            ending_possibility.append(possible is not False)
+            if possible is False:
+                issues.append(
+                    _issue(
+                        SEVERITY_WARNING,
+                        "结局",
+                        f"结局{_tag(ending)}",
+                        "结局不可达：没有任何可达状态能够满足该条件，结局可能永远不会触发",
+                        hint="P1-2 可达性检查",
+                    )
+                )
+        if ending_possibility and not any(ending_possibility):
+            issues.append(
+                _issue(
+                    SEVERITY_WARNING,
+                    "模组",
+                    "顶层 › endings",
+                    "没有任何声明结局可达：所有结局条件都无法在可达状态中成立",
+                    hint="P1-2 可达性检查",
+                )
+            )
+
+    # Conditions with no declared source are a separate diagnostic from graph
+    # reachability: a source may exist only in an unreachable branch, while a
+    # condition may also be impossible even when all of its names are defined.
+    for where, host in condition_fields(data):
+        condition = host.get("condition")
+        terms = _condition_terms(condition)
+        if terms is None:
+            continue
+        missing: list[str] = []
+        for kind, value in terms:
+            if kind == "clue" and value not in clue_sources:
+                missing.append(f"clue:{value}")
+            elif kind == "clues":
+                missing.extend(
+                    f"clue:{clue_id}"
+                    for clue_id in value.split("+")
+                    if clue_id and clue_id not in clue_sources
+                )
+            elif kind == "monster_dead" and value not in monster_sources:
+                missing.append(f"monster_dead:{value}")
+            elif (
+                kind == "flag"
+                and value not in flag_sources
+                and value != "npc_dead"
+            ):
+                missing.append(f"flag:{value}")
+        if missing:
+            unique_missing = list(dict.fromkeys(missing))
+            issues.append(
+                _issue(
+                    SEVERITY_WARNING,
+                    "条件",
+                    f"{where} › condition",
+                    "条件引用没有已知写入来源："
+                    f"{'、'.join(unique_missing)}；该条件可能永远不成立",
+                    hint="P1-2 可达性检查",
+                )
+            )
+
     # 未使用线索
     referenced: set[str] = set()
     for scene in scenes:
@@ -595,12 +962,13 @@ def _graph_lint(  # noqa: C901,PLR0912
                 continue
             for field in ("private_clues", "public_clues"):
                 referenced.update(str(clue) for clue in get_list(node, field))
-    clue_term = re.compile(r"\bclues?:([a-z0-9_+]+)")
     for _where, host in condition_fields(data):
         condition = host.get("condition")
-        if isinstance(condition, str):
-            for match in clue_term.finditer(condition):
-                referenced.update(part for part in match.group(1).split("+") if part)
+        for kind, value in _condition_terms(condition) or []:
+            if kind == "clue":
+                referenced.add(value)
+            elif kind == "clues":
+                referenced.update(part for part in value.split("+") if part)
     for clue in get_list(data, "clues"):
         if isinstance(clue, dict):
             ident = str(clue.get("id", ""))
@@ -637,27 +1005,6 @@ def _misc_lint(data: dict[str, Any], issues: list[Issue]) -> None:
         for event in get_list(data, "events")
         if isinstance(event, dict) and not str(event.get("condition", "")).strip()
     )
-    flag_term = re.compile(r"\bflag:([a-z0-9_]+)")
-    writable_flags = _ENGINE_FLAGS | _declared_social_flags(data)
-    for where, host in condition_fields(data):
-        condition = host.get("condition")
-        if not isinstance(condition, str):
-            continue
-        for match in flag_term.finditer(condition):
-            name = match.group(1)
-            if name not in writable_flags and name != "npc_dead":
-                issues.append(
-                    _issue(
-                        SEVERITY_WARNING,
-                        "通用",
-                        f"{where} › condition",
-                        f"flag:{name} 没有已知写入来源"
-                        "（引擎固定 flag 或 NPC 社交节点），"
-                        "该条件可能永不成立",
-                    )
-                )
-
-
 def run_lint(data: dict[str, Any]) -> list[Issue]:
     """全部规范检查；调用方自行与 validate 结果合并排序。"""
     issues: list[Issue] = []

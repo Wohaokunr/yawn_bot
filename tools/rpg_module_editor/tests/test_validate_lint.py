@@ -28,6 +28,10 @@ def _messages(issues: list) -> str:
     return "\n".join(f"{i.severity} {i.path_label} {i.message}" for i in issues)
 
 
+def _p1_2_issues(issues: list) -> list:
+    return [issue for issue in issues if issue.hint == "P1-2 可达性检查"]
+
+
 def test_valid_module_has_zero_errors(valid_data: dict) -> None:
     """核心不变式：编辑器诊断与 load_modules 的结论一致。"""
     ModuleDef.model_validate(valid_data)  # 引擎口径通过
@@ -53,6 +57,13 @@ def test_dangling_reference_error(valid_data: dict) -> None:
     data["scenes"][0]["exits"][0]["condition"] = "clue:not_exist"
     report = validate_structure(data)
     assert any("未定义的线索" in i.message for i in report.errors)
+
+
+def test_dangling_exit_error_stays_in_schema(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    data["scenes"][0]["exits"][0]["to_scene"] = "missing_scene"
+    report = validate_structure(data)
+    assert any("未定义的场景" in i.message for i in report.errors)
 
 
 def test_trivially_true_ending_rejected(valid_data: dict) -> None:
@@ -129,6 +140,94 @@ def test_unreachable_scene_warned(valid_data: dict) -> None:
     assert any("不可达" in i.message for i in issues)
 
 
+def test_condition_aware_graph_rejects_self_locked_scene(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    clue_id = "sealed_clue"
+    data["clues"].append({"id": clue_id, "name": "密室线索", "text": "无"})
+    living_room = next(
+        scene for scene in data["scenes"] if scene["id"] == "living_room"
+    )
+    sealed = copy.deepcopy(living_room)
+    sealed["id"] = "sealed_room"
+    sealed["name"] = "密室"
+    sealed["checks"][0]["id"] = "sealed_search"
+    sealed["checks"][0]["clue"] = clue_id
+    sealed["exits"] = []
+    data["scenes"].append(sealed)
+    living_room["exits"].append(
+        {"to_scene": "sealed_room", "condition": f"clue:{clue_id}"}
+    )
+
+    issues = run_lint(data)
+
+    assert any(
+        issue.section == "场景"
+        and "sealed_room" in issue.path_label
+        and "不可达" in issue.message
+        for issue in _p1_2_issues(issues)
+    )
+
+
+def test_unreachable_ending_and_missing_clue_source_are_reported(
+    valid_data: dict,
+) -> None:
+    data = copy.deepcopy(valid_data)
+    clue_id = "never_written"
+    data["clues"].append({"id": clue_id, "name": "未写入线索", "text": "无"})
+    data["endings"][0]["condition"] = f"clue:{clue_id}"
+
+    issues = run_lint(data)
+
+    assert any(
+        issue.section == "条件"
+        and clue_id in issue.message
+        and "写入来源" in issue.message
+        for issue in _p1_2_issues(issues)
+    )
+    assert any(
+        issue.section == "结局"
+        and "不可" in issue.message
+        for issue in _p1_2_issues(issues)
+    )
+
+
+def test_all_declared_endings_unreachable_get_module_warning(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    for ending in data["endings"]:
+        ending["condition"] = "clue:never_ending"
+
+    issues = _p1_2_issues(run_lint(data))
+
+    assert any(
+        issue.section == "模组" and "没有任何声明结局可达" in issue.message
+        for issue in issues
+    )
+
+
+def test_monster_dead_without_scene_source_is_reported(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    monster = copy.deepcopy(data["monsters"][0])
+    monster["id"] = "unplaced_beast"
+    monster["on_death_clue"] = None
+    data["monsters"].append(monster)
+    data["endings"][0]["condition"] = "monster_dead:unplaced_beast"
+
+    issues = run_lint(data)
+
+    assert any(
+        issue.section == "条件"
+        and "monster_dead:unplaced_beast" in issue.message
+        for issue in _p1_2_issues(issues)
+    )
+
+
+def test_existing_modules_have_no_p1_2_false_positive() -> None:
+    for path in sorted(modules_dir().glob("*.yaml")):
+        data, _ = load_module_file(path)
+        issues = _p1_2_issues(run_lint(data))
+        assert not issues, f"{path.name}: {_messages(issues)}"
+
+
 def test_unused_clue_warned(valid_data: dict) -> None:
     data = copy.deepcopy(valid_data)
     data["clues"].append({"id": "orphan_clue", "name": "孤儿线索", "text": "无"})
@@ -187,6 +286,30 @@ def test_social_node_declared_flag_is_known(valid_data: dict) -> None:
     data["endings"][0]["condition"] = "flag:custom_flag"
     issues = run_lint(data)
     assert not any("flag:custom_flag" in i.message for i in issues)
+
+
+def test_multi_clue_condition_uses_all_declared_sources(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    data["clues"].append({"id": "second_clue", "name": "第二线索", "text": "无"})
+    living_room = next(
+        scene for scene in data["scenes"] if scene["id"] == "living_room"
+    )
+    living_room["checks"][0]["clue"] = "second_clue"
+    data["endings"][0]["condition"] = "clues:brass_key+second_clue"
+
+    issues = _p1_2_issues(run_lint(data))
+
+    assert not any("clue:brass_key" in issue.message for issue in issues)
+    assert not any("clue:second_clue" in issue.message for issue in issues)
+
+
+def test_npc_death_flag_is_a_known_condition_source(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    data["endings"][0]["condition"] = "flag:npc_dead:butler"
+
+    issues = _p1_2_issues(run_lint(data))
+
+    assert not any("npc_dead:butler" in issue.message for issue in issues)
 
 
 def test_skeleton_template_is_clean() -> None:
