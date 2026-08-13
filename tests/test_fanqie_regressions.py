@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import httpx
 import nonebot
 import pytest
+from nonebot.adapters.onebot.v11 import Message
 from nonebot.exception import RejectedException
 from typing_extensions import Self
 
@@ -219,6 +220,91 @@ async def test_link_query_propagates_state_rejection(
         )
 
     assert rejection_calls == []
+
+
+@pytest.mark.asyncio
+async def test_choice_state_machine_does_not_repeat_search(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = fanqie_modules.commands
+    provider_module = fanqie_modules.provider
+    book = provider_module.BookSummary("123456", "Target book", "Author")
+    chapters = [
+        provider_module.ChapterRef("654321", "Chapter 1", 1),
+        provider_module.ChapterRef("654322", "Chapter 2", 2),
+    ]
+    search_values: list[str] = []
+    chapter_book_ids: list[str] = []
+    prompts: list[tuple[object, ...]] = []
+    finishes: list[tuple[object, ...]] = []
+    submissions: list[tuple[object, ...]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def search(self, value: str) -> list[object]:
+            search_values.append(value)
+            return [book]
+
+        async def list_chapters(self, book_id: str) -> list[object]:
+            chapter_book_ids.append(book_id)
+            return chapters
+
+    async def allow_feature(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def fake_reject_arg(*args: object, **_kwargs: object) -> None:
+        prompts.append(args)
+
+    async def fake_finish(*args: object, **_kwargs: object) -> None:
+        finishes.append(args)
+
+    async def fake_submit_job(*args: object, **_kwargs: object) -> tuple[int, None]:
+        submissions.append(args)
+        return 42, None
+
+    monkeypatch.setattr(commands, "FanqieProvider", FakeProvider)
+    monkeypatch.setattr(commands, "_feature_ok", allow_feature)
+    monkeypatch.setattr(commands, "submit_job", fake_submit_job)
+    monkeypatch.setattr(commands.fanqie_cmd, "reject_arg", fake_reject_arg)
+    monkeypatch.setattr(commands.fanqie_cmd, "finish", fake_finish)
+
+    event = SimpleNamespace(get_user_id=lambda: "10001", group_id=20002)
+    matcher = commands.fanqie_cmd()
+
+    await commands.handle_fanqie_entry(matcher, Message("Target book"), None)
+    assert matcher.state["fanqie_step"] == "input"
+    assert str(matcher.get_arg("fanqie_choice")) == "Target book"
+
+    await commands.handle_fanqie_choice(
+        event,
+        matcher,
+        object(),
+        Message("Target book"),
+    )
+    assert search_values == ["Target book"]
+    assert matcher.state["fanqie_step"] == "book"
+
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("1"))
+    assert search_values == ["Target book"]
+    assert chapter_book_ids == ["123456"]
+    assert matcher.state["fanqie_step"] == "range"
+
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("1-2"))
+    assert matcher.state["fanqie_step"] == "confirm"
+
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("确认"))
+    assert submissions and submissions[0][0:2] == (10001, 20002)
+    assert finishes and "#42" in str(finishes[-1][0])
+    assert [args[0] for args in prompts] == ["fanqie_choice"] * 3
 
 
 @pytest.mark.asyncio

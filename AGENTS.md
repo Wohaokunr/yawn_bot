@@ -22,6 +22,8 @@
 - 2026-08-14：新增可选 `yawn_fanqie` 番茄小说子插件。仅处理番茄公开书籍/阅读页和页面字体资源，不登录、不绕过验证码或付费控制；新增 provider、PUA 字体解码、章节范围交互、持久化任务/断点、单 worker 有界队列、用户/群/全局权限链、私聊 TXT 投递和 canonical `yawn_fanqie` 迁移。迁移需由维护者手动执行，正文只短期保存在 localstore 数据目录；完成后应运行插件定向测试、Ruff、Pyright、compileall、正式 discovery 和 `git diff --check`。
 - 2026-08-14：修复番茄查询回归：搜索改用公开 `/search/<关键词>` 路径，书籍链接查询把 `_set_book_and_ask_range()` 的 NoneBot `RejectedException` 交还状态机，不再误报“查询失败：RejectedException(0)”。provider、交互命令、任务 worker、权限拦截、断点复用、文件合并和私聊投递均补齐不含正文的 debug/exception 日志；新增搜索路径与状态机异常传播回归测试。保留未跟踪的 RPG 迁移文件，不要混入番茄修复提交。
 
+- 2026-08-14：修复番茄小说交互状态机：移除多个 `got` 参数之间使用 `reject_arg()` 的跨阶段跳转，统一使用 `fanqie_choice` 输入和 `fanqie_step`（input/book/range/confirm）路由；同行输入书名后，后续编号只读取目录，不会再次被当作搜索关键词。新增完整“书名→编号→章节范围→确认”回归，番茄定向测试 8 项通过。
+
 - 2026-08-12：为 yawn_core 增加持久化定时提醒；调度必须使用 nonebot-plugin-apscheduler 的全局 scheduler，消息发送必须通过 OneBot V11 Bot API，重启时从 ORM 恢复启用任务。
 - 2026-08-12：定时提醒只持久化可复用的 OneBot 消息段，拒绝 reply、forward、node 等临时段；文本支持 {{倒计时:YYYY-MM-DD}}，新增提醒的 ORM 迁移必须由维护者手动生成并应用。
 - 2026-08-12：按维护者要求生成并应用定时提醒迁移 ea3af2a76220；因已有迁移存在多个 head，实际使用 uv run nb orm upgrade heads，数据库已创建 yawn_core_scheduledreminder。
