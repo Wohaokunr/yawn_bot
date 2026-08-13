@@ -84,3 +84,4 @@
 - 2026-08-13：当前 Codex 沙箱将 `.git` 的 index、objects、refs 设为只读，无法在本环境内更新独立提交；实现与验证已完成，需在可写工作树执行本目标的 `git add`/`git commit`。
 - 2026-08-13：将 P1-1 固定种子试玩器整合进模组编辑器 TUI；新增“试玩”页、F6/工具栏入口、草稿/已保存文件数据源切换、seed/结局/人数/搜索上限设置、后台线程运行、轨迹与 JSON 报告及 Textual 剪贴板复制。TUI 复用 `tools.rpg_playtest` 的 schema 校验、确定性搜索和稳定渲染，不修改在线引擎语义；新增试玩页挂载、草稿与磁盘数据源、失败诊断、复制 JSON 和 80/100/140 列响应式回归测试。
 - 2026-08-13：P1-1 TUI 集成验证通过：编辑器测试 74 项、试玩器测试 10 项、全量 pytest 146 项（1 个既有 NoneBot adapter warning）；`uv run ruff check src tests tools`、`uv run pyright src tools`、`compileall` 和 `git diff --check` 均通过。CLI JSON 默认格式保持兼容，TUI JSON 使用同一字段并仅增加可读缩进。
+- 2026-08-13：修复 P1-1 TUI“运行试玩”按钮被设置行默认 `1fr` 高度推到视口外的问题；设置行和字段容器改为内容高度，并新增 179×47 宽屏可视性回归，确保运行/复制按钮及轨迹结果区可见。试玩页专测 8 项通过。

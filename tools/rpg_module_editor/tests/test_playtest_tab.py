@@ -110,3 +110,17 @@ async def test_playtest_tab_is_responsive(size: tuple[int, int]) -> None:
         assert tab.region.width > 0
         assert tab._trace.region.height > 0
         assert isinstance(tab._source, Select)
+
+
+async def test_playtest_controls_remain_visible_on_wide_screen() -> None:
+    """Settings rows must not consume all available height via a 1fr default."""
+    app = ModuleEditorApp(initial_path=_YUZHAI)
+    async with app.run_test(size=(179, 47)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-playtest"
+        await pilot.pause()
+        tab = app._playtest_tab
+        assert tab._run_button.region.height > 0
+        assert tab._copy_button.region.height > 0
+        assert tab.query_one("#playtest-output").region.height > 0
+        assert tab._run_button.region.bottom < app.size.height
