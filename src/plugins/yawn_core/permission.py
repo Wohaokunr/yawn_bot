@@ -36,6 +36,7 @@ FEATURE_REGISTRY: dict[str, str] = {
     "werewolf": "狼人杀",
     "rpg": "跑团",
     "reminder": "定时提醒",
+    "fanqie": "番茄小说",
 }
 
 

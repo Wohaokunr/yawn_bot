@@ -55,6 +55,7 @@ jobs:
               "yawn_core",
               "yawn_core:yawn_rpg",
               "yawn_core:yawn_werewolf",
+              "yawn_core:yawn_fanqie",
           )
           missing = [name for name in required if nonebot.get_plugin(name) is None]
           if missing:
