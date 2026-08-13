@@ -24,7 +24,8 @@ from pydantic import BaseModel
 class AIChatConfig(BaseModel):
     """AI 服务配置，字段从 .env / 环境变量读取。"""
 
-    ai_api_key: str  # 必填，缺失时启动即报错
+    # AI 是可选能力，确定性 RPG 部署无需配置密钥也可启动。
+    ai_api_key: Optional[str] = None
     ai_base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
     ai_model: str = "mimo-v2.5-pro"
     ai_max_tokens: int = 1024  # 单次生成的最大 token 数
@@ -32,10 +33,23 @@ class AIChatConfig(BaseModel):
 
 ai_config = get_plugin_config(AIChatConfig)
 
-client = AsyncOpenAI(
-    api_key=ai_config.ai_api_key,
-    base_url=ai_config.ai_base_url,
-)
+# 仅在实际发起 AI 请求时构造 SDK 客户端。
+client: Optional[AsyncOpenAI] = None
+
+
+def get_client() -> Optional[AsyncOpenAI]:
+    """返回共享客户端；未配置 AI 时返回 ``None``。"""
+    global client  # noqa: PLW0603
+    if client is not None:
+        return client
+    api_key = ai_config.ai_api_key
+    if not api_key or not api_key.strip():
+        return None
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=ai_config.ai_base_url,
+    )
+    return client
 
 # 非流式补全的并发上限：防止满桌 AI 的并发决策饿死 /对话 等交互调用
 _COMPLETION_CONCURRENCY = asyncio.Semaphore(6)
@@ -54,10 +68,14 @@ async def complete(
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
+    llm_client = get_client()
+    if llm_client is None:
+        logger.warning("LLM 未配置 AI_API_KEY，跳过非流式补全")
+        return None
     async with _COMPLETION_CONCURRENCY:
         try:
             response = await asyncio.wait_for(
-                client.chat.completions.create(
+                llm_client.chat.completions.create(
                     model=ai_config.ai_model,
                     messages=messages,
                     stream=False,
@@ -112,10 +130,14 @@ async def complete_with_tools(
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
+    llm_client = get_client()
+    if llm_client is None:
+        logger.warning("LLM 未配置 AI_API_KEY，跳过工具补全")
+        return None
     async with _COMPLETION_CONCURRENCY:
         try:
             response = await asyncio.wait_for(
-                client.chat.completions.create(
+                llm_client.chat.completions.create(
                     model=ai_config.ai_model,
                     messages=messages,
                     tools=tools,
