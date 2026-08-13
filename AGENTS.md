@@ -17,6 +17,8 @@
 
 ## 任务完成记录
 
+- 2026-08-13：完成 P1-2 场景与结局静态可达性诊断。编辑器 lint 新增基于条件词条、检定/死亡/社交奖励和引擎 flag 写入来源的保守固定点分析，报告条件阻断的场景与结局、无写入来源的条件、全部结局不可达和悬空出口；不修改在线 RPG 引擎或 P1-1 试玩器语义。新增可达性回归覆盖自锁场景、多线索、怪物死亡、NPC 死亡 flag、不可达结局、现有模组零误报及 schema 悬空引用。
+
 - 2026-08-12：为 yawn_core 增加持久化定时提醒；调度必须使用 nonebot-plugin-apscheduler 的全局 scheduler，消息发送必须通过 OneBot V11 Bot API，重启时从 ORM 恢复启用任务。
 - 2026-08-12：定时提醒只持久化可复用的 OneBot 消息段，拒绝 reply、forward、node 等临时段；文本支持 {{倒计时:YYYY-MM-DD}}，新增提醒的 ORM 迁移必须由维护者手动生成并应用。
 - 2026-08-12：按维护者要求生成并应用定时提醒迁移 ea3af2a76220；因已有迁移存在多个 head，实际使用 uv run nb orm upgrade heads，数据库已创建 yawn_core_scheduledreminder。
