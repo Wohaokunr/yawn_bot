@@ -82,6 +82,11 @@ class Action:
     submitted_at: float = field(default_factory=time.monotonic)
     expected_phase: Optional[Phase] = None
     expected_scene: Optional[str] = None
+    # PLAY 阶段的逻辑轮次快照。动作是否过期只看局面是否真的推进，
+    # 不再按真实排队秒数淘汰，避免把 AI/KP 的响应延迟算到玩家头上。
+    expected_explore_round: Optional[int] = None
+    expected_combat_round: Optional[int] = None
+    expected_combat_actor: Optional[int] = None
     result: Optional["asyncio.Future[str]"] = None
     # SAY 由引擎在消费前分类；这些字段不受玩家输入信任，
     # 只作为同一串行引擎内的路由快照。
@@ -164,6 +169,8 @@ class Game:
     game_row_id: Optional[int] = None
     # 携带 onebot v11 Bot 实例；用 Any 避免 nonebot 基类与适配器类型冲突
     bot: Any = None
+    # 报名 / 建卡阶段截止时刻（事件循环单调时钟）；供 /局面 展示。
+    phase_deadline: float = 0.0
     # ── 局内状态（仅引擎写入）──────────────────────────
     current_scene: Optional[str] = None
     discovered_clues: set[str] = field(default_factory=set)
@@ -305,11 +312,16 @@ class Game:
             flags=dict(self.flags),
         )
 
-    def start_explore_round(self, timeout: float) -> None:
-        """开始新探索轮，并清除上一轮未消耗的协助。"""
+    def start_explore_round(self, _timeout: float) -> None:
+        """开始新探索轮，并清除上一轮未消耗的协助。
+
+        探索期限只统计真正等待玩家输入的空闲时间，因此这里先置零；
+        PLAY 主循环确认队列与缓冲区均为空后才会按 ``timeout`` 启动计时。
+        参数保留在此处以维持统一调用接口，并明确由引擎控制实际起算点。
+        """
         self.explore_round += 1
         self.explore_acted.clear()
-        self.explore_deadline = asyncio.get_running_loop().time() + timeout
+        self.explore_deadline = 0.0
         self.assists.clear()
         self.npc_emotion_rapport_delta.clear()
         self.npc_emotion_attitude_delta.clear()

@@ -235,13 +235,14 @@ NPC 战斗数值镜像 `Monster`（`hp` / `attack_skill` / `attack_name` /
 
 ## 阶段与交互
 
-`SIGNUP`（报名 + `/选择模组 N`）→ `CHAR_CREATE`（系统掷卡私聊下发，
+`SIGNUP`（报名 + `/选择模组 N`；`/开始游戏` 人数不足只反馈差额并保持报名）→ `CHAR_CREATE`（系统掷卡私聊下发，
 私聊 DSL 微调：重掷/加减点/重置/查看/确认，超时自动确认，DM 失败
 自动确认）→ `PLAY`（时钟按 `time.start` 初始化，**群聊记录清空**——
 报名/建卡播报不进 KP 提示词；场景循环：结局安全网 → 事件扫描
 → 自动出口 → 行动分发；连续自动切景超过场景数 +1 判为恒真条件成环、
 兜底收尾）→ `ENDED`。PLAY 期群自由文本由 priority-0 非阻塞监听器
-投递 SAY，`rpg_say_settle_window` 内合批为一次 KP 调用；KP 回合期间
+投递 SAY，`rpg_say_settle_window` 内先收集原文，再并行路由并保持顺序；
+首条 NPC 路由是 KP 合批边界。KP 回合期间
 到达的消息经回合中吸纳处理（见核心契约）；私聊监听器
 **仅建卡期**拦截（其余私聊放行给 ai_chat）。两个监听规则的特性开关
 判定按 (用户, 群) 随对局缓存（TTL 300 秒，`commands._FEATURE_CACHE_TTL`），
@@ -250,7 +251,8 @@ NPC 战斗数值镜像 `Monster`（`hp` / `attack_skill` / `attack_name` /
 ## 配置键（`.env` 可覆盖，见 `config.py`）
 
 `RPG_MIN_PLAYERS` / `RPG_MAX_PLAYERS`、`RPG_SIGNUP_TIMEOUT`、
-`RPG_CHAR_CREATE_TIMEOUT` / `RPG_CHAR_REROLL_MAX` / `RPG_CHAR_SKILL_POOL`
+`RPG_CHAR_CREATE_TIMEOUT` / `RPG_CHAR_CREATE_WARN_REMAIN` /
+`RPG_CHAR_REROLL_MAX` / `RPG_CHAR_SKILL_POOL`
 （None→INT×2）/ `RPG_CHAR_SKILL_CAP`、`RPG_IDLE_TIMEOUT`、
 `RPG_WAIT_DEFAULT` / `RPG_WAIT_MAX`、
 `RPG_AI_ENABLED` / `RPG_AI_MAX_TOOL_ROUNDS` / `RPG_AI_TURN_TIMEOUT`、
@@ -261,7 +263,15 @@ finish_reason=length 截断返空）/ `RPG_KP_TEMPERATURE` /
 `RPG_SAY_SETTLE_WINDOW` / `RPG_SPEECH_TRUNCATE` / `RPG_MAX_CONTEXT_LINES`、
 `RPG_NPC_TIMEOUT` / `RPG_NPC_MAX_TOKENS`（推理模型须给足余量，
 否则截断返空 → NPC 全程罐头）/ `RPG_NPC_TEMPERATURE` /
-`RPG_NPC_CONTEXT_LINES`。
+`RPG_NPC_CONTEXT_LINES` / `RPG_AI_WAIT_NOTICE_DELAY`。
+
+`RPG_ACTION_TTL` 已不再是有效语义；行动是否过期只由阶段、场景、探索
+轮次、战斗轮次和当前行动者快照决定。`RPG_EXPLORE_ROUND_TIMEOUT` 只在
+所有行动缓冲为空且真正等待输入时计时，AI/KP/NPC/系统结算期间暂停。
+
+`/局面` 群内只显示公开信息，并把请求者的 HP/SAN、行动资格、个人线索、
+未公开 NPC 情报和关系分段单独私聊；`/线索` 无参数时群内只列公共线索，
+完整手记私聊发送。私聊失败不得把私人正文发回群内。
 
 ## 日志约定
 
