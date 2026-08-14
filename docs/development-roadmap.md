@@ -65,3 +65,4 @@ P0-1 至 P0-3 若已存在于工作区，应按上述边界拆分提交，不在
 - 2026-08-14：番茄小说子插件补齐任务创建回归修复：异步 SQLAlchemy 提交前缓存自增任务 ID，避免 `MissingGreenlet` 中断入队；新增回归测试，定向 pytest 9 项、Ruff、Pyright 通过。
 - 2026-08-14：修复番茄 worker 在异步 ORM 提交后继续读取书籍/章节对象导致的 `MissingGreenlet`；新增不可变章节快照并缓存任务书籍字段、章节状态日志字段，确保下载、写入和合并只使用普通值或新会话数据；番茄定向 pytest 11 项、Ruff、Pyright、compileall 和 `git diff --check` 均通过。
 - 2026-08-14：降低番茄章节默认请求间隔至 0.5 秒，保留 0.2 秒下限与 `FANQIE_REQUEST_DELAY` 配置覆盖；同步更新部署说明和环境示例，番茄定向 pytest 12 项、Ruff、Pyright、compileall 和 `git diff --check` 均通过。
+- 2026-08-14：番茄 provider 不再用目录 `isChapterLock` 提前跳过章节；按公开阅读页实际响应读取状态正文，并增加 `muye-reader-content noselect` DOM 备用解析与回归测试。未增加登录、授权接口或内容解锁逻辑。
