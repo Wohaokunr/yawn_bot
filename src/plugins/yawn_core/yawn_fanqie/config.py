@@ -16,6 +16,7 @@ class Config(BaseModel):
     fanqie_max_file_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     fanqie_file_retention_hours: int = Field(default=24, ge=1, le=720)
     fanqie_search_limit: int = Field(default=5, ge=1, le=5)
+    fanqie_rank_limit: int = Field(default=10, ge=1, le=10)
     fanqie_third_party_api_base: str = "http://101.35.133.34:5000"
     fanqie_third_party_api_timeout: float = Field(default=30.0, gt=0, le=120)
     fanqie_third_party_api_retries: int = Field(default=1, ge=0, le=3)

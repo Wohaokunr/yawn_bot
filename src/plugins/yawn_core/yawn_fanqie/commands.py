@@ -24,7 +24,17 @@ from ..permission import (  # noqa: TID252
 )
 from .config import Config
 from .models import FanqieBook, FanqieJob
-from .provider import BookSummary, ChapterRef, FanqieProvider, parse_source
+from .provider import (
+    BookSummary,
+    ChapterRef,
+    FanqieProvider,
+    FanqieServiceUnavailable,
+    RankCategory,
+    RankGender,
+    RankType,
+    SearchOrder,
+    parse_source,
+)
 from .state import cancel_job, delete_job, deliver_job, retry_job, submit_job
 
 fanqie_cmd = on_command(
@@ -43,13 +53,68 @@ config = get_plugin_config(Config)
 
 _FANQIE_CHOICE_KEY = "fanqie_choice"
 _FANQIE_STEP_INPUT = "input"
+_FANQIE_STEP_RANK_KIND = "rank_kind"
+_FANQIE_STEP_RANK_GENDER = "rank_gender"
+_FANQIE_STEP_RANK_CATEGORY = "rank_category"
 _FANQIE_STEP_BOOK = "book"
 _FANQIE_STEP_RANGE = "range"
 _FANQIE_STEP_CONFIRM = "confirm"
+_RANK_TYPE_CHOICES = (
+    ("read", "阅读榜"),
+    ("new", "新书榜"),
+)
+_RANK_GENDER_CHOICES = (
+    ("male", "男频"),
+    ("female", "女频"),
+)
+_SEARCH_PREFIXES: tuple[tuple[str, SearchOrder], ...] = (
+    ("搜索最新", "new"),
+    ("搜索最热", "hot"),
+    ("搜索", "related"),
+)
 
 
 def _plain(value: Message) -> str:
     return str(value).strip()
+
+
+def _parse_search_input(value: str) -> tuple[str, SearchOrder]:
+    """解析搜索关键词和官方搜索排序。"""
+
+    text = value.strip()
+    for prefix, order in _SEARCH_PREFIXES:
+        if text == prefix:
+            return "", order
+        if text.startswith(prefix):
+            suffix = text[len(prefix) :]
+            if suffix and suffix[0] in {" ", "　"}:
+                return suffix.strip(), order
+    return text, "related"
+
+
+def _format_count(value: int | None) -> str:
+    return f"{value:,}" if value is not None else "未知"
+
+
+def _book_choice_prompt(
+    results: list[BookSummary],
+    *,
+    ranked: bool = False,
+) -> str:
+    lines = ["请选择小说编号："]
+    for index, book in enumerate(results, 1):
+        if ranked:
+            rank = book.rank or index
+            lines.append(
+                f"{index}. #{rank}《{book.title}》｜作者：{book.author}｜"
+                f"阅读：{_format_count(book.read_count)}｜字数：{_format_count(book.word_count)}"
+            )
+        else:
+            lines.append(
+                f"{index}. 《{book.title}》｜作者：{book.author}｜ID：{book.book_id}"
+            )
+    lines.append("发送“取消”退出。")
+    return "\n".join(lines)
 
 
 def _debug_text(value: object, limit: int = 160) -> str:
@@ -129,6 +194,39 @@ async def _set_book_and_ask_range(
     )
 
 
+async def _begin_rank_input(matcher: Matcher) -> None:
+    """读取榜单分类并进入榜单类型选择。"""
+
+    async with FanqieProvider(config) as provider:
+        try:
+            categories = await provider.list_rank_categories()
+        except FanqieServiceUnavailable as exc:
+            logger.debug(f"番茄榜单暂不可用：error={_debug_text(exc)!r}")
+            matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+            await fanqie_cmd.reject_arg(
+                _FANQIE_CHOICE_KEY,
+                "番茄榜单暂时不可用，可能需要稍后重试；也可以直接输入书籍链接或 book ID。",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(f"番茄榜单分类读取失败：error_type={type(exc).__name__}")
+            matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+            await fanqie_cmd.reject_arg(
+                _FANQIE_CHOICE_KEY,
+                "读取番茄榜单失败，请稍后重试；也可以直接输入书籍链接或 book ID。",
+            )
+            return
+    matcher.state["rank_categories"] = categories
+    matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_KIND
+    lines = ["请选择榜单类型："]
+    lines.extend(
+        f"{index}. {choice[1]}"
+        for index, choice in enumerate(_RANK_TYPE_CHOICES, 1)
+    )
+    lines.append("发送“取消”退出。")
+    await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, "\n".join(lines))
+
+
 @fanqie_cmd.handle()
 async def handle_fanqie_entry(
     matcher: Matcher,
@@ -143,7 +241,13 @@ async def handle_fanqie_entry(
         matcher.set_arg(_FANQIE_CHOICE_KEY, arg)
 
 
-async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
+async def _begin_fanqie_input(  # noqa: C901, PLR0911
+    matcher: Matcher,
+    value: str,
+) -> None:
+    if value in {"榜单", "排行榜"}:
+        await _begin_rank_input(matcher)
+        return
     try:
         source_kind, _source_id = parse_source(value)
     except ValueError:
@@ -174,22 +278,41 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
         await _set_book_and_ask_range(matcher, book, chapters)
         return
 
+    keyword, order = _parse_search_input(value)
+    if not keyword:
+        matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY,
+            "请输入书名或作者名；也可以输入“榜单”查看排行榜。",
+        )
+        return
     async with FanqieProvider(config) as provider:
         try:
-            results = await provider.search(value)
+            results = await provider.search(keyword, order=order)
         except RejectedException:
             logger.debug("番茄搜索交互异常继续向 NoneBot 状态机传播")
             raise
+        except FanqieServiceUnavailable as exc:
+            logger.debug(
+                f"番茄搜索暂不可用：keyword={_debug_text(keyword)!r} "
+                f"order={order} error={_debug_text(exc)!r}"
+            )
+            matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+            await fanqie_cmd.reject_arg(
+                _FANQIE_CHOICE_KEY,
+                "番茄搜索暂时要求验证或接口不可用，请稍后重试；也可以直接输入书籍链接或 book ID。",
+            )
+            return
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                f"番茄书名查询失败：value={_debug_text(value)!r} "
+                f"番茄书名查询失败：value={_debug_text(keyword)!r} "
                 f"error_type={type(exc).__name__}"
             )
             matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
             await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, f"查询失败：{exc}")
             return
     if not results:
-        logger.debug(f"番茄搜索完成但无结果：value={_debug_text(value)!r}")
+        logger.debug(f"番茄搜索完成但无结果：value={_debug_text(keyword)!r}")
         matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
         await fanqie_cmd.reject_arg(
             _FANQIE_CHOICE_KEY, "没有找到公开书籍，请换个书名或直接输入链接。"
@@ -197,24 +320,19 @@ async def _begin_fanqie_input(matcher: Matcher, value: str) -> None:
         return
     matcher.state["search_results"] = results
     matcher.state["fanqie_step"] = _FANQIE_STEP_BOOK
-    lines = ["请选择小说编号："]
-    lines.extend(
-        f"{index}. 《{book.title}》｜作者：{book.author}｜ID：{book.book_id}"
-        for index, book in enumerate(results, 1)
-    )
-    lines.append("发送“取消”退出。")
     logger.debug(
-        f"番茄搜索完成：value={_debug_text(value)!r} result_count={len(results)} "
+        f"番茄搜索完成：value={_debug_text(keyword)!r} order={order} "
+        f"result_count={len(results)} "
         f"book_ids={[book.book_id for book in results]}"
     )
-    await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, "\n".join(lines))
+    await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, _book_choice_prompt(results))
 
 
 @fanqie_cmd.got(
     _FANQIE_CHOICE_KEY,
-    prompt="请输入书名、fanqienovel.com 书籍/阅读页链接，或 book ID。发送“取消”退出。",
+    prompt="请输入书名/作者名、榜单、fanqienovel.com 书籍/阅读页链接，或 book ID。发送“取消”退出。",
 )
-async def handle_fanqie_choice(
+async def handle_fanqie_choice(  # noqa: PLR0911
     event: MessageEvent,
     matcher: Matcher,
     session: async_scoped_session,
@@ -229,6 +347,15 @@ async def handle_fanqie_choice(
     step = matcher.state.get("fanqie_step", _FANQIE_STEP_INPUT)
     if step == _FANQIE_STEP_INPUT:
         await _begin_fanqie_input(matcher, text)
+        return
+    if step == _FANQIE_STEP_RANK_KIND:
+        await _handle_rank_kind(matcher, text)
+        return
+    if step == _FANQIE_STEP_RANK_GENDER:
+        await _handle_rank_gender(matcher, text)
+        return
+    if step == _FANQIE_STEP_RANK_CATEGORY:
+        await _handle_rank_category(matcher, text)
         return
     if step == _FANQIE_STEP_BOOK:
         await _handle_fanqie_book(matcher, text)
@@ -249,6 +376,7 @@ async def _handle_fanqie_book(matcher: Matcher, text: str) -> None:
         await fanqie_cmd.reject_arg(
             _FANQIE_CHOICE_KEY, "请输入搜索结果编号，例如 1。"
         )
+        return
     book = results[int(text) - 1]
     logger.debug(
         f"番茄搜索结果选择：selection={text} book_id={book.book_id}"
@@ -267,6 +395,119 @@ async def _handle_fanqie_book(matcher: Matcher, text: str) -> None:
     await _set_book_and_ask_range(matcher, book, chapters)
 
 
+async def _handle_rank_kind(matcher: Matcher, text: str) -> None:
+    if not text.isdigit() or not 1 <= int(text) <= len(_RANK_TYPE_CHOICES):
+        matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_KIND
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY,
+            "请输入榜单类型编号，例如 1；发送“取消”退出。",
+        )
+        return
+    rank_type, label = _RANK_TYPE_CHOICES[int(text) - 1]
+    matcher.state["rank_type"] = rank_type
+    matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_GENDER
+    lines = [f"已选择{label}，请选择性别分类："]
+    lines.extend(
+        f"{index}. {choice[1]}"
+        for index, choice in enumerate(_RANK_GENDER_CHOICES, 1)
+    )
+    lines.append("发送“取消”退出。")
+    await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, "\n".join(lines))
+
+
+async def _handle_rank_gender(matcher: Matcher, text: str) -> None:
+    if not text.isdigit() or not 1 <= int(text) <= len(_RANK_GENDER_CHOICES):
+        matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_GENDER
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY,
+            "请输入性别分类编号，例如 1；发送“取消”退出。",
+        )
+        return
+    gender, label = _RANK_GENDER_CHOICES[int(text) - 1]
+    categories = cast(
+        "dict[str, list[RankCategory]]",
+        matcher.state.get("rank_categories", {}),
+    )
+    category_items = categories.get(gender, [])
+    if not category_items:
+        matcher.state["fanqie_step"] = _FANQIE_STEP_INPUT
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY,
+            "该性别没有可用分类，请重新输入“榜单”或发送“取消”退出。",
+        )
+        return
+    matcher.state["rank_gender"] = gender
+    matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_CATEGORY
+    lines = [f"已选择{label}，请选择具体分类："]
+    lines.extend(
+        f"{index}. {category.name}"
+        for index, category in enumerate(category_items, 1)
+    )
+    lines.append("发送“取消”退出。")
+    await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, "\n".join(lines))
+
+
+async def _handle_rank_category(matcher: Matcher, text: str) -> None:
+    categories = cast(
+        "dict[str, list[RankCategory]]",
+        matcher.state.get("rank_categories", {}),
+    )
+    gender = str(matcher.state.get("rank_gender", ""))
+    rank_type = str(matcher.state.get("rank_type", ""))
+    category_items = categories.get(gender, [])
+    if not text.isdigit() or not 1 <= int(text) <= len(category_items):
+        matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_CATEGORY
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY,
+            "请输入分类编号，例如 1；发送“取消”退出。",
+        )
+        return
+    category = category_items[int(text) - 1]
+    async with FanqieProvider(config) as provider:
+        try:
+            results = await provider.list_rank_books(
+                gender=cast("RankGender", gender),
+                rank_type=cast("RankType", rank_type),
+                category_id=category.category_id,
+            )
+        except FanqieServiceUnavailable as exc:
+            logger.debug(
+                f"番茄榜单暂不可用：gender={gender} rank_type={rank_type} "
+                f"category_id={category.category_id} error={_debug_text(exc)!r}"
+            )
+            matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_CATEGORY
+            await fanqie_cmd.reject_arg(
+                _FANQIE_CHOICE_KEY,
+                "番茄榜单暂时要求验证或接口不可用，请稍后重试。",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                f"番茄榜单读取失败：gender={gender} rank_type={rank_type} "
+                f"category_id={category.category_id} error_type={type(exc).__name__}"
+            )
+            matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_CATEGORY
+            await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, "读取榜单失败，请稍后重试。")
+            return
+    if not results:
+        matcher.state["fanqie_step"] = _FANQIE_STEP_RANK_CATEGORY
+        await fanqie_cmd.reject_arg(
+            _FANQIE_CHOICE_KEY,
+            "该榜单暂时没有公开书籍，请换一个分类。",
+        )
+        return
+    matcher.state["search_results"] = results
+    matcher.state["fanqie_step"] = _FANQIE_STEP_BOOK
+    logger.debug(
+        f"番茄榜单完成：gender={gender} rank_type={rank_type} "
+        f"category_id={category.category_id} result_count={len(results)}"
+    )
+    await fanqie_cmd.reject_arg(
+        _FANQIE_CHOICE_KEY,
+        _book_choice_prompt(results, ranked=True),
+    )
+
+
 async def _handle_fanqie_range(matcher: Matcher, text: str) -> None:
     chapters = cast("list[ChapterRef]", matcher.state.get("chapters", []))
     book = cast("BookSummary", matcher.state.get("book"))
@@ -275,6 +516,7 @@ async def _handle_fanqie_range(matcher: Matcher, text: str) -> None:
     except ValueError as exc:
         matcher.state["fanqie_step"] = _FANQIE_STEP_RANGE
         await fanqie_cmd.reject_arg(_FANQIE_CHOICE_KEY, str(exc))
+        return
     logger.debug(
         f"番茄章节范围选择：book_id={book.book_id} start={start} end={end}"
     )
@@ -297,6 +539,7 @@ async def _handle_fanqie_confirm(
         await fanqie_cmd.reject_arg(
             _FANQIE_CHOICE_KEY, "请发送“确认”开始，或发送“取消”退出。"
         )
+        return
     book = cast("BookSummary", matcher.state["book"])
     chapters = cast("list[ChapterRef]", matcher.state["chapters"])
     logger.debug(

@@ -21,9 +21,15 @@ _EXPECTED_CALLS = 4
 _TEST_BOOK_RECORD_ID = 7
 _TEST_JOB_ID = 42
 _DEFAULT_FANQIE_REQUEST_DELAY = 0.5
+_DEFAULT_FANQIE_RANK_LIMIT = 10
 _MIN_FANQIE_REQUEST_DELAY = 0.2
 _THIRD_PARTY_REQUEST_COUNT = 2
 _MIN_FULL_CONTENT_CHARS = 120
+_SEARCH_READ_COUNT = 12
+_SEARCH_WORD_COUNT = 345
+_API_READ_COUNT = 1234
+_API_WORD_COUNT = 5678
+_RANK_READ_COUNT = 99
 
 
 class _CommitExpiringSession:
@@ -171,6 +177,7 @@ def test_fanqie_request_delay_default_is_short_but_bounded(
     settings = fanqie_modules.config.Config()
 
     assert settings.fanqie_request_delay == _DEFAULT_FANQIE_REQUEST_DELAY
+    assert settings.fanqie_rank_limit == _DEFAULT_FANQIE_RANK_LIMIT
     assert (
         fanqie_modules.config.Config(
             fanqie_request_delay=_MIN_FANQIE_REQUEST_DELAY
@@ -223,6 +230,7 @@ def test_search_and_book_chapter_parsers(fanqie_modules: SimpleNamespace) -> Non
         }
     }
     page = (
+        "<script src='captcha/index.js'></script>"
         "<script>window.__INITIAL_STATE__="
         + json.dumps(state, ensure_ascii=False)
         + ";</script>"
@@ -254,47 +262,227 @@ def test_search_and_book_chapter_parsers(fanqie_modules: SimpleNamespace) -> Non
     assert chapters[1].is_locked
 
 
+def test_search_response_and_rank_parsers(fanqie_modules: SimpleNamespace) -> None:
+    provider = fanqie_modules.provider
+    search_payload = {
+        "data": {
+            "search_book_data_list": [
+                {
+                    "book_id": "123456",
+                    "bookName": "模糊结果",
+                    "author": "作者甲",
+                    "readCount": str(_SEARCH_READ_COUNT),
+                    "wordNumber": str(_SEARCH_WORD_COUNT),
+                },
+                {
+                    "book_id": "123456",
+                    "bookName": "重复结果",
+                },
+                {"book_id": "invalid", "bookName": "应被丢弃"},
+            ]
+        }
+    }
+    books = provider.parse_search_response(search_payload, limit=5)
+    assert [book.book_id for book in books] == ["123456"]
+    assert books[0].read_count == _SEARCH_READ_COUNT
+    assert books[0].word_count == _SEARCH_WORD_COUNT
+    assert provider.parse_search_response(
+        {"data": {"search_book_data_list": []}}
+    ) == []
+
+    rank_state = {
+        "rank": {
+            "rankCategoryTypeList": {
+                "male": [{"id": "1141", "name": "西方奇幻"}],
+                "female": [{"id": "1139", "name": "古风世情"}],
+            },
+            "book_list": [
+                {
+                    "bookId": "765432",
+                    "bookName": "\ue000榜书",
+                    "author": "作者乙",
+                    "read_count": str(_RANK_READ_COUNT),
+                    "wordNumber": "1000",
+                }
+            ],
+        }
+    }
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(rank_state, ensure_ascii=False)
+        + ";</script>"
+    )
+    categories = provider.parse_rank_categories(page)
+    assert categories["male"][0].category_id == "1141"
+    ranked = provider.parse_rank_results(
+        page,
+        mapping={"\ue000": "榜"},
+    )
+    assert ranked[0].title == "榜榜书"
+    assert ranked[0].rank == 1
+    assert ranked[0].read_count == _RANK_READ_COUNT
+
+
+def test_search_input_orders(fanqie_modules: SimpleNamespace) -> None:
+    commands = fanqie_modules.commands
+
+    assert commands._parse_search_input("模糊关键词") == ("模糊关键词", "related")
+    assert commands._parse_search_input("搜索最新 模糊关键词") == (
+        "模糊关键词",
+        "new",
+    )
+    assert commands._parse_search_input("搜索最热　模糊关键词") == (
+        "模糊关键词",
+        "hot",
+    )
+
+
 @pytest.mark.asyncio
-async def test_search_uses_current_public_path(
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        "<div>请完成下列验证</div>".encode(),
+        b"not-json",
+        b'{"data": {}}',
+    ],
+)
+async def test_search_rejects_empty_or_challenge_response(
+    fanqie_modules: SimpleNamespace,
+    body: bytes,
+) -> None:
+    provider_module = fanqie_modules.provider
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(), client
+    ) as provider:
+        with pytest.raises(provider_module.FanqieServiceUnavailable):
+            await provider.search("模糊关键词")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [403, 429])
+async def test_search_http_rejection_is_service_unavailable(
+    fanqie_modules: SimpleNamespace,
+    status_code: int,
+) -> None:
+    provider_module = fanqie_modules.provider
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text="forbidden", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(fanqie_request_retries=0), client
+    ) as provider:
+        with pytest.raises(provider_module.FanqieServiceUnavailable):
+            await provider.search("模糊关键词")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rank_provider_uses_official_routes(
     fanqie_modules: SimpleNamespace,
 ) -> None:
     provider_module = fanqie_modules.provider
     page = (
+        "<script src='captcha/index.js'></script>"
         "<script>window.__INITIAL_STATE__="
         + json.dumps(
             {
-                "search": {
-                    "books": [
+                "rank": {
+                    "rankCategoryTypeList": {
+                        "male": [{"id": "1141", "name": "西方奇幻"}],
+                        "female": [{"id": "1139", "name": "古风世情"}],
+                    },
+                    "book_list": [
                         {
-                            "bookId": "123456",
-                            "bookName": "Target book",
-                            "author": "Author",
+                            "bookId": "765432",
+                            "bookName": "榜单书",
+                            "author": "作者乙",
+                            "read_count": "99",
+                            "wordNumber": "1000",
                         }
-                    ]
+                    ],
                 }
             },
             ensure_ascii=False,
         )
         + ";</script>"
     )
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.raw_path.decode())
+        return httpx.Response(200, text=page, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(fanqie_rank_limit=1), client
+    ) as provider:
+        categories = await provider.list_rank_categories()
+        books = await provider.list_rank_books(
+            gender="male",
+            rank_type="read",
+            category_id=categories["male"][0].category_id,
+        )
+    await client.aclose()
+
+    assert seen_paths == ["/rank", "/rank/1_2_1141"]
+    assert books[0].title == "榜单书"
+    assert books[0].rank == 1
+
+
+@pytest.mark.asyncio
+async def test_search_uses_official_api_and_order(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    provider_module = fanqie_modules.provider
+    payload = {
+        "data": {
+            "search_book_data_list": [
+                {
+                    "book_id": "123456",
+                    "bookName": "Target book",
+                    "author": "Author",
+                    "book_abstract": "模糊匹配简介",
+                    "read_count": str(_API_READ_COUNT),
+                    "word_count": str(_API_WORD_COUNT),
+                }
+            ],
+            "total_count": 1,
+        }
+    }
     seen_urls: list[httpx.URL] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_urls.append(request.url)
-        return httpx.Response(200, text=page, request=request)
+        return httpx.Response(200, json=payload, request=request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     async with provider_module.FanqieProvider(
         fanqie_modules.config.Config(), client
     ) as provider:
-        books = await provider.search("十日终焉")
+        books = await provider.search("十日", order="hot")
     await client.aclose()
 
     assert books[0].book_id == "123456"
-    assert seen_urls[0].raw_path == (
-        b"/search/%E5%8D%81%E6%97%A5%E7%BB%88%E7%84%89"
-    )
-    assert seen_urls[0].query == b""
+    assert books[0].description == "模糊匹配简介"
+    assert books[0].read_count == _API_READ_COUNT
+    assert books[0].word_count == _API_WORD_COUNT
+    assert seen_urls[0].path == "/api/author/search/search_book/v1"
+    assert dict(seen_urls[0].params) == {
+        "filter": "127,127,127,127",
+        "page_count": "5",
+        "page_index": "0",
+        "query_type": "2",
+        "query_word": "十日",
+    }
 
 
 @pytest.mark.asyncio
@@ -385,7 +573,7 @@ async def test_choice_state_machine_does_not_repeat_search(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def search(self, value: str) -> list[object]:
+        async def search(self, value: str, **_kwargs: object) -> list[object]:
             search_values.append(value)
             return [book]
 
@@ -440,6 +628,90 @@ async def test_choice_state_machine_does_not_repeat_search(
     assert submissions and submissions[0][0:2] == (10001, 20002)
     assert finishes and "#42" in str(finishes[-1][0])
     assert [args[0] for args in prompts] == ["fanqie_choice"] * 3
+
+
+@pytest.mark.asyncio
+async def test_rank_state_machine_reuses_book_download_flow(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = fanqie_modules.commands
+    provider_module = fanqie_modules.provider
+    book = provider_module.BookSummary(
+        "765432",
+        "榜单书",
+        "作者乙",
+        rank=1,
+        read_count=99,
+        word_count=1000,
+    )
+    categories = {
+        "male": [provider_module.RankCategory("1141", "西方奇幻")],
+        "female": [provider_module.RankCategory("1139", "古风世情")],
+    }
+    chapters = [provider_module.ChapterRef("654321", "Chapter 1", 1)]
+    rank_calls: list[tuple[str, str, str]] = []
+    chapter_book_ids: list[str] = []
+    prompts: list[tuple[object, ...]] = []
+
+    class FakeProvider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def list_rank_categories(self) -> dict[str, list[object]]:
+            return categories
+
+        async def list_rank_books(
+            self,
+            *,
+            gender: str,
+            rank_type: str,
+            category_id: str,
+        ) -> list[object]:
+            rank_calls.append((gender, rank_type, category_id))
+            return [book]
+
+        async def list_chapters(self, book_id: str) -> list[object]:
+            chapter_book_ids.append(book_id)
+            return chapters
+
+    async def allow_feature(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def fake_reject_arg(*args: object, **_kwargs: object) -> None:
+        prompts.append(args)
+
+    monkeypatch.setattr(commands, "FanqieProvider", FakeProvider)
+    monkeypatch.setattr(commands, "_feature_ok", allow_feature)
+    monkeypatch.setattr(commands.fanqie_cmd, "reject_arg", fake_reject_arg)
+
+    event = SimpleNamespace(get_user_id=lambda: "10001", group_id=20002)
+    matcher = commands.fanqie_cmd()
+
+    await commands.handle_fanqie_entry(matcher, Message("榜单"), None)
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("榜单"))
+    assert matcher.state["fanqie_step"] == "rank_kind"
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("9"))
+    assert matcher.state["fanqie_step"] == "rank_kind"
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("1"))
+    assert matcher.state["fanqie_step"] == "rank_gender"
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("9"))
+    assert matcher.state["fanqie_step"] == "rank_gender"
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("1"))
+    assert matcher.state["fanqie_step"] == "rank_category"
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("1"))
+    assert matcher.state["fanqie_step"] == "book"
+    assert rank_calls == [("male", "read", "1141")]
+    assert "#1" in str(prompts[-1][1])
+    await commands.handle_fanqie_choice(event, matcher, object(), Message("1"))
+    assert chapter_book_ids == ["765432"]
+    assert matcher.state["fanqie_step"] == "range"
 
 
 @pytest.mark.asyncio
