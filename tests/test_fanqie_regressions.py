@@ -22,6 +22,8 @@ _TEST_BOOK_RECORD_ID = 7
 _TEST_JOB_ID = 42
 _DEFAULT_FANQIE_REQUEST_DELAY = 0.5
 _MIN_FANQIE_REQUEST_DELAY = 0.2
+_THIRD_PARTY_REQUEST_COUNT = 2
+_MIN_FULL_CONTENT_CHARS = 120
 
 
 class _CommitExpiringSession:
@@ -776,13 +778,79 @@ async def test_provider_uses_mobile_helper_for_explicitly_free_preview(
         fake_fetch_mobile_chapter,
     )
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    settings = fanqie_modules.config.Config(fanqie_mobile_helper_path="helper.exe")
+    settings = fanqie_modules.config.Config(
+        fanqie_third_party_api_base="",
+        fanqie_mobile_helper_path="helper.exe",
+    )
     async with provider_module.FanqieProvider(settings, client) as provider:
         chapter = await provider.fetch_chapter("111111")
     await client.aclose()
 
     assert helper_calls == [("123456", 11, "第十一章")]
     assert chapter.content == "完整移动端正文"
+
+
+@pytest.mark.asyncio
+async def test_provider_uses_third_party_raw_full_for_free_preview(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    provider_module = fanqie_modules.provider
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "title": "第十一章",
+                        "needPay": 0,
+                        "isPaidPublication": False,
+                        "isPaidStory": False,
+                        "isChapterLock": True,
+                        "chapterWordNumber": "10",
+                        "content": "网页预览",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "fanqienovel.com":
+            return httpx.Response(_OK_STATUS, text=page, request=request)
+        assert request.url.host == "api.example.test"
+        assert request.url.path == "/api/raw_full"
+        assert request.url.params["item_id"] == "111111"
+        return httpx.Response(
+            _OK_STATUS,
+            json={
+                "code": 200,
+                "data": {
+                    "title": "第十一章",
+                    "content": "<p>完整第三方全文正文。</p>" * 20,
+                    "paragraphs_num": 2,
+                    "free_para_nums": 2,
+                    "chapter_word_number": "10",
+                },
+            },
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = fanqie_modules.config.Config(
+        fanqie_third_party_api_base="https://api.example.test"
+    )
+    async with provider_module.FanqieProvider(settings, client) as provider:
+        chapter = await provider.fetch_chapter("111111")
+    await client.aclose()
+
+    assert len(requests) == _THIRD_PARTY_REQUEST_COUNT
+    assert chapter.title == "第十一章"
+    assert chapter.content.startswith("完整第三方全文正文。\n\n")
+    assert len(chapter.content) > _MIN_FULL_CONTENT_CHARS
 
 
 @pytest.mark.asyncio
