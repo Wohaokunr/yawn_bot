@@ -16,8 +16,8 @@ import re
 from dataclasses import dataclass
 from html import unescape
 from time import perf_counter
-from typing import Any
-from urllib.parse import quote, urlparse
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -43,6 +43,9 @@ _FONT_URL_RE = re.compile(
     r"url\(\s*['\"]?(https?://[^)'\"\s]+?\.woff2(?:\?[^)'\"\s]*)?)['\"]?\s*\)",
     re.IGNORECASE,
 )
+_SEARCH_QUERY_TYPES: dict[str, str] = {"related": "0", "new": "1", "hot": "2"}
+_RANK_GENDER_CODES: dict[str, str] = {"male": "1", "female": "0"}
+_RANK_TYPE_CODES: dict[str, str] = {"read": "2", "new": "1"}
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +57,15 @@ class ChapterUnavailable(FanqieProviderError):
     """章节锁定、正文为空或无法公开解码。"""
 
 
+class FanqieServiceUnavailable(FanqieProviderError):
+    """搜索或榜单接口被风控、返回异常或页面结构暂时不可用。"""
+
+
+SearchOrder = Literal["related", "new", "hot"]
+RankGender = Literal["male", "female"]
+RankType = Literal["read", "new"]
+
+
 @dataclass(frozen=True, slots=True)
 class BookSummary:
     book_id: str
@@ -61,6 +73,17 @@ class BookSummary:
     author: str = "未知作者"
     description: str = ""
     url: str = ""
+    rank: int | None = None
+    read_count: int | None = None
+    word_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RankCategory:
+    """番茄榜单页面提供的性别分类。"""
+
+    category_id: str
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +159,18 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    """把榜单中的阅读量、字数等字段转换为非负整数。"""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _chapter_is_explicitly_free(chapter_data: dict[str, Any] | None) -> bool:
@@ -237,20 +272,47 @@ def _third_party_chapter_response(
     return title, raw_content, data
 
 
+def _item_value(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _book_from_dict(item: dict[str, Any]) -> BookSummary | None:
-    raw_id = item.get("bookId", item.get("book_id"))
+    raw_id = _item_value(item, "bookId", "book_id", "bookID", "bookIdStr")
     if raw_id is None:
-        url = str(item.get("url", item.get("bookUrl", "")))
+        url = str(_item_value(item, "url", "bookUrl") or "")
         match = re.search(r"/page/(\d+)", url)
         raw_id = match.group(1) if match else None
     if raw_id is None or not _BOOK_ID_RE.fullmatch(str(raw_id)):
         return None
-    title = sanitize_text(item.get("bookName", item.get("title", item.get("name", ""))))
+    title = sanitize_text(
+        _item_value(
+            item,
+            "bookName",
+            "book_name",
+            "bookTitle",
+            "book_title",
+            "title",
+            "name",
+        )
+    )
     if not title:
         return None
-    author = sanitize_text(item.get("author", item.get("authorName", "未知作者")))
+    author = sanitize_text(
+        _item_value(item, "author", "authorName", "author_name", "authorNameText")
+    )
     description = sanitize_text(
-        item.get("abstract", item.get("description", item.get("bookIntro", "")))
+        _item_value(
+            item,
+            "abstract",
+            "book_abstract",
+            "description",
+            "bookIntro",
+            "book_intro",
+        )
     )
     return BookSummary(
         book_id=str(raw_id),
@@ -258,7 +320,219 @@ def _book_from_dict(item: dict[str, Any]) -> BookSummary | None:
         author=author or "未知作者",
         description=description,
         url=f"{BASE_URL}/page/{raw_id}",
+        rank=_nonnegative_int(
+            _item_value(item, "rank", "currentPos", "rank_pos", "rankNum", "rank_num")
+        ),
+        read_count=_nonnegative_int(
+            _item_value(
+                item,
+                "read_count",
+                "readCount",
+                "read_count_num",
+                "readNum",
+                "read_num",
+            )
+        ),
+        word_count=_nonnegative_int(
+            _item_value(
+                item,
+                "wordNumber",
+                "word_number",
+                "word_count",
+                "wordCount",
+            )
+        ),
     )
+
+
+def _dedupe_books(items: Any, limit: int) -> list[BookSummary]:
+    if not isinstance(items, list):
+        raise TypeError("书籍结果不是列表")
+    results: list[BookSummary] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        book = _book_from_dict(item)
+        if book is None or book.book_id in seen:
+            continue
+        results.append(book)
+        seen.add(book.book_id)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def parse_search_response(payload: Any, limit: int = 5) -> list[BookSummary]:
+    """解析官方搜索接口返回的书籍列表。"""
+
+    if not isinstance(payload, dict):
+        raise TypeError("搜索接口返回的不是 JSON 对象")
+    code = payload.get("code")
+    if code not in (None, 0, "0", 200, "200"):
+        raise ValueError(f"搜索接口返回错误 code={code}")
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        raise TypeError("搜索接口缺少 data 对象")
+    key = next(
+        (
+            name
+            for name in ("search_book_data_list", "book_list", "books")
+            if name in data
+        ),
+        None,
+    )
+    if key is None:
+        raise ValueError("搜索接口缺少书籍列表")
+    return _dedupe_books(data.get(key) or [], limit)
+
+
+def _rank_state(state: dict[str, Any]) -> dict[str, Any]:
+    rank = state.get("rank", state)
+    if not isinstance(rank, dict):
+        raise TypeError("榜单状态不是对象")
+    return rank
+
+
+def _rank_book_items(rank_state: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_books = rank_state.get("book_list", rank_state.get("bookList"))
+    if not isinstance(raw_books, list):
+        raise TypeError("榜单页面缺少书籍列表")
+    return [item for item in raw_books if isinstance(item, dict)]
+
+
+def _rank_needs_mapping(items: list[dict[str, Any]]) -> bool:
+    return any(
+        contains_pua(str(item.get(key, "")))
+        for item in items
+        for key in (
+            "bookName",
+            "book_name",
+            "bookTitle",
+            "book_title",
+            "title",
+            "name",
+            "author",
+            "authorName",
+            "author_name",
+            "authorNameText",
+            "abstract",
+            "book_abstract",
+            "bookIntro",
+            "book_intro",
+        )
+    )
+
+
+def _require_rank_mapping(
+    mapping: dict[str, str],
+    *,
+    required: bool,
+) -> dict[str, str]:
+    if required and not mapping:
+        raise ValueError("榜单字体映射缺失")
+    return mapping
+
+
+def _validate_rank_text(books: list[BookSummary]) -> None:
+    if any(
+        contains_pua(value)
+        for book in books
+        for value in (book.title, book.author, book.description)
+    ):
+        raise ValueError("榜单文字仍含未解码字体字符")
+
+
+def parse_rank_categories(page: str) -> dict[str, list[RankCategory]]:
+    """解析榜单页面提供的男频/女频分类。"""
+
+    state = extract_initial_state(page)
+    raw_categories = _rank_state(state).get("rankCategoryTypeList")
+    if not isinstance(raw_categories, dict):
+        raise TypeError("榜单页面缺少分类列表")
+    categories: dict[str, list[RankCategory]] = {}
+    for gender in ("male", "female"):
+        raw_items = raw_categories.get(gender)
+        if not isinstance(raw_items, list):
+            continue
+        parsed: list[RankCategory] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            category_id = str(
+                _item_value(item, "id", "category_id", "categoryId") or ""
+            ).strip()
+            name = sanitize_text(_item_value(item, "name", "categoryName"))
+            if not category_id or not name or category_id in seen:
+                continue
+            parsed.append(RankCategory(category_id=category_id, name=name))
+            seen.add(category_id)
+        if parsed:
+            categories[gender] = parsed
+    if not categories:
+        raise ValueError("榜单页面未找到有效分类")
+    return categories
+
+
+def _decode_rank_item(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+    decoded = dict(item)
+    for key in (
+        "bookName",
+        "book_name",
+        "bookTitle",
+        "book_title",
+        "title",
+        "name",
+        "author",
+        "authorName",
+        "author_name",
+        "authorNameText",
+        "abstract",
+        "book_abstract",
+        "description",
+        "bookIntro",
+        "book_intro",
+    ):
+        value = decoded.get(key)
+        if isinstance(value, str):
+            decoded[key] = decrypt_pua(value, mapping)
+    return decoded
+
+
+def parse_rank_results(
+    page: str,
+    limit: int = 10,
+    mapping: dict[str, str] | None = None,
+) -> list[BookSummary]:
+    """解析榜单页面的书籍列表，保留排名顺序和榜单数据。"""
+
+    state = extract_initial_state(page)
+    raw_books = _rank_book_items(_rank_state(state))
+    active_mapping = mapping or {}
+    items = (
+        [_decode_rank_item(item, active_mapping) for item in raw_books]
+        if active_mapping
+        else raw_books
+    )
+    results = _dedupe_books(items, limit)
+    return [
+        BookSummary(
+            book_id=book.book_id,
+            title=book.title,
+            author=book.author,
+            description=book.description,
+            url=book.url,
+            rank=index,
+            read_count=book.read_count,
+            word_count=book.word_count,
+        )
+        for index, book in enumerate(results, 1)
+    ]
+
+
+def _looks_like_challenge(text: str) -> bool:
+    return any(marker in text for marker in ("请完成下列验证", "人机验证", "验证码"))
 
 
 def parse_search_results(page: str, limit: int = 5) -> list[BookSummary]:
@@ -607,33 +881,140 @@ class FanqieProvider:
         response = await self._request(self._page_url(path))
         return response.text
 
-    async def search(self, keyword: str) -> list[BookSummary]:
-        """搜索最多五本公开书籍。"""
+    async def search(
+        self,
+        keyword: str,
+        *,
+        order: SearchOrder = "related",
+    ) -> list[BookSummary]:
+        """通过官方公开搜索接口模糊搜索书名或作者。"""
 
         keyword = keyword.strip()
         if not keyword:
             return []
-        search_path = f"/search/{quote(keyword, safe='')}"
+        query_type = _SEARCH_QUERY_TYPES.get(order)
+        if query_type is None:
+            raise ValueError("不支持的番茄搜索排序")
+        search_path = "/api/author/search/search_book/v1"
+        params = {
+            "filter": "127,127,127,127",
+            "page_count": str(self.settings.fanqie_search_limit),
+            "page_index": "0",
+            "query_type": query_type,
+            "query_word": keyword,
+        }
         logger.debug(
-            "fanqie search start: keyword=%r path=%s limit=%d",
+            "fanqie search start: keyword=%r order=%s path=%s limit=%d",
             keyword[:80],
+            order,
             search_path,
             self.settings.fanqie_search_limit,
         )
-        response = await self._request(
-            self._page_url(search_path),
-        )
-        page = response.text
-        results = parse_search_results(page, self.settings.fanqie_search_limit)
+        try:
+            response = await self._request(
+                self._page_url(search_path),
+                params=params,
+            )
+        except FanqieProviderError as exc:
+            raise FanqieServiceUnavailable("番茄搜索接口暂时不可用") from exc
+        if not response.content or _looks_like_challenge(response.text):
+            raise FanqieServiceUnavailable(
+                "番茄搜索接口返回了空响应或验证页面"
+            )
+        try:
+            payload = response.json()
+            results = parse_search_response(
+                payload,
+                self.settings.fanqie_search_limit,
+            )
+        except (ValueError, TypeError) as exc:
+            raise FanqieServiceUnavailable("番茄搜索接口返回结构异常") from exc
         logger.debug(
-            "fanqie search complete: keyword=%r result_count=%d book_ids=%s "
-            "page_bytes=%d",
+            "fanqie search complete: keyword=%r order=%s result_count=%d "
+            "book_ids=%s response_bytes=%d",
             keyword[:80],
+            order,
             len(results),
             [book.book_id for book in results],
             len(response.content),
         )
         return results
+
+    async def list_rank_categories(self) -> dict[str, list[RankCategory]]:
+        """取得官方榜单页面提供的男频/女频分类。"""
+
+        try:
+            response = await self._request(self._page_url("/rank"))
+        except FanqieProviderError as exc:
+            raise FanqieServiceUnavailable("番茄榜单暂时不可用") from exc
+        if not response.content or _looks_like_challenge(response.text):
+            raise FanqieServiceUnavailable("番茄榜单返回了空响应或验证页面")
+        try:
+            categories = parse_rank_categories(response.text)
+        except (ValueError, TypeError) as exc:
+            raise FanqieServiceUnavailable("番茄榜单分类结构异常") from exc
+        logger.debug(
+            "fanqie rank categories complete: genders=%s counts=%s",
+            sorted(categories),
+            {gender: len(items) for gender, items in categories.items()},
+        )
+        return categories
+
+    async def list_rank_books(
+        self,
+        *,
+        gender: RankGender,
+        rank_type: RankType,
+        category_id: str,
+        limit: int | None = None,
+    ) -> list[BookSummary]:
+        """取得指定性别、榜单类型和分类的公开榜单。"""
+
+        gender_code = _RANK_GENDER_CODES.get(gender)
+        rank_type_code = _RANK_TYPE_CODES.get(rank_type)
+        if gender_code is None or rank_type_code is None:
+            raise ValueError("不支持的番茄榜单类型")
+        if not re.fullmatch(r"\d{1,12}", category_id):
+            raise ValueError("非法番茄榜单分类")
+        rank_limit = self.settings.fanqie_rank_limit if limit is None else limit
+        if not 1 <= rank_limit <= 10:
+            raise ValueError("番茄榜单最多读取 10 本书")
+        path = f"/rank/{gender_code}_{rank_type_code}_{category_id}"
+        logger.debug(
+            "fanqie rank start: gender=%s rank_type=%s category_id=%s limit=%d",
+            gender,
+            rank_type,
+            category_id,
+            rank_limit,
+        )
+        try:
+            response = await self._request(self._page_url(path))
+        except FanqieProviderError as exc:
+            raise FanqieServiceUnavailable("番茄榜单暂时不可用") from exc
+        page = response.text
+        if not response.content or _looks_like_challenge(page):
+            raise FanqieServiceUnavailable("番茄榜单返回了空响应或验证页面")
+        try:
+            state = extract_initial_state(page)
+            rank_state = _rank_state(state)
+            raw_books = _rank_book_items(rank_state)
+            needs_mapping = _rank_needs_mapping(raw_books)
+            mapping = await self._font_mapping(page, state) if needs_mapping else {}
+            active_mapping = _require_rank_mapping(mapping, required=needs_mapping)
+            books = parse_rank_results(page, rank_limit, mapping=active_mapping)
+            _validate_rank_text(books)
+        except (FanqieProviderError, ValueError, TypeError) as exc:
+            raise FanqieServiceUnavailable("番茄榜单结构或字体解析失败") from exc
+        logger.debug(
+            "fanqie rank complete: gender=%s rank_type=%s category_id=%s "
+            "result_count=%d book_ids=%s",
+            gender,
+            rank_type,
+            category_id,
+            len(books),
+            [book.book_id for book in books],
+        )
+        return books
 
     async def resolve_book_reference(self, value: str) -> BookSummary:
         """解析书籍页、阅读页 URL 或 ID 并取得书籍摘要。"""
@@ -691,12 +1072,12 @@ class FanqieProvider:
                 css_parts.append(item)
         match = _FONT_URL_RE.search("\n".join(css_parts))
         if match is None:
-            logger.debug("fanqie chapter font mapping absent")
+            logger.debug("fanqie page font mapping absent")
             return {}
         url = self._validate_font_url(match.group(1))
         if url in self._font_cache:
             logger.debug(
-                "fanqie chapter font mapping cache hit: url=%s entries=%d",
+                "fanqie page font mapping cache hit: url=%s entries=%d",
                 url,
                 len(self._font_cache[url]),
             )
@@ -718,7 +1099,7 @@ class FanqieProvider:
         }
         self._font_cache[url] = mapping
         logger.debug(
-            "fanqie chapter font mapping parsed: url=%s entries=%d",
+            "fanqie page font mapping parsed: url=%s entries=%d",
             url,
             len(mapping),
         )
@@ -834,8 +1215,13 @@ __all__ = [
     "ChapterUnavailable",
     "FanqieProvider",
     "FanqieProviderError",
+    "FanqieServiceUnavailable",
+    "RankCategory",
     "parse_book_page",
     "parse_chapter_list",
+    "parse_rank_categories",
+    "parse_rank_results",
+    "parse_search_response",
     "parse_search_results",
     "parse_source",
 ]

@@ -12,9 +12,10 @@ from .config import Config
 
 __plugin_meta__ = PluginMetadata(
     name="番茄小说",
-    description="按书名、链接或 book ID 下载番茄免费小说公开章节为 TXT",
+    description="模糊搜索、浏览番茄公开榜单并下载公开章节为 TXT",
     usage=(
-        "发送 /番茄小说，按提示搜索并选择章节；发送 /番茄任务 查看进度或管理已有任务"
+        "发送 /番茄小说，按提示搜索/选择榜单和章节；"
+        "发送 /番茄任务 查看进度或管理已有任务"
     ),
     config=Config,
     extra={
@@ -22,7 +23,7 @@ __plugin_meta__ = PluginMetadata(
             {
                 "name": "番茄小说",
                 "aliases": ["番茄下载", "下载小说"],
-                "description": "搜索并下载番茄免费小说公开章节",
+                "description": "模糊搜索、浏览榜单并下载番茄免费小说公开章节",
                 "feature": "fanqie",
                 "scope": "all",
                 "superuser": False,
