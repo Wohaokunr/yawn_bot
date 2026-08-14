@@ -5,7 +5,7 @@ NoneBot 权限。页面结构变化时可独立替换本模块。
 """
 
 # provider 的诊断错误需要携带页面/HTTP 上下文，且解析分支较多。
-# ruff: noqa: N818, PLR2004, TRY003, TRY300, C901, PLR0912, PERF401, PYI034
+# ruff: noqa: N818, PLR2004, TRY003, TRY300, C901, PLR0912, PLR0915, PERF401, PYI034
 
 from __future__ import annotations
 
@@ -186,6 +186,55 @@ def _mobile_helper_request(
     if not _BOOK_ID_RE.fullmatch(book_id) or chapter_order is None:
         return None
     return book_id, chapter_order
+
+
+def _third_party_api_base(value: str) -> str:
+    """校验管理员配置的第三方 API 根地址。"""
+
+    base = value.strip().rstrip("/")
+    parsed = urlparse(base)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise FanqieProviderError(
+            "番茄第三方 API 地址必须是无账号密码的 HTTP(S) 地址"
+        )
+    if host in {"localhost", "localhost.localdomain"}:
+        raise FanqieProviderError("番茄第三方 API 地址不能指向本机")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise FanqieProviderError("番茄第三方 API 地址不能指向内网地址")
+    return base
+
+
+def _third_party_chapter_response(
+    payload: Any,
+) -> tuple[str, str, dict[str, Any]]:
+    """提取开源第三方 API ``/api/raw_full`` 的章节数据。"""
+
+    if not isinstance(payload, dict):
+        raise ChapterUnavailable("第三方 API 返回的不是 JSON 对象")
+    code = payload.get("code")
+    if code not in (None, 200, "200"):
+        message = sanitize_text(payload.get("message")) or f"code={code}"
+        raise ChapterUnavailable(f"第三方 API 返回错误：{message}")
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        raise ChapterUnavailable("第三方 API 缺少章节数据")
+    raw_content = data.get("content")
+    if not isinstance(raw_content, str) or not raw_content.strip():
+        raise ChapterUnavailable("第三方 API 未返回章节正文")
+    title = sanitize_text(data.get("title", data.get("chapter_title", "")))
+    return title, raw_content, data
 
 
 def _book_from_dict(item: dict[str, Any]) -> BookSummary | None:
@@ -377,18 +426,36 @@ class FanqieProvider:
         return url
 
     async def _request(
-        self, url: str, *, params: dict[str, str] | None = None
+        self,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        allow_third_party: bool = False,
+        timeout: float | None = None,
+        retries: int | None = None,
     ) -> httpx.Response:
         if self._client is None:
             raise RuntimeError("FanqieProvider 必须在 async with 中使用")
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower().rstrip(".")
         if host not in {_HOST, f"www.{_HOST}"}:
-            self._validate_font_url(url)
-            if not parsed.path.lower().endswith(".woff2"):
-                raise FanqieProviderError("provider 只允许请求页面返回的 woff2 字体")
+            if allow_third_party:
+                _third_party_api_base(url.rsplit("/api/", 1)[0])
+            else:
+                self._validate_font_url(url)
+                if not parsed.path.lower().endswith(".woff2"):
+                    raise FanqieProviderError(
+                        "provider 只允许请求页面返回的 woff2 字体"
+                    )
         last_error: Exception | None = None
-        total = self.settings.fanqie_request_retries + 1
+        total = (
+            self.settings.fanqie_request_retries if retries is None else retries
+        ) + 1
+        request_timeout = (
+            self.settings.fanqie_request_timeout
+            if timeout is None
+            else timeout
+        )
         for attempt in range(total):
             started = perf_counter()
             logger.debug(
@@ -402,7 +469,7 @@ class FanqieProvider:
                 response = await self._client.get(
                     url,
                     params=params,
-                    timeout=self.settings.fanqie_request_timeout,
+                    timeout=request_timeout,
                 )
                 logger.debug(
                     "fanqie request response: url=%s status=%d bytes=%d "
@@ -468,6 +535,73 @@ class FanqieProvider:
                     continue
                 raise FanqieProviderError("网络请求失败") from exc
         raise FanqieProviderError("网络请求失败") from last_error
+
+    async def _third_party_chapter(
+        self,
+        *,
+        item_id: str,
+        expected_title: str,
+        expected_word_count: int | None,
+    ) -> ChapterContent:
+        """通过开源项目采用的第三方 raw_full 接口读取免费章节全文。"""
+
+        base = _third_party_api_base(self.settings.fanqie_third_party_api_base)
+        response = await self._request(
+            f"{base}/api/raw_full",
+            params={"item_id": item_id},
+            allow_third_party=True,
+            timeout=self.settings.fanqie_third_party_api_timeout,
+            retries=self.settings.fanqie_third_party_api_retries,
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ChapterUnavailable("第三方 API 返回的不是有效 JSON") from exc
+        title, raw_content, metadata = _third_party_chapter_response(payload)
+        if not title:
+            raise ChapterUnavailable("第三方 API 缺少章节标题")
+        if sanitize_text(title) != sanitize_text(expected_title):
+            raise ChapterUnavailable(
+                f"第三方 API 章节标题不匹配：返回 {title!r}，期望 {expected_title!r}"
+            )
+        content = html_to_text(raw_content)
+        if contains_pua(content):
+            raise ChapterUnavailable("第三方 API 正文仍含未解码字体字符")
+        if not content:
+            raise ChapterUnavailable("第三方 API 清理后正文为空")
+        paragraphs = _positive_int(metadata.get("paragraphs_num"))
+        free_paragraphs = _positive_int(metadata.get("free_para_nums"))
+        if (
+            paragraphs is not None
+            and free_paragraphs is not None
+            and free_paragraphs < paragraphs
+        ):
+            raise ChapterUnavailable("第三方 API 返回的章节并非全部免费段落")
+        api_word_count = _positive_int(
+            metadata.get("chapter_word_number", metadata.get("word_number"))
+        )
+        expected = expected_word_count or api_word_count
+        non_whitespace_chars = len(re.sub(r"\s+", "", content))
+        if expected is not None and non_whitespace_chars < max(120, expected * 4 // 5):
+            raise ChapterUnavailable(
+                "第三方 API 返回正文明显短于章节字数，拒绝保存为全文"
+            )
+        logger.info(
+            "fanqie third-party chapter complete: item_id=%s title=%r "
+            "content_chars=%d non_whitespace_chars=%d paragraphs=%s "
+            "free_paragraphs=%s",
+            item_id,
+            title[:80],
+            len(content),
+            non_whitespace_chars,
+            paragraphs,
+            free_paragraphs,
+        )
+        return ChapterContent(
+            item_id=item_id,
+            title=title,
+            content=content,
+        )
 
     async def _page(self, path: str) -> str:
         response = await self._request(self._page_url(path))
@@ -591,7 +725,7 @@ class FanqieProvider:
         return mapping
 
     async def fetch_chapter(self, item_id: str) -> ChapterContent:
-        """读取阅读页实际正文；明显预览可委托本机免费 helper 补全。"""
+        """读取页面正文；免费预览优先由第三方接口补全。"""
 
         if not re.fullmatch(r"\d{6,32}", item_id):
             raise ValueError("非法章节 ID")
@@ -622,42 +756,64 @@ class FanqieProvider:
             if contains_pua(content):
                 raise ChapterUnavailable("章节字体映射缺失，未尝试绕过访问控制")
         is_preview = _chapter_looks_like_preview(content, chapter_data)
-        if is_preview and mobile_helper_configured(self.settings):
+        if is_preview:
             if not _chapter_is_explicitly_free(chapter_data):
                 raise ChapterUnavailable(
-                    "该章节未被阅读页明确标记为免费，未调用本机 helper"
+                    "该章节未被阅读页明确标记为免费，未调用第三方全文接口"
                 )
-            helper_request = _mobile_helper_request(chapter_data)
-            if helper_request is None:
-                raise ChapterUnavailable("阅读页缺少本机 helper 所需的书籍或章节序号")
-            book_id, chapter_order = helper_request
+            expected_word_count = _positive_int(
+                chapter_data.get("chapterWordNumber")
+                if isinstance(chapter_data, dict)
+                else None
+            )
+            third_party_error: FanqieProviderError | None = None
             try:
-                mobile_chapter = await fetch_mobile_chapter(
-                    self.settings,
-                    book_id=book_id,
-                    chapter_order=chapter_order,
+                return await self._third_party_chapter(
+                    item_id=item_id,
                     expected_title=title,
+                    expected_word_count=expected_word_count,
                 )
-            except MobileHelperError as exc:
-                raise ChapterUnavailable(str(exc)) from exc
-            logger.debug(
-                "fanqie chapter mobile helper complete: item_id=%s book_id=%s "
-                "chapter_order=%d title=%r content_chars=%d",
-                item_id,
-                book_id,
-                chapter_order,
-                mobile_chapter.title[:80],
-                len(mobile_chapter.content),
-            )
-            return ChapterContent(
-                item_id=item_id,
-                title=mobile_chapter.title,
-                content=mobile_chapter.content,
-            )
-        if is_preview and _chapter_is_explicitly_free(chapter_data):
+            except FanqieProviderError as exc:
+                third_party_error = exc
+                logger.warning(
+                    "fanqie third-party chapter unavailable: item_id=%s error=%s",
+                    item_id,
+                    exc,
+                )
+            if mobile_helper_configured(self.settings):
+                helper_request = _mobile_helper_request(chapter_data)
+                if helper_request is None:
+                    raise ChapterUnavailable(
+                        "第三方全文接口失败，且阅读页缺少本机 helper 所需的 "
+                        "书籍或章节序号"
+                    ) from third_party_error
+                book_id, chapter_order = helper_request
+                try:
+                    mobile_chapter = await fetch_mobile_chapter(
+                        self.settings,
+                        book_id=book_id,
+                        chapter_order=chapter_order,
+                        expected_title=title,
+                    )
+                except MobileHelperError as exc:
+                    raise ChapterUnavailable(str(exc)) from exc
+                logger.debug(
+                    "fanqie chapter mobile helper complete: item_id=%s book_id=%s "
+                    "chapter_order=%d title=%r content_chars=%d",
+                    item_id,
+                    book_id,
+                    chapter_order,
+                    mobile_chapter.title[:80],
+                    len(mobile_chapter.content),
+                )
+                return ChapterContent(
+                    item_id=item_id,
+                    title=mobile_chapter.title,
+                    content=mobile_chapter.content,
+                )
             raise ChapterUnavailable(
-                "阅读页仅返回预览；请配置 FANQIE_MOBILE_HELPER_PATH 获取免费移动端全文"
-            )
+                "阅读页仅返回预览；第三方全文接口不可用"
+            ) from third_party_error
         if not content:
             raise ChapterUnavailable("阅读页未返回公开正文")
         logger.debug(

@@ -48,13 +48,17 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 `AI_API_KEY` 可选。需要私聊 AI 对话或正常的狼人杀 AI 时才应配置。无 key 的 RPG
 部署建议设置 `RPG_AI_ENABLED=false`，以明确启用确定性模式。
 
-番茄小说子插件也是可选功能。它只处理番茄站公开可访问的内容，不登录、不绕过
-验证码或付费/访问控制；群聊任务的 TXT 成品只会私发给请求者。默认队列上限为 20，
+番茄小说子插件也是可选功能。它只处理阅读页明确标记为免费的内容，不登录、不绕过
+验证码或付费章节；群聊任务的 TXT 成品只会私发给请求者。默认队列上限为 20，
 每用户 1 个、每群 3 个活动任务，章节请求间隔 0.5 秒，成品和章节临时文件默认保留
 24 小时。可用 `FANQIE_*` 环境变量调整超时、重试、队列和保留时间，正文不会写入
 数据库。
 
-有些明确免费的移动端章节在公开网页只返回预览。若管理员已自行安装兼容的 Tomato
+有些明确免费的章节在公开网页只返回预览。插件默认使用开源项目公开的第三方
+`raw_full` 接口 `http://101.35.133.34:5000` 补全文本，可用
+`FANQIE_THIRD_PARTY_API_BASE`、`FANQIE_THIRD_PARTY_API_TIMEOUT` 和
+`FANQIE_THIRD_PARTY_API_RETRIES` 覆盖地址、超时和重试次数。该服务是外部依赖，可能
+变更或不可用；请求只发送章节 ID，不发送 QQ、Cookie 或登录凭据。若管理员已自行安装兼容的 Tomato
 Novel Downloader，可设置绝对路径 `FANQIE_MOBILE_HELPER_PATH`（Windows 示例：
 `C:/tools/TomatoNovelDownloader.exe`）。插件只会对阅读页同时满足 `needPay=0`、
 `isPaidPublication=false`、`isPaidStory=false`，且正文明显短于页面标明字数的单章调用
