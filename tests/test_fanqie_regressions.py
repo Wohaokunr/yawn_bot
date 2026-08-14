@@ -191,6 +191,17 @@ def test_initial_state_html_cleaning_and_pua(fanqie_modules: SimpleNamespace) ->
     assert decoder.font_glyph_to_text("gid58670") == "0"
 
 
+def test_reader_dom_content_fallback(fanqie_modules: SimpleNamespace) -> None:
+    decoder = fanqie_modules.decoder
+    page = (
+        '<div class="muye-reader-content noselect">'
+        "<p>甲&nbsp;乙</p><p>丙<br/>丁</p>"
+        "</div>"
+    )
+
+    assert decoder.extract_reader_content(page) == "甲 乙\n\n丙\n丁"
+
+
 def test_search_and_book_chapter_parsers(fanqie_modules: SimpleNamespace) -> None:
     provider = fanqie_modules.provider
     state = {
@@ -491,7 +502,7 @@ async def test_run_job_snapshots_values_before_commit(
         chapter_index=3,
         item_id="654321",
         title="Chapter 3",
-        is_locked=False,
+        is_locked=True,
         status="pending",
     )
     chapter.id = 99
@@ -511,7 +522,7 @@ async def test_run_job_snapshots_values_before_commit(
         chapter_index=3,
         item_id="654321",
         title="Chapter 3",
-        is_locked=False,
+        is_locked=True,
         status="pending",
     )
     current_chapter.id = 99
@@ -648,6 +659,43 @@ async def test_provider_retries_429_and_rejects_empty_chapter(
             await provider.fetch_chapter("111111")
     await client.aclose()
     assert calls == _EXPECTED_CALLS
+
+
+@pytest.mark.asyncio
+async def test_provider_reads_content_even_when_catalog_marks_chapter_locked(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    provider_module = fanqie_modules.provider
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "title": "第十一章",
+                        "isChapterLock": True,
+                        "content": "",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+        '<div class="muye-reader-content noselect"><p>页面实际正文</p></div>'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(_OK_STATUS, text=page, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(), client
+    ) as provider:
+        chapter = await provider.fetch_chapter("111111")
+    await client.aclose()
+
+    assert chapter.title == "第十一章"
+    assert chapter.content == "页面实际正文"
 
 
 def test_range_filename_and_startup_report(fanqie_modules: SimpleNamespace) -> None:

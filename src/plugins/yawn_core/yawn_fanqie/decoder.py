@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 
 _FONT_MAP_TEXT = """
@@ -103,6 +104,78 @@ def html_to_text(content: str) -> str:
         if line or (output and output[-1]):
             output.append(line)
     return "\n".join(output).strip()
+
+
+class _ReaderContentParser(HTMLParser):
+    """提取公开阅读页 ``muye-reader-content`` 容器中的段落。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._depth = 0
+        self._container_depth: int | None = None
+        self._paragraph_depth = 0
+        self._current: list[str] = []
+        self.paragraphs: list[str] = []
+
+    @property
+    def _in_container(self) -> bool:
+        return self._container_depth is not None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self._container_depth is None and tag == "div":
+            classes = next(
+                (value or "" for key, value in attrs if key.lower() == "class"),
+                "",
+            )
+            if "muye-reader-content" in classes.split():
+                self._container_depth = self._depth
+        if tag == "br":
+            if self._in_container and self._paragraph_depth:
+                self._current.append("\n")
+            return
+        self._depth += 1
+        if self._in_container and tag == "p":
+            self._paragraph_depth += 1
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() != "br":
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._in_container and tag == "p" and self._paragraph_depth:
+            self._paragraph_depth -= 1
+            if self._paragraph_depth == 0 and self._current:
+                self.paragraphs.append("".join(self._current))
+                self._current = []
+        if self._depth:
+            self._depth -= 1
+        if self._container_depth is not None and self._depth == self._container_depth:
+            self._container_depth = None
+            self._paragraph_depth = 0
+            self._current = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_container and self._paragraph_depth:
+            self._current.append(data)
+
+
+def extract_reader_content(page: str) -> str:
+    """从阅读页 DOM 备用提取章节段落，不推断或修改访问权限。"""
+
+    parser = _ReaderContentParser()
+    parser.feed(page)
+    parser.close()
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in parser.paragraphs
+        if paragraph.strip()
+    ]
+    return html_to_text("\n\n".join(paragraphs))
 
 
 def decrypt_pua(text: str, mapping: dict[str, str] | None = None) -> str:

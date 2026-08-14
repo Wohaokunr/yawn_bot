@@ -456,25 +456,14 @@ async def _run_job(job_id: int) -> None:
                         f"chapter_index={chapter_row.chapter_index} status={chapter_row.status}"
                     )
                     continue
-                is_locked = chapter_row.is_locked
+                catalog_locked = chapter_row.is_locked
                 item_id = chapter_row.item_id
                 chapter_title = chapter_row.title
-            if is_locked:
-                logger.debug(
-                    f"番茄章节标记不可用：job_id={job_id} "
-                    f"chapter_index={chapter.index} reason=locked"
-                )
-                await _mark_chapter(
-                    job_id,
-                    chapter.id,
-                    "unavailable",
-                    error="章节需要付费或访问权限",
-                )
-                continue
             try:
                 logger.debug(
                     f"番茄章节请求开始：job_id={job_id} "
-                    f"chapter_index={chapter.index} item_id={item_id}"
+                    f"chapter_index={chapter.index} item_id={item_id} "
+                    f"catalog_locked={catalog_locked}"
                 )
                 content = await provider.fetch_chapter(item_id)
             except ChapterUnavailable as exc:

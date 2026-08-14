@@ -9,9 +9,12 @@
 
 - [fanqiexiaoshuo-Download 页面解析参考](https://github.com/zhoulianglen/fanqiexiaoshuo-Download)
 - [其公开字体映射实现](https://raw.githubusercontent.com/zhoulianglen/fanqiexiaoshuo-Download/refs/heads/master/download.py)
+- [fanqienovel-downloader 阅读页 DOM 解析参考](https://github.com/ying-ck/fanqienovel-downloader/blob/master/src/main.py)
 
-本项目没有整体引入上述项目，也没有复制其下载器、任务或网络代码。字体 glyph
-映射仅作为 provider 的数据常量使用；页面结构或字体格式异常时，章节会标记为
-不可用并保留可重试状态。项目也不依赖带有 AGPL 边界的第三方下载器，例如
-[fanqienovel-downloader](https://github.com/ying-ck/fanqienovel-downloader)。
+本项目没有整体引入上述项目，也没有复制其下载器、任务或网络代码。provider 先读取
+阅读页状态中的正文，缺失时再读取页面实际返回的
+`muye-reader-content noselect` 段落；目录中的 `isChapterLock` 只作为诊断信息，
+不再提前阻断正文请求。字体 glyph 映射仅作为 provider 的数据常量使用；页面没有返回
+正文或字体格式异常时，章节会标记为不可用并保留可重试状态。项目不登录、不提交验证码、
+不调用需要授权的接口，也不尝试伪造或解锁服务器未返回的正文。
 使用者仍需自行确认目标内容的版权、平台条款和所在地区法律要求。

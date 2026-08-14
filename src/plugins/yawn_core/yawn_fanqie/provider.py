@@ -26,6 +26,7 @@ from .decoder import (
     contains_pua,
     decrypt_pua,
     extract_initial_state,
+    extract_reader_content,
     font_glyph_to_text,
     html_to_text,
 )
@@ -523,25 +524,30 @@ class FanqieProvider:
         return mapping
 
     async def fetch_chapter(self, item_id: str) -> ChapterContent:
-        """读取单章正文；锁定、空正文和无法解码均标记为不可用。"""
+        """读取阅读页实际返回的单章正文。"""
 
         if not re.fullmatch(r"\d{6,32}", item_id):
             raise ValueError("非法章节 ID")
         logger.debug("fanqie chapter fetch start: item_id=%s", item_id)
         page = await self._page(f"/reader/{item_id}")
-        state = extract_initial_state(page)
+        try:
+            state = extract_initial_state(page)
+        except ValueError:
+            state = {}
         chapter_data = _first_value(state, ("chapterData",))
-        if not isinstance(chapter_data, dict):
-            raise ChapterUnavailable("阅读页结构发生变化")
-        if chapter_data.get("isChapterLock", chapter_data.get("isLocked", False)):
-            raise ChapterUnavailable("章节需要付费或访问权限")
-        title = sanitize_text(chapter_data.get("title", "")) or f"章节 {item_id}"
-        raw_content = chapter_data.get(
-            "content", chapter_data.get("chapterContent", "")
-        )
-        if not isinstance(raw_content, str):
-            raise ChapterUnavailable("章节正文格式异常")
-        content = html_to_text(raw_content)
+        if isinstance(chapter_data, dict):
+            title = sanitize_text(chapter_data.get("title", "")) or f"章节 {item_id}"
+            raw_content = chapter_data.get("content") or chapter_data.get(
+                "chapterContent", ""
+            )
+            content = html_to_text(raw_content) if isinstance(raw_content, str) else ""
+        else:
+            title = f"章节 {item_id}"
+            content = ""
+        if not content:
+            content = extract_reader_content(page)
+        if not content:
+            raise ChapterUnavailable("阅读页未返回公开正文")
         if contains_pua(content):
             mapping = await self._font_mapping(page, state)
             content = decrypt_pua(content, mapping)
