@@ -30,6 +30,11 @@ from .decoder import (
     font_glyph_to_text,
     html_to_text,
 )
+from .mobile_helper import (
+    MobileHelperError,
+    fetch_mobile_chapter,
+    mobile_helper_configured,
+)
 
 BASE_URL = "https://fanqienovel.com"
 _HOST = "fanqienovel.com"
@@ -119,6 +124,68 @@ def _first_value(value: Any, keys: tuple[str, ...]) -> Any:
             if key in item and item[key] not in (None, "", [], {}):
                 return item[key]
     return None
+
+
+def _positive_int(value: Any) -> int | None:
+    """把阅读页的章节序号/字数转换为正整数。"""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _chapter_is_explicitly_free(chapter_data: dict[str, Any] | None) -> bool:
+    """仅接受阅读页同时明确标记为免费且非付费出版的章节。"""
+
+    if not isinstance(chapter_data, dict):
+        return False
+    need_pay = chapter_data.get("needPay")
+    paid_markers = (
+        str(chapter_data.get("isPaidPublication")).strip().lower(),
+        str(chapter_data.get("isPaidStory")).strip().lower(),
+    )
+    return (
+        need_pay in (0, "0", False)
+        and paid_markers[0] in {"0", "false", "no"}
+        and paid_markers[1] in {"0", "false", "no"}
+    )
+
+
+def _chapter_looks_like_preview(
+    content: str,
+    chapter_data: dict[str, Any] | None,
+) -> bool:
+    """根据页面标明的字数识别明显短于正文的公开预览。"""
+
+    if not content:
+        return True
+    if not isinstance(chapter_data, dict):
+        return False
+    expected_length = _positive_int(chapter_data.get("chapterWordNumber"))
+    if expected_length is None:
+        return False
+    actual_length = len(re.sub(r"\s+", "", content))
+    return actual_length < max(120, expected_length // 2)
+
+
+def _mobile_helper_request(
+    chapter_data: dict[str, Any] | None,
+) -> tuple[str, int] | None:
+    """从阅读页提取 helper 所需的书籍 ID 和章节顺序。"""
+
+    if not isinstance(chapter_data, dict):
+        return None
+    book_id = str(chapter_data.get("bookId", "")).strip()
+    chapter_order = _positive_int(
+        chapter_data.get("realChapterOrder", chapter_data.get("order"))
+    )
+    if not _BOOK_ID_RE.fullmatch(book_id) or chapter_order is None:
+        return None
+    return book_id, chapter_order
 
 
 def _book_from_dict(item: dict[str, Any]) -> BookSummary | None:
@@ -524,7 +591,7 @@ class FanqieProvider:
         return mapping
 
     async def fetch_chapter(self, item_id: str) -> ChapterContent:
-        """读取阅读页实际返回的单章正文。"""
+        """读取阅读页实际正文；明显预览可委托本机免费 helper 补全。"""
 
         if not re.fullmatch(r"\d{6,32}", item_id):
             raise ValueError("非法章节 ID")
@@ -554,8 +621,45 @@ class FanqieProvider:
             title = decrypt_pua(title, mapping)
             if contains_pua(content):
                 raise ChapterUnavailable("章节字体映射缺失，未尝试绕过访问控制")
+        is_preview = _chapter_looks_like_preview(content, chapter_data)
+        if is_preview and mobile_helper_configured(self.settings):
+            if not _chapter_is_explicitly_free(chapter_data):
+                raise ChapterUnavailable(
+                    "该章节未被阅读页明确标记为免费，未调用本机 helper"
+                )
+            helper_request = _mobile_helper_request(chapter_data)
+            if helper_request is None:
+                raise ChapterUnavailable("阅读页缺少本机 helper 所需的书籍或章节序号")
+            book_id, chapter_order = helper_request
+            try:
+                mobile_chapter = await fetch_mobile_chapter(
+                    self.settings,
+                    book_id=book_id,
+                    chapter_order=chapter_order,
+                    expected_title=title,
+                )
+            except MobileHelperError as exc:
+                raise ChapterUnavailable(str(exc)) from exc
+            logger.debug(
+                "fanqie chapter mobile helper complete: item_id=%s book_id=%s "
+                "chapter_order=%d title=%r content_chars=%d",
+                item_id,
+                book_id,
+                chapter_order,
+                mobile_chapter.title[:80],
+                len(mobile_chapter.content),
+            )
+            return ChapterContent(
+                item_id=item_id,
+                title=mobile_chapter.title,
+                content=mobile_chapter.content,
+            )
+        if is_preview and _chapter_is_explicitly_free(chapter_data):
+            raise ChapterUnavailable(
+                "阅读页仅返回预览；请配置 FANQIE_MOBILE_HELPER_PATH 获取免费移动端全文"
+            )
         if not content:
-            raise ChapterUnavailable("章节正文为空")
+            raise ChapterUnavailable("阅读页未返回公开正文")
         logger.debug(
             "fanqie chapter fetch complete: item_id=%s title=%r "
             "content_chars=%d pua=%s",

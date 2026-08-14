@@ -52,7 +52,17 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 验证码或付费/访问控制；群聊任务的 TXT 成品只会私发给请求者。默认队列上限为 20，
 每用户 1 个、每群 3 个活动任务，章节请求间隔 0.5 秒，成品和章节临时文件默认保留
 24 小时。可用 `FANQIE_*` 环境变量调整超时、重试、队列和保留时间，正文不会写入
-数据库。相关来源与使用边界见 [`docs/fanqie-notice.md`](fanqie-notice.md)。
+数据库。
+
+有些明确免费的移动端章节在公开网页只返回预览。若管理员已自行安装兼容的 Tomato
+Novel Downloader，可设置绝对路径 `FANQIE_MOBILE_HELPER_PATH`（Windows 示例：
+`C:/tools/TomatoNovelDownloader.exe`）。插件只会对阅读页同时满足 `needPay=0`、
+`isPaidPublication=false`、`isPaidStory=false`，且正文明显短于页面标明字数的单章调用
+它；helper 每次任务都只监听临时 `127.0.0.1` 端口，使用临时数据/输出目录并在读取后
+退出。可用
+`FANQIE_MOBILE_HELPER_STARTUP_TIMEOUT` 和 `FANQIE_MOBILE_HELPER_TIMEOUT` 调整超时。
+不要把远程 URL、账号 Cookie 或登录凭据配置给该项。相关来源与使用边界见
+[`docs/fanqie-notice.md`](fanqie-notice.md)。
 
 ## 4. 迁移
 

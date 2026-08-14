@@ -138,6 +138,9 @@ def fanqie_modules() -> SimpleNamespace:
         decoder=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.decoder"),
         provider=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.provider"),
         config=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.config"),
+        mobile_helper=importlib.import_module(
+            "src.plugins.yawn_core.yawn_fanqie.mobile_helper"
+        ),
         commands=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.commands"),
         state=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.state"),
         core=importlib.import_module("src.plugins.yawn_core"),
@@ -696,6 +699,141 @@ async def test_provider_reads_content_even_when_catalog_marks_chapter_locked(
 
     assert chapter.title == "第十一章"
     assert chapter.content == "页面实际正文"
+
+
+def test_mobile_helper_reads_only_single_exported_chapter(
+    fanqie_modules: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    mobile_helper = fanqie_modules.mobile_helper
+    output_dir = tmp_path / "output" / "book"
+    output_dir.mkdir(parents=True)
+    (output_dir / "0000_书籍信息.txt").write_text(
+        "书名：测试书\n",
+        encoding="utf-8",
+    )
+    (output_dir / "0001_第十一章.txt").write_text(
+        "分卷：第一卷\n\n第十一章\n\n完整正文\n第二段\n",
+        encoding="utf-8",
+    )
+
+    chapter = mobile_helper._read_exported_chapter(
+        tmp_path / "output",
+        "第十一章",
+        4096,
+    )
+
+    assert chapter.title == "第十一章"
+    assert chapter.content == "完整正文\n第二段"
+
+
+@pytest.mark.asyncio
+async def test_provider_uses_mobile_helper_for_explicitly_free_preview(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_module = fanqie_modules.provider
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "bookId": "123456",
+                        "order": "11",
+                        "title": "第十一章",
+                        "needPay": 0,
+                        "isPaidPublication": False,
+                        "isPaidStory": False,
+                        "isChapterLock": True,
+                        "chapterWordNumber": "2000",
+                        "content": "网页预览",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+    helper_calls: list[tuple[str, int, str]] = []
+
+    async def fake_fetch_mobile_chapter(
+        _settings: object,
+        *,
+        book_id: str,
+        chapter_order: int,
+        expected_title: str,
+    ) -> SimpleNamespace:
+        helper_calls.append((book_id, chapter_order, expected_title))
+        return SimpleNamespace(title="第十一章", content="完整移动端正文")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(_OK_STATUS, text=page, request=request)
+
+    monkeypatch.setattr(
+        provider_module,
+        "fetch_mobile_chapter",
+        fake_fetch_mobile_chapter,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = fanqie_modules.config.Config(fanqie_mobile_helper_path="helper.exe")
+    async with provider_module.FanqieProvider(settings, client) as provider:
+        chapter = await provider.fetch_chapter("111111")
+    await client.aclose()
+
+    assert helper_calls == [("123456", 11, "第十一章")]
+    assert chapter.content == "完整移动端正文"
+
+
+@pytest.mark.asyncio
+async def test_provider_never_uses_mobile_helper_for_nonfree_preview(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_module = fanqie_modules.provider
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "bookId": "123456",
+                        "order": "11",
+                        "title": "第十一章",
+                        "needPay": 1,
+                        "isPaidPublication": True,
+                        "chapterWordNumber": "2000",
+                        "content": "网页预览",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+    helper_called = False
+
+    async def fake_fetch_mobile_chapter(*_args: object, **_kwargs: object) -> object:
+        nonlocal helper_called
+        helper_called = True
+        raise AssertionError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(_OK_STATUS, text=page, request=request)
+
+    monkeypatch.setattr(
+        provider_module,
+        "fetch_mobile_chapter",
+        fake_fetch_mobile_chapter,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = fanqie_modules.config.Config(fanqie_mobile_helper_path="helper.exe")
+    async with provider_module.FanqieProvider(settings, client) as provider:
+        with pytest.raises(provider_module.ChapterUnavailable, match="明确标记为免费"):
+            await provider.fetch_chapter("111111")
+    await client.aclose()
+
+    assert not helper_called
 
 
 def test_range_filename_and_startup_report(fanqie_modules: SimpleNamespace) -> None:

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class Config(BaseModel):
-    """公开页面抓取、队列和正文保留策略。"""
+    """公开页面抓取、可选本机 helper、队列和正文保留策略。"""
 
     fanqie_request_timeout: float = Field(default=30.0, gt=0, le=120)
     fanqie_request_retries: int = Field(default=2, ge=0, le=5)
@@ -16,6 +16,9 @@ class Config(BaseModel):
     fanqie_max_file_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     fanqie_file_retention_hours: int = Field(default=24, ge=1, le=720)
     fanqie_search_limit: int = Field(default=5, ge=1, le=5)
+    fanqie_mobile_helper_path: str = ""
+    fanqie_mobile_helper_startup_timeout: float = Field(default=15.0, gt=0, le=60)
+    fanqie_mobile_helper_timeout: float = Field(default=120.0, gt=0, le=600)
     fanqie_user_agent: str = (
         "YawnBot/0.1 (+https://github.com/Wohaokunr/yawn_bot; public-pages-only)"
     )
