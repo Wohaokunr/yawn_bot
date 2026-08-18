@@ -12,58 +12,32 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha256
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
-_FONT_MAP_TEXT = """
-58670:0 58413:1 58678:2 58371:3 58353:4 58480:5 58359:6 58449:7 58540:8 58692:9
-58712:a 58542:b 58575:c 58626:d 58691:e 58561:f 58362:g 58619:h 58430:i 58531:j
-58588:k 58440:l 58681:m 58631:n 58376:o 58429:p 58555:q 58498:r 58518:s 58453:t
-58397:u 58356:v 58435:w 58514:x 58482:y 58529:z 58515:A 58688:B 58709:C 58344:D
-58656:E 58381:F 58576:G 58516:H 58463:I 58649:J 58571:K 58558:L 58433:M 58517:N
-58387:O 58687:P 58537:Q 58541:R 58458:S 58390:T 58466:U 58386:V 58697:W 58519:X
-58511:Y 58634:Z
-58611:的 58590:一 58398:是 58422:了 58657:我 58666:不 58562:人 58345:在 58510:他
-58496:有 58654:这 58441:个 58493:上 58714:们 58618:来 58528:到 58620:时 58403:大
-58461:地 58481:为 58700:子 58708:中 58503:你 58442:说 58639:生 58506:国 58663:年
-58436:着 58563:就 58391:那 58357:和 58354:要 58695:她 58372:出 58696:也 58551:得
-58445:里 58408:后 58599:自 58424:以 58394:会 58348:家 58426:可 58673:下 58417:而
-58556:过 58603:天 58565:去 58604:能 58522:对 58632:小 58622:多 58350:然 58605:于
-58617:心 58401:学 58637:么 58684:之 58382:都 58464:好 58487:看 58693:起 58608:发
-58392:当 58474:没 58601:成 58355:只 58573:如 58499:事 58469:把 58361:还 58698:用
-58489:第 58711:样 58457:道 58635:想 58492:作 58647:种 58623:开 58521:美 58609:总
-58530:从 58665:无 58652:情 58676:己 58456:面 58581:最 58509:女 58488:但 58363:现
-58685:前 58396:些 58523:所 58471:同 58485:日 58613:手 58533:又 58589:行 58527:意
-58593:动 58699:方 58707:期 58414:它 58596:头 58570:经 58660:长 58364:儿 58526:回
-58501:位 58638:分 58404:爱 58677:老 58535:因 58629:很 58577:给 58606:名 58497:法
-58662:间 58479:斯 58532:知 58380:世 58385:什 58405:两 58644:次 58578:使 58505:身
-58564:者 58412:被 58686:高 58624:已 58667:亲 58607:其 58616:进 58368:此 58427:话
-58423:常 58633:与 58525:活 58543:正 58418:感 58597:见 58683:明 58507:问 58621:力
-58703:理 58438:尔 58536:点 58384:文 58484:几 58539:定 58554:本 58421:公 58347:特
-58569:做 58710:外 58574:孩 58375:相 58645:西 58592:果 58572:走 58388:将 58370:月
-58399:十 58651:实 58546:向 58504:声 58419:车 58407:全 58672:信 58675:重 58538:三
-58465:机 58374:工 58579:物 58402:气 58702:每 58553:并 58360:别 58389:真 58560:打
-58690:太 58473:新 58512:比 58653:才 58704:便 58545:夫 58641:再 58475:书 58583:部
-58472:水 58478:像 58664:眼 58586:等 58568:体 58674:却 58490:加 58476:电 58346:主
-58630:界 58595:门 58502:利 58713:海 58587:受 58548:听 58351:表 58547:德 58443:少
-58460:克 58636:代 58585:员 58625:许 58694:稜 58428:先 58640:口 58628:由 58612:死
-58446:安 58468:写 58410:性 58508:马 58594:光 58483:白 58544:或 58495:住 58450:难
-58643:望 58486:教 58406:命 58447:花 58669:结 58415:乐 58444:色 58549:更 58494:拉
-58409:东 58658:神 58557:记 58602:处 58559:让 58610:母 58513:父 58500:应 58378:直
-58680:字 58352:场 58383:平 58454:报 58671:友 58668:关 58452:放 58627:至 58400:张
-58455:认 58416:接 58552:告 58614:入 58582:笑 58534:内 58701:英 58349:军 58491:候
-58467:民 58365:岁 58598:往 58425:何 58462:度 58420:山 58661:觉 58615:路 58648:带
-58470:万 58377:男 58520:边 58646:风 58600:解 58431:叫 58715:任 58524:金 58439:快
-58566:原 58477:吃 58642:妈 58437:变 58411:通 58451:师 58395:立 58369:象 58706:数
-58705:四 58379:失 58567:满 58373:战 58448:远 58659:格 58434:士 58679:音 58432:轻
-58689:目 58591:条 58682:呢
-"""
+from .font_signatures import FONT_SIGNATURE_MAP
 
-FONT_GLYPH_MAP: dict[str, str] = {}
-for _item in _FONT_MAP_TEXT.split():
-    _key, _value = _item.split(":", 1)
-    FONT_GLYPH_MAP[_key] = _value
+_READER_PUA_START = 58344
+_READER_CHARSET = (
+    "D\u5728\u4e3b\u7279\u5bb6\u519b\u7136\u8868\u573a4\u8981\u53eav\u548c?6\u522b\u8fd8g\u73b0\u513f\u5c81??"
+    "\u6b64\u8c61\u67083\u51fa\u6218\u5de5\u76f8o\u7537\u76f4\u5931\u4e16F\u90fd\u5e73\u6587\u4ec0VO\u5c06\u771fT\u90a3"
+    "\u5f53?\u4f1a\u7acb\u4e9bu\u662f\u5341\u5f20\u5b66\u6c14\u5927\u7231\u4e24\u547d\u5168\u540e\u4e1c\u6027\u901a\u88ab1\u5b83\u4e50"
+    "\u63a5\u800c\u611f\u8f66\u5c71\u516c\u4e86\u5e38\u4ee5\u4f55\u53ef\u8bdd\u5148pi\u53eb\u8f7bM\u58ebw\u7740\u53d8\u5c14\u5feb"
+    "l\u4e2a\u8bf4\u5c11\u8272\u91cc\u5b89\u82b1\u8fdc7\u96be\u5e08\u653et\u62a5\u8ba4\u9762\u9053S?\u514b\u5730\u5ea6I"
+    "\u597d\u673aU\u6c11\u5199\u628a\u4e07\u540c\u6c34\u65b0\u6ca1\u4e66\u7535\u5403\u50cf\u65af5\u4e3ay\u767d\u51e0\u65e5\u6559\u770b"
+    "\u4f46\u7b2c\u52a0\u5019\u4f5c\u4e0a\u62c9\u4f4f\u6709\u6cd5r\u4e8b\u5e94\u4f4d\u5229\u4f60\u58f0\u8eab\u56fd\u95ee\u9a6c\u5973\u4ed6Y"
+    "\u6bd4\u7236xAHNsX\u8fb9\u7f8e\u5bf9\u6240\u91d1\u6d3b\u56de\u610f\u5230z\u4ecej\u77e5\u53c8\u5185\u56e0"
+    "\u70b9Q\u4e09\u5b9a8Rb\u6b63\u6216\u592b\u5411\u5fb7\u542c\u66f4?\u5f97\u544a\u5e76\u672cq\u8fc7\u8bb0L\u8ba9"
+    "\u6253f\u4eba\u5c31\u8005\u53bb\u539f\u6ee1\u4f53\u505a\u7ecfK\u8d70\u5982\u5b69cG\u7ed9\u4f7f\u7269?\u6700\u7b11\u90e8"
+    "?\u5458\u7b49\u53d7k\u884c\u4e00\u6761\u679c\u52a8\u5149\u95e8\u5934\u89c1\u5f80\u81ea\u89e3\u6210\u5904\u5929\u80fd\u4e8e\u540d\u5176"
+    "\u53d1\u603b\u6bcd\u7684\u6b7b\u624b\u5165\u8def\u8fdb\u5fc3\u6765h\u65f6\u529b\u591a\u5f00\u5df2\u8bb8d\u81f3\u7531\u5f88\u754cn"
+    "\u5c0f\u4e0eZ\u60f3\u4ee3\u4e48\u5206\u751f\u53e3\u518d\u5988\u671b\u6b21\u897f\u98ce\u79cd\u5e26J?\u5b9e\u60c5\u624d\u8fd9?"
+    "E\u6211\u795e\u683c\u957f\u89c9\u95f4\u5e74\u773c\u65e0\u4e0d\u4eb2\u5173\u7ed30\u53cb\u4fe1\u4e0b\u5374\u91cd\u5df1\u80012\u97f3"
+    "\u5b57m\u5462\u660e\u4e4b\u524d\u9ad8PB\u76ee\u592ae9\u8d77\u7a1c\u5979\u4e5fW\u7528\u65b9\u5b50\u82f1\u6bcf\u7406"
+    "\u4fbf\u56db\u6570\u671f\u4e2dC\u5916\u6837a\u6d77\u4eec\u4efb"
+)
 
 _INITIAL_STATE_RE = re.compile(r"window\.__INITIAL_STATE__\s*=\s*", re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -185,14 +159,37 @@ def decrypt_pua(text: str, mapping: dict[str, str] | None = None) -> str:
     return "".join(active.get(char, char) for char in text)
 
 
+def decrypt_reader_pua(text: str) -> str:
+    """Decode the fixed Reader PUA permutation without affecting Search fonts."""
+
+    output: list[str] = []
+    for char in text:
+        offset = ord(char) - _READER_PUA_START
+        if 0 <= offset < len(_READER_CHARSET):
+            decoded = _READER_CHARSET[offset]
+            output.append(char if decoded == "?" else decoded)
+        else:
+            output.append(char)
+    return "".join(output)
+
+
 def contains_pua(text: str) -> bool:
     """判断文本是否仍含有待解码的私用区字符。"""
 
     return _PUA_RE.search(text) is not None
 
 
-def font_glyph_to_text(glyph_name: str) -> str | None:
-    """把 ``gid58670``/``glyph58670`` 等字体 glyph 名称映射成字符。"""
+def font_glyph_signature_to_text(font: Any, glyph_name: str) -> str | None:
+    """按字形轮廓解码被番茄重新编号的公开字体。"""
 
-    match = re.search(r"(?:gid|glyph)?(\d+)$", glyph_name, re.IGNORECASE)
-    return FONT_GLYPH_MAP.get(match.group(1)) if match else None
+    try:
+        from fontTools.pens.recordingPen import RecordingPen
+
+        pen = RecordingPen()
+        font.getGlyphSet()[glyph_name].draw(pen)
+        signature = sha256(
+            repr(tuple(pen.value)).encode("utf-8")
+        ).hexdigest()
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    return FONT_SIGNATURE_MAP.get(signature)

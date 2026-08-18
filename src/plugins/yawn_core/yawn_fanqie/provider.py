@@ -5,7 +5,7 @@ NoneBot 权限。页面结构变化时可独立替换本模块。
 """
 
 # provider 的诊断错误需要携带页面/HTTP 上下文，且解析分支较多。
-# ruff: noqa: N818, PLR2004, TRY003, TRY300, C901, PLR0912, PLR0915, PERF401, PYI034
+# ruff: noqa: N818, PLR2004, TRY003, TRY300, TRY301, C901, PLR0912, PLR0913, PLR0915, PERF203, PERF401, PYI034
 
 from __future__ import annotations
 
@@ -16,18 +16,24 @@ import re
 from dataclasses import dataclass
 from html import unescape
 from time import perf_counter
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 import httpx
 
+from .browser_search import (
+    BrowserSearchError,
+    BrowserSearchSnapshot,
+    search_page_snapshot,
+)
 from .config import Config
 from .decoder import (
     contains_pua,
     decrypt_pua,
+    decrypt_reader_pua,
     extract_initial_state,
     extract_reader_content,
-    font_glyph_to_text,
+    font_glyph_signature_to_text,
     html_to_text,
 )
 from .mobile_helper import (
@@ -35,6 +41,9 @@ from .mobile_helper import (
     fetch_mobile_chapter,
     mobile_helper_configured,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 BASE_URL = "https://fanqienovel.com"
 _HOST = "fanqienovel.com"
@@ -44,6 +53,35 @@ _FONT_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _SEARCH_QUERY_TYPES: dict[str, str] = {"related": "0", "new": "1", "hot": "2"}
+_BOOK_TEXT_KEYS = (
+    "bookName",
+    "book_name",
+    "bookTitle",
+    "book_title",
+    "title",
+    "name",
+    "author",
+    "authorName",
+    "author_name",
+    "authorNameText",
+    "abstract",
+    "book_abstract",
+    "description",
+    "bookIntro",
+    "book_intro",
+)
+_SEARCH_VISIBLE_TEXT_KEYS = (
+    "bookName",
+    "book_name",
+    "bookTitle",
+    "book_title",
+    "title",
+    "name",
+    "author",
+    "authorName",
+    "author_name",
+    "authorNameText",
+)
 _RANK_GENDER_CODES: dict[str, str] = {"male": "1", "female": "0"}
 _RANK_TYPE_CODES: dict[str, str] = {"read": "2", "new": "1"}
 logger = logging.getLogger(__name__)
@@ -55,6 +93,10 @@ class FanqieProviderError(RuntimeError):
 
 class ChapterUnavailable(FanqieProviderError):
     """章节锁定、正文为空或无法公开解码。"""
+
+
+class ChapterFetchTransientError(FanqieProviderError):
+    """全文后端暂时不可用，任务应保留进度并允许重试。"""
 
 
 class FanqieServiceUnavailable(FanqieProviderError):
@@ -257,10 +299,15 @@ def _third_party_chapter_response(
     """提取开源第三方 API ``/api/raw_full`` 的章节数据。"""
 
     if not isinstance(payload, dict):
-        raise ChapterUnavailable("第三方 API 返回的不是 JSON 对象")
+        raise FanqieProviderError("第三方 API 返回的不是 JSON 对象")
     code = payload.get("code")
     if code not in (None, 200, "200"):
         message = sanitize_text(payload.get("message")) or f"code={code}"
+        numeric_code = _positive_int(code)
+        if numeric_code == 429 or (
+            numeric_code is not None and numeric_code >= 500
+        ):
+            raise FanqieProviderError(f"第三方 API 服务错误：{message}")
         raise ChapterUnavailable(f"第三方 API 返回错误：{message}")
     data = payload.get("data", payload)
     if not isinstance(data, dict):
@@ -270,6 +317,44 @@ def _third_party_chapter_response(
         raise ChapterUnavailable("第三方 API 未返回章节正文")
     title = sanitize_text(data.get("title", data.get("chapter_title", "")))
     return title, raw_content, data
+
+
+def _validate_mirror_content(
+    raw_content: str,
+    *,
+    expected_word_count: int | None,
+    preview: str,
+) -> str:
+    """Validate content-only mirrors against the official free preview."""
+
+    content = html_to_text(raw_content)
+    if contains_pua(content):
+        raise ChapterUnavailable("第三方 API 正文仍含未解码字体字符")
+    if not content:
+        raise ChapterUnavailable("第三方 API 清理后正文为空")
+    quote_translation = str.maketrans(
+        {
+            "“": '"',
+            "”": '"',
+            "「": '"',
+            "」": '"',
+            "\u2018": "'",
+            "\u2019": "'",
+            "『": "'",
+            "』": "'",
+        }
+    )
+    normalized_content = re.sub(r"\s+", "", content).translate(quote_translation)
+    if expected_word_count is not None and len(normalized_content) < max(
+        120, expected_word_count * 4 // 5
+    ):
+        raise ChapterUnavailable("第三方 API 返回正文明显短于章节字数，拒绝保存为全文")
+    normalized_preview = re.sub(r"\s+", "", preview).translate(quote_translation)
+    if len(normalized_preview) >= 40 and not normalized_content.startswith(
+        normalized_preview[:80]
+    ):
+        raise ChapterUnavailable("第三方 API 返回内容与阅读页预览不匹配")
+    return content
 
 
 def _item_value(item: dict[str, Any], *keys: str) -> Any:
@@ -363,7 +448,11 @@ def _dedupe_books(items: Any, limit: int) -> list[BookSummary]:
     return results
 
 
-def parse_search_response(payload: Any, limit: int = 5) -> list[BookSummary]:
+def parse_search_response(
+    payload: Any,
+    limit: int = 5,
+    mapping: dict[str, str] | None = None,
+) -> list[BookSummary]:
     """解析官方搜索接口返回的书籍列表。"""
 
     if not isinstance(payload, dict):
@@ -384,7 +473,16 @@ def parse_search_response(payload: Any, limit: int = 5) -> list[BookSummary]:
     )
     if key is None:
         raise ValueError("搜索接口缺少书籍列表")
-    return _dedupe_books(data.get(key) or [], limit)
+    items = data.get(key) or []
+    active_mapping = mapping or {}
+    if active_mapping and isinstance(items, list):
+        items = [
+            _decode_book_item(item, active_mapping)
+            if isinstance(item, dict)
+            else item
+            for item in items
+        ]
+    return _dedupe_books(items, limit)
 
 
 def _rank_state(state: dict[str, Any]) -> dict[str, Any]:
@@ -405,22 +503,7 @@ def _rank_needs_mapping(items: list[dict[str, Any]]) -> bool:
     return any(
         contains_pua(str(item.get(key, "")))
         for item in items
-        for key in (
-            "bookName",
-            "book_name",
-            "bookTitle",
-            "book_title",
-            "title",
-            "name",
-            "author",
-            "authorName",
-            "author_name",
-            "authorNameText",
-            "abstract",
-            "book_abstract",
-            "bookIntro",
-            "book_intro",
-        )
+        for key in _BOOK_TEXT_KEYS
     )
 
 
@@ -475,29 +558,44 @@ def parse_rank_categories(page: str) -> dict[str, list[RankCategory]]:
     return categories
 
 
-def _decode_rank_item(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+def _decode_book_item(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
     decoded = dict(item)
-    for key in (
-        "bookName",
-        "book_name",
-        "bookTitle",
-        "book_title",
-        "title",
-        "name",
-        "author",
-        "authorName",
-        "author_name",
-        "authorNameText",
-        "abstract",
-        "book_abstract",
-        "description",
-        "bookIntro",
-        "book_intro",
-    ):
+    for key in _BOOK_TEXT_KEYS:
         value = decoded.get(key)
         if isinstance(value, str):
             decoded[key] = decrypt_pua(value, mapping)
     return decoded
+
+
+def _search_payload_needs_mapping(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return False
+    for key in ("search_book_data_list", "book_list", "books"):
+        items = data.get(key)
+        if not isinstance(items, list):
+            continue
+        return any(
+            isinstance(item, dict)
+            and any(
+                isinstance(item.get(text_key), str)
+                and contains_pua(item[text_key])
+                for text_key in _SEARCH_VISIBLE_TEXT_KEYS
+            )
+            for item in items
+        )
+    return False
+
+
+def _validate_search_text(books: list[BookSummary]) -> None:
+    if any(
+        contains_pua(value)
+        for book in books
+        for value in (book.title, book.author)
+    ):
+        raise ValueError("搜索文字仍含未解码字体字符")
 
 
 def parse_rank_results(
@@ -511,7 +609,7 @@ def parse_rank_results(
     raw_books = _rank_book_items(_rank_state(state))
     active_mapping = mapping or {}
     items = (
-        [_decode_rank_item(item, active_mapping) for item in raw_books]
+        [_decode_book_item(item, active_mapping) for item in raw_books]
         if active_mapping
         else raw_books
     )
@@ -533,53 +631,6 @@ def parse_rank_results(
 
 def _looks_like_challenge(text: str) -> bool:
     return any(marker in text for marker in ("请完成下列验证", "人机验证", "验证码"))
-
-
-def parse_search_results(page: str, limit: int = 5) -> list[BookSummary]:
-    """从搜索 HTML/初始状态提取去重后的书籍摘要。"""
-
-    results: list[BookSummary] = []
-    seen: set[str] = set()
-    try:
-        state: Any = extract_initial_state(page)
-    except ValueError:
-        state = None
-    if state is not None:
-        for item in _walk(state):
-            book = _book_from_dict(item)
-            if book and book.book_id not in seen:
-                results.append(book)
-                seen.add(book.book_id)
-                if len(results) >= limit:
-                    logger.debug(
-                        "fanqie parse search results: result_count=%d limit=%d",
-                        len(results),
-                        limit,
-                    )
-                    return results
-
-    pattern = re.compile(
-        r'<a[^>]+href=["\']/page/(\d+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL
-    )
-    for match in pattern.finditer(page):
-        book_id = match.group(1)
-        title = html_to_text(match.group(2))
-        if not title or book_id in seen:
-            continue
-        results.append(
-            BookSummary(
-                book_id=book_id,
-                title=title,
-                url=f"{BASE_URL}/page/{book_id}",
-            )
-        )
-        seen.add(book_id)
-        if len(results) >= limit:
-            break
-    logger.debug(
-        "fanqie parse search results: result_count=%d limit=%d", len(results), limit
-    )
-    return results
 
 
 def parse_book_page(page: str, book_id: str) -> BookSummary:
@@ -653,11 +704,14 @@ class FanqieProvider:
         self,
         settings: Config | None = None,
         client: httpx.AsyncClient | None = None,
+        browser_search: Callable[..., Awaitable[BrowserSearchSnapshot]] | None = None,
     ) -> None:
         self.settings = settings or Config()
         self._client = client
         self._owned_client = client is None
+        self._browser_search = browser_search or search_page_snapshot
         self._font_cache: dict[str, dict[str, str]] = {}
+        self._third_party_open_sources: set[str] = set()
 
     async def __aenter__(self) -> FanqieProvider:
         if self._client is None:
@@ -704,6 +758,7 @@ class FanqieProvider:
         url: str,
         *,
         params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
         allow_third_party: bool = False,
         timeout: float | None = None,
         retries: int | None = None,
@@ -743,6 +798,7 @@ class FanqieProvider:
                 response = await self._client.get(
                     url,
                     params=params,
+                    headers=headers,
                     timeout=request_timeout,
                 )
                 logger.debug(
@@ -830,7 +886,7 @@ class FanqieProvider:
         try:
             payload = response.json()
         except ValueError as exc:
-            raise ChapterUnavailable("第三方 API 返回的不是有效 JSON") from exc
+            raise FanqieProviderError("第三方 API 返回的不是有效 JSON") from exc
         title, raw_content, metadata = _third_party_chapter_response(payload)
         if not title:
             raise ChapterUnavailable("第三方 API 缺少章节标题")
@@ -877,6 +933,85 @@ class FanqieProvider:
             content=content,
         )
 
+    async def _third_party_proxy_chapter(
+        self,
+        *,
+        item_id: str,
+        expected_title: str,
+        expected_word_count: int | None,
+        preview: str,
+    ) -> ChapterContent:
+        """Read App-decrypted free text from the public fanqietc proxy."""
+
+        base = _third_party_api_base(self.settings.fanqie_third_party_fallback_base)
+        token = self.settings.fanqie_third_party_fallback_token.strip()
+        if not token:
+            raise FanqieProviderError("番茄全文回退代理未配置 API token")
+        response = await self._request(
+            f"{base}/proxy",
+            params={
+                "api": "default",
+                "action": "content",
+                "item_id": item_id,
+            },
+            headers={
+                "X-API-Token": token,
+                "Origin": "https://fanqietc.com",
+                "Referer": "https://fanqietc.com/",
+            },
+            allow_third_party=True,
+            timeout=self.settings.fanqie_third_party_api_timeout,
+            retries=self.settings.fanqie_third_party_api_retries,
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise FanqieProviderError(
+                "番茄全文回退代理返回的不是有效 JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise FanqieProviderError("番茄全文回退代理返回结构异常")
+        code = payload.get("code")
+        if code not in (None, 200, "200"):
+            message = sanitize_text(
+                payload.get("message", payload.get("msg"))
+            ) or f"code={code}"
+            numeric_code = _positive_int(code)
+            if numeric_code == 429 or (
+                numeric_code is not None and numeric_code >= 500
+            ):
+                raise FanqieProviderError(f"番茄全文回退代理服务错误：{message}")
+            raise ChapterUnavailable(f"番茄全文回退代理返回错误：{message}")
+        data = payload.get("data", payload)
+        if not isinstance(data, dict):
+            raise ChapterUnavailable("番茄全文回退代理缺少章节数据")
+        raw_content = data.get("content")
+        if not isinstance(raw_content, str) or not raw_content.strip():
+            raise ChapterUnavailable("番茄全文回退代理未返回章节正文")
+        content = _validate_mirror_content(
+            raw_content,
+            expected_word_count=expected_word_count,
+            preview=preview,
+        )
+        returned_title = sanitize_text(
+            data.get("title", data.get("chapter_title", expected_title))
+        )
+        if returned_title and returned_title != sanitize_text(expected_title):
+            raise ChapterUnavailable(
+                f"番茄全文回退代理章节标题不匹配：返回 {returned_title!r}，"
+                f"期望 {expected_title!r}"
+            )
+        logger.info(
+            "fanqie fallback chapter complete: item_id=%s content_chars=%d",
+            item_id,
+            len(content),
+        )
+        return ChapterContent(
+            item_id=item_id,
+            title=expected_title,
+            content=content,
+        )
+
     async def _page(self, path: str) -> str:
         response = await self._request(self._page_url(path))
         return response.text
@@ -895,48 +1030,50 @@ class FanqieProvider:
         query_type = _SEARCH_QUERY_TYPES.get(order)
         if query_type is None:
             raise ValueError("不支持的番茄搜索排序")
-        search_path = "/api/author/search/search_book/v1"
-        params = {
-            "filter": "127,127,127,127",
-            "page_count": str(self.settings.fanqie_search_limit),
-            "page_index": "0",
-            "query_type": query_type,
-            "query_word": keyword,
-        }
         logger.debug(
-            "fanqie search start: keyword=%r order=%s path=%s limit=%d",
+            "fanqie search start: keyword=%r order=%s limit=%d",
             keyword[:80],
             order,
-            search_path,
             self.settings.fanqie_search_limit,
         )
         try:
-            response = await self._request(
-                self._page_url(search_path),
-                params=params,
+            snapshot = await self._browser_search(
+                keyword,
+                query_type=query_type,
+                timeout=self.settings.fanqie_browser_timeout,
+                headless=self.settings.fanqie_browser_headless,
+                profile_dir=self.settings.fanqie_browser_profile_dir,
             )
-        except FanqieProviderError as exc:
-            raise FanqieServiceUnavailable("番茄搜索接口暂时不可用") from exc
-        if not response.content or _looks_like_challenge(response.text):
-            raise FanqieServiceUnavailable(
-                "番茄搜索接口返回了空响应或验证页面"
-            )
+        except BrowserSearchError as exc:
+            raise FanqieServiceUnavailable(str(exc)) from exc
         try:
-            payload = response.json()
+            page = snapshot.page
+            payload = snapshot.payload
+            needs_mapping = _search_payload_needs_mapping(payload)
+            mapping: dict[str, str] = {}
+            if needs_mapping:
+                if not page:
+                    raise ValueError("搜索页面字体映射缺失")
+                state = extract_initial_state(page)
+                mapping = await self._font_mapping(page, state)
+                if not mapping:
+                    raise ValueError("搜索页面字体映射缺失")
             results = parse_search_response(
                 payload,
                 self.settings.fanqie_search_limit,
+                mapping=mapping,
             )
-        except (ValueError, TypeError) as exc:
+            if needs_mapping:
+                _validate_search_text(results)
+        except (FanqieProviderError, ValueError, TypeError) as exc:
             raise FanqieServiceUnavailable("番茄搜索接口返回结构异常") from exc
         logger.debug(
             "fanqie search complete: keyword=%r order=%s result_count=%d "
-            "book_ids=%s response_bytes=%d",
+            "book_ids=%s",
             keyword[:80],
             order,
             len(results),
             [book.book_id for book in results],
-            len(response.content),
         )
         return results
 
@@ -1092,11 +1229,12 @@ class FanqieProvider:
             cmap = font.getBestCmap() or {}
         except Exception as exc:
             raise ChapterUnavailable("章节字体格式异常，无法公开解码") from exc
-        mapping = {
-            chr(codepoint): decoded
-            for codepoint, glyph_name in cmap.items()
-            if (decoded := font_glyph_to_text(str(glyph_name))) is not None
-        }
+        mapping: dict[str, str] = {}
+        for codepoint, raw_glyph_name in cmap.items():
+            glyph_name = str(raw_glyph_name)
+            decoded = font_glyph_signature_to_text(font, glyph_name)
+            if decoded is not None:
+                mapping[chr(codepoint)] = decoded
         self._font_cache[url] = mapping
         logger.debug(
             "fanqie page font mapping parsed: url=%s entries=%d",
@@ -1131,9 +1269,12 @@ class FanqieProvider:
         if not content:
             raise ChapterUnavailable("阅读页未返回公开正文")
         if contains_pua(content):
-            mapping = await self._font_mapping(page, state)
-            content = decrypt_pua(content, mapping)
-            title = decrypt_pua(title, mapping)
+            content = decrypt_reader_pua(content)
+            title = decrypt_reader_pua(title)
+            if contains_pua(content):
+                mapping = await self._font_mapping(page, state)
+                content = decrypt_pua(content, mapping)
+                title = decrypt_pua(title, mapping)
             if contains_pua(content):
                 raise ChapterUnavailable("章节字体映射缺失，未尝试绕过访问控制")
         is_preview = _chapter_looks_like_preview(content, chapter_data)
@@ -1147,23 +1288,90 @@ class FanqieProvider:
                 if isinstance(chapter_data, dict)
                 else None
             )
-            third_party_error: FanqieProviderError | None = None
-            try:
-                return await self._third_party_chapter(
-                    item_id=item_id,
-                    expected_title=title,
-                    expected_word_count=expected_word_count,
+            primary_base = self.settings.fanqie_third_party_api_base.strip()
+            fallback_base = self.settings.fanqie_third_party_fallback_base.strip()
+            third_party_sources: list[tuple[str, Any]] = []
+            configured_sources = {"raw_full"} if primary_base else set()
+            if primary_base and "raw_full" not in self._third_party_open_sources:
+                third_party_sources.append(
+                    (
+                        "raw_full",
+                        lambda: self._third_party_chapter(
+                            item_id=item_id,
+                            expected_title=title,
+                            expected_word_count=expected_word_count,
+                        ),
+                    )
                 )
-            except FanqieProviderError as exc:
-                third_party_error = exc
-                logger.warning(
-                    "fanqie third-party chapter unavailable: item_id=%s error=%s",
-                    item_id,
-                    exc,
+            # Clearing the primary base remains the documented way to disable
+            # all remote mirrors and use only the administrator's local helper.
+            fallback_configured = (
+                primary_base
+                and fallback_base
+                and self.settings.fanqie_third_party_fallback_token.strip()
+            )
+            if fallback_configured:
+                configured_sources.add("fanqietc")
+            if (
+                fallback_configured
+                and "fanqietc" not in self._third_party_open_sources
+            ):
+                third_party_sources.append(
+                    (
+                        "fanqietc",
+                        lambda: self._third_party_proxy_chapter(
+                            item_id=item_id,
+                            expected_title=title,
+                            expected_word_count=expected_word_count,
+                            preview=content,
+                        ),
+                    )
                 )
+            source_errors: list[FanqieProviderError] = []
+            open_sources = configured_sources & self._third_party_open_sources
+            transient_error = (
+                ChapterFetchTransientError(
+                    "番茄全文服务暂时不可用，已熔断节点："
+                    + ", ".join(sorted(open_sources))
+                )
+                if open_sources
+                else None
+            )
+            if not third_party_sources and primary_base:
+                transient_error = ChapterFetchTransientError(
+                    "番茄全文服务暂时不可用，所有已配置节点均已熔断"
+                )
+            for source_name, source_call in third_party_sources:
+                try:
+                    return await source_call()
+                except ChapterUnavailable as exc:
+                    source_errors.append(exc)
+                    logger.warning(
+                        "fanqie third-party chapter rejected: item_id=%s "
+                        "source=%s error=%s",
+                        item_id,
+                        source_name,
+                        exc,
+                    )
+                except FanqieProviderError as exc:
+                    source_errors.append(exc)
+                    self._third_party_open_sources.add(source_name)
+                    transient_error = ChapterFetchTransientError(
+                        f"番茄全文源 {source_name} 暂时不可用：{exc}"
+                    )
+                    logger.warning(
+                        "fanqie third-party chapter unavailable: item_id=%s "
+                        "source=%s error=%s",
+                        item_id,
+                        source_name,
+                        exc,
+                    )
+            third_party_error = source_errors[-1] if source_errors else None
             if mobile_helper_configured(self.settings):
                 helper_request = _mobile_helper_request(chapter_data)
                 if helper_request is None:
+                    if transient_error is not None:
+                        raise transient_error from third_party_error
                     raise ChapterUnavailable(
                         "第三方全文接口失败，且阅读页缺少本机 helper 所需的 "
                         "书籍或章节序号"
@@ -1177,6 +1385,10 @@ class FanqieProvider:
                         expected_title=title,
                     )
                 except MobileHelperError as exc:
+                    if transient_error is not None:
+                        raise ChapterFetchTransientError(
+                            f"第三方全文服务暂时不可用，且本机 helper 失败：{exc}"
+                        ) from transient_error
                     raise ChapterUnavailable(str(exc)) from exc
                 logger.debug(
                     "fanqie chapter mobile helper complete: item_id=%s book_id=%s "
@@ -1192,11 +1404,11 @@ class FanqieProvider:
                     title=mobile_chapter.title,
                     content=mobile_chapter.content,
                 )
+            if transient_error is not None:
+                raise transient_error from third_party_error
             raise ChapterUnavailable(
                 "阅读页仅返回预览；第三方全文接口不可用"
             ) from third_party_error
-        if not content:
-            raise ChapterUnavailable("阅读页未返回公开正文")
         logger.debug(
             "fanqie chapter fetch complete: item_id=%s title=%r "
             "content_chars=%d pua=%s",
@@ -1211,6 +1423,7 @@ class FanqieProvider:
 __all__ = [
     "BookSummary",
     "ChapterContent",
+    "ChapterFetchTransientError",
     "ChapterRef",
     "ChapterUnavailable",
     "FanqieProvider",
@@ -1222,6 +1435,5 @@ __all__ = [
     "parse_rank_categories",
     "parse_rank_results",
     "parse_search_response",
-    "parse_search_results",
     "parse_source",
 ]

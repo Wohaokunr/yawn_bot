@@ -51,15 +51,24 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 番茄小说子插件也是可选功能。它只处理阅读页明确标记为免费的内容，不登录、不绕过
 验证码或付费章节；群聊任务的 TXT 成品只会私发给请求者。默认队列上限为 20，
 每用户 1 个、每群 3 个活动任务，章节请求间隔 0.5 秒，成品和章节临时文件默认保留
-24 小时。搜索使用番茄公开搜索接口，榜单使用公开榜单页，默认最多展示 10 本榜单书籍；
-可用 `FANQIE_*` 环境变量调整超时、重试、队列、榜单数量和保留时间，正文不会写入数据库。
-如果公开搜索接口返回验证码或风控空响应，插件会提示稍后重试，不会提交验证码或绕过访问控制。
+24 小时。搜索使用 Playwright Chromium 执行番茄公开搜索页，由页面自身初始化安全 SDK
+并发起官方搜索请求；榜单仍使用公开榜单页，默认最多展示 10 本榜单书籍。首次部署
+需要执行 `uv run playwright install chromium`。搜索默认在 localstore 下维护插件专用的
+持久化浏览器会话，用于保留页面生成的 session/fingerprint cookie；不会读取用户已有的
+Chrome/Edge 配置文件，也不保存 QQ 登录态。首次空响应会在同一持久会话内自动重试一次；
+浏览器保持 Playwright 标准行为，不修改自动化标记，也不伪造账号、Cookie 或服务端令牌；
+如果仍要求验证码、返回空响应或浏览器不可用，插件会提示稍后重试，不会自动提交验证码。
+可用 `FANQIE_*` 环境变量调整浏览器超时、headless 模式、会话目录、页面请求、
+重试、队列、榜单数量和保留时间，正文不会写入数据库。
 
 有些明确免费的章节在公开网页只返回预览。插件默认使用开源项目公开的第三方
 `raw_full` 接口 `http://101.35.133.34:5000` 补全文本，可用
 `FANQIE_THIRD_PARTY_API_BASE`、`FANQIE_THIRD_PARTY_API_TIMEOUT` 和
 `FANQIE_THIRD_PARTY_API_RETRIES` 覆盖地址、超时和重试次数。该服务是外部依赖，可能
-变更或不可用；请求只发送章节 ID，不发送 QQ、Cookie 或登录凭据。若管理员已自行安装兼容的 Tomato
+变更或不可用；节点连续出现 5xx/网络错误后，本次任务会熔断该节点并切换到公开
+App 内容代理 `https://api.fanqietc.com`。可用
+`FANQIE_THIRD_PARTY_FALLBACK_BASE` 和 `FANQIE_THIRD_PARTY_FALLBACK_TOKEN` 覆盖或关闭
+该回退源。请求只发送章节 ID 和公开前端 token，不发送 QQ、Cookie 或登录凭据。若管理员已自行安装兼容的 Tomato
 Novel Downloader，可设置绝对路径 `FANQIE_MOBILE_HELPER_PATH`（Windows 示例：
 `C:/tools/TomatoNovelDownloader.exe`）。插件只会对阅读页同时满足 `needPay=0`、
 `isPaidPublication=false`、`isPaidStory=false`，且正文明显短于页面标明字数的单章调用

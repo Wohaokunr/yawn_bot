@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -30,6 +31,8 @@ _SEARCH_WORD_COUNT = 345
 _API_READ_COUNT = 1234
 _API_WORD_COUNT = 5678
 _RANK_READ_COUNT = 99
+_FONT_SIGNATURE_COUNT = 362
+_RAW_FULL_502_ERROR = "raw_full HTTP 502"
 
 
 class _CommitExpiringSession:
@@ -57,10 +60,11 @@ class _CommitExpiringSession:
 
     async def flush(self) -> None:
         for item in self.items:
-            if isinstance(item, self.book_type) and item.id is None:
-                item.id = _TEST_BOOK_RECORD_ID
-            if isinstance(item, self.job_type) and item.id is None:
-                item.id = _TEST_JOB_ID
+            item_any = cast("Any", item)
+            if isinstance(item, self.book_type) and item_any.id is None:
+                item_any.id = _TEST_BOOK_RECORD_ID
+            if isinstance(item, self.job_type) and item_any.id is None:
+                item_any.id = _TEST_JOB_ID
 
     async def commit(self) -> None:
         assert self.job is not None
@@ -143,6 +147,9 @@ def fanqie_modules() -> SimpleNamespace:
     if nonebot.get_plugin("yawn_core") is None:
         nonebot.load_from_toml("pyproject.toml")
     return SimpleNamespace(
+        browser_search=importlib.import_module(
+            "src.plugins.yawn_core.yawn_fanqie.browser_search"
+        ),
         decoder=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.decoder"),
         provider=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.provider"),
         config=importlib.import_module("src.plugins.yawn_core.yawn_fanqie.config"),
@@ -199,8 +206,15 @@ def test_initial_state_html_cleaning_and_pua(fanqie_modules: SimpleNamespace) ->
         "甲 乙\n\n丙\n丁"
     )
     assert decoder.decrypt_pua("A\ue000B", {"\ue000": "你"}) == "A你B"
+    assert decoder.decrypt_reader_pua("\ue3e8\ue3e9\ue52e") == "D在0"
     assert decoder.contains_pua("A\ue000B")
-    assert decoder.font_glyph_to_text("gid58670") == "0"
+    assert len(decoder.FONT_SIGNATURE_MAP) == _FONT_SIGNATURE_COUNT
+    assert (
+        decoder.FONT_SIGNATURE_MAP[
+            "6a8f5c2b453ad5daa08f8d4b71ee82a1cdef9f3ce24490763618e4505b3010f1"
+        ]
+        == "女"
+    )
 
 
 def test_reader_dom_content_fallback(fanqie_modules: SimpleNamespace) -> None:
@@ -214,29 +228,8 @@ def test_reader_dom_content_fallback(fanqie_modules: SimpleNamespace) -> None:
     assert decoder.extract_reader_content(page) == "甲 乙\n\n丙\n丁"
 
 
-def test_search_and_book_chapter_parsers(fanqie_modules: SimpleNamespace) -> None:
+def test_book_and_chapter_parsers(fanqie_modules: SimpleNamespace) -> None:
     provider = fanqie_modules.provider
-    state = {
-        "search": {
-            "books": [
-                {
-                    "bookId": "123456",
-                    "bookName": "公开的书",
-                    "author": "作者",
-                    "abstract": "简介",
-                },
-                {"bookId": "234567", "title": "第二本", "authorName": "乙"},
-            ]
-        }
-    }
-    page = (
-        "<script src='captcha/index.js'></script>"
-        "<script>window.__INITIAL_STATE__="
-        + json.dumps(state, ensure_ascii=False)
-        + ";</script>"
-    )
-    books = provider.parse_search_results(page)
-    assert [book.book_id for book in books] == ["123456", "234567"]
     book_page = {
         "page": {
             "bookId": "123456",
@@ -337,52 +330,240 @@ def test_search_input_orders(fanqie_modules: SimpleNamespace) -> None:
     )
 
 
+class _FakeSearchResponse:
+    def __init__(self, url: str, status: int, body: bytes) -> None:
+        self.url = url
+        self.status = status
+        self._body = body
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+def test_browser_search_matches_only_official_response(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    matches = fanqie_modules.browser_search._matches_search_response
+    assert matches(
+        SimpleNamespace(
+            url=(
+                "https://fanqienovel.com/api/author/search/search_book/v1"
+                "?query_type=2"
+            )
+        ),
+        "2",
+    )
+    assert matches(
+        SimpleNamespace(
+            url=(
+                "https://www.fanqienovel.com/api/author/search/search_book/v1"
+                "?query_type=0"
+            )
+        ),
+        "0",
+    )
+    rejected = (
+        "http://fanqienovel.com/api/author/search/search_book/v1?query_type=0",
+        "https://example.com/api/author/search/search_book/v1?query_type=0",
+        "https://fanqienovel.com/api/author/search/search_book/v1?query_type=1",
+    )
+    assert not any(matches(SimpleNamespace(url=url), "0") for url in rejected)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "body",
+    ("status", "body"),
     [
-        b"",
-        "<div>请完成下列验证</div>".encode(),
-        b"not-json",
-        b'{"data": {}}',
+        (200, b""),
+        (200, "<div>请完成下列验证</div>".encode()),
+        (403, b"forbidden"),
+        (200, b"not-json"),
     ],
 )
-async def test_search_rejects_empty_or_challenge_response(
+async def test_browser_search_rejects_invalid_responses(
     fanqie_modules: SimpleNamespace,
+    status: int,
     body: bytes,
 ) -> None:
-    provider_module = fanqie_modules.provider
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=body, request=request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    async with provider_module.FanqieProvider(
-        fanqie_modules.config.Config(), client
-    ) as provider:
-        with pytest.raises(provider_module.FanqieServiceUnavailable):
-            await provider.search("模糊关键词")
-    await client.aclose()
+    browser = fanqie_modules.browser_search
+    response = _FakeSearchResponse("https://fanqienovel.com/search", status, body)
+    with pytest.raises(browser.BrowserSearchError):
+        await browser._read_response_payload(response)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [403, 429])
-async def test_search_http_rejection_is_service_unavailable(
+async def test_provider_translates_browser_failure(
     fanqie_modules: SimpleNamespace,
-    status_code: int,
 ) -> None:
     provider_module = fanqie_modules.provider
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, text="forbidden", request=request)
+    async def unavailable(*_args: object, **_kwargs: object) -> object:
+        raise fanqie_modules.browser_search.BrowserSearchError("浏览器不可用")
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     async with provider_module.FanqieProvider(
-        fanqie_modules.config.Config(fanqie_request_retries=0), client
+        fanqie_modules.config.Config(),
+        browser_search=unavailable,
     ) as provider:
-        with pytest.raises(provider_module.FanqieServiceUnavailable):
+        with pytest.raises(
+            provider_module.FanqieServiceUnavailable,
+            match="浏览器不可用",
+        ):
             await provider.search("模糊关键词")
-    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("order", "query_type"),
+    [("related", "0"), ("new", "1"), ("hot", "2")],
+)
+async def test_search_uses_browser_payload_and_order(
+    fanqie_modules: SimpleNamespace,
+    order: str,
+    query_type: str,
+) -> None:
+    provider_module = fanqie_modules.provider
+    browser_module = fanqie_modules.browser_search
+    payload = {
+        "data": {
+            "search_book_data_list": [
+                {
+                    "book_id": "123456",
+                    "bookName": "Target book",
+                    "author": "Author",
+                    "book_abstract": "模糊匹配简介",
+                    "read_count": str(_API_READ_COUNT),
+                    "word_count": str(_API_WORD_COUNT),
+                }
+            ],
+            "total_count": 1,
+        }
+    }
+    seen: list[tuple[str, str, float, bool, str]] = []
+
+    async def browser_search(
+        keyword: str,
+        *,
+        query_type: str,
+        timeout: float,
+        headless: bool,
+        profile_dir: str,
+    ) -> Any:
+        seen.append((keyword, query_type, timeout, headless, profile_dir))
+        return browser_module.BrowserSearchSnapshot(payload=payload, page="")
+
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(),
+        browser_search=browser_search,
+    ) as provider:
+        books = await provider.search("十日", order=order)  # type: ignore[arg-type]
+
+    assert books[0].book_id == "123456"
+    assert books[0].description == "模糊匹配简介"
+    assert books[0].read_count == _API_READ_COUNT
+    assert books[0].word_count == _API_WORD_COUNT
+    assert seen == [("十日", query_type, 30.0, True, "")]
+
+
+@pytest.mark.asyncio
+async def test_search_decodes_pua_with_font_from_browser_page(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_module = fanqie_modules.provider
+    browser_module = fanqie_modules.browser_search
+    snapshot = browser_module.BrowserSearchSnapshot(
+        payload={
+            "data": {
+                "search_book_data_list": [
+                    {
+                        "book_id": "123456",
+                        "book_name": "\ue410\ue4c0终焉",
+                        "author": "杀虫队队\ue4cc",
+                    }
+                ]
+            }
+        },
+        page="<script>window.__INITIAL_STATE__={};</script>",
+    )
+
+    async def browser_search(*_args: object, **_kwargs: object) -> object:
+        return snapshot
+
+    async def font_mapping(
+        _self: object,
+        _page: str,
+        _state: dict[str, Any],
+    ) -> dict[str, str]:
+        return {"\ue410": "文", "\ue4c0": "打", "\ue4cc": "走"}
+
+    monkeypatch.setattr(provider_module.FanqieProvider, "_font_mapping", font_mapping)
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(),
+        browser_search=browser_search,
+    ) as provider:
+        books = await provider.search("终焉")
+
+    assert books[0].title == "文打终焉"
+    assert books[0].author == "杀虫队队走"
+
+
+@pytest.mark.asyncio
+async def test_browser_search_reports_missing_runtime(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = fanqie_modules.browser_search
+
+    def missing_runtime() -> object:
+        raise browser.BrowserSearchError("未安装 Playwright")  # noqa: TRY003
+
+    monkeypatch.setattr(browser, "_load_async_playwright", missing_runtime)
+    with pytest.raises(browser.BrowserSearchError, match="未安装 Playwright"):
+        await browser.search_page_snapshot(
+            "模糊关键词",
+            query_type="0",
+            timeout=1,
+            headless=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_browser_search_serializes_requests(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = fanqie_modules.browser_search
+    active = 0
+    max_active = 0
+
+    async def fake_page_search(*_args: object, **_kwargs: object) -> object:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return browser.BrowserSearchSnapshot(
+            payload={"data": {"search_book_data_list": []}},
+            page="",
+        )
+
+    monkeypatch.setattr(browser, "_search_page_snapshot", fake_page_search)
+    await asyncio.gather(
+        browser.search_page_snapshot(
+            "关键词一",
+            query_type="0",
+            timeout=1,
+            headless=True,
+        ),
+        browser.search_page_snapshot(
+            "关键词二",
+            query_type="0",
+            timeout=1,
+            headless=True,
+        ),
+    )
+
+    assert max_active == 1
 
 
 @pytest.mark.asyncio
@@ -436,53 +617,6 @@ async def test_rank_provider_uses_official_routes(
     assert seen_paths == ["/rank", "/rank/1_2_1141"]
     assert books[0].title == "榜单书"
     assert books[0].rank == 1
-
-
-@pytest.mark.asyncio
-async def test_search_uses_official_api_and_order(
-    fanqie_modules: SimpleNamespace,
-) -> None:
-    provider_module = fanqie_modules.provider
-    payload = {
-        "data": {
-            "search_book_data_list": [
-                {
-                    "book_id": "123456",
-                    "bookName": "Target book",
-                    "author": "Author",
-                    "book_abstract": "模糊匹配简介",
-                    "read_count": str(_API_READ_COUNT),
-                    "word_count": str(_API_WORD_COUNT),
-                }
-            ],
-            "total_count": 1,
-        }
-    }
-    seen_urls: list[httpx.URL] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen_urls.append(request.url)
-        return httpx.Response(200, json=payload, request=request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    async with provider_module.FanqieProvider(
-        fanqie_modules.config.Config(), client
-    ) as provider:
-        books = await provider.search("十日", order="hot")
-    await client.aclose()
-
-    assert books[0].book_id == "123456"
-    assert books[0].description == "模糊匹配简介"
-    assert books[0].read_count == _API_READ_COUNT
-    assert books[0].word_count == _API_WORD_COUNT
-    assert seen_urls[0].path == "/api/author/search/search_book/v1"
-    assert dict(seen_urls[0].params) == {
-        "filter": "127,127,127,127",
-        "page_count": "5",
-        "page_index": "0",
-        "query_type": "2",
-        "query_word": "十日",
-    }
 
 
 @pytest.mark.asyncio
@@ -863,6 +997,132 @@ async def test_run_job_snapshots_values_before_commit(
 
 
 @pytest.mark.asyncio
+async def test_run_job_keeps_transient_chapter_failure_retryable(  # noqa: C901
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = fanqie_modules.state
+    provider_module = fanqie_modules.provider
+    job = state.FanqieJob(
+        book_record_id=_TEST_BOOK_RECORD_ID,
+        requester_user_id=10001,
+        group_id=None,
+        start_chapter=1,
+        end_chapter=1,
+        total_chapters=1,
+        status="queued",
+        cancel_requested=False,
+    )
+    job.id = _TEST_JOB_ID
+    book = state.FanqieBook(
+        book_id="123456",
+        title="Target book",
+        author="Author",
+        url="https://fanqienovel.com/page/123456",
+    )
+    book.id = _TEST_BOOK_RECORD_ID
+    chapter = state.FanqieJobChapter(
+        job_id=_TEST_JOB_ID,
+        chapter_index=11,
+        item_id="654321",
+        title="Chapter 11",
+        is_locked=False,
+        status="pending",
+    )
+    chapter.id = 99
+    current_job = state.FanqieJob(
+        book_record_id=_TEST_BOOK_RECORD_ID,
+        requester_user_id=10001,
+        group_id=None,
+        start_chapter=1,
+        end_chapter=1,
+        total_chapters=1,
+        status="running",
+        cancel_requested=False,
+    )
+    current_job.id = _TEST_JOB_ID
+    current_chapter = state.FanqieJobChapter(
+        job_id=_TEST_JOB_ID,
+        chapter_index=11,
+        item_id="654321",
+        title="Chapter 11",
+        is_locked=False,
+        status="pending",
+    )
+    current_chapter.id = 99
+    sessions = iter(
+        [
+            _WorkerSession(job=job, book=book, chapter_rows=[chapter]),
+            _WorkerSession(job=current_job, chapter_row=current_chapter),
+        ]
+    )
+    chapter_updates: list[tuple[int, int, str, str | None]] = []
+    job_failures: list[tuple[int, str]] = []
+    notifications: list[str] = []
+
+    class FakeProvider:
+        def __init__(self, _config: object) -> None:
+            return None
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_chapter(self, _item_id: str) -> object:
+            raise provider_module.ChapterFetchTransientError(_RAW_FULL_502_ERROR)
+
+    async def allow_feature(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def not_cancelled(_job_id: int) -> bool:
+        return False
+
+    async def mark_chapter(
+        job_id: int,
+        chapter_id: int,
+        status: str,
+        *,
+        error: str | None = None,
+        **_kwargs: object,
+    ) -> None:
+        chapter_updates.append((job_id, chapter_id, status, error))
+
+    async def mark_failed(job_id: int, error: str) -> None:
+        job_failures.append((job_id, error))
+
+    async def job_group_id(_job_id: int) -> None:
+        return None
+
+    async def notify(_bot: object, _group_id: int | None, message: str) -> None:
+        notifications.append(message)
+
+    async def should_not_assemble(*_args: object) -> None:
+        pytest.fail("瞬时失败后不应合并缺章成品")
+
+    monkeypatch.setattr(state, "get_session", lambda: next(sessions))
+    monkeypatch.setattr(state, "FanqieProvider", FakeProvider)
+    monkeypatch.setattr(state, "check_feature_permission", allow_feature)
+    monkeypatch.setattr(state, "_is_cancelled", not_cancelled)
+    monkeypatch.setattr(state, "_mark_chapter", mark_chapter)
+    monkeypatch.setattr(state, "_mark_job_failed", mark_failed)
+    monkeypatch.setattr(state, "_job_group_id", job_group_id)
+    monkeypatch.setattr(state, "notify_group", notify)
+    monkeypatch.setattr(state, "get_bot", object)
+    monkeypatch.setattr(state, "_assemble_and_deliver", should_not_assemble)
+
+    await state._run_job(_TEST_JOB_ID)
+
+    expected_error = "第11章请求失败：raw_full HTTP 502"
+    assert chapter_updates == [(_TEST_JOB_ID, 99, "failed", expected_error)]
+    assert job_failures == [(_TEST_JOB_ID, expected_error)]
+    assert notifications == [
+        "番茄任务 #42 下载失败：第11章，请使用“番茄任务 42 重试”"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_mark_chapter_caches_values_before_commit(
     fanqie_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -905,6 +1165,66 @@ async def test_mark_chapter_caches_values_before_commit(
     assert session.commits == 1
     assert chapter.status == "completed"
     assert chapter.temp_path == "chapter.txt"
+
+
+@pytest.mark.asyncio
+async def test_retry_completed_job_resets_only_old_remote_outages(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = fanqie_modules.state
+    job = state.FanqieJob(
+        book_record_id=_TEST_BOOK_RECORD_ID,
+        requester_user_id=10001,
+        group_id=None,
+        start_chapter=1,
+        end_chapter=3,
+        total_chapters=3,
+        completed_chapters=3,
+        status="completed",
+        cancel_requested=False,
+        output_path="old.txt",
+        output_name="old.txt",
+        send_status="sent",
+    )
+    job.id = _TEST_JOB_ID
+    completed = SimpleNamespace(
+        status="completed",
+        temp_path="good.txt",
+        last_error=None,
+    )
+    old_outage = SimpleNamespace(
+        status="unavailable",
+        temp_path=None,
+        last_error="阅读页仅返回预览；第三方全文接口不可用",
+    )
+    nonfree = SimpleNamespace(
+        status="unavailable",
+        temp_path=None,
+        last_error="该章节未被阅读页明确标记为免费",
+    )
+    session = _WorkerSession(
+        job=job,
+        chapter_rows=[completed, old_outage, nonfree],
+    )
+    queued: list[int] = []
+
+    async def enqueue(job_id: int) -> bool:
+        queued.append(job_id)
+        return True
+
+    monkeypatch.setattr(state, "get_session", lambda: session)
+    monkeypatch.setattr(state, "_has_owned_file", lambda path: path == "good.txt")
+    monkeypatch.setattr(state, "_enqueue", enqueue)
+
+    assert await state.retry_job(_TEST_JOB_ID) == (True, None)
+    assert queued == [_TEST_JOB_ID]
+    assert job.status == "queued"
+    assert job.output_path is None
+    assert completed.status == "completed"
+    assert old_outage.status == "pending"
+    assert old_outage.last_error is None
+    assert nonfree.status == "unavailable"
 
 
 @pytest.mark.asyncio
@@ -1123,6 +1443,144 @@ async def test_provider_uses_third_party_raw_full_for_free_preview(
     assert chapter.title == "第十一章"
     assert chapter.content.startswith("完整第三方全文正文。\n\n")
     assert len(chapter.content) > _MIN_FULL_CONTENT_CHARS
+
+
+@pytest.mark.asyncio
+async def test_provider_fails_over_after_raw_full_502(
+    fanqie_modules: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_module = fanqie_modules.provider
+    preview = "官网免费预览内容" * 12
+    full_content = preview + "完整正文后续" * 40
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "title": "第十一章",
+                        "needPay": 0,
+                        "isPaidPublication": False,
+                        "isPaidStory": False,
+                        "chapterWordNumber": "300",
+                        "content": preview,
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+    requests: list[httpx.Request] = []
+    fallback_calls = 0
+
+    async def no_sleep(_seconds: float) -> None:
+        return
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fallback_calls
+        requests.append(request)
+        if request.url.host == "fanqienovel.com":
+            return httpx.Response(_OK_STATUS, text=page, request=request)
+        if request.url.host == "raw.example.test":
+            return httpx.Response(502, request=request)
+        assert request.url.host == "fallback.example.test"
+        assert request.url.path == "/proxy"
+        assert request.url.params["action"] == "content"
+        assert request.headers["X-API-Token"] == "public-test-token"
+        fallback_calls += 1
+        return httpx.Response(
+            _OK_STATUS,
+            json={
+                "data": {
+                    "content": full_content if fallback_calls == 1 else "短文"
+                }
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr(provider_module.asyncio, "sleep", no_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = fanqie_modules.config.Config(
+        fanqie_third_party_api_base="https://raw.example.test",
+        fanqie_third_party_api_retries=1,
+        fanqie_third_party_fallback_base="https://fallback.example.test",
+        fanqie_third_party_fallback_token="public-test-token",
+    )
+    async with provider_module.FanqieProvider(settings, client) as provider:
+        chapter = await provider.fetch_chapter("111111")
+        with pytest.raises(
+            provider_module.ChapterFetchTransientError,
+            match="已熔断节点：raw_full",
+        ):
+            await provider.fetch_chapter("111111")
+    await client.aclose()
+
+    assert [request.url.host for request in requests] == [
+        "fanqienovel.com",
+        "raw.example.test",
+        "raw.example.test",
+        "fallback.example.test",
+        "fanqienovel.com",
+        "fallback.example.test",
+    ]
+    assert chapter.title == "第十一章"
+    assert chapter.content == full_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["http_502", "payload_500"])
+async def test_provider_keeps_service_failures_retryable(
+    fanqie_modules: SimpleNamespace,
+    failure_mode: str,
+) -> None:
+    provider_module = fanqie_modules.provider
+    preview = "官网免费预览内容" * 12
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "title": "第十一章",
+                        "needPay": 0,
+                        "isPaidPublication": False,
+                        "isPaidStory": False,
+                        "chapterWordNumber": "2000",
+                        "content": preview,
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "fanqienovel.com":
+            return httpx.Response(_OK_STATUS, text=page, request=request)
+        if failure_mode == "http_502":
+            return httpx.Response(502, request=request)
+        return httpx.Response(
+            _OK_STATUS,
+            json={"code": 500, "message": "upstream unavailable"},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = fanqie_modules.config.Config(
+        fanqie_third_party_api_base="https://raw.example.test",
+        fanqie_third_party_api_retries=0,
+        fanqie_third_party_fallback_base="",
+    )
+    async with provider_module.FanqieProvider(settings, client) as provider:
+        with pytest.raises(
+            provider_module.ChapterFetchTransientError,
+            match="raw_full",
+        ):
+            await provider.fetch_chapter("111111")
+    await client.aclose()
 
 
 @pytest.mark.asyncio

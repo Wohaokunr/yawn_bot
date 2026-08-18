@@ -147,5 +147,15 @@ dmypy.json
 .claude/worktrees/
 .vs/
 
+# Root-level scratch artifacts generated during local investigation/builds.
+/.tmp_*
+
 # Local database recovery copies
 .local-db-backups/
+
+# Local runtime data is never source; canonical ORM migrations remain versioned.
+/data/*
+!/data/nonebot_plugin_orm/
+/data/nonebot_plugin_orm/*
+!/data/nonebot_plugin_orm/migrations/
+!/data/nonebot_plugin_orm/migrations/**
