@@ -34,6 +34,10 @@ config = get_plugin_config(Config)
 ACTIVE_STATUSES = {"queued", "running"}
 TERMINAL_CHAPTER_STATUSES = {"completed", "unavailable"}
 _MAX_ERROR_LENGTH = 1000
+_RETRYABLE_UNAVAILABLE_MARKERS = (
+    "第三方全文接口不可用",
+    "第三方全文接口失败",
+)
 _BJ_TZ = timezone(timedelta(hours=8))
 _queue: asyncio.Queue[int] | None = None
 _worker_task: asyncio.Task[None] | None = None
@@ -77,6 +81,14 @@ def _owned_path(raw: str | Path) -> Path | None:
 def _has_owned_file(raw: str | None) -> bool:
     path = _owned_path(raw) if raw else None
     return path is not None and path.is_file()
+
+
+def _is_retryable_unavailable(error: str | None) -> bool:
+    """Recognize old terminal rows caused by a remote full-text outage."""
+
+    return bool(error) and any(
+        marker in error for marker in _RETRYABLE_UNAVAILABLE_MARKERS
+    )
 
 
 def _chapter_temp_path(job_id: int, chapter_index: int) -> Path:
@@ -695,18 +707,6 @@ async def retry_job(job_id: int) -> tuple[bool, str | None]:
         if job is None:
             logger.debug(f"番茄任务重试拒绝：job_id={job_id} reason=missing")
             return False, "任务不存在"
-        if job.status not in {"failed", "cancelled"}:
-            logger.debug(
-                f"番茄任务重试拒绝：job_id={job_id} status={job.status}"
-            )
-            return False, "只有失败或已取消的任务可以重试"
-        job.status = "queued"
-        job.cancel_requested = False
-        job.last_error = None
-        job.output_path = None
-        job.output_name = None
-        job.send_status = "pending"
-        job.send_error = None
         chapters = list(
             (
                 await session.execute(
@@ -716,8 +716,33 @@ async def retry_job(job_id: int) -> tuple[bool, str | None]:
             .scalars()
             .all()
         )
+        retryable_unavailable = job.status == "completed" and any(
+            chapter.status == "unavailable"
+            and _is_retryable_unavailable(chapter.last_error)
+            for chapter in chapters
+        )
+        if job.status not in {"failed", "cancelled"} and not retryable_unavailable:
+            logger.debug(
+                f"番茄任务重试拒绝：job_id={job_id} status={job.status}"
+            )
+            return False, "只有失败、已取消，或含暂时不可用章节的任务可以重试"
+        job.status = "queued"
+        job.cancel_requested = False
+        job.last_error = None
+        job.output_path = None
+        job.output_name = None
+        job.send_status = "pending"
+        job.send_error = None
         for chapter in chapters:
-            if chapter.status != "completed" or not _has_owned_file(chapter.temp_path):
+            keep_completed = chapter.status == "completed" and _has_owned_file(
+                chapter.temp_path
+            )
+            keep_unavailable = (
+                retryable_unavailable
+                and chapter.status == "unavailable"
+                and not _is_retryable_unavailable(chapter.last_error)
+            )
+            if not keep_completed and not keep_unavailable:
                 chapter.status = "pending"
                 chapter.temp_path = None
                 chapter.last_error = None
