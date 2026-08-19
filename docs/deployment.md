@@ -48,6 +48,14 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 `AI_API_KEY` 可选。需要私聊 AI 对话或正常的狼人杀 AI 时才应配置。无 key 的 RPG
 部署建议设置 `RPG_AI_ENABLED=false`，以明确启用确定性模式。
 
+### 3.1 运行指标
+
+P1-6 提供进程内运行指标，不需要额外环境变量、监控 SDK 或数据库迁移。运维适配器
+可调用 `yawn_core.metrics.snapshot_metrics()` 获取 JSON 快照，或调用
+`yawn_core.metrics.render_prometheus()` 获取 Prometheus 文本；指标在进程重启后清零。
+指标不包含 `game_id`、群号、用户号、QQ 号、提示词、AI 响应或消息正文。完整指标
+目录和标签约束见 [`docs/metrics.md`](metrics.md)。
+
 番茄小说子插件也是可选功能。它只处理阅读页明确标记为免费的内容，不登录、不绕过
 验证码或付费章节；群聊任务的 TXT 成品只会私发给请求者。默认队列上限为 20，
 每用户 1 个、每群 3 个活动任务，章节请求间隔 0.5 秒，成品和章节临时文件默认保留
@@ -61,8 +69,11 @@ Chrome/Edge 配置文件，也不保存 QQ 登录态。首次空响应会在同�
 可用 `FANQIE_*` 环境变量调整浏览器超时、headless 模式、会话目录、页面请求、
 重试、队列、榜单数量和保留时间，正文不会写入数据库。
 
-有些明确免费的章节在公开网页只返回预览。插件默认使用开源项目公开的第三方
-`raw_full` 接口 `http://101.35.133.34:5000` 补全文本，可用
+有些明确免费的章节在公开网页只返回预览。插件会先使用固定 Reading 7.2.1.32 匿名
+App 画像直连官方 `api5-normal-sinfonlinea.fqnovel.com`，完成六签名、`registerkey`、
+单章 `batch_full` 和正文解密；可用 `FANQIE_APP_PROTOCOL_ENABLED=false` 关闭该来源。
+App 失败后再使用开源项目公开的第三方 `raw_full` 接口
+`http://101.35.133.34:5000` 补全文本，可用
 `FANQIE_THIRD_PARTY_API_BASE`、`FANQIE_THIRD_PARTY_API_TIMEOUT` 和
 `FANQIE_THIRD_PARTY_API_RETRIES` 覆盖地址、超时和重试次数。该服务是外部依赖，可能
 变更或不可用；节点连续出现 5xx/网络错误后，本次任务会熔断该节点并切换到公开
@@ -77,6 +88,15 @@ Novel Downloader，可设置绝对路径 `FANQIE_MOBILE_HELPER_PATH`（Windows �
 `FANQIE_MOBILE_HELPER_STARTUP_TIMEOUT` 和 `FANQIE_MOBILE_HELPER_TIMEOUT` 调整超时。
 不要把远程 URL、账号 Cookie 或登录凭据配置给该项。相关来源与使用边界见
 [`docs/fanqie-notice.md`](fanqie-notice.md)。
+
+App 协议固定参考 `ZreXoc/fanqie-rs` 提交
+`906c6fd5744af0ef49e529102cdb64a250c067f7`；该提交的 `Cargo.toml` 声明 MIT，但提交树
+没有单独的 `LICENSE` 文件。它提供的是抓包匿名画像，不包含网络 `device_register`
+端点；本插件因此把固定 `device_id`、`iid`、`cdid`、`x-tt-dt` 样本作为版本化画像，
+在首次使用时原子写入 localstore。画像结构损坏或服务端明确判定失效时，只会清除并重新
+初始化一次，不会无限轮换设备。协议只允许固定 HTTPS 主机和路径，不跟随重定向；日志不
+记录设备 ID、签名 URL、请求头或正文密钥。`registerkey` 返回的 AES key 只保留在当前
+进程内，章节声明的 key version 变化时最多刷新并重取一次，不写入 localstore 或数据库。
 
 ## 4. 迁移
 

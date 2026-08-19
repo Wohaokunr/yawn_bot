@@ -180,7 +180,19 @@ async def test_partial_delivery_only_persists_sent_segments(
 
     monkeypatch.setattr(ai_chat_module, "_client", Client())
     bot = Bot()
-    result = await ai_chat_module._stream_and_send_impl(bot, object(), [])
+    metrics = importlib.import_module("src.plugins.yawn_core.metrics")
+    metrics.reset_metrics_for_tests()
+    try:
+        result = await ai_chat_module._stream_and_send_impl(bot, object(), [])
 
-    assert bot.sent == [first]
-    assert result == first
+        assert bot.sent == [first]
+        assert result == first
+        assert any(
+            item["name"] == "yawnbot_ai_requests_total"
+            and item["labels"]
+            == {"operation": "chat_stream", "outcome": "delivery_failed_partial"}
+            and item["value"] == 1
+            for item in metrics.snapshot_metrics()["counters"]
+        )
+    finally:
+        metrics.reset_metrics_for_tests()

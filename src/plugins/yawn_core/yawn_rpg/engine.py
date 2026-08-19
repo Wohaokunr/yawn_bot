@@ -25,7 +25,9 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
+from ..event_log import record_game_event  # noqa: TID252
 from ..llm import complete, complete_with_tools  # noqa: TID252
+from ..metrics import record_ai_degradation  # noqa: TID252
 from . import ai_kp, ai_npc, ai_social, api
 from .charsheet import (
     CharacterSheet,
@@ -255,6 +257,7 @@ async def _classify_say(
         return
 
     # AI 关闭或调用失败时，不凭空创造社交效果；仅做名称/焦点兜底。
+    record_ai_degradation("rpg", "social_route_fallback")
     target_id = _deterministic_npc_target(game, action.actor_user_id, text)
     if target_id is None:
         action.route = "kp_say"
@@ -418,6 +421,13 @@ def _enter_phase(game: Game, phase: Phase) -> None:
         return
     logger.info(f"跑团群 {game.group_id} 进入阶段 {phase.value}")
     game.phase = phase
+    record_game_event(
+        game,
+        "rpg",
+        "phase_changed",
+        phase=phase,
+        round_no=game.explore_round,
+    )
 
 
 async def _announce(game: Game, text: Union[str, "Message"]) -> None:
@@ -1454,6 +1464,14 @@ async def enter_scene(
     if game.phase is Phase.PLAY:
         lines.append(_explore_prompt_text(game))
     logger.info(f"跑团群 {game.group_id} 进入场景 {scene.name}（{scene_id}）")
+    record_game_event(
+        game,
+        "rpg",
+        "scene_entered",
+        phase=game.phase,
+        round_no=game.explore_round,
+        payload={"scene_id": scene_id, "opening": opening},
+    )
     await _announce(game, "\n".join(lines))
     return True
 
@@ -1881,6 +1899,14 @@ def check_events(game: Game) -> None:
         if evaluate_condition(event.condition, ctx):
             game.occurred_events.add(event.id)
             logger.info(f"跑团群 {game.group_id} 事件发生：{event.name}")
+            record_game_event(
+                game,
+                "rpg",
+                "plot_event_triggered",
+                phase=game.phase,
+                round_no=game.explore_round,
+                payload={"event_id": event.id},
+            )
 
 
 def ending_recap_text(game: Game) -> str:
@@ -1908,6 +1934,18 @@ async def do_ending(game: Game, ending: Ending) -> None:
     logger.info(f"跑团群 {game.group_id} 达成结局 {ending.id}（{ending.outcome}）")
     for p in game.players:
         p.survived = not p.incapped
+    record_game_event(
+        game,
+        "rpg",
+        "game_ended",
+        phase=game.phase,
+        round_no=game.explore_round,
+        payload={
+            "duration_minutes": max(game.elapsed_minutes, 0),
+            "ending_id": ending.id,
+            "outcome": ending.outcome,
+        },
+    )
     await _announce(game, ending.text)
     await _announce(game, ending_recap_text(game))
     await _persist_end(game, ending)
@@ -1937,6 +1975,7 @@ async def _fallback_narrate(
     actor: Optional[PlayerState] = None,
 ) -> None:
     """AI 失败时的确定性兜底叙述。"""
+    record_ai_degradation("rpg", "deterministic_fallback")
     if game.phase is not Phase.PLAY:
         return
     cp = match_trigger(game, text)
@@ -2158,6 +2197,7 @@ async def run_kp_turn(
                 # 工具调用失败：降级为纯叙述再试一次，并记住本局不再用工具
                 if not game.tools_broken:
                     game.tools_broken = True
+                    record_ai_degradation("rpg", "kp_tools_fallback")
                     logger.warning(
                         f"跑团群 {game.group_id} KP 工具调用失败，本局降级为纯叙述模式"
                     )
@@ -2492,6 +2532,7 @@ async def _tool_speak_as_npc(
             game, cfg, npc, activity, f"KP 指示：{intent}"
         )
     if not line:
+        record_ai_degradation("rpg", "npc_fallback")
         line = npc.fallback_line or "（对方似乎不想多说。）"
     clean_line = ai_npc.sanitize_npc_line(line)
     # KP 工具只能产生公开台词；它不经过社交结算，也不修改关系。
@@ -2603,6 +2644,7 @@ async def _world_reaction(game: Game, cfg: Config, offenses: list[str]) -> None:
         )
         line = await ai_npc.generate_npc_line(game, cfg, npc, activity, directive)
     if not line:
+        record_ai_degradation("rpg", "npc_fallback")
         line = "住手！你们这是要干什么！来人啊！"
     clean_line = ai_npc.sanitize_npc_line(line)
     game.append_npc_context(npc.id, f"NPC {npc.name}：{clean_line}")
@@ -3450,6 +3492,15 @@ async def _run_play(game: Game, cfg: Config) -> None:
         if player is None:
             release_action(game, action)
             continue
+        record_game_event(
+            game,
+            "rpg",
+            "action_received",
+            phase=game.phase,
+            round_no=game.explore_round,
+            actor_seat=player.seat,
+            payload={"action_kind": action.kind.value},
+        )
         wait_notice: Optional[asyncio.Task[None]] = None
         say_batch: Optional[list[Action]] = None
         try:
@@ -3554,6 +3605,7 @@ async def _persist_start(game: Game) -> None:
     module = game.module
     if module is None:
         return
+    persistence = "failed"
     try:
         async with get_session() as session:
             row = RPGGame(
@@ -3578,11 +3630,24 @@ async def _persist_start(game: Game) -> None:
                     )
                 )
             await session.commit()
+            persistence = "ok"
     except Exception:  # noqa: BLE001
         logger.warning(
             f"跑团群 {game.group_id} 开局写库失败",
             exc_info=True,
         )
+    record_game_event(
+        game,
+        "rpg",
+        "game_started",
+        phase=game.phase,
+        round_no=game.explore_round,
+        payload={
+            "module_id": module.id,
+            "persistence": persistence,
+            "player_count": len(game.players),
+        },
+    )
 
 
 async def _persist_end(game: Game, ending: Ending) -> None:
@@ -3623,6 +3688,13 @@ async def run_game(game: Game) -> None:
     """引擎主任务：报名选模组 → 建卡 → 场景循环 → 终局。"""
     cfg = config
     logger.info(f"跑团群 {game.group_id} 引擎启动（房主 {game.host_user_id}）")
+    record_game_event(
+        game,
+        "rpg",
+        "game_created",
+        phase=game.phase,
+        payload={"player_count": len(game.signup_user_ids)},
+    )
     try:
         try:
             game.bot = get_bot()

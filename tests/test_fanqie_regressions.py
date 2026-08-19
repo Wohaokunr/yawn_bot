@@ -33,6 +33,12 @@ _API_WORD_COUNT = 5678
 _RANK_READ_COUNT = 99
 _FONT_SIGNATURE_COUNT = 362
 _RAW_FULL_502_ERROR = "raw_full HTTP 502"
+_SENSITIVE_APP_ERROR = (
+    "GET https://hidden.invalid/register?device_id=secret failed"
+)
+_SENSITIVE_APP_FALLBACK_ERROR = (
+    "request failed: https://hidden.invalid/device/secret"
+)
 
 
 class _CommitExpiringSession:
@@ -185,6 +191,7 @@ def test_fanqie_request_delay_default_is_short_but_bounded(
 
     assert settings.fanqie_request_delay == _DEFAULT_FANQIE_REQUEST_DELAY
     assert settings.fanqie_rank_limit == _DEFAULT_FANQIE_RANK_LIMIT
+    assert settings.fanqie_app_protocol_enabled is True
     assert (
         fanqie_modules.config.Config(
             fanqie_request_delay=_MIN_FANQIE_REQUEST_DELAY
@@ -949,6 +956,7 @@ async def test_run_job_snapshots_values_before_commit(
         ]
     )
     assembled: list[tuple[int, str, str]] = []
+    provider_calls: list[tuple[str, str]] = []
 
     class FakeProvider:
         def __init__(self, _config: object) -> None:
@@ -960,8 +968,8 @@ async def test_run_job_snapshots_values_before_commit(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def fetch_chapter(self, item_id: str) -> object:
-            assert item_id == "654321"
+        async def fetch_chapter(self, item_id: str, *, book_id: str) -> object:
+            provider_calls.append((item_id, book_id))
             return provider_module.ChapterContent("654321", "Chapter 3", "正文")
 
     async def allow_feature(*_args: object, **_kwargs: object) -> bool:
@@ -990,6 +998,7 @@ async def test_run_job_snapshots_values_before_commit(
 
     await state._run_job(_TEST_JOB_ID)
 
+    assert provider_calls == [("654321", "123456")]
     assert assembled == [(_TEST_JOB_ID, "Target book", "Author")]
     assert (tmp_path / "chapter.txt").read_text(encoding="utf-8") == (
         "第3章 Chapter 3\n\n正文\n"
@@ -1070,7 +1079,8 @@ async def test_run_job_keeps_transient_chapter_failure_retryable(  # noqa: C901
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def fetch_chapter(self, _item_id: str) -> object:
+        async def fetch_chapter(self, _item_id: str, *, book_id: str) -> object:
+            assert book_id == "123456"
             raise provider_module.ChapterFetchTransientError(_RAW_FULL_502_ERROR)
 
     async def allow_feature(*_args: object, **_kwargs: object) -> bool:
@@ -1295,6 +1305,133 @@ async def test_provider_reads_content_even_when_catalog_marks_chapter_locked(
     assert chapter.content == "页面实际正文"
 
 
+@pytest.mark.asyncio
+async def test_provider_prefers_app_protocol_for_explicitly_free_preview(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    provider_module = fanqie_modules.provider
+    preview = "官网免费预览内容" * 12
+    full_content = preview + "完整正文后续" * 40
+    expected_title = "第三十一章：关于艾莉的疑惑"
+    app_content = f"第31章：关于艾莉的疑惑\n{full_content}"
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "title": expected_title,
+                        "needPay": 0,
+                        "isPaidPublication": False,
+                        "isPaidStory": False,
+                        "chapterWordNumber": "300",
+                        "content": preview,
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+
+    class FakeAppClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self.closed = False
+
+        async def fetch_chapter(self, item_id: str, *, book_id: str) -> str:
+            self.calls.append((item_id, book_id))
+            return app_content
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "fanqienovel.com"
+        return httpx.Response(_OK_STATUS, text=page, request=request)
+
+    app_client = FakeAppClient()
+    factory_calls = 0
+
+    def app_client_factory() -> Any:
+        nonlocal factory_calls
+        factory_calls += 1
+        return app_client
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with provider_module.FanqieProvider(
+        fanqie_modules.config.Config(),
+        client,
+        app_client_factory=app_client_factory,
+    ) as provider:
+        chapter = await provider.fetch_chapter("111111", book_id="123456")
+    await client.aclose()
+
+    assert factory_calls == 1
+    assert app_client.calls == [("111111", "123456")]
+    assert app_client.closed
+    assert chapter.title == expected_title
+    assert chapter.content == full_content
+
+
+@pytest.mark.asyncio
+async def test_provider_hides_app_protocol_error_details(
+    fanqie_modules: SimpleNamespace,
+) -> None:
+    provider_module = fanqie_modules.provider
+    preview = "官网免费预览内容" * 12
+    page = (
+        "<script>window.__INITIAL_STATE__="
+        + json.dumps(
+            {
+                "reader": {
+                    "chapterData": {
+                        "title": "第十一章",
+                        "needPay": 0,
+                        "isPaidPublication": False,
+                        "isPaidStory": False,
+                        "chapterWordNumber": "2000",
+                        "content": preview,
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+        + ";</script>"
+    )
+
+    class FakeAppClient:
+        async def fetch_chapter(self, _item_id: str, *, book_id: str) -> str:
+            assert book_id == "123456"
+            raise provider_module.AppProtocolTransientError(_SENSITIVE_APP_ERROR)
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(_OK_STATUS, text=page, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = fanqie_modules.config.Config(
+        fanqie_third_party_api_base="",
+        fanqie_third_party_fallback_base="",
+    )
+    async with provider_module.FanqieProvider(
+        settings,
+        client,
+        app_client=cast("Any", FakeAppClient()),
+    ) as provider:
+        with pytest.raises(
+            provider_module.ChapterFetchTransientError
+        ) as error_info:
+            await provider.fetch_chapter("111111", book_id="123456")
+    await client.aclose()
+
+    assert "http" not in str(error_info.value).lower()
+    assert error_info.value.__cause__ is None
+    assert error_info.value.__context__ is None
+
+
 def test_mobile_helper_reads_only_single_exported_chapter(
     fanqie_modules: SimpleNamespace,
     tmp_path: Path,
@@ -1371,6 +1508,7 @@ async def test_provider_uses_mobile_helper_for_explicitly_free_preview(
     )
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = fanqie_modules.config.Config(
+        fanqie_app_protocol_enabled=False,
         fanqie_third_party_api_base="",
         fanqie_mobile_helper_path="helper.exe",
     )
@@ -1383,7 +1521,7 @@ async def test_provider_uses_mobile_helper_for_explicitly_free_preview(
 
 
 @pytest.mark.asyncio
-async def test_provider_uses_third_party_raw_full_for_free_preview(
+async def test_provider_falls_back_to_raw_full_after_app_transient_error(
     fanqie_modules: SimpleNamespace,
 ) -> None:
     provider_module = fanqie_modules.provider
@@ -1409,6 +1547,20 @@ async def test_provider_uses_third_party_raw_full_for_free_preview(
     )
     requests: list[httpx.Request] = []
 
+    class FakeAppClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self.closed = False
+
+        async def fetch_chapter(self, item_id: str, *, book_id: str) -> str:
+            self.calls.append((item_id, book_id))
+            raise provider_module.AppProtocolTransientError(
+                _SENSITIVE_APP_FALLBACK_ERROR
+            )
+
+        async def aclose(self) -> None:
+            self.closed = True
+
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.host == "fanqienovel.com":
@@ -1432,13 +1584,20 @@ async def test_provider_uses_third_party_raw_full_for_free_preview(
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app_client = FakeAppClient()
     settings = fanqie_modules.config.Config(
         fanqie_third_party_api_base="https://api.example.test"
     )
-    async with provider_module.FanqieProvider(settings, client) as provider:
-        chapter = await provider.fetch_chapter("111111")
+    async with provider_module.FanqieProvider(
+        settings,
+        client,
+        app_client=cast("Any", app_client),
+    ) as provider:
+        chapter = await provider.fetch_chapter("111111", book_id="123456")
     await client.aclose()
 
+    assert app_client.calls == [("111111", "123456")]
+    assert app_client.closed
     assert len(requests) == _THIRD_PARTY_REQUEST_COUNT
     assert chapter.title == "第十一章"
     assert chapter.content.startswith("完整第三方全文正文。\n\n")
@@ -1503,6 +1662,7 @@ async def test_provider_fails_over_after_raw_full_502(
     monkeypatch.setattr(provider_module.asyncio, "sleep", no_sleep)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = fanqie_modules.config.Config(
+        fanqie_app_protocol_enabled=False,
         fanqie_third_party_api_base="https://raw.example.test",
         fanqie_third_party_api_retries=1,
         fanqie_third_party_fallback_base="https://fallback.example.test",
@@ -1570,6 +1730,7 @@ async def test_provider_keeps_service_failures_retryable(
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = fanqie_modules.config.Config(
+        fanqie_app_protocol_enabled=False,
         fanqie_third_party_api_base="https://raw.example.test",
         fanqie_third_party_api_retries=0,
         fanqie_third_party_fallback_base="",
@@ -1610,11 +1771,21 @@ async def test_provider_never_uses_mobile_helper_for_nonfree_preview(
         + ";</script>"
     )
     helper_called = False
+    app_called = False
 
     async def fake_fetch_mobile_chapter(*_args: object, **_kwargs: object) -> object:
         nonlocal helper_called
         helper_called = True
         raise AssertionError
+
+    class FakeAppClient:
+        async def fetch_chapter(self, _item_id: str) -> str:
+            nonlocal app_called
+            app_called = True
+            raise AssertionError
+
+        async def aclose(self) -> None:
+            return None
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(_OK_STATUS, text=page, request=request)
@@ -1626,11 +1797,16 @@ async def test_provider_never_uses_mobile_helper_for_nonfree_preview(
     )
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = fanqie_modules.config.Config(fanqie_mobile_helper_path="helper.exe")
-    async with provider_module.FanqieProvider(settings, client) as provider:
+    async with provider_module.FanqieProvider(
+        settings,
+        client,
+        app_client=cast("Any", FakeAppClient()),
+    ) as provider:
         with pytest.raises(provider_module.ChapterUnavailable, match="明确标记为免费"):
             await provider.fetch_chapter("111111")
     await client.aclose()
 
+    assert not app_called
     assert not helper_called
 
 

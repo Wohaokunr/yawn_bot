@@ -17,6 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 from .. import game_registry  # noqa: TID252
+from ..metrics import record_queue_rejection  # noqa: TID252
 from .module_schema import ConditionContext
 
 if TYPE_CHECKING:
@@ -250,6 +251,8 @@ class Game:
     feature_ok_cache: dict[tuple[int, Optional[int]], tuple[bool, float]] = field(
         default_factory=dict
     )
+    # 事件日志使用独立的进程内稳定 id，不依赖 ORM 是否成功写入。
+    event_log_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -509,8 +512,10 @@ def submit_action(
 ) -> SubmitResult:
     """唯一入队入口：执行轻量背压/去重，状态裁决仍留给引擎。"""
     if action.expected_phase is not None and action.expected_phase is not game.phase:
+        record_queue_rejection("action_queue", "rpg", "stale")
         return SubmitResult.STALE
     if action.action_id in game.pending_actions:
+        record_queue_rejection("action_queue", "rpg", "duplicate")
         return SubmitResult.DUPLICATE
     is_say = action.kind is ActionKind.SAY
     per_user = game.pending_say_by_user if is_say else game.pending_by_user
@@ -535,8 +540,10 @@ def submit_action(
         last.aux = "\n".join(part for part in (last.aux, action.aux) if part)
         return SubmitResult.ACCEPTED
     if pending_count >= limit:
+        record_queue_rejection("action_queue", "rpg", "user_limit")
         return SubmitResult.USER_LIMIT
     if game.action_queue.qsize() >= min(queue_max, game.action_queue.maxsize):
+        record_queue_rejection("action_queue", "rpg", "queue_full")
         return SubmitResult.QUEUE_FULL
     game.pending_actions[action.action_id] = action
     per_user[action.actor_user_id] = per_user.get(action.actor_user_id, 0) + 1

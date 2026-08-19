@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import time
 import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
@@ -65,6 +66,23 @@ def _chat_lock(user_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _chat_locks[user_id] = lock
     return lock
+
+
+def _record_stream_metric(outcome: str, started: float) -> None:
+    """记录流式 AI 请求；监控故障不能改变消息发送语义。"""
+
+    try:
+        from .metrics import record_ai_degradation, record_ai_request
+
+        record_ai_request(
+            "chat_stream",
+            outcome,
+            max(time.perf_counter() - started, 0.0),
+        )
+        if outcome != "success":
+            record_ai_degradation("chat", outcome)
+    except Exception:  # noqa: BLE001
+        logger.debug("流式 AI 指标更新失败", exc_info=True)
 
 __plugin_meta__ = PluginMetadata(
     name="Yawn对话",
@@ -278,6 +296,7 @@ async def _stream_and_send(
     history: list[dict[str, str]],
 ) -> Optional[str]:
     """在全局 AI 并发额度内执行流式对话。"""
+    started = time.perf_counter()
     acquired = False
     try:
         await asyncio.wait_for(
@@ -286,6 +305,7 @@ async def _stream_and_send(
         )
         acquired = True
     except asyncio.TimeoutError:
+        _record_stream_metric("concurrency_timeout", started)
         await bot.send(
             event,
             MessageSegment.text("当前 AI 请求较多，请稍后再试~"),
@@ -311,6 +331,7 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     致歉提示仅发送、不持久化，避免污染对话上下文。
     """
 
+    started = time.perf_counter()
     delivered: list[str] = []
 
     async def _flush(piece: str) -> None:
@@ -324,10 +345,12 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     pending = ""  # 已生成但尚未发送的文本
     timed_out = False
     delivery_failed = False
+    stream_error = False
 
     try:
         llm_client = _client or _get_client()
         if llm_client is None:
+            _record_stream_metric("not_configured", started)
             await bot.send(
                 event,
                 MessageSegment.text("抱歉，AI 服务尚未配置，请联系管理员~"),
@@ -340,6 +363,7 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
             max_tokens=_ai_config.ai_max_tokens,
         )
     except OpenAIError as e:
+        _record_stream_metric("error", started)
         logger.error(f"AI 调用失败: {e}")
         await bot.send(
             event,
@@ -386,6 +410,7 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
                 await _flush(pending)
                 pending = ""
     except OpenAIError as e:
+        stream_error = True
         logger.error(f"AI 流中断: {e}")
     except Exception as e:  # noqa: BLE001
         # 发送可能在拆分后的任意一段失败。保留此前已经送达的片段，
@@ -410,7 +435,12 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     text = "\n".join(delivered).strip()
     if not text:
         if delivery_failed:
+            _record_stream_metric("delivery_failed", started)
             return None
+        _record_stream_metric(
+            "timeout" if timed_out else "error" if stream_error else "empty",
+            started,
+        )
         await bot.send(
             event,
             MessageSegment.text(
@@ -420,6 +450,14 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
             ),
         )
         return None
+    if delivery_failed:
+        _record_stream_metric("delivery_failed_partial", started)
+    elif stream_error:
+        _record_stream_metric("error_partial", started)
+    elif timed_out:
+        _record_stream_metric("timeout_partial", started)
+    else:
+        _record_stream_metric("success", started)
     if timed_out:
         await bot.send(event, MessageSegment.text("（生成超时，以上为部分内容）"))
     return text
