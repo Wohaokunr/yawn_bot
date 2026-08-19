@@ -21,6 +21,12 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .app_protocol import (
+    AppChapterUnavailable,
+    AppProtocolTransientError,
+    FanqieAppClient,
+    FanqieAppError,
+)
 from .browser_search import (
     BrowserSearchError,
     BrowserSearchSnapshot,
@@ -81,6 +87,9 @@ _SEARCH_VISIBLE_TEXT_KEYS = (
     "authorName",
     "author_name",
     "authorNameText",
+)
+_CHAPTER_HEADING_RE = re.compile(
+    r"^第(?:\d+|[零〇一二两三四五六七八九十百千万]+)章[：:](.+)$"
 )
 _RANK_GENDER_CODES: dict[str, str] = {"male": "1", "female": "0"}
 _RANK_TYPE_CODES: dict[str, str] = {"read": "2", "new": "1"}
@@ -355,6 +364,26 @@ def _validate_mirror_content(
     ):
         raise ChapterUnavailable("第三方 API 返回内容与阅读页预览不匹配")
     return content
+
+
+def _strip_matching_leading_title(content: str, expected_title: str) -> str:
+    """Remove a duplicated App title with the same explicit chapter subtitle."""
+
+    lines = content.splitlines()
+    if len(lines) < 2:
+        return content
+    actual = sanitize_text(lines[0])
+    expected = sanitize_text(expected_title)
+    if actual != expected:
+        actual_heading = _CHAPTER_HEADING_RE.fullmatch(actual)
+        expected_heading = _CHAPTER_HEADING_RE.fullmatch(expected)
+        if (
+            actual_heading is None
+            or expected_heading is None
+            or actual_heading.group(1) != expected_heading.group(1)
+        ):
+            return content
+    return "\n".join(lines[1:]).lstrip()
 
 
 def _item_value(item: dict[str, Any], *keys: str) -> Any:
@@ -705,11 +734,20 @@ class FanqieProvider:
         settings: Config | None = None,
         client: httpx.AsyncClient | None = None,
         browser_search: Callable[..., Awaitable[BrowserSearchSnapshot]] | None = None,
+        *,
+        app_client: FanqieAppClient | None = None,
+        app_client_factory: Callable[[], FanqieAppClient] | None = None,
     ) -> None:
+        if app_client is not None and app_client_factory is not None:
+            raise ValueError("app_client 与 app_client_factory 不能同时设置")
         self.settings = settings or Config()
         self._client = client
         self._owned_client = client is None
         self._browser_search = browser_search or search_page_snapshot
+        self._app_client = app_client
+        self._app_client_factory = app_client_factory or (
+            lambda: FanqieAppClient(timeout=self.settings.fanqie_request_timeout)
+        )
         self._font_cache: dict[str, dict[str, str]] = {}
         self._third_party_open_sources: set[str] = set()
 
@@ -722,9 +760,14 @@ class FanqieProvider:
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        if self._owned_client and self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        try:
+            if self._app_client is not None:
+                await self._app_client.aclose()
+                self._app_client = None
+        finally:
+            if self._owned_client and self._client is not None:
+                await self._client.aclose()
+                self._client = None
 
     def _page_url(self, path: str) -> str:
         if not path.startswith("/") or "//" in path:
@@ -930,6 +973,60 @@ class FanqieProvider:
         return ChapterContent(
             item_id=item_id,
             title=title,
+            content=content,
+        )
+
+    async def _app_protocol_chapter(
+        self,
+        *,
+        book_id: str,
+        item_id: str,
+        expected_title: str,
+        expected_word_count: int | None,
+        preview: str,
+    ) -> ChapterContent:
+        """Read a free chapter through the fixed anonymous App protocol."""
+
+        if self._app_client is None:
+            try:
+                self._app_client = self._app_client_factory()
+            except FanqieAppError:
+                self._app_client = None
+            if self._app_client is None:
+                raise ChapterFetchTransientError(
+                    "番茄 App 协议客户端初始化失败"
+                ) from None
+        raw_content = ""
+        failure: Literal["unavailable", "transient"] | None = None
+        try:
+            raw_content = await self._app_client.fetch_chapter(
+                item_id,
+                book_id=book_id,
+            )
+        except AppChapterUnavailable:
+            failure = "unavailable"
+        except (AppProtocolTransientError, FanqieAppError):
+            failure = "transient"
+        if failure == "unavailable":
+            raise ChapterUnavailable("番茄 App 协议未返回可用正文") from None
+        if failure == "transient":
+            raise ChapterFetchTransientError(
+                "番茄 App 协议暂时不可用"
+            ) from None
+        raw_content = _strip_matching_leading_title(raw_content, expected_title)
+        content = _validate_mirror_content(
+            raw_content,
+            expected_word_count=expected_word_count,
+            preview=preview,
+        )
+        logger.info(
+            "fanqie app protocol chapter complete: item_id=%s content_chars=%d",
+            item_id,
+            len(content),
+        )
+        return ChapterContent(
+            item_id=item_id,
+            title=expected_title,
             content=content,
         )
 
@@ -1243,11 +1340,18 @@ class FanqieProvider:
         )
         return mapping
 
-    async def fetch_chapter(self, item_id: str) -> ChapterContent:
-        """读取页面正文；免费预览优先由第三方接口补全。"""
+    async def fetch_chapter(
+        self,
+        item_id: str,
+        *,
+        book_id: str = "",
+    ) -> ChapterContent:
+        """读取页面正文；免费预览按 App、镜像、helper 的顺序补全。"""
 
         if not re.fullmatch(r"\d{6,32}", item_id):
             raise ValueError("非法章节 ID")
+        if book_id and not re.fullmatch(r"\d{6,32}", book_id):
+            raise ValueError("非法书籍 ID")
         logger.debug("fanqie chapter fetch start: item_id=%s", item_id)
         page = await self._page(f"/reader/{item_id}")
         try:
@@ -1290,6 +1394,32 @@ class FanqieProvider:
             )
             primary_base = self.settings.fanqie_third_party_api_base.strip()
             fallback_base = self.settings.fanqie_third_party_fallback_base.strip()
+            source_errors: list[FanqieProviderError] = []
+            transient_error: ChapterFetchTransientError | None = None
+            if self.settings.fanqie_app_protocol_enabled and book_id:
+                try:
+                    return await self._app_protocol_chapter(
+                        book_id=book_id,
+                        item_id=item_id,
+                        expected_title=title,
+                        expected_word_count=expected_word_count,
+                        preview=content,
+                    )
+                except ChapterUnavailable as exc:
+                    source_errors.append(exc)
+                    logger.warning(
+                        "fanqie app protocol chapter rejected: item_id=%s error=%s",
+                        item_id,
+                        exc,
+                    )
+                except ChapterFetchTransientError as exc:
+                    transient_error = exc
+                    logger.warning(
+                        "fanqie app protocol chapter unavailable: item_id=%s "
+                        "error=%s",
+                        item_id,
+                        exc,
+                    )
             third_party_sources: list[tuple[str, Any]] = []
             configured_sources = {"raw_full"} if primary_base else set()
             if primary_base and "raw_full" not in self._third_party_open_sources:
@@ -1303,8 +1433,8 @@ class FanqieProvider:
                         ),
                     )
                 )
-            # Clearing the primary base remains the documented way to disable
-            # all remote mirrors and use only the administrator's local helper.
+            # Clearing the primary base disables both remote mirrors. The App
+            # protocol has its own fixed boolean switch above.
             fallback_configured = (
                 primary_base
                 and fallback_base
@@ -1327,16 +1457,12 @@ class FanqieProvider:
                         ),
                     )
                 )
-            source_errors: list[FanqieProviderError] = []
             open_sources = configured_sources & self._third_party_open_sources
-            transient_error = (
-                ChapterFetchTransientError(
+            if open_sources:
+                transient_error = ChapterFetchTransientError(
                     "番茄全文服务暂时不可用，已熔断节点："
                     + ", ".join(sorted(open_sources))
                 )
-                if open_sources
-                else None
-            )
             if not third_party_sources and primary_base:
                 transient_error = ChapterFetchTransientError(
                     "番茄全文服务暂时不可用，所有已配置节点均已熔断"

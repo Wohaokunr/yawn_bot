@@ -19,6 +19,7 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
+from ..event_log import record_game_event  # noqa: TID252
 from . import ai_player, api
 from .config import Config
 from .models import WerewolfGame, WerewolfPlayer
@@ -130,6 +131,16 @@ async def _get_action(game: Game, step: float) -> Optional[Action]:
         return None
     game.action_queue.task_done()
     release_action(game, action)
+    player = game.player_by_user(action.actor_user_id)
+    record_game_event(
+        game,
+        "werewolf",
+        "action_received",
+        phase=game.phase,
+        round_no=game.round_no,
+        actor_seat=player.seat if player is not None else None,
+        payload={"action_kind": action.kind.value},
+    )
     return action
 
 
@@ -142,6 +153,14 @@ def _enter_phase(game: Game, phase: Phase) -> None:
     )
     game.phase = phase
     game.phase_token += 1
+    record_game_event(
+        game,
+        "werewolf",
+        "phase_changed",
+        phase=phase,
+        round_no=game.round_no,
+        payload={"phase_token": game.phase_token},
+    )
     ai_player.on_phase_change(game)
 
 
@@ -1587,6 +1606,7 @@ async def _handle_detonation(
 
 async def _persist_start(game: Game) -> None:
     """开局写库：对局行 + 玩家行。失败不影响游戏。"""
+    persistence = "failed"
     try:
         async with get_session() as session:
             row = WerewolfGame(
@@ -1611,15 +1631,36 @@ async def _persist_start(game: Game) -> None:
                     )
                 )
             await session.commit()
+            persistence = "ok"
     except Exception:  # noqa: BLE001
         logger.warning(
             f"狼人杀群 {game.group_id} 开局写库失败",
             exc_info=True,
         )
+    record_game_event(
+        game,
+        "werewolf",
+        "game_started",
+        phase=game.phase,
+        round_no=game.round_no,
+        payload={
+            "board": game.board,
+            "persistence": persistence,
+            "player_count": len(game.players),
+        },
+    )
 
 
 async def _persist_end(game: Game, winner: Faction) -> None:
     """终局写库：对局结果 + 玩家胜负/死因。"""
+    record_game_event(
+        game,
+        "werewolf",
+        "game_ended",
+        phase=game.phase,
+        round_no=game.round_no,
+        payload={"round": game.round_no, "winner": winner.value},
+    )
     if game.game_row_id is None:
         return
     try:
@@ -1652,8 +1693,6 @@ async def _persist_end(game: Game, winner: Faction) -> None:
             f"狼人杀群 {game.group_id} 终局写库失败",
             exc_info=True,
         )
-
-
 # ── 引擎入口 ──────────────────────────────────────────────
 
 
@@ -1663,6 +1702,14 @@ async def run_game(  # noqa: C901,PLR0911,PLR0912,PLR0915
     """引擎主任务：报名 → 发牌 → 昼夜循环 → 终局。"""
     cfg = config
     logger.info(f"狼人杀群 {game.group_id} 引擎启动（房主 {game.host_user_id}）")
+    record_game_event(
+        game,
+        "werewolf",
+        "game_created",
+        phase=game.phase,
+        round_no=game.round_no,
+        payload={"player_count": len(game.signup_user_ids)},
+    )
     try:
         # 优先使用命令层开房时注入的 Bot（即收到 /狼人杀 事件的那个连接）；
         # 仅在未注入时回退 get_bot()——多机器人在线时 get_bot() 会抛

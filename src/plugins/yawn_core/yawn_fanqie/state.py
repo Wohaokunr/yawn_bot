@@ -477,7 +477,7 @@ async def _run_job(job_id: int) -> None:
                     f"chapter_index={chapter.index} item_id={item_id} "
                     f"catalog_locked={catalog_locked}"
                 )
-                content = await provider.fetch_chapter(item_id)
+                content = await provider.fetch_chapter(item_id, book_id=book_id)
             except ChapterUnavailable as exc:
                 logger.debug(
                     f"番茄章节不可用：job_id={job_id} "

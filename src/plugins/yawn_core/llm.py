@@ -9,6 +9,7 @@ complete_with_tools() 面向 agentic 场景（如跑团 KP 经 tool_call
 """
 
 import asyncio
+import time
 from typing import Any, Optional
 
 from nonebot import get_plugin_config, logger
@@ -37,6 +38,23 @@ ai_config = get_plugin_config(AIChatConfig)
 client: Optional[AsyncOpenAI] = None
 
 
+def _record_ai_metric(operation: str, outcome: str, started: float) -> None:
+    """把 LLM 调用观测写入进程指标；指标故障不影响调用方。"""
+
+    try:
+        from .metrics import record_ai_degradation, record_ai_request
+
+        record_ai_request(
+            operation,
+            outcome,
+            max(time.perf_counter() - started, 0.0),
+        )
+        if outcome != "success":
+            record_ai_degradation("llm", outcome)
+    except Exception:  # noqa: BLE001
+        logger.debug("AI 指标更新失败", exc_info=True)
+
+
 def get_client() -> Optional[AsyncOpenAI]:
     """返回共享客户端；未配置 AI 时返回 ``None``。"""
     global client  # noqa: PLW0603
@@ -63,52 +81,77 @@ async def complete(
     timeout: float = 25.0,
 ) -> Optional[str]:
     """非流式补全：返回完整回复文本；失败/超时/空回复返回 None。"""
+    started = time.perf_counter()
+    outcome = "error"
+    result: Optional[str] = None
     # 部分 OpenAI 兼容端点会把显式 null 的 temperature 拒成 400，
     # 仅在调用方显式给值时才加入请求参数
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
-    llm_client = get_client()
-    if llm_client is None:
-        logger.warning("LLM 未配置 AI_API_KEY，跳过非流式补全")
-        return None
-    async with _COMPLETION_CONCURRENCY:
-        try:
-            response = await asyncio.wait_for(
-                llm_client.chat.completions.create(
-                    model=ai_config.ai_model,
-                    messages=messages,
-                    stream=False,
-                    max_tokens=(
-                        max_tokens
-                        if max_tokens is not None
-                        else ai_config.ai_max_tokens
+    try:
+        llm_client = get_client()
+        if llm_client is None:
+            outcome = "not_configured"
+            logger.warning("LLM 未配置 AI_API_KEY，跳过非流式补全")
+            return None
+        async with _COMPLETION_CONCURRENCY:
+            try:
+                response = await asyncio.wait_for(
+                    llm_client.chat.completions.create(
+                        model=ai_config.ai_model,
+                        messages=messages,
+                        stream=False,
+                        max_tokens=(
+                            max_tokens
+                            if max_tokens is not None
+                            else ai_config.ai_max_tokens
+                        ),
+                        **extra,
                     ),
-                    **extra,
-                ),
-                timeout=timeout,
-            )
-        except (OpenAIError, asyncio.TimeoutError):
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                outcome = "timeout"
+                logger.warning(
+                    f"LLM 非流式补全超时（model={ai_config.ai_model}, "
+                    f"timeout={timeout}s）",
+                    exc_info=True,
+                )
+                return None
+            except OpenAIError:
+                logger.warning(
+                    f"LLM 非流式补全失败（model={ai_config.ai_model}, "
+                    f"timeout={timeout}s）",
+                    exc_info=True,
+                )
+                return None
+        if not response.choices:
+            outcome = "empty"
+            logger.warning(f"LLM 未返回任何 choice（model={ai_config.ai_model}）")
+            return None
+        choice = response.choices[0]
+        content = (choice.message.content or "").strip()
+        if not content:
+            outcome = "empty"
+            # 推理模型可能把 token 全部耗在 reasoning 上，或被 max_tokens
+            # 截断（finish_reason="length"）：留下诊断信息而不是静默 None
             logger.warning(
-                f"LLM 非流式补全失败（model={ai_config.ai_model}, timeout={timeout}s）",
-                exc_info=True,
+                f"LLM 返回空内容"
+                f"（model={ai_config.ai_model}, finish_reason={choice.finish_reason}）"
             )
             return None
-    if not response.choices:
-        logger.warning(f"LLM 未返回任何 choice（model={ai_config.ai_model}）")
-        return None
-    choice = response.choices[0]
-    content = (choice.message.content or "").strip()
-    if not content:
-        # 推理模型可能把 token 全部耗在 reasoning 上，或被 max_tokens
-        # 截断（finish_reason="length"）：留下诊断信息而不是静默 None
-        logger.warning(
-            f"LLM 返回空内容"
-            f"（model={ai_config.ai_model}, finish_reason={choice.finish_reason}）"
+        outcome = "success"
+        logger.debug(
+            f"LLM 补全成功（model={ai_config.ai_model}, 长度={len(content)}）"
         )
-        return None
-    logger.debug(f"LLM 补全成功（model={ai_config.ai_model}, 长度={len(content)}）")
-    return content
+        result = content
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        _record_ai_metric("complete", outcome, started)
+    return result
 
 
 async def complete_with_tools(
@@ -127,51 +170,74 @@ async def complete_with_tools(
     落入 None 分支。返回原始 message 以便调用方读取 content 与
     tool_calls 并把工具结果回填对话继续循环。
     """
+    started = time.perf_counter()
+    outcome = "error"
+    result: Optional[ChatCompletionMessage] = None
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
-    llm_client = get_client()
-    if llm_client is None:
-        logger.warning("LLM 未配置 AI_API_KEY，跳过工具补全")
-        return None
-    async with _COMPLETION_CONCURRENCY:
-        try:
-            response = await asyncio.wait_for(
-                llm_client.chat.completions.create(
-                    model=ai_config.ai_model,
-                    messages=messages,
-                    tools=tools,
-                    stream=False,
-                    max_tokens=(
-                        max_tokens
-                        if max_tokens is not None
-                        else ai_config.ai_max_tokens
+    try:
+        llm_client = get_client()
+        if llm_client is None:
+            outcome = "not_configured"
+            logger.warning("LLM 未配置 AI_API_KEY，跳过工具补全")
+            return None
+        async with _COMPLETION_CONCURRENCY:
+            try:
+                response = await asyncio.wait_for(
+                    llm_client.chat.completions.create(
+                        model=ai_config.ai_model,
+                        messages=messages,
+                        tools=tools,
+                        stream=False,
+                        max_tokens=(
+                            max_tokens
+                            if max_tokens is not None
+                            else ai_config.ai_max_tokens
+                        ),
+                        **extra,
                     ),
-                    **extra,
-                ),
-                timeout=timeout,
-            )
-        except (OpenAIError, asyncio.TimeoutError):
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                outcome = "timeout"
+                logger.warning(
+                    f"LLM 工具补全超时（model={ai_config.ai_model}, "
+                    f"timeout={timeout}s）",
+                    exc_info=True,
+                )
+                return None
+            except OpenAIError:
+                logger.warning(
+                    f"LLM 工具补全失败（model={ai_config.ai_model}, "
+                    f"timeout={timeout}s）",
+                    exc_info=True,
+                )
+                return None
+        if not response.choices:
+            outcome = "empty"
+            logger.warning(f"LLM 未返回任何 choice（model={ai_config.ai_model}）")
+            return None
+        choice = response.choices[0]
+        message = choice.message
+        content = (message.content or "").strip()
+        if not content and not message.tool_calls:
+            outcome = "empty"
+            # 既无文本又无工具调用：推理截断或端点异常，留诊断信息
             logger.warning(
-                f"LLM 工具补全失败（model={ai_config.ai_model}, timeout={timeout}s）",
-                exc_info=True,
+                f"LLM 工具补全返回空内容"
+                f"（model={ai_config.ai_model}, finish_reason={choice.finish_reason}）"
             )
             return None
-    if not response.choices:
-        logger.warning(f"LLM 未返回任何 choice（model={ai_config.ai_model}）")
-        return None
-    choice = response.choices[0]
-    message = choice.message
-    content = (message.content or "").strip()
-    if not content and not message.tool_calls:
-        # 既无文本又无工具调用：推理截断或端点异常，留诊断信息
-        logger.warning(
-            f"LLM 工具补全返回空内容"
-            f"（model={ai_config.ai_model}, finish_reason={choice.finish_reason}）"
+        outcome = "success"
+        logger.debug(
+            f"LLM 工具补全成功（model={ai_config.ai_model}, "
+            f"tool_calls={len(message.tool_calls or [])}, 文本长度={len(content)}）"
         )
-        return None
-    logger.debug(
-        f"LLM 工具补全成功（model={ai_config.ai_model}, "
-        f"tool_calls={len(message.tool_calls or [])}, 文本长度={len(content)}）"
-    )
-    return message
+        result = message
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        _record_ai_metric("complete_with_tools", outcome, started)
+    return result

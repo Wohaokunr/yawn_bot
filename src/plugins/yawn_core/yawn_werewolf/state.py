@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 from .. import game_registry  # noqa: TID252
+from ..metrics import record_queue_rejection  # noqa: TID252
 from .roles import DEFAULT_BOARD_KEY
 
 if TYPE_CHECKING:
@@ -192,6 +194,8 @@ class Game:
     # 报名阶段身份请求（user_id -> 期望角色；命令层记录，仅内存，
     # 发牌时由引擎消费，退报名即清理）
     role_requests: dict[int, Role] = field(default_factory=dict)
+    # 事件日志使用独立的进程内稳定 id，不依赖 ORM 是否成功写入。
+    event_log_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -404,17 +408,21 @@ def submit_action(
             and action.kind is ActionKind.START_GAME
         )
         if not allowed_admin_start:
+            record_queue_rejection("action_queue", "werewolf", "not_member")
             return False
     if any(
         _same_action(existing, action)
         for existing in game.pending_actions.values()
     ):
+        record_queue_rejection("action_queue", "werewolf", "duplicate")
         return False
     if game.pending_by_user.get(action.actor_user_id, 0) >= max(user_pending_max, 1):
+        record_queue_rejection("action_queue", "werewolf", "user_limit")
         return False
     try:
         game.action_queue.put_nowait(action)
     except asyncio.QueueFull:
+        record_queue_rejection("action_queue", "werewolf", "queue_full")
         return False
     game.pending_actions[id(action)] = action
     game.pending_by_user[action.actor_user_id] = (

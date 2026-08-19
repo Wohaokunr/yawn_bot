@@ -7,6 +7,8 @@ import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .metrics import record_queue_rejection
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -85,6 +87,7 @@ def enqueue(
     try:
         state.queue.put_nowait(item)
     except asyncio.QueueFull:
+        record_queue_rejection("chat_queue", "chat", "queue_full")
         return False
     return True
 

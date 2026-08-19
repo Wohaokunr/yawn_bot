@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from nonebot import get_plugin_config, logger
 
 from ..llm import complete  # noqa: TID252
+from ..metrics import record_ai_degradation  # noqa: TID252
 from . import api
 from .config import Config
 from .dsl import parse_dm_action
@@ -600,6 +601,7 @@ async def _simple_decide(
             f"狼人杀群 {game.group_id} {player.seat}号 "
             f"AI 决策失败，托管行动：{fallback.value}"
         )
+        record_ai_degradation("werewolf", "action_fallback")
         _enqueue_action(game, Action(fallback, player.user_id))
 
 
@@ -614,6 +616,7 @@ def _enqueue_wolf_skip(game: Game, wolf: PlayerState) -> None:
         f"狼人杀群 {game.group_id} {wolf.seat}号 "
         "AI 狼刀决策失败，托管：过（空刀）"
     )
+    record_ai_degradation("werewolf", "action_fallback")
     _enqueue_action(game, Action(ActionKind.SKIP, wolf.user_id))
 
 
@@ -742,6 +745,7 @@ async def _run_decide(driver: AIDriver, player: PlayerState) -> None:
         logger.info(
             f"狼人杀群 {driver.game.group_id} {player.seat}号 AI 竞选决策失败，放弃上警"
         )
+        record_ai_degradation("werewolf", "action_fallback")
 
 
 def _maybe_spawn_knight(driver: AIDriver) -> None:
@@ -803,6 +807,7 @@ async def _vote_decide(driver: AIDriver, player: PlayerState) -> None:
         _enqueue_action(game, action)
         return
     logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 投票决策失败，托管：弃票")
+    record_ai_degradation("werewolf", "action_fallback")
     _enqueue_action(game, Action(ActionKind.ABSTAIN, player.user_id))
 
 
@@ -834,6 +839,7 @@ async def _llm_decide(  # noqa: PLR0911
     for attempt in range(2):
         # 阶段已切换时不发起新请求，也不再为旧阶段格式纠错。
         if phase_token != game.phase_token:
+            record_ai_degradation("werewolf", "stale_phase")
             return None
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -841,6 +847,7 @@ async def _llm_decide(  # noqa: PLR0911
                 f"狼人杀群 {game.group_id} {player.seat}号 "
                 f"AI 决策耗尽总预算（{total_timeout:.1f}s）"
             )
+            record_ai_degradation("werewolf", "decision_timeout")
             return None
         try:
             # complete() 自带单请求超时；外层 wait_for 再保证即使
@@ -859,12 +866,15 @@ async def _llm_decide(  # noqa: PLR0911
                 f"狼人杀群 {game.group_id} {player.seat}号 "
                 f"AI 决策超过总预算（{total_timeout:.1f}s）"
             )
+            record_ai_degradation("werewolf", "decision_timeout")
             return None
         # 请求期间可能已进入下一阶段；此时既不解析，也不重试。
         if phase_token != game.phase_token:
+            record_ai_degradation("werewolf", "stale_phase")
             return None
         if text is None:
             logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 决策调用失败")
+            record_ai_degradation("werewolf", "decision_failed")
             return None
         logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 决策回复：{text!r}")
         action = parse_dm_action(text, player.user_id, allow_votes=True)
@@ -874,6 +884,7 @@ async def _llm_decide(  # noqa: PLR0911
             action.phase_token = phase_token
             return action
         if attempt != 0 or phase_token != game.phase_token:
+            record_ai_degradation("werewolf", "invalid_action")
             return None
         logger.info(
             f"狼人杀群 {game.group_id} {player.seat}号 "
@@ -887,6 +898,7 @@ async def _llm_decide(  # noqa: PLR0911
                 "content": "指令格式错误或目标不合法。请严格按提示重新回复一条指令。",
             },
         ]
+    record_ai_degradation("werewolf", "invalid_action")
     return None
 
 
@@ -999,6 +1011,7 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
             f"狼人杀群 {game.group_id} {player.seat}号 "
             "AI 发言生成/投递失败，代发跳过提示"
         )
+        record_ai_degradation("werewolf", "speech_fallback")
         if game.bot is not None:
             await api.safe_group_msg(
                 game.bot,
