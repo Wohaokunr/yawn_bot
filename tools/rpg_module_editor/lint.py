@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any, Optional
 
 from .schema_loader import (
@@ -66,6 +68,24 @@ _CONDITION_KINDS = frozenset(
         "flag",
     }
 )
+
+_P1_3_SCHEDULE_HINT = "P1-3 行程覆盖检查"
+_P1_3_PRIVACY_HINT = "P1-3 私密性检查"
+_MINUTES_PER_DAY = 24 * 60
+_LAST_CLOCK_HOUR = 23
+_LAST_CLOCK_MINUTE = 59
+
+
+@dataclass(frozen=True)
+class _ReachabilityState:
+    """P1-2 的保守固定点结果，供后续静态诊断复用。"""
+
+    scenes: set[str]
+    clues: set[str]
+    flags: set[str]
+    dead_monsters: set[str]
+    npcs: set[str]
+    npc_facts: set[tuple[str, str]]
 
 
 def _declared_social_flags(data: dict[str, Any]) -> set[str]:
@@ -155,6 +175,141 @@ def _condition_possible(  # noqa: C901,PLR0911,PLR0912,PLR0913
             # belongs to the fixed-seed playtest, not this structural lint.
             continue
     return True
+
+
+def _parse_clock(value: Any) -> Optional[int]:
+    """Parse a YAML HH:MM value, including YAML 1.1's integer coercion."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value < _MINUTES_PER_DAY else None
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value)
+    if match is None:
+        return None
+    hours, minutes = (int(part) for part in match.groups())
+    if hours > _LAST_CLOCK_HOUR or minutes > _LAST_CLOCK_MINUTE:
+        return None
+    return hours * 60 + minutes
+
+
+def _clock_text(minutes: int) -> str:
+    minutes %= _MINUTES_PER_DAY
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _relative_time_offset(clock: int, start: int) -> int:
+    return (clock - start) % _MINUTES_PER_DAY
+
+
+def _schedule_times(entry: dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    return (
+        _parse_clock(entry.get("from", entry.get("frm"))),
+        _parse_clock(entry.get("to")),
+    )
+
+
+def _clock_in_window(value: int, frm: int, to: int) -> bool:
+    if frm == to:
+        return True
+    if frm < to:
+        return frm <= value < to
+    return value >= frm or value < to
+
+
+def _condition_time_offsets(condition: Any, start: int) -> set[int]:
+    """Return playable-clock boundaries mentioned by a condition."""
+
+    offsets: set[int] = set()
+    for kind, value in _condition_terms(condition) or []:
+        values: list[str] = []
+        if kind in {"time_after", "time_before"}:
+            values.append(value)
+        elif kind == "time_between":
+            left, separator, right = value.partition("-")
+            if separator:
+                values.extend((left.strip(), right.strip()))
+        for item in values:
+            clock = _parse_clock(item)
+            if clock is not None:
+                offsets.add(_relative_time_offset(clock, start))
+    return offsets
+
+
+def _playable_window(data: dict[str, Any]) -> tuple[int, int]:
+    """Return ``(clock_start, elapsed_end)`` for the static audit window."""
+
+    time_data = data.get("time")
+    start = (
+        _parse_clock(time_data.get("start"))
+        if isinstance(time_data, dict)
+        else None
+    )
+    clock_start = start if start is not None else 0
+    endings = get_list(data, "endings")
+    terminal_offsets: list[int] = []
+    for ending in endings:
+        if not isinstance(ending, dict):
+            continue
+        for kind, value in _condition_terms(ending.get("condition")) or []:
+            if kind != "time_after":
+                continue
+            clock = _parse_clock(value)
+            if clock is not None:
+                terminal_offsets.append(_relative_time_offset(clock, clock_start))
+    if not terminal_offsets:
+        return clock_start, _MINUTES_PER_DAY
+    return clock_start, min(terminal_offsets)
+
+
+def _coverage_boundaries(  # noqa: C901
+    data: dict[str, Any],
+    *,
+    clock_start: int,
+    horizon: int,
+) -> list[int]:
+    boundaries = {0, horizon}
+    if horizon <= 0:
+        return sorted(boundaries)
+
+    def add_clock(clock: Optional[int]) -> None:
+        if clock is None:
+            return
+        offset = _relative_time_offset(clock, clock_start)
+        if 0 < offset < horizon:
+            boundaries.add(offset)
+
+    for npc in get_list(data, "npcs"):
+        if not isinstance(npc, dict):
+            continue
+        for entry in get_list(npc, "schedule"):
+            if not isinstance(entry, dict):
+                continue
+            frm, to = _schedule_times(entry)
+            add_clock(frm)
+            add_clock(to)
+            for offset in _condition_time_offsets(entry.get("condition"), clock_start):
+                if 0 < offset < horizon:
+                    boundaries.add(offset)
+    for _where, host in condition_fields(data):
+        for offset in _condition_time_offsets(host.get("condition"), clock_start):
+            if 0 < offset < horizon:
+                boundaries.add(offset)
+    return sorted(boundaries)
+
+
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if not intervals:
+        return []
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _condition_source_maps(  # noqa: C901,PLR0912
@@ -729,10 +884,10 @@ def _npc_can_be_in_scene(  # noqa: PLR0913
     return False
 
 
-def _graph_lint(  # noqa: C901,PLR0912,PLR0915
-    data: dict[str, Any], issues: list[Issue]
-) -> None:
-    """条件感知的场景 / 结局可达性与线索引用图检查。"""
+def _reachability_state(  # noqa: C901,PLR0912,PLR0915
+    data: dict[str, Any],
+) -> _ReachabilityState:
+    """Compute the optimistic fixed point used by P1-2 and P1-3."""
 
     scenes = get_list(data, "scenes")
     scene_by_id = {
@@ -741,8 +896,6 @@ def _graph_lint(  # noqa: C901,PLR0912,PLR0915
         if isinstance(scene, dict) and isinstance(scene.get("id"), str)
     }
     start = data.get("start_scene")
-    clue_sources, flag_sources, monster_sources = _condition_source_maps(data)
-
     reachable: set[str] = set()
     available_clues: set[str] = set()
     available_flags: set[str] = set(_ENGINE_FLAGS)
@@ -758,105 +911,132 @@ def _graph_lint(  # noqa: C901,PLR0912,PLR0915
             target.add(values)
         return len(target) != before
 
-    # The fixed point is intentionally optimistic: once a scene is reachable,
-    # every check/kill/social outcome that can be performed there is considered
-    # available. This catches dependency cycles without modelling dice or
-    # relationship values and therefore cannot reject a legal path merely for
-    # being hard to discover.
-    if isinstance(start, str) and start in scene_by_id:
-        reachable.add(start)
-        changed = True
-        while changed:
-            changed = False
-            for scene_id in tuple(reachable):
-                scene = scene_by_id[scene_id]
-                for check in get_list(scene, "checks"):
-                    if isinstance(check, dict):
-                        changed |= add_values(available_clues, check.get("clue"))
+    if not isinstance(start, str) or start not in scene_by_id:
+        return _ReachabilityState(
+            reachable,
+            available_clues,
+            available_flags,
+            possible_dead_monsters,
+            possible_npcs,
+            possible_npc_facts,
+        )
 
-                for monster_id in get_list(scene, "monsters"):
-                    monster = next(
-                        (
-                            item
-                            for item in get_list(data, "monsters")
-                            if isinstance(item, dict) and item.get("id") == monster_id
-                        ),
-                        None,
-                    )
-                    if monster is None:
-                        continue
-                    changed |= add_values(possible_dead_monsters, monster_id)
-                    changed |= add_values(
-                        available_clues, monster.get("on_death_clue")
-                    )
+    reachable.add(start)
+    changed = True
+    while changed:
+        changed = False
+        for scene_id in tuple(reachable):
+            scene = scene_by_id[scene_id]
+            for check in get_list(scene, "checks"):
+                if isinstance(check, dict):
+                    changed |= add_values(available_clues, check.get("clue"))
 
-                for npc in get_list(data, "npcs"):
-                    if not isinstance(npc, dict):
+            for monster_id in get_list(scene, "monsters"):
+                monster = next(
+                    (
+                        item
+                        for item in get_list(data, "monsters")
+                        if isinstance(item, dict) and item.get("id") == monster_id
+                    ),
+                    None,
+                )
+                if monster is None:
+                    continue
+                changed |= add_values(possible_dead_monsters, monster_id)
+                changed |= add_values(available_clues, monster.get("on_death_clue"))
+
+            for npc in get_list(data, "npcs"):
+                if not isinstance(npc, dict):
+                    continue
+                npc_id = npc.get("id")
+                if not isinstance(npc_id, str) or not _npc_can_be_in_scene(
+                    npc,
+                    scene_id,
+                    scenes=scenes,
+                    reachable_scenes=reachable,
+                    clues=available_clues,
+                    flags=available_flags,
+                    dead_monsters=possible_dead_monsters,
+                ):
+                    continue
+                changed |= add_values(possible_npcs, npc_id)
+                changed |= add_values(available_flags, "murder")
+                changed |= add_values(available_flags, f"npc_dead:{npc_id}")
+                changed |= add_values(available_clues, npc.get("on_death_clue"))
+                for node in get_list(npc, "social_nodes"):
+                    if not isinstance(node, dict):
                         continue
-                    npc_id = npc.get("id")
-                    if not isinstance(npc_id, str) or not _npc_can_be_in_scene(
-                        npc,
-                        scene_id,
-                        scenes=scenes,
-                        reachable_scenes=reachable,
-                        clues=available_clues,
-                        flags=available_flags,
-                        dead_monsters=possible_dead_monsters,
-                    ):
+                    required = {
+                        (npc_id, str(fact))
+                        for fact in get_list(node, "requires_facts")
+                        if fact
+                    }
+                    if not required.issubset(possible_npc_facts):
                         continue
-                    changed |= add_values(possible_npcs, npc_id)
-                    changed |= add_values(available_flags, "murder")
-                    changed |= add_values(available_flags, f"npc_dead:{npc_id}")
                     changed |= add_values(
-                        available_clues, npc.get("on_death_clue")
-                    )
-                    for node in get_list(npc, "social_nodes"):
-                        if not isinstance(node, dict):
-                            continue
-                        required = {
+                        possible_npc_facts,
+                        {
                             (npc_id, str(fact))
-                            for fact in get_list(node, "requires_facts")
+                            for fact in get_list(node, "unlock_facts")
                             if fact
-                        }
-                        if not required.issubset(possible_npc_facts):
-                            continue
-                        changed |= add_values(
-                            possible_npc_facts,
-                            {
-                                (npc_id, str(fact))
-                                for fact in get_list(node, "unlock_facts")
-                                if fact
-                            },
-                        )
-                        for field_name in ("private_clues", "public_clues"):
-                            changed |= add_values(
-                                available_clues, get_list(node, field_name)
-                            )
-                        for field_name in ("success_flags", "failure_flags"):
-                            changed |= add_values(
-                                available_flags, get_list(node, field_name)
-                            )
-
-            for scene_id in tuple(reachable):
-                scene = scene_by_id[scene_id]
-                for exit_ in get_list(scene, "exits"):
-                    if not isinstance(exit_, dict):
-                        continue
-                    target = exit_.get("to_scene")
-                    if not isinstance(target, str) or target not in scene_by_id:
-                        continue
-                    possible = _condition_possible(
-                        exit_.get("condition"),
-                        current_scene=scene_id,
-                        reachable_scenes=reachable,
-                        clues=available_clues,
-                        flags=available_flags,
-                        dead_monsters=possible_dead_monsters,
+                        },
                     )
-                    if possible and target not in reachable:
-                        reachable.add(target)
-                        changed = True
+                    for field_name in ("private_clues", "public_clues"):
+                        changed |= add_values(
+                            available_clues,
+                            get_list(node, field_name),
+                        )
+                    for field_name in ("success_flags", "failure_flags"):
+                        changed |= add_values(
+                            available_flags,
+                            get_list(node, field_name),
+                        )
 
+        for scene_id in tuple(reachable):
+            scene = scene_by_id[scene_id]
+            for exit_ in get_list(scene, "exits"):
+                if not isinstance(exit_, dict):
+                    continue
+                target = exit_.get("to_scene")
+                if not isinstance(target, str) or target not in scene_by_id:
+                    continue
+                possible = _condition_possible(
+                    exit_.get("condition"),
+                    current_scene=scene_id,
+                    reachable_scenes=reachable,
+                    clues=available_clues,
+                    flags=available_flags,
+                    dead_monsters=possible_dead_monsters,
+                )
+                if possible and target not in reachable:
+                    reachable.add(target)
+                    changed = True
+
+    return _ReachabilityState(
+        reachable,
+        available_clues,
+        available_flags,
+        possible_dead_monsters,
+        possible_npcs,
+        possible_npc_facts,
+    )
+
+
+def _graph_lint(  # noqa: C901,PLR0912,PLR0915
+    data: dict[str, Any], issues: list[Issue]
+) -> None:
+    """条件感知的场景 / 结局可达性与线索引用图检查。"""
+
+    scenes = get_list(data, "scenes")
+    start = data.get("start_scene")
+    clue_sources, flag_sources, monster_sources = _condition_source_maps(data)
+    reachability = _reachability_state(data)
+    reachable = reachability.scenes
+    available_clues = reachability.clues
+    available_flags = reachability.flags
+    possible_dead_monsters = reachability.dead_monsters
+
+    if isinstance(start, str) and start in reachable:
         issues.extend(
             _issue(
                 SEVERITY_WARNING,
@@ -984,6 +1164,299 @@ def _graph_lint(  # noqa: C901,PLR0912,PLR0915
                 )
 
 
+def _coverage_interval_label(clock_start: int, start: int, end: int) -> str:
+    start_clock = _clock_text(clock_start + start)
+    end_clock = _clock_text(clock_start + end)
+    return f"{start_clock}→{end_clock}（开局后 +{start}~+{end} 分钟）"
+
+
+def _schedule_entry_possible(
+    entry: dict[str, Any],
+    clock: int,
+    state: _ReachabilityState,
+) -> Optional[bool]:
+    frm, to = _schedule_times(entry)
+    if frm is None or to is None or not _clock_in_window(clock, frm, to):
+        return False
+    return _condition_possible(
+        entry.get("condition"),
+        current_scene=None,
+        reachable_scenes=state.scenes,
+        clues=state.clues,
+        flags=state.flags,
+        dead_monsters=state.dead_monsters,
+    )
+
+
+def _schedule_coverage_lint(  # noqa: C901,PLR0912,PLR0915
+    data: dict[str, Any], issues: list[Issue]
+) -> None:
+    """Report schedule gaps and entries that cannot produce an encounter."""
+
+    state = _reachability_state(data)
+    if not state.scenes:
+        return
+    clock_start, horizon = _playable_window(data)
+    if horizon <= 0:
+        return
+    boundaries = _coverage_boundaries(
+        data,
+        clock_start=clock_start,
+        horizon=horizon,
+    )
+    segments = list(pairwise(boundaries))
+    if not segments:
+        return
+
+    for npc in get_list(data, "npcs"):
+        if not isinstance(npc, dict):
+            continue
+        schedule = [
+            entry for entry in get_list(npc, "schedule") if isinstance(entry, dict)
+        ]
+        if not schedule:
+            continue
+        label = f"NPC{_tag(npc)}"
+        gap_intervals: list[tuple[int, int]] = []
+        entry_possible = [False] * len(schedule)
+        entry_uncertain = [False] * len(schedule)
+        entry_seen = [False] * len(schedule)
+        unreachable_targets: dict[int, set[str]] = {}
+
+        for start, end in segments:
+            sample_offset = start + (end - start) // 2
+            sample_clock = (clock_start + sample_offset) % _MINUTES_PER_DAY
+            present_scenes: set[str] = set()
+            explicit_away = False
+            uncertain = False
+            for index, entry in enumerate(schedule):
+                possible = _schedule_entry_possible(entry, sample_clock, state)
+                if possible is False:
+                    frm, to = _schedule_times(entry)
+                    if frm is not None and to is not None and _clock_in_window(
+                        sample_clock, frm, to
+                    ):
+                        entry_seen[index] = True
+                    continue
+                if possible is None:
+                    uncertain = True
+                    entry_uncertain[index] = True
+                    continue
+                entry_seen[index] = True
+                entry_possible[index] = True
+                if entry.get("away"):
+                    explicit_away = True
+                    continue
+                target = entry.get("scene")
+                if not isinstance(target, str) or not target:
+                    uncertain = True
+                    continue
+                if target in state.scenes:
+                    present_scenes.add(target)
+                else:
+                    unreachable_targets.setdefault(index, set()).add(target)
+            if not present_scenes and not explicit_away and not uncertain:
+                gap_intervals.append((start, end))
+
+        for start, end in _merge_intervals(gap_intervals):
+            issues.append(
+                _issue(
+                    SEVERITY_WARNING,
+                    "NPC",
+                    f"{label} › 行程",
+                    "可玩窗口内没有任何可达场景可遇见 NPC："
+                    f"{_coverage_interval_label(clock_start, start, end)}",
+                    hint=_P1_3_SCHEDULE_HINT,
+                )
+            )
+
+        for index, _entry in enumerate(schedule):
+            if entry_uncertain[index] or not entry_seen[index]:
+                continue
+            if not entry_possible[index]:
+                issues.append(
+                    _issue(
+                        SEVERITY_WARNING,
+                        "NPC",
+                        f"{label} › 行程 #{index + 1}",
+                        "该行程在可玩窗口内没有任何可能命中的时段或条件，"
+                        "运行时不会生效",
+                        hint=_P1_3_SCHEDULE_HINT,
+                    )
+                )
+        for index, targets in unreachable_targets.items():
+            issues.append(
+                _issue(
+                    SEVERITY_WARNING,
+                    "NPC",
+                    f"{label} › 行程 #{index + 1}",
+                    "条件可能成立，但目标场景不可达："
+                    + "、".join(sorted(targets)),
+                    hint=_P1_3_SCHEDULE_HINT,
+                )
+            )
+
+
+def _normalize_leak_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split()).casefold()
+
+
+def _public_text_sinks(  # noqa: C901,PLR0912
+    data: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    """Enumerate module fields that can reach a public or shared context."""
+
+    sinks: list[tuple[str, str, str]] = []
+
+    def add(section: str, path: str, value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            sinks.append((section, path, value))
+
+    for field_name in ("name", "description", "opening"):
+        add("模组", f"顶层 › {field_name}", data.get(field_name))
+
+    for scene in get_list(data, "scenes"):
+        if not isinstance(scene, dict):
+            continue
+        label = f"场景{_tag(scene)}"
+        for field_name in ("name", "narration", "idle_narration"):
+            add("场景", f"{label} › {field_name}", scene.get(field_name))
+        for index, check in enumerate(get_list(scene, "checks")):
+            if not isinstance(check, dict):
+                continue
+            for field_name in ("success_text", "failure_text"):
+                add(
+                    "场景",
+                    f"{label} › 检定点 #{index + 1} › {field_name}",
+                    check.get(field_name),
+                )
+        for index, exit_ in enumerate(get_list(scene, "exits")):
+            if isinstance(exit_, dict):
+                add(
+                    "场景",
+                    f"{label} › 出口 #{index + 1} › narration",
+                    exit_.get("narration"),
+                )
+
+    for npc in get_list(data, "npcs"):
+        if not isinstance(npc, dict):
+            continue
+        label = f"NPC{_tag(npc)}"
+        for field_name in (
+            "name",
+            "public_desc",
+            "persona",
+            "fallback_line",
+            "on_death_text",
+        ):
+            add("NPC", f"{label} › {field_name}", npc.get(field_name))
+        for index, value in enumerate(get_list(npc, "knows")):
+            add("NPC", f"{label} › knows #{index + 1}", value)
+        for index, entry in enumerate(get_list(npc, "schedule")):
+            if isinstance(entry, dict):
+                add(
+                    "NPC",
+                    f"{label} › 行程 #{index + 1} › activity",
+                    entry.get("activity"),
+                )
+        for node_index, node in enumerate(get_list(npc, "social_nodes")):
+            if not isinstance(node, dict):
+                continue
+            node_label = f"{label} › 社交节点 #{node_index + 1}"
+            for field_name in ("name", "goal", "success_text", "failure_text"):
+                add("NPC", f"{node_label} › {field_name}", node.get(field_name))
+            for strategy_index, strategy in enumerate(
+                get_list(node, "strategies")
+            ):
+                if not isinstance(strategy, dict):
+                    continue
+                strategy_label = f"{node_label} › 策略 #{strategy_index + 1}"
+                for field_name in ("name", "success_text", "failure_text"):
+                    add(
+                        "NPC",
+                        f"{strategy_label} › {field_name}",
+                        strategy.get(field_name),
+                    )
+
+    for monster in get_list(data, "monsters"):
+        if not isinstance(monster, dict):
+            continue
+        label = f"怪物{_tag(monster)}"
+        for field_name in ("name", "on_death_text"):
+            add("怪物", f"{label} › {field_name}", monster.get(field_name))
+
+    for clue in get_list(data, "clues"):
+        if isinstance(clue, dict):
+            label = f"线索{_tag(clue)}"
+            add("线索", f"{label} › name", clue.get("name"))
+            add("线索", f"{label} › text", clue.get("text"))
+
+    for ending in get_list(data, "endings"):
+        if isinstance(ending, dict):
+            label = f"结局{_tag(ending)}"
+            for field_name in ("name", "text", "summary"):
+                add("结局", f"{label} › {field_name}", ending.get(field_name))
+
+    for event in get_list(data, "events"):
+        if isinstance(event, dict):
+            label = f"事件{_tag(event)}"
+            for field_name in ("name", "summary"):
+                add("事件", f"{label} › {field_name}", event.get(field_name))
+    return sinks
+
+
+def _private_text_sources(data: dict[str, Any]) -> list[tuple[str, str]]:
+    sources: list[tuple[str, str]] = []
+    for npc in get_list(data, "npcs"):
+        if not isinstance(npc, dict):
+            continue
+        label = f"NPC{_tag(npc)}"
+        for index, value in enumerate(get_list(npc, "secrets")):
+            if isinstance(value, str) and value.strip():
+                sources.append((f"{label} › secrets #{index + 1}", value))
+        for index, fact in enumerate(get_list(npc, "facts")):
+            if not isinstance(fact, dict):
+                continue
+            fact_label = f"{label} › 私人情报 #{index + 1}{_tag(fact)}"
+            for field_name in ("name", "text"):
+                value = fact.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    sources.append((f"{fact_label} › {field_name}", value))
+    return sources
+
+
+def _privacy_lint(data: dict[str, Any], issues: list[Issue]) -> None:
+    """Find exact private-text collisions with public/context sinks."""
+
+    sinks = [
+        (section, path, _normalize_leak_text(value))
+        for section, path, value in _public_text_sinks(data)
+    ]
+    seen: set[tuple[str, str]] = set()
+    for source_path, source_value in _private_text_sources(data):
+        needle = _normalize_leak_text(source_value)
+        if not needle:
+            continue
+        for _section, sink_path, haystack in sinks:
+            if needle not in haystack:
+                continue
+            key = (source_path, sink_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(
+                _issue(
+                    SEVERITY_ERROR,
+                    "NPC",
+                    source_path,
+                    f"私密字段内容出现在公共汇 {sink_path}，可能经该路径泄露",
+                    hint=_P1_3_PRIVACY_HINT,
+                )
+            )
+
+
 def _misc_lint(data: dict[str, Any], issues: list[Issue]) -> None:
     """杂项：通用结局开关、序幕事件、引擎 flag 提示。"""
     if data.get("generic_endings") is False:
@@ -1016,5 +1489,7 @@ def run_lint(data: dict[str, Any]) -> list[Issue]:
     _schedule_rules_lint(data, issues)
     _ending_rules_lint(data, issues)
     _graph_lint(data, issues)
+    _schedule_coverage_lint(data, issues)
+    _privacy_lint(data, issues)
     _misc_lint(data, issues)
     return issues

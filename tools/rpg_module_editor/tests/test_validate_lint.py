@@ -32,6 +32,10 @@ def _p1_2_issues(issues: list) -> list:
     return [issue for issue in issues if issue.hint == "P1-2 可达性检查"]
 
 
+def _p1_3_issues(issues: list) -> list:
+    return [issue for issue in issues if issue.hint.startswith("P1-3")]
+
+
 def test_valid_module_has_zero_errors(valid_data: dict) -> None:
     """核心不变式：编辑器诊断与 load_modules 的结论一致。"""
     ModuleDef.model_validate(valid_data)  # 引擎口径通过
@@ -310,6 +314,153 @@ def test_npc_death_flag_is_a_known_condition_source(valid_data: dict) -> None:
     issues = _p1_2_issues(run_lint(data))
 
     assert not any("npc_dead:butler" in issue.message for issue in issues)
+
+
+def test_schedule_gap_is_limited_to_playable_window(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    butler["schedule"] = [
+        {"from": "21:00", "to": "06:00", "scene": "living_room"},
+    ]
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert not any("05:00→06:00" in issue.message for issue in issues)
+
+
+def test_schedule_gap_and_cross_midnight_window_are_reported(
+    valid_data: dict,
+) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    butler["schedule"] = [
+        {"from": "21:00", "to": "23:30", "scene": "living_room"},
+    ]
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert any(
+        issue.severity == "WARNING"
+        and "23:30→06:00" in issue.message
+        and "可达场景" in issue.message
+        for issue in issues
+    )
+
+    butler["schedule"] = [
+        {"from": "21:00", "to": "02:00", "away": True},
+        {"from": "02:00", "to": "06:00", "scene": "living_room"},
+    ]
+    assert not _p1_3_issues(run_lint(data))
+
+
+def test_schedule_condition_without_source_is_never_effective(
+    valid_data: dict,
+) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    butler["schedule"] = [
+        {
+            "from": "21:00",
+            "to": "23:00",
+            "scene": "living_room",
+            "condition": "flag:never_written",
+        }
+    ]
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert any(
+        issue.section == "NPC"
+        and "行程 #1" in issue.path_label
+        and "不会生效" in issue.message
+        for issue in issues
+    )
+
+
+def test_schedule_targeting_unreachable_scene_is_reported(valid_data: dict) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    butler["schedule"] = [
+        {"from": "21:00", "to": "23:00", "scene": "sealed_room"},
+    ]
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert any(
+        issue.section == "NPC"
+        and "sealed_room" in issue.message
+        and "不可达" in issue.message
+        for issue in issues
+    )
+
+
+def test_private_secret_collision_reports_source_and_public_sink(
+    valid_data: dict,
+) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    secret = "only the butler knows this sentence"
+    butler["secrets"] = [secret]
+    butler["schedule"][0]["activity"] = f"守着油灯，{secret}"
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert any(
+        issue.severity == "ERROR"
+        and "secrets #1" in issue.path_label
+        and "行程 #1 › activity" in issue.message
+        for issue in issues
+    )
+
+
+def test_private_fact_collision_checks_broadcast_and_social_text(
+    valid_data: dict,
+) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    fact_text = "the private fact must never be broadcast"
+    butler["facts"] = [{"id": "hidden_fact", "name": "隐秘事实", "text": fact_text}]
+    data["endings"][0]["text"] = f"终局文案：{fact_text}"
+    butler["social_nodes"][0]["goal"] = f"公开目标：{fact_text}"
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert any(
+        "私人情报 #1" in issue.path_label
+        and "结局" in issue.message
+        for issue in issues
+    )
+    assert any(
+        "私人情报 #1" in issue.path_label
+        and "社交节点 #1 › goal" in issue.message
+        for issue in issues
+    )
+
+
+def test_private_text_collision_normalizes_scene_and_clue_sinks(
+    valid_data: dict,
+) -> None:
+    data = copy.deepcopy(valid_data)
+    butler = next(n for n in data["npcs"] if n["id"] == "butler")
+    secret = "Private Secret Token"
+    butler["secrets"] = [secret]
+    data["scenes"][0]["narration"] = "private   secret token appears here"
+    fact_text = "另一段个人情报正文"
+    butler["facts"] = [{"id": "hidden_fact", "name": "隐秘事实", "text": fact_text}]
+    data["clues"][0]["text"] = f"线索中不应出现：{fact_text}"
+
+    issues = _p1_3_issues(run_lint(data))
+
+    assert any("场景" in issue.message for issue in issues)
+    assert any("线索" in issue.message for issue in issues)
+
+
+def test_existing_modules_have_no_p1_3_errors() -> None:
+    for path in sorted(modules_dir().glob("*.yaml")):
+        data, _ = load_module_file(path)
+        issues = _p1_3_issues(run_lint(data))
+        errors = [issue for issue in issues if issue.severity == "ERROR"]
+        assert not errors, f"{path.name}: {_messages(errors)}"
 
 
 def test_skeleton_template_is_clean() -> None:
