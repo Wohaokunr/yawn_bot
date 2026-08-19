@@ -54,6 +54,10 @@ P1-6 提供进程内运行指标，不需要额外环境变量、监控 SDK 或�
 可调用 `yawn_core.metrics.snapshot_metrics()` 获取 JSON 快照，或调用
 `yawn_core.metrics.render_prometheus()` 获取 Prometheus 文本；指标在进程重启后清零。
 指标不包含 `game_id`、群号、用户号、QQ 号、提示词、AI 响应或消息正文。完整指标
+
+RPG 额外提供 `yawnbot_rpg_tutorial_total`、`yawnbot_rpg_deductions_total` 和
+`yawnbot_rpg_terminations_total`，分别观察新手引导、联合推理和终止原因；它们只使用
+步骤、结果和原因等低基数标签。
 目录和标签约束见 [`docs/metrics.md`](metrics.md)。
 
 番茄小说子插件也是可选功能。它只处理阅读页明确标记为免费的内容，不登录、不绕过
@@ -156,6 +160,15 @@ uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproj
 子插件启动报告；若 RPG 或狼人杀为 `失败`，不要把该版本投入运行。
 
 ## 6. 启动与进程管理
+
+### 6.1 RPG 首次验证
+
+首次报名会优先私聊发送分阶段引导；私聊失败时群内只提示玩家加机器人好友，不回退角色卡、
+个人线索或引导正文。`/跑团帮助` 可随时重看当前阶段，`/跳过引导` 停止自动提示，
+`/重新引导` 清除当前版本状态。服务器重启后旧局不恢复，新局重新开设。
+
+回放从 JSONL 事件日志读取，不修改游戏状态；公开回放只展示已公开线索和推论，个人回放
+额外展示该玩家获授权的信息。事件日志不可用时回放明确返回不可回放。
 
 生产启动命令：
 

@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 MODULES = ROOT / "src" / "plugins" / "yawn_core" / "yawn_rpg" / "modules"
 OLD_HOUSE = MODULES / "yuzhai_old_house.yaml"
 TIDE = MODULES / "before_tide_departs.yaml"
+INTRO = MODULES / "fogbound_archive.yaml"
 
 
 def _config(ending: str, **kwargs: Any) -> simulator.SearchConfig:
@@ -54,6 +55,24 @@ def test_different_seed_changes_generated_party_or_rolls() -> None:
     assert (
         first["players"] != second["players"]
         or first["steps"] != second["steps"]
+    )
+
+
+def test_intro_trace_includes_deterministic_deduction() -> None:
+    module = simulator.load_module(INTRO)
+
+    first = simulator.search_module(
+        module, _config("alarm_explained", seed=28, players=1)
+    ).to_dict()
+    second = simulator.search_module(
+        module, _config("alarm_explained", seed=28, players=1)
+    ).to_dict()
+
+    assert first == second
+    assert first["ok"] is True
+    assert any(
+        step["action"] == "deduction" and step["target"] == "inside_key_used"
+        for step in first["steps"]
     )
 
 

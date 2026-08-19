@@ -1,4 +1,4 @@
-# 运行指标（P1-6）
+# 运行指标（P1-6 / RPG 新手引导与推理）
 
 YawnBot 的运行指标是进程内聚合值，不依赖 Prometheus SDK、网络服务或新增数据库表。
 进程重启后指标清零；事件日志和 ORM 仍是各自独立的持久化边界。
@@ -28,6 +28,9 @@ prometheus_text = render_prometheus()
 | `yawnbot_ai_request_duration_seconds` | histogram | `operation` | AI 请求延迟 |
 | `yawnbot_ai_degradations_total` | counter | `component`, `reason` | 固定兜底、超时、并发拥塞和发送失败等降级 |
 | `yawnbot_game_endings_total` | counter | `game_kind`, `outcome`, `ending`, `winner` | RPG 结局和狼人杀胜方分布 |
+| `yawnbot_rpg_tutorial_total` | counter | `step`, `outcome` | RPG 引导开始、步骤展示、完成和跳过 |
+| `yawnbot_rpg_deductions_total` | counter | `outcome` | 推论发起、确认、成功、失败和撤回 |
+| `yawnbot_rpg_terminations_total` | counter | `reason` | RPG 正常结束、手动结束、服务器中断和引擎异常 |
 
 未使用的可选标签不会被补成空字符串；每个指标只输出实际产生过的 series。
 阶段耗时的内部计时账本使用稳定 `game_id` 做键，但 `game_id` 不会进入任何公开
@@ -46,4 +49,3 @@ prometheus_text = render_prometheus()
 - `game_id`、`group_id`、`user_id`、QQ 号、`actor_id` 等高基数字段会被拒绝。
 - 指标更新失败会被吞掉，不改变游戏裁决、AI fallback、消息发送或事件日志写入。
 - 事件日志 writer 队列满时只增加拒绝计数并丢弃旁路事件，不阻塞 RPG/狼人杀引擎。
-

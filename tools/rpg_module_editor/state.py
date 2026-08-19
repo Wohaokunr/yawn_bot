@@ -240,6 +240,22 @@ def new_clue_dict(clue_id: str) -> dict[str, Any]:
     return {"id": clue_id, "name": "", "text": ""}
 
 
+def new_deduction_dict(deduction_id: str) -> dict[str, Any]:
+    """新建一条确定性推论。"""
+    return {
+        "id": deduction_id,
+        "name": "",
+        "required_clues": [],
+        "conclusion_keywords": [["关键词"]],
+        "success_text": "",
+        "failure_hint": "现有证据还不足以支持这个结论。",
+        "unlock_flags": [f"deduced_{deduction_id}"],
+        "grant_clues": [],
+        "once": True,
+        "failure_time_cost": 1,
+    }
+
+
 def new_ending_dict(ending_id: str) -> dict[str, Any]:
     return {
         "id": ending_id,
@@ -271,7 +287,15 @@ def generate_unique_id(base: str, existing: set[str]) -> str:
 
 # ── 访问器 ────────────────────────────────────────────────
 
-_LIST_SECTIONS = ("scenes", "npcs", "monsters", "clues", "endings", "events")
+_LIST_SECTIONS = (
+    "scenes",
+    "npcs",
+    "monsters",
+    "clues",
+    "deductions",
+    "endings",
+    "events",
+)
 
 
 def get_list(data: dict[str, Any], key: str) -> list[Any]:
@@ -328,6 +352,10 @@ _REFERENCE_DESCRIPTORS: dict[str, ReferenceDescriptor] = {
     ),
     "node.private_clues": ReferenceDescriptor("clue", "私人线索", multiple=True),
     "node.public_clues": ReferenceDescriptor("clue", "公开线索", multiple=True),
+    "deduction.required_clues": ReferenceDescriptor(
+        "clue", "必需线索", allow_blank=False, multiple=True
+    ),
+    "deduction.grant_clues": ReferenceDescriptor("clue", "奖励线索", multiple=True),
 }
 
 
@@ -415,9 +443,10 @@ def _rename_in_condition(condition: str, kind: str, old: str, new: str) -> str:
                 (kind == "scene" and prefix == "scene" and value == old)
                 or (kind == "monster" and prefix == "monster_dead" and value == old)
                 or (kind == "clue" and prefix == "clue" and value == old)
+                or (kind == "deduction" and prefix == "deduction" and value == old)
             ):
                 term = f"{prefix}:{new}"
-            elif kind == "clue" and prefix == "clues":
+            elif (kind, prefix) in {("clue", "clues"), ("deduction", "deductions")}:
                 parts = [new if v == old else v for v in value.split("+")]
                 term = f"{prefix}:{'+'.join(parts)}"
         terms.append(term)
@@ -429,7 +458,7 @@ def rename_entity(  # noqa: C901,PLR0912,PLR0915
 ) -> list[str]:
     """级联改名实体 id；返回受影响位置描述列表（供确认对话框展示）。
 
-    kind: scene / npc / monster / clue
+    kind: scene / npc / monster / clue / deduction
     """
     sites: list[str] = []
     section = {
@@ -437,6 +466,7 @@ def rename_entity(  # noqa: C901,PLR0912,PLR0915
         "npc": "npcs",
         "monster": "monsters",
         "clue": "clues",
+        "deduction": "deductions",
     }[kind]
     for item in get_list(data, section):
         if isinstance(item, dict) and item.get("id") == old:
@@ -517,6 +547,17 @@ def rename_entity(  # noqa: C901,PLR0912,PLR0915
                                 f"NPC〈{npc.get('id', '?')}〉社交节点"
                                 f"〈{node.get('id', '?')}〉{ref_field}"
                             )
+        maybe_rename_conditions()
+        for deduction in get_list(data, "deductions"):
+            if not isinstance(deduction, dict):
+                continue
+            for ref_field in ("required_clues", "grant_clues"):
+                references = get_list(deduction, ref_field)
+                for index, clue_id in enumerate(references):
+                    if clue_id == old:
+                        references[index] = new
+                        sites.append(f"推论〈{deduction.get('id', '?')}〉{ref_field}")
+    elif kind == "deduction":
         maybe_rename_conditions()
     return sites
 
@@ -677,6 +718,7 @@ _SEARCH_TABS = {
     "npcs": "tab-npcs",
     "monsters": "tab-monsters",
     "clues": "tab-clues",
+    "deductions": "tab-deductions",
     "endings": "tab-endings",
     "events": "tab-events",
 }
@@ -685,6 +727,7 @@ _SEARCH_CONTAINER_LABELS = {
     "npcs": "NPC",
     "monsters": "怪物",
     "clues": "线索",
+    "deductions": "推论",
     "endings": "结局",
     "events": "事件",
     "checks": "检定点",
@@ -865,6 +908,11 @@ def build_condition_tokens(data: dict[str, Any]) -> list[tuple[str, str]]:
         if isinstance(monster, dict) and monster.get("id")
     )
     tokens.extend(
+        (f"推论已成立：{entity_label(item)}", f"deduction:{item['id']}")
+        for item in get_list(data, "deductions")
+        if isinstance(item, dict) and item.get("id")
+    )
+    tokens.extend(
         (f"当前场景：{entity_label(scene)}", f"scene:{scene['id']}")
         for scene in get_list(data, "scenes")
         if isinstance(scene, dict) and scene.get("id")
@@ -914,6 +962,7 @@ __all__ = [
     "get_list",
     "new_check_dict",
     "new_clue_dict",
+    "new_deduction_dict",
     "new_ending_dict",
     "new_event_dict",
     "new_exit_dict",

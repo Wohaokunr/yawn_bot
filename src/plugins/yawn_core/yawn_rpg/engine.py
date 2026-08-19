@@ -27,7 +27,12 @@ from sqlalchemy import select
 
 from ..event_log import record_game_event  # noqa: TID252
 from ..llm import complete, complete_with_tools  # noqa: TID252
-from ..metrics import record_ai_degradation  # noqa: TID252
+from ..metrics import (  # noqa: TID252
+    record_ai_degradation,
+    record_rpg_deduction,
+    record_rpg_termination,
+)
+from ..replay import register_replay_participants  # noqa: TID252
 from . import ai_kp, ai_npc, ai_social, api
 from .charsheet import (
     CharacterSheet,
@@ -65,6 +70,7 @@ from .state import (
     Action,
     ActionKind,
     Game,
+    PendingDeduction,
     Phase,
     PlayerState,
     discard_game,
@@ -72,6 +78,7 @@ from .state import (
     leave_signup,
     release_action,
 )
+from .tutorial import HELP_TEXT, STEP_IDS, guide_enabled, record_step, set_guide_state
 
 if TYPE_CHECKING:
     from openai.types.chat import (
@@ -447,6 +454,43 @@ async def _announce_ephemeral(game: Game, text: str) -> None:
         await api.safe_group_msg(game.bot, game.group_id, text)
 
 
+async def _tutorial_step(game: Game, user_id: int, step: str) -> None:
+    """向首次游玩的调查员私聊一步提示，不进入剧情日志。"""
+    shown = game.tutorial_steps_shown.setdefault(user_id, set())
+    if step in shown or step not in HELP_TEXT or not await guide_enabled(user_id):
+        return
+    shown.add(step)
+    ok = game.bot is not None and await api.send_dm(
+        game.bot, user_id, f"═══ 新手引导 · {step} ═══\n{HELP_TEXT[step]}"
+    )
+    await record_step(game, user_id, step)
+    player = game.player_by_user(user_id)
+    if step == "报名":
+        record_game_event(
+            game,
+            "rpg",
+            "tutorial_started",
+            phase=game.phase,
+            actor_seat=player.seat if player is not None else None,
+            payload={"step": STEP_IDS[step]},
+        )
+    if not ok:
+        await _announce_ephemeral(
+            game,
+            f"新手引导私聊未送达，请先加机器人好友；也可发送 /跑团帮助 {step}。",
+        )
+    if step == "推理" and ok:
+        await set_guide_state(user_id, "completed")
+        record_game_event(
+            game,
+            "rpg",
+            "tutorial_completed",
+            phase=game.phase,
+            actor_seat=player.seat if player is not None else None,
+            payload={"step": STEP_IDS[step]},
+        )
+
+
 async def _dm(
     game: Game,
     player: PlayerState,
@@ -604,6 +648,37 @@ def public_clue_list_text(game: Game) -> str:
     """只列出已公开线索名称，适合直接发到群内。"""
     names = [name for _, name in _public_clues(game)]
     return "公共线索：" + ("、".join(names) if names else "暂无")
+
+
+def clue_board_text(game: Game) -> str:
+    """渲染只含公开事实的团队线索板。"""
+    if game.module is None:
+        return "当前没有可用的团队线索板。"
+    lines = ["═══ 团队线索板 ═══"]
+    public = [clue for clue in game.module.clues if clue.id in game.public_clues]
+    if public:
+        for clue in public:
+            suffix = f" · {clue.source_hint}" if clue.source_hint else ""
+            lines.append(f"- [{clue.category}] {clue.name}{suffix}")
+    else:
+        lines.append("- 暂无公开线索；个人线索需要主动 /分享线索。")
+    lines.append("已完成推论：")
+    completed = [
+        item.name
+        for item in game.module.deductions
+        if item.id in game.completed_deductions
+    ]
+    lines.append("- " + ("、".join(completed) if completed else "暂无"))
+    if game.pending_deduction is not None:
+        pending = game.pending_deduction
+        names = [
+            clue.name if clue_id in game.public_clues else "未公开证据"
+            for clue_id in pending.clue_ids
+            if (clue := game.module.clue(clue_id)) is not None
+        ]
+        lines.append("待确认推理：" + " + ".join(names))
+        lines.append("其他调查员可发送 /赞成推理。")
+    return "\n".join(lines)
 
 
 def _waiting_names(game: Game) -> list[str]:
@@ -878,6 +953,8 @@ async def _run_signup(game: Game, cfg: Config) -> None:
             ]
         ),
     )
+    for user_id in game.signup_user_ids:
+        await _tutorial_step(game, user_id, "报名")
     warned = False
     while True:
         remaining = deadline - _loop_time()
@@ -912,6 +989,7 @@ async def _run_signup(game: Game, cfg: Config) -> None:
                         MessageSegment.at(action.actor_user_id)
                         + f" 报名成功！当前 {len(game.signup_user_ids)}/{cap} 人",
                     )
+                    await _tutorial_step(game, action.actor_user_id, "报名")
                 else:
                     await _announce(
                         game,
@@ -1022,6 +1100,7 @@ async def _run_char_create(game: Game, cfg: Config) -> None:
         "超时将自动确认。",
     )
     for p in game.players:
+        await _tutorial_step(game, p.user_id, "建卡")
         if not await _dm(game, p, _card_text(p, cfg), char_create=True):
             p.confirmed = True  # 私聊失败：自动确认
             await _announce(
@@ -1400,6 +1479,7 @@ async def discover_clue(
             else "获得了一条个人线索（私聊失败，请加机器人为好友）。"
         )
         await _announce(game, MessageSegment.at(owner.user_id) + message)
+        await _tutorial_step(game, owner.user_id, "线索")
     return True
 
 
@@ -1918,15 +1998,23 @@ def ending_recap_text(game: Game) -> str:
         f"{_player_name(player)}（{'存续' if not player.incapped else '倒下'}）"
         for player in game.players
     )
-    return "\n".join(
-        [
+    lines = [
             "═══ 系统回顾 ═══",
             f"模组：《{module_name}》",
             f"游戏内耗时：{duration}",
             f"公开线索：{len(game.public_clues)} 条",
             "调查员：" + (statuses or "暂无"),
+            f"回放编号：{game.event_log_id}",
         ]
-    )
+    if game.module is not None and game.completed_deductions:
+        lines.append("联合推理：")
+        for deduction in game.module.deductions:
+            if deduction.id not in game.completed_deductions:
+                continue
+            seats = sorted(game.deduction_confirmers.get(deduction.id, set()))
+            participants = "、".join(f"{seat}号" for seat in seats) or "系统记录"
+            lines.append(f"- {deduction.name}（参与：{participants}）")
+    return "\n".join(lines)
 
 
 async def do_ending(game: Game, ending: Ending) -> None:
@@ -3137,6 +3225,178 @@ async def _handle_share_clue(game: Game, player: PlayerState, aux: str) -> bool:
         return False
     game.public_clues.add(clue_id)
     await _announce(game, f"〔线索分享〕{clue.name}\n{clue.text}")
+    if game.module.deductions:
+        for participant in game.active_players():
+            await _tutorial_step(game, participant.user_id, "推理")
+    return True
+
+
+def _normalize_deduction_text(text: str) -> str:
+    return "".join(text.lower().split())
+
+
+async def _settle_deduction(game: Game, pending: "PendingDeduction") -> bool:
+    module = game.module
+    if module is None:
+        return False
+    normalized = _normalize_deduction_text(pending.conclusion)
+    chosen = set(pending.clue_ids)
+    deduction = next(
+        (
+            item
+            for item in module.deductions
+            if set(item.required_clues) == chosen
+            and all(
+                any(word.lower() in normalized for word in group)
+                for group in item.conclusion_keywords
+            )
+        ),
+        None,
+    )
+    game.pending_deduction = None
+    signature = (tuple(sorted(chosen)), normalized)
+    if deduction is None:
+        first_failure = signature not in game.failed_deduction_signatures
+        game.failed_deduction_signatures.add(signature)
+        candidates = [
+            item for item in module.deductions if set(item.required_clues) == chosen
+        ]
+        hint = (
+            candidates[0].failure_hint
+            if candidates
+            else "现有证据还不足以支持这个结论。"
+        )
+        await _announce(game, f"〔推理未成立〕{hint}")
+        if first_failure:
+            await _tick_time(
+                game, min(item.failure_time_cost for item in candidates) if candidates else 5
+            )
+        record_game_event(
+            game,
+            "rpg",
+            "deduction_failed",
+            phase=game.phase,
+            round_no=game.explore_round,
+            payload={"clue_ids": sorted(chosen)},
+        )
+        record_rpg_deduction("failed")
+        return True
+    if deduction.once and deduction.id in game.completed_deductions:
+        await _announce(game, "这项推论已经成立，不会重复获得奖励。")
+        return False
+    game.completed_deductions.add(deduction.id)
+    game.deduction_confirmers[deduction.id] = {
+        player.seat
+        for user_id in pending.confirmations
+        if (player := game.player_by_user(user_id)) is not None
+    }
+    for flag in deduction.unlock_flags:
+        raise_flag(game, flag)
+    for clue_id in deduction.grant_clues:
+        await discover_clue(game, clue_id)
+    await _announce(game, f"〔联合推理 · {deduction.name}〕\n{deduction.success_text}")
+    record_game_event(
+        game,
+        "rpg",
+        "deduction_succeeded",
+        phase=game.phase,
+        round_no=game.explore_round,
+        payload={"deduction_id": deduction.id, "clue_ids": sorted(chosen)},
+    )
+    record_rpg_deduction("succeeded")
+    return True
+
+
+async def _handle_propose_deduction(
+    game: Game, player: PlayerState, aux: str
+) -> bool:
+    if game.module is None or not game.module.deductions:
+        await _announce(game, "当前模组没有可提交的联合推理。")
+        return False
+    if game.pending_deduction is not None:
+        await _announce(game, "已有推理等待确认，请先 /赞成推理 或由发起人撤回。")
+        return False
+    clues_text, sep, conclusion = aux.partition("：")
+    if not sep:
+        clues_text, sep, conclusion = aux.partition(":")
+    names = [item.strip() for item in clues_text.split("+") if item.strip()]
+    if not sep or len(names) < 2 or not conclusion.strip():
+        await _announce(game, "格式：/推理 线索A + 线索B：结论")
+        return False
+    clue_ids: list[str] = []
+    for name in names:
+        clue, scope = lookup_visible_clue(game, player, name)
+        if clue is None or scope == "ambiguous":
+            await _announce(game, "有不可用的线索，请查看 /线索板 或先分享个人线索。")
+            return False
+        clue_ids.append(clue.id)
+    pending = PendingDeduction(
+        proposer_user_id=player.user_id,
+        clue_ids=tuple(dict.fromkeys(clue_ids)),
+        conclusion=conclusion.strip(),
+        scene_id=game.current_scene or "",
+        explore_round=game.explore_round,
+        confirmations={player.user_id},
+    )
+    game.pending_deduction = pending
+    record_game_event(
+        game,
+        "rpg",
+        "deduction_proposed",
+        phase=game.phase,
+        round_no=game.explore_round,
+        actor_seat=player.seat,
+        payload={"clue_ids": sorted(pending.clue_ids)},
+    )
+    record_rpg_deduction("proposed")
+    if len(game.active_players()) <= 1:
+        return await _settle_deduction(game, pending)
+    await _announce(game, f"{_player_name(player)} 发起联合推理，等待另一名调查员 /赞成推理。")
+    return True
+
+
+async def _handle_confirm_deduction(game: Game, player: PlayerState) -> bool:
+    pending = game.pending_deduction
+    if pending is None:
+        await _announce(game, "当前没有等待确认的推理，请先使用 /推理 发起。")
+        return False
+    if pending.proposer_user_id == player.user_id:
+        await _announce(game, "发起人不能提供第二次确认，需要另一名调查员赞成。")
+        return False
+    pending.confirmations.add(player.user_id)
+    record_game_event(
+        game,
+        "rpg",
+        "deduction_confirmed",
+        phase=game.phase,
+        round_no=game.explore_round,
+        actor_seat=player.seat,
+        payload={"clue_ids": sorted(pending.clue_ids)},
+    )
+    record_rpg_deduction("confirmed")
+    return await _settle_deduction(game, pending)
+
+
+async def _handle_withdraw_deduction(game: Game, player: PlayerState) -> bool:
+    pending = game.pending_deduction
+    if pending is None:
+        await _announce(game, "当前没有等待确认的推理。")
+        return False
+    if pending.proposer_user_id != player.user_id:
+        await _announce(game, "只有推理发起人可以撤回。")
+        return False
+    game.pending_deduction = None
+    record_game_event(
+        game,
+        "rpg",
+        "deduction_withdrawn",
+        phase=game.phase,
+        round_no=game.explore_round,
+        actor_seat=player.seat,
+        payload={"clue_ids": sorted(pending.clue_ids)},
+    )
+    record_rpg_deduction("withdrawn")
+    await _announce(game, "联合推理提案已撤回。")
     return True
 
 
@@ -3359,6 +3619,12 @@ async def _process_action(
         return await _handle_share_clue(game, player, action.aux or "")
     elif action.kind is ActionKind.SHARE_FACT:
         return await _handle_share_fact(game, player, action.aux or "")
+    elif action.kind is ActionKind.PROPOSE_DEDUCTION:
+        return await _handle_propose_deduction(game, player, action.aux or "")
+    elif action.kind is ActionKind.CONFIRM_DEDUCTION:
+        return await _handle_confirm_deduction(game, player)
+    elif action.kind is ActionKind.WITHDRAW_DEDUCTION:
+        return await _handle_withdraw_deduction(game, player)
     elif action.kind is ActionKind.PASS_TURN:
         if game.combat_order:
             if game.combat_order[game.combat_index] != player.user_id:
@@ -3406,6 +3672,8 @@ async def _run_play(game: Game, cfg: Config) -> None:
     game.clock_start_minutes = game.module.time.start_minutes
     game.group_log.clear()
     await enter_scene(game, game.module.start_scene, opening=True)
+    for player in game.players:
+        await _tutorial_step(game, player.user_id, "行动")
     auto_hop_limit = len(game.module.scenes) + 1
     auto_hops = 0
     idle_deadline = 0.0
@@ -3605,6 +3873,11 @@ async def _persist_start(game: Game) -> None:
     module = game.module
     if module is None:
         return
+    register_replay_participants(
+        game.event_log_id,
+        "rpg",
+        {player.user_id: player.seat for player in game.players},
+    )
     persistence = "failed"
     try:
         async with get_session() as session:
@@ -3681,6 +3954,33 @@ async def _persist_end(game: Game, ending: Ending) -> None:
         )
 
 
+async def _persist_interrupted(game: Game, reason: str) -> None:
+    """记录非剧情终止；失败只记日志，不阻塞任务取消。"""
+    if game.game_row_id is None:
+        return
+    try:
+        async with get_session() as session:
+            row = await session.get(RPGGame, game.game_row_id)
+            if row is None or row.ended_at is not None:
+                return
+            row.ended_at = _now_bj()
+            row.termination_reason = reason
+            for p in game.players:
+                stmt = select(RPGPlayer).where(
+                    RPGPlayer.game_id == game.game_row_id,
+                    RPGPlayer.user_id == p.user_id,
+                )
+                prow = (await session.execute(stmt)).scalar_one_or_none()
+                if prow is not None:
+                    prow.final_hp = p.hp
+                    prow.final_san = p.san
+                    prow.is_incapped = p.incapped
+                    prow.survived = None
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("跑团群 %s 中断状态写库失败", game.group_id, exc_info=True)
+
+
 # ── 引擎入口 ──────────────────────────────────────────────
 
 
@@ -3732,7 +4032,19 @@ async def run_game(game: Game) -> None:
     except asyncio.CancelledError:
         # 常规取消路径（空房解散 / /结束游戏）由命令层自行播报，
         # 并已把阶段置为 ENDED；仅对意外取消兜底播报
-        if game.phase not in (Phase.SIGNUP, Phase.ENDED):
+        reason = game.termination_reason
+        if reason is not None:
+            record_rpg_termination(reason)
+            record_game_event(
+                game,
+                "rpg",
+                "game_interrupted",
+                phase=Phase.ENDED,
+                round_no=game.explore_round,
+                payload={"termination_reason": reason},
+            )
+            await _persist_interrupted(game, reason)
+        elif game.phase not in (Phase.SIGNUP, Phase.ENDED):
             with contextlib.suppress(Exception):
                 await _announce(game, "对局已被强制结束")
         logger.info(f"跑团群 {game.group_id} 引擎任务被取消")

@@ -15,6 +15,7 @@ from .schema_loader import (
     NPC,
     CheckPoint,
     Clue,
+    Deduction,
     Ending,
     Exit,
     ModuleDef,
@@ -42,6 +43,7 @@ _KNOWN_KEYS: dict[type, set[str]] = {
     NPC: set(NPC.model_fields),
     Monster: set(Monster.model_fields),
     Clue: set(Clue.model_fields),
+    Deduction: set(Deduction.model_fields),
     Ending: set(Ending.model_fields),
     PlotEvent: set(PlotEvent.model_fields),
     TimeConfig: set(TimeConfig.model_fields),
@@ -61,6 +63,8 @@ _CONDITION_KINDS = frozenset(
         "clue",
         "clues",
         "monster_dead",
+        "deduction",
+        "deductions",
         "scene",
         "time_after",
         "time_before",
@@ -163,6 +167,10 @@ def _condition_possible(  # noqa: C901,PLR0911,PLR0912,PLR0913
                 return False
         elif kind == "monster_dead" and value not in dead_monsters:
             return False
+        elif kind in {"deduction", "deductions"}:
+            # 推论可达性由 schema 的 required_clues 保证引用合法；固定点在
+            # P2 首版保守视为可能成立，避免把需要玩家文本的裁决误判为软锁。
+            continue
         elif kind == "scene":
             if current_scene is not None and value != current_scene:
                 return False

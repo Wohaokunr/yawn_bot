@@ -20,6 +20,7 @@ from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
 from ..event_log import record_game_event  # noqa: TID252
+from ..replay import register_replay_participants  # noqa: TID252
 from . import ai_player, api
 from .config import Config
 from .models import WerewolfGame, WerewolfPlayer
@@ -1606,6 +1607,11 @@ async def _handle_detonation(
 
 async def _persist_start(game: Game) -> None:
     """开局写库：对局行 + 玩家行。失败不影响游戏。"""
+    register_replay_participants(
+        game.event_log_id,
+        "werewolf",
+        {player.user_id: player.seat for player in game.players},
+    )
     persistence = "failed"
     try:
         async with get_session() as session:
@@ -1989,6 +1995,7 @@ async def _finish(game: Game, winner: Faction) -> None:
         )
         lines.append(f"{p.seat}号：{p.role.value} {status}{sheriff_mark}{owner_mark}")
     lines.append("──────────────")
+    lines.append(f"回放编号：{game.event_log_id}")
     lines.append("感谢大家的游玩~ 发送 /战绩 查看胜率")
     await _announce(game, "\n".join(lines))
     await _persist_end(game, winner)

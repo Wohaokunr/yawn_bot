@@ -29,6 +29,7 @@ from nonebot.params import CommandArg
 from nonebot.rule import Rule
 from nonebot_plugin_orm import get_session
 
+from ..event_log import record_game_event  # noqa: TID252
 from ..permission import (  # noqa: TID252
     check_feature_permission,
     is_group_admin,
@@ -50,11 +51,72 @@ from .state import (
     stop_game,
     submit_action,
 )
+from .tutorial import help_text, set_guide_state
 
 if TYPE_CHECKING:
     from .state import Game
 
 config = get_plugin_config(Config)
+
+
+tutorial_help_cmd = on_command(
+    "跑团帮助", aliases={"TRPG帮助"}, priority=5, block=True
+)
+
+
+@tutorial_help_cmd.handle()
+async def handle_tutorial_help(
+    event: MessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """按当前阶段或指定主题显示简短帮助。"""
+    topic = str(arg).strip()
+    if not topic:
+        game = game_of_user(int(event.get_user_id()))
+        if game is not None:
+            topic = {
+                Phase.SIGNUP: "报名",
+                Phase.CHAR_CREATE: "建卡",
+                Phase.PLAY: "行动",
+            }.get(game.phase, "")
+    await tutorial_help_cmd.finish(help_text(topic))
+
+
+skip_tutorial_cmd = on_command("跳过引导", priority=5, block=True)
+
+
+@skip_tutorial_cmd.handle()
+async def handle_skip_tutorial(
+    event: MessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    user_id = int(event.get_user_id())
+    await set_guide_state(user_id, "skipped")
+    game = game_of_user(user_id)
+    if game is not None:
+        player = game.player_by_user(user_id)
+        record_game_event(
+            game,
+            "rpg",
+            "tutorial_skipped",
+            phase=game.phase,
+            actor_seat=player.seat if player is not None else None,
+            payload={"step": "profile"},
+        )
+    await skip_tutorial_cmd.finish("已停止自动新手提示；仍可随时使用 /跑团帮助。")
+
+
+reset_tutorial_cmd = on_command("重新引导", priority=5, block=True)
+
+
+@reset_tutorial_cmd.handle()
+async def handle_reset_tutorial(
+    event: MessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    await set_guide_state(int(event.get_user_id()), "reset")
+    await reset_tutorial_cmd.finish("已重置新手引导；下次参团会重新按阶段提示。")
 
 
 def _player_required(game: "Game", user_id: int) -> str | None:
@@ -675,6 +737,19 @@ async def handle_assist(
 
 share_clue_cmd = on_command("分享线索", aliases={"公开线索"}, priority=5, block=True)
 
+clue_board_cmd = on_command("线索板", aliases={"证据板"}, priority=5, block=True)
+
+
+@clue_board_cmd.handle()
+async def handle_clue_board(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await clue_board_cmd.finish("现在不在跑团进行中；发送 /跑团帮助 查看入门流程。")
+    await clue_board_cmd.finish(engine.clue_board_text(game))
+
 
 @share_clue_cmd.handle()
 async def handle_share_clue(
@@ -697,6 +772,71 @@ async def handle_share_clue(
         _action(ActionKind.SHARE_CLUE, user_id, game=game, aux=clue),
     )
     await share_clue_cmd.finish(error)
+
+
+deduction_cmd = on_command("推理", aliases={"联合推理"}, priority=5, block=True)
+
+
+@deduction_cmd.handle()
+async def handle_deduction(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await deduction_cmd.finish("现在不在跑团进行中；可发送 /局面 查看当前阶段。")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await deduction_cmd.finish(error)
+    raw = str(arg).strip()
+    if not raw:
+        await deduction_cmd.finish("格式：/推理 线索A + 线索B：结论")
+    error = _submit(
+        game,
+        _action(ActionKind.PROPOSE_DEDUCTION, user_id, game=game, aux=raw),
+    )
+    await deduction_cmd.finish(error)
+
+
+confirm_deduction_cmd = on_command("赞成推理", priority=5, block=True)
+
+
+@confirm_deduction_cmd.handle()
+async def handle_confirm_deduction(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await confirm_deduction_cmd.finish("现在没有进行中的联合推理。")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await confirm_deduction_cmd.finish(error)
+    error = _submit(
+        game, _action(ActionKind.CONFIRM_DEDUCTION, user_id, game=game)
+    )
+    await confirm_deduction_cmd.finish(error)
+
+
+withdraw_deduction_cmd = on_command("撤回推理", priority=5, block=True)
+
+
+@withdraw_deduction_cmd.handle()
+async def handle_withdraw_deduction(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("rpg"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.PLAY:
+        await withdraw_deduction_cmd.finish("现在没有进行中的联合推理。")
+    user_id = int(event.get_user_id())
+    if (error := _player_required(game, user_id)) is not None:
+        await withdraw_deduction_cmd.finish(error)
+    error = _submit(
+        game, _action(ActionKind.WITHDRAW_DEDUCTION, user_id, game=game)
+    )
+    await withdraw_deduction_cmd.finish(error)
 
 
 share_fact_cmd = on_command("分享情报", aliases={"公开情报"}, priority=5, block=True)

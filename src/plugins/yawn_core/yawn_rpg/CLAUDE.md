@@ -60,6 +60,9 @@
 - **线索权限**：玩家检定发现的线索默认私聊给发现者，只有 `/分享线索 名称`
   后才群内公开；社交节点的 `private_clues` 复用该机制，`public_clues`
   直接全队公开；无发现者的旧工具/死亡奖励线索仍保持全队公开。
+- **新手与联合推理**：首次玩家按阶段私聊引导；`/线索板` 只投影公开线索。
+  `/推理`、`/赞成推理`、`/撤回推理` 必须走动作队列，证据和关键词由系统
+  按模组 `deductions` 确定性裁决，原始结论不写事件日志。
 
 ## 工具目录与验证规则（execute_tool）
 
@@ -135,7 +138,8 @@ user 消息前部的场景块与已发生事件在状态未变的回合间接续
 ## 条件表达式（evaluate_condition，确定性）
 
 词条以 `&` 组合（须全部满足）：`always` / `clue:<id>` / `clues:<a>+<b>` /
-`monster_dead:<id>` / `scene:<id>` / `all_players_incapped` /
+`monster_dead:<id>` / `deduction:<id>` / `deductions:<a>+<b>` /
+`scene:<id>` / `all_players_incapped` /
 `time_after:HH:MM` / `time_before:HH:MM` / `time_between:HH:MM-HH:MM`
 （跨午夜窗口）/ `flag:<name>` / `flag:<name>>=N`。未知词条、空词条
 （悬挂 `&`）与非法格式保守判 False。**时间词按剧本时间轴求值**：

@@ -60,6 +60,10 @@ class RPGGame(Model):
         nullable=True,
     )
 
+    termination_reason: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+
 
 class RPGPlayer(Model):
     """单个玩家在一局中的记录。"""
@@ -102,3 +106,12 @@ class RPGPlayer(Model):
 
     # 是否存活到结局；对局未结束为 None
     survived: Mapped[Optional[bool]] = mapped_column(nullable=True)
+
+
+class RPGPlayerGuide(Model):
+    """RPG 新手引导完成状态；不保存任何玩法私密内容。"""
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tutorial_version: Mapped[int] = mapped_column(default=1)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    skipped_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)

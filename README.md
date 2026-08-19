@@ -7,10 +7,11 @@ YawnBot 是基于 NoneBot2 与 OneBot V11 的 QQ 机器人。`yawn_core` 提供�
 ## 当前能力
 
 - 平台：三级功能开关、统一帮助/管理面板、用户与群活跃记录、定时提醒。
-- RPG：YAML 模组、运行时 schema、Textual 编辑器、AI/KP 工具调用和确定性降级。
+- RPG：渐进式新手引导、团队线索板、联合推理、YAML 模组、Textual 编辑器和确定性降级。
 - 狼人杀：四种板子、完整昼夜流程、AI 玩家、安全超时与托管。
 - 番茄小说：按书名/作者模糊搜索、浏览公开阅读榜/新书榜或输入链接/book ID 选择章节，后台生成 UTF-8 TXT，成品私发。
 - 持久化：SQLite + nonebot-plugin-orm，保存平台数据、局末摘要和番茄任务断点；正文只短期落盘。
+- 局后回放：RPG/狼人杀从结构化事件日志重建公开视角；参与者可在私聊查看自己的过滤视角。
 
 当前游戏房间、队列和局内状态只存在单进程内存中。项目不支持多实例共同消费同一
 群的游戏动作，也不能在进程重启后恢复未结束的游戏。
@@ -86,6 +87,8 @@ uv run python -m tools.rpg_module_editor
 uv run python -m tools.rpg_module_editor --check \
   src/plugins/yawn_core/yawn_rpg/modules/before_tide_departs.yaml
 ```
+
+玩家命令与隐私规则见 [RPG 新手与联合推理指南](docs/rpg-gameplay-guide.md)。
 
 打开编辑器后切换到“试玩”页（也可按 `F6`），可以选择当前草稿或已保存文件，
 填写固定 `seed` 和目标结局，然后查看可复现的动作轨迹与 JSON。试玩器在后台运行，

@@ -291,16 +291,34 @@ monsters:
 clues:
   - id: torn_diary
     name: 撕碎的日记页
+    category: 文书
+    source_hint: 客厅暗格
     text: |
       「……实验失败了。那东西吃光了一切活物，却独独认得阿衡的锁。我不能让它出去，只能把它锁在下面……若有人读到这页纸，钥匙在书房。」
   - id: brass_key
     name: 黄铜钥匙
+    category: 物证
+    source_hint: 书房
     text: 一把沉甸甸的黄铜钥匙，齿纹磨得发亮，柄上刻着一个「窖」字。
   - id: truth
     name: 地窖真相
+    category: 真相
+    source_hint: 地下室
     text: |
       完整的日记拼出了真相：沈家少爷阿衡病死后，沈老爷用秘术想让他复生，却造出了这只食尸鬼。
       它只认少爷的长命锁，老爷只好把它锁在地下室，用自己的血肉喂养它，直到油尽灯枯。
+
+deductions:
+  - id: cellar_holds_family_secret
+    name: 地窖封存着沈家的秘密
+    required_clues: [torn_diary, brass_key]
+    conclusion_keywords:
+      - [地窖, 地下室]
+      - [秘密, 真相, 实验]
+    success_text: 日记里被撕断的句子与钥匙上的「窖」字彼此印证，沈家的秘密就在地下。
+    failure_hint: 这些证据指向一个地点，但结论还没有把地点与隐情联系起来。
+    unlock_flags: [deduced_cellar_secret]
+    grant_clues: []
 
 endings:
   - id: truth_revealed
@@ -341,6 +359,10 @@ events:
     summary: |
       黄铜钥匙已现世，地下室之门可开。周伯最怕来人真的下去——得知此事的他应明显不安，
       可借 NPC 反应施加压力，但不得阻止。
+  - id: cellar_deduced
+    name: 地窖秘密被识破
+    condition: deduction:cellar_holds_family_secret
+    summary: 调查员已用日记与钥匙共同推断出地窖的重要性，应强化其团队协作反馈。
   - id: ghoul_felled
     name: 孽物伏诛
     condition: monster_dead:ghoul

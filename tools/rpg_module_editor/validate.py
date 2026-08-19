@@ -192,7 +192,12 @@ def id_sets(data: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
 def check_condition(condition: str, data: dict[str, Any]) -> Optional[str]:
     """条件表达式引用校验；合法返回 None。"""
     scenes, monsters, clues = id_sets(data)
-    return validate_condition(condition, scenes, monsters, clues)
+    deductions = {
+        item["id"]
+        for item in data.get("deductions", []) or []
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    return validate_condition(condition, scenes, monsters, clues, deductions)
 
 
 def check_ending_condition(condition: str, data: dict[str, Any]) -> Optional[str]:

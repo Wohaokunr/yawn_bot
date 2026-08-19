@@ -7,11 +7,12 @@
 由系统掌控）。命令元数据由父插件 help_panel 扫描。
 """
 
-from nonebot import get_plugin_config, logger
+from nonebot import get_driver, get_plugin_config, logger
 from nonebot.plugin import PluginMetadata
 
 from . import commands, models  # noqa: F401
 from .config import Config
+from .state import stop_all_games
 
 __plugin_meta__ = PluginMetadata(
     name="跑团",
@@ -161,6 +162,62 @@ __plugin_meta__ = PluginMetadata(
                 "superuser": False,
             },
             {
+                "name": "跑团帮助",
+                "aliases": ["TRPG帮助"],
+                "description": "按当前阶段查看新手玩法引导",
+                "feature": "rpg",
+                "scope": "all",
+                "superuser": False,
+            },
+            {
+                "name": "线索板",
+                "aliases": ["证据板"],
+                "description": "查看团队已公开线索和联合推理进度",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "推理",
+                "aliases": ["联合推理"],
+                "description": "组合公开或本人持有的线索发起团队推理",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "赞成推理",
+                "aliases": [],
+                "description": "确认当前待处理的团队推理提案",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "撤回推理",
+                "aliases": [],
+                "description": "撤回自己发起的团队推理提案",
+                "feature": "rpg",
+                "scope": "group",
+                "superuser": False,
+            },
+            {
+                "name": "跳过引导",
+                "aliases": [],
+                "description": "停止自动新手提示但保留帮助命令",
+                "feature": "rpg",
+                "scope": "all",
+                "superuser": False,
+            },
+            {
+                "name": "重新引导",
+                "aliases": [],
+                "description": "重置当前版本的新手引导状态",
+                "feature": "rpg",
+                "scope": "all",
+                "superuser": False,
+            },
+            {
                 "name": "协助",
                 "aliases": ["帮忙"],
                 "description": "协助同场景调查员的下一次技能检定",
@@ -197,5 +254,12 @@ __plugin_meta__ = PluginMetadata(
 )
 
 config = get_plugin_config(Config)
+
+
+@get_driver().on_shutdown
+async def _stop_rpg_games() -> None:
+    """服务关闭时立即终止所有内存中的 RPG 对局，不做恢复。"""
+    await stop_all_games("server_shutdown")
+    logger.info("跑团活跃对局已因服务关闭终止")
 
 logger.info("跑团子插件已加载")

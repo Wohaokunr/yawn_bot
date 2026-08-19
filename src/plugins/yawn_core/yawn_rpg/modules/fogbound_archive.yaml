@@ -1,0 +1,94 @@
+id: fogbound_archive
+name: 雾中档案室
+description: 面向首次玩家的短篇调查模组，通过分享两条证据完成一次联合推理。
+min_players: 1
+max_players: 4
+difficulty: 入门
+time:
+  start: "20:00"
+generic_endings: true
+opening: |
+  海雾封住了旧档案馆。管理员请你们查清昨夜警铃为何响起，天亮前馆舍将彻底封闭。
+start_scene: reading_room
+
+scenes:
+  - id: reading_room
+    name: 阅览室
+    narration: |
+      长桌上散着潮湿的借阅单，通往库房的门边留着一道新鲜刮痕。
+    idle_narration: 雾气贴着窗面，纸页在风里轻轻翻动。
+    checks:
+      - id: inspect_borrow_slip
+        skill: library
+        once: true
+        triggers: [借阅单, 档案, 查记录]
+        success_text: 你找到了昨夜最后一张借阅单。
+        failure_text: 单据被潮气粘在一起，一时难以辨认。
+        clue: altered_slip
+      - id: inspect_door_mark
+        skill: spot_hidden
+        once: true
+        triggers: [门, 刮痕, 检查门边]
+        success_text: 刮痕中嵌着细小的铜屑。
+        failure_text: 门边只有潮湿木屑，看不出更多。
+        clue: brass_scrape
+    exits:
+      - to_scene: sealed_stack
+        condition: deduction:inside_key_used
+        keywords: [库房, 档案库]
+        narration: 众人凭推论找到内侧机关，库房门应声松开。
+
+  - id: sealed_stack
+    name: 封存库房
+    narration: |
+      封存架后，一只旧警铃被倒下的金属书匣压住。昨夜的响动终于有了答案。
+    idle_narration: 铜铃已经停止摇晃，雾中的馆舍恢复安静。
+
+clues:
+  - id: altered_slip
+    name: 被改写的借阅单
+    category: 文书
+    source_hint: 阅览室长桌
+    text: 借阅时间被人改晚了一刻，但墨迹来自管理员桌上的蓝黑墨水。
+  - id: brass_scrape
+    name: 门边铜屑
+    category: 痕迹
+    source_hint: 库房门边
+    text: 铜屑只可能来自门内侧的老式钥匙，外侧钥匙是铁制的。
+
+deductions:
+  - id: inside_key_used
+    name: 有人从馆内开启库房
+    required_clues: [altered_slip, brass_scrape]
+    conclusion_keywords:
+      - [馆内, 里面, 内侧]
+      - [钥匙, 开门, 开启]
+    success_text: 借阅单的改动与门边铜屑彼此印证：有人留在馆内，用内侧钥匙开启过库房。
+    failure_hint: 一条证据说明时间被改动，另一条证据说明钥匙来自哪一侧。
+    unlock_flags: [archive_opened_from_inside]
+    grant_clues: []
+
+endings:
+  - id: alarm_explained
+    condition: scene:sealed_stack & deduction:inside_key_used
+    name: 雾散铃止
+    outcome: good
+    summary: 调查员分享两条证据并完成联合推理后进入库房，查明警铃由倾倒书匣触发。
+    text: |
+      ═══ 结局 · 雾散铃止 ═══
+      书匣被重新扶稳，管理员承认自己改动借阅单只是为了掩饰闭馆后返回取物。
+      海风推开雾幕时，你们带着一块完整的证据板离开了档案馆。
+  - id: dawn_seal
+    condition: time_after:06:00
+    name: 封馆
+    outcome: neutral
+    summary: 调查未能在天亮前完成时触发的兜底结局。
+    text: |
+      ═══ 结局 · 封馆 ═══
+      晨雾尚未散去，管理处已经为大门落锁。昨夜警铃的原因只能留待下一次调查。
+
+events:
+  - id: evidence_joined
+    name: 证据闭环
+    condition: deduction:inside_key_used
+    summary: 调查员已完成教学模组的核心联合推理，可以明确反馈协作成功。
