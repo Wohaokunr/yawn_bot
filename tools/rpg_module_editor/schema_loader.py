@@ -100,6 +100,7 @@ SocialNode = _schema.SocialNode
 SocialStrategy = _schema.SocialStrategy
 Monster = _schema.Monster
 Clue = _schema.Clue
+Deduction = _schema.Deduction
 Ending = _schema.Ending
 PlotEvent = _schema.PlotEvent
 ConditionContext = _schema.ConditionContext
@@ -139,6 +140,7 @@ __all__ = [
     "CheckPoint",
     "Clue",
     "ConditionContext",
+    "Deduction",
     "Ending",
     "Exit",
     "ModuleDef",

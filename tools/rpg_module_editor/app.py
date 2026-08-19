@@ -25,6 +25,7 @@ from .dialogs import (
 from .schema_loader import modules_dir
 from .state import ModuleDraft, SearchResult
 from .tabs.clues_tab import CluesTab
+from .tabs.deductions_tab import DeductionsTab
 from .tabs.endings_tab import EndingsTab
 from .tabs.events_tab import EventsTab
 from .tabs.module_tab import ModuleTab
@@ -51,6 +52,7 @@ _TAB_SCENES = "tab-scenes"
 _TAB_NPCS = "tab-npcs"
 _TAB_MONSTERS = "tab-monsters"
 _TAB_CLUES = "tab-clues"
+_TAB_DEDUCTIONS = "tab-deductions"
 _TAB_ENDINGS = "tab-endings"
 _TAB_EVENTS = "tab-events"
 _TAB_YAML = "tab-yaml"
@@ -92,6 +94,7 @@ class ModuleEditorApp(App):
         self._npcs_tab = NpcsTab()
         self._monsters_tab = MonstersTab()
         self._clues_tab = CluesTab()
+        self._deductions_tab = DeductionsTab()
         self._endings_tab = EndingsTab()
         self._events_tab = EventsTab()
         self._yaml_tab = YamlTab()
@@ -104,6 +107,7 @@ class ModuleEditorApp(App):
             _TAB_NPCS: self._npcs_tab,
             _TAB_MONSTERS: self._monsters_tab,
             _TAB_CLUES: self._clues_tab,
+            _TAB_DEDUCTIONS: self._deductions_tab,
             _TAB_ENDINGS: self._endings_tab,
             _TAB_EVENTS: self._events_tab,
             _TAB_YAML: self._yaml_tab,
@@ -116,6 +120,7 @@ class ModuleEditorApp(App):
             _TAB_NPCS: "NPC",
             _TAB_MONSTERS: "怪物",
             _TAB_CLUES: "线索",
+            _TAB_DEDUCTIONS: "推论",
             _TAB_ENDINGS: "结局",
             _TAB_EVENTS: "事件",
             _TAB_YAML: "YAML 源码",

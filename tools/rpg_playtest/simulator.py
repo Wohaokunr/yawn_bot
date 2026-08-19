@@ -8,7 +8,7 @@ remaining isolated from the process-global random source.
 
 # Transition logic stays together so this standalone model can be audited
 # against the module schema without importing the online engine.
-# ruff: noqa: C901,PLR0911,PLR0912,PLR0913,PLR0915,PLR0917,PLR2004,ARG001,E501
+# ruff: noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915, PLR0917, PLR2004, ARG001
 
 from __future__ import annotations
 
@@ -184,6 +184,7 @@ class _State:
     combat_index: int = 0
     combat_round: int = 0
     move_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    completed_deductions: set[str] = field(default_factory=set)
     trace: list[TraceStep] = field(default_factory=list)
 
     def clone(self) -> _State:
@@ -201,6 +202,7 @@ class _State:
             clock_start_minutes=self.clock_start,
             elapsed_minutes=self.elapsed,
             flags=dict(self.flags),
+            deductions=set(self.completed_deductions),
         )
 
 
@@ -211,6 +213,7 @@ class _Relevant:
     monsters: frozenset[str]
     facts: frozenset[tuple[str, str]]
     social_nodes: frozenset[tuple[str, str]]
+    deductions: frozenset[str]
     has_time: bool
     all_players_incapped: bool
 
@@ -286,6 +289,7 @@ def _relevance(module: Any, ending: Any) -> _Relevant:
     monsters: set[str] = set()
     facts: set[tuple[str, str]] = set()
     social_nodes: set[tuple[str, str]] = set()
+    deductions: set[str] = set()
     has_time = _has_time_condition(ending.condition)
     all_players_incapped = ending.condition == "all_players_incapped"
 
@@ -311,6 +315,13 @@ def _relevance(module: Any, ending: Any) -> _Relevant:
                 elif kind == "flag" and value not in flags:
                     flags.add(value)
                     changed = True
+                elif kind == "deduction" and value not in deductions:
+                    deductions.add(value)
+                    changed = True
+                elif kind == "deductions":
+                    before = len(deductions)
+                    deductions.update(part for part in value.split("+") if part)
+                    changed |= len(deductions) != before
                 elif kind == "monster_dead" and value not in monsters:
                     monsters.add(value)
                     changed = True
@@ -335,21 +346,32 @@ def _relevance(module: Any, ending: Any) -> _Relevant:
             if monster.on_death_clue in clues and monster.id not in monsters:
                 monsters.add(monster.id)
                 changed = True
+        for deduction in module.deductions:
+            rewards_are_useful = bool(
+                set(deduction.unlock_flags) & flags
+                or set(deduction.grant_clues) & clues
+            )
+            if deduction.id in deductions or rewards_are_useful:
+                if deduction.id not in deductions:
+                    deductions.add(deduction.id)
+                    changed = True
+                before = len(clues)
+                clues.update(deduction.required_clues)
+                changed |= len(clues) != before
     return _Relevant(
         frozenset(clues),
         frozenset(flags),
         frozenset(monsters),
         frozenset(facts),
         frozenset(social_nodes),
+        frozenset(deductions),
         has_time,
         all_players_incapped,
     )
 
 
 def _state_key(state: _State) -> tuple[Any, ...]:
-    players = tuple(
-        (p.hp, p.san, p.incapped) for p in state.players
-    )
+    players = tuple((p.hp, p.san, p.incapped) for p in state.players)
     return (
         state.scene,
         state.elapsed,
@@ -357,7 +379,9 @@ def _state_key(state: _State) -> tuple[Any, ...]:
         tuple(sorted(state.clues)),
         tuple(sorted(state.public_clues)),
         tuple(
-            sorted((key, tuple(sorted(value))) for key, value in state.clue_owners.items())
+            sorted(
+                (key, tuple(sorted(value))) for key, value in state.clue_owners.items()
+            )
         ),
         tuple(sorted(state.fired_checks)),
         tuple(sorted(state.passed_checks)),
@@ -373,7 +397,9 @@ def _state_key(state: _State) -> tuple[Any, ...]:
         tuple(sorted(state.npc_attempts.items())),
         tuple(sorted(state.npc_rewards)),
         tuple(
-            sorted((key, tuple(sorted(value))) for key, value in state.npc_facts.items())
+            sorted(
+                (key, tuple(sorted(value))) for key, value in state.npc_facts.items()
+            )
         ),
         tuple(
             sorted(
@@ -385,9 +411,9 @@ def _state_key(state: _State) -> tuple[Any, ...]:
         state.combat_index,
         state.combat_round,
         tuple(sorted(state.move_counts.items())),
+        tuple(sorted(state.completed_deductions)),
         state.rng.getstate(),
     )
-
 
 
 def _dominance_key(state: _State) -> tuple[Any, ...]:
@@ -615,7 +641,9 @@ def _apply_check(module: Any, state: _State, action: _Action) -> list[dict[str, 
         state.passed_checks.add(cp.id)
     if cp.once:
         state.fired_checks.add(cp.id)
-    check_cost = cp.time_cost if cp.time_cost is not None else _time_cost(module, "check")
+    check_cost = (
+        cp.time_cost if cp.time_cost is not None else _time_cost(module, "check")
+    )
     state.elapsed += max(check_cost, 0)
     return rolls
 
@@ -683,9 +711,7 @@ def _opposed_dodge(
     if not dodge_value:
         return False, None
     dummy = Player(0, label, {}, {"dodge": dodge_value}, 1, 1)
-    success, roll = _check_success(
-        state, dummy, "dodge", CheckDifficulty.REGULAR
-    )
+    success, roll = _check_success(state, dummy, "dodge", CheckDifficulty.REGULAR)
     ranks = {
         "fumble": 0,
         "failure": 1,
@@ -716,7 +742,9 @@ def _combat_targets(module: Any, state: _State) -> list[tuple[str, str]]:
 def _start_combat(state: _State) -> None:
     if state.combat_order:
         return
-    active = [index for index, player in enumerate(state.players) if not player.incapped]
+    active = [
+        index for index, player in enumerate(state.players) if not player.incapped
+    ]
     active.sort(key=lambda index: (-state.players[index].attributes["dex"], index))
     state.combat_order = active
     state.combat_index = 0
@@ -930,7 +958,19 @@ def _apply_action(module: Any, parent: _State, action: _Action) -> _State:
         rolls = _apply_monster_attack(module, state, action)
     elif action.kind == "pass":
         _advance_combat(module, state)
-    actor_name = state.players[action.actor].name if action.actor < len(state.players) else None
+    elif action.kind == "deduction":
+        deduction = module.deduction(action.target)
+        if deduction is not None:
+            state.completed_deductions.add(deduction.id)
+            for flag_name in deduction.unlock_flags:
+                state.flags[flag_name] = max(state.flags.get(flag_name, 0), 1)
+            for clue_id in deduction.grant_clues:
+                state.clues.add(clue_id)
+                state.public_clues.add(clue_id)
+            detail = deduction.success_text
+    actor_name = (
+        state.players[action.actor].name if action.actor < len(state.players) else None
+    )
     _append_step(
         state,
         action=action.kind,
@@ -957,11 +997,13 @@ def _last_move_was_reverse(state: _State, target: str) -> bool:
     )
 
 
-def _social_available(module: Any, state: _State, npc: Any, node: Any, actor: int) -> bool:
+def _social_available(
+    module: Any, state: _State, npc: Any, node: Any, actor: int
+) -> bool:
     player = state.players[actor]
-    unlocked = state.npc_facts.get((npc.id, player.seat), set()) | state.npc_public_facts.get(
-        npc.id, set()
-    )
+    unlocked = state.npc_facts.get(
+        (npc.id, player.seat), set()
+    ) | state.npc_public_facts.get(npc.id, set())
     if not set(node.requires_facts).issubset(unlocked):
         return False
     rapport = state.npc_rapport.get((npc.id, player.seat), npc.initial_rapport)
@@ -974,9 +1016,7 @@ def _social_available(module: Any, state: _State, npc: Any, node: Any, actor: in
     )
 
 
-def _social_is_outcome_invariant(
-    npc_id: str, node: Any, relevant: _Relevant
-) -> bool:
+def _social_is_outcome_invariant(npc_id: str, node: Any, relevant: _Relevant) -> bool:
     """Whether one social representative is enough for this target slice.
 
     Some modules deliberately write the same plot flag on both success and
@@ -986,9 +1026,7 @@ def _social_is_outcome_invariant(
     """
     success = set(node.success_flags)
     failure = set(node.failure_flags)
-    relevant_facts = {
-        fact for owner, fact in relevant.facts if owner == npc_id
-    }
+    relevant_facts = {fact for owner, fact in relevant.facts if owner == npc_id}
     relevant_rewards = (
         (set(node.private_clues) | set(node.public_clues)) & set(relevant.clues)
     ) | (set(node.unlock_facts) & relevant_facts)
@@ -1017,7 +1055,9 @@ def _wait_values(module: Any, state: _State, relevant: _Relevant) -> list[int]:
                     if boundary > state.elapsed:
                         values.add(boundary - state.elapsed)
     for condition in conditions:
-        for match in re.finditer(r"time_(?:after|before):([0-2]?\d:[0-5]\d)", condition):
+        for match in re.finditer(
+            r"time_(?:after|before):([0-2]?\d:[0-5]\d)", condition
+        ):
             hours, minutes = map(int, match.group(1).split(":"))
             boundary = (hours * 60 + minutes - state.clock_start) % 1440
             if boundary > state.elapsed:
@@ -1045,10 +1085,7 @@ def _actions(
         actor = state.combat_order[state.combat_index]
         targets = _combat_targets(module, state)
         actions = (
-            [
-                _Action("attack", actor, f"{kind}:{target}")
-                for kind, target in targets
-            ]
+            [_Action("attack", actor, f"{kind}:{target}") for kind, target in targets]
             if not relevant.all_players_incapped
             else []
         )
@@ -1071,6 +1108,13 @@ def _actions(
 
     actions: list[_Action] = []
     scene = module.scene(state.scene)
+    actions.extend(
+        _Action("deduction", 0, deduction.id)
+        for deduction in module.deductions
+        if deduction.id in relevant.deductions
+        and deduction.id not in state.completed_deductions
+        and set(deduction.required_clues).issubset(state.clues)
+    )
     if relevant.all_players_incapped:
         monster_actions = [
             _Action("monster_attack", victim, f"monster:{monster_id}")
@@ -1137,9 +1181,9 @@ def _actions(
                 facts_done = node_facts.issubset(
                     state.npc_facts.get((npc.id, player.seat), set())
                 )
-                node_clues = (
-                    set(node.private_clues) | set(node.public_clues)
-                ) & set(relevant.clues)
+                node_clues = (set(node.private_clues) | set(node.public_clues)) & set(
+                    relevant.clues
+                )
                 clues_done = node_clues.issubset(state.clues)
                 if relevant_done and facts_done and clues_done:
                     continue
@@ -1160,9 +1204,8 @@ def _actions(
         monster = module.monster(monster_id)
         if monster_id in state.dead_monsters:
             continue
-        if (
-            not relevant.all_players_incapped
-            and (monster_id in relevant.monsters or monster.on_death_clue in relevant.clues)
+        if not relevant.all_players_incapped and (
+            monster_id in relevant.monsters or monster.on_death_clue in relevant.clues
         ):
             actions.extend(
                 _Action("attack", actor, f"monster:{monster_id}")
@@ -1192,9 +1235,7 @@ def _actions(
         and not _npc_present(module, state, npc.id)
         for npc in module.npcs
     )
-    if time_sensitive and (
-        relevant.has_time or not actions or scheduled_target_absent
-    ):
+    if time_sensitive and (relevant.has_time or not actions or scheduled_target_absent):
         actions.extend(
             _Action("wait", 0, value=value)
             for value in _wait_values(module, state, relevant)
@@ -1386,7 +1427,11 @@ def search_module(
     if not preserve_clock:
         for npc_id, _node_id in relevant.social_nodes:
             npc = module.npc(npc_id)
-            if npc is not None and npc.schedule and not _npc_present(module, state, npc_id):
+            if (
+                npc is not None
+                and npc.schedule
+                and not _npc_present(module, state, npc_id)
+            ):
                 preserve_clock = True
                 break
     queue: deque[_State] = deque([state])

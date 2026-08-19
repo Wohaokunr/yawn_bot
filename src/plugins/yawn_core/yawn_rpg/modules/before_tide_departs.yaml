@@ -773,9 +773,13 @@ monsters:
 clues:
   - id: volunteer_list
     name: 志愿者名册
+    category: 记录
+    source_hint: 车站广场
     text: 名册记录着外地志愿者的分工，接待人一栏端正地写着汐见未央的名字。
   - id: capital_ticket
     name: 王都车票
+    category: 私人物证
+    source_hint: 未央随身
     text: 一张今晚有效的车票。目的地是王都，票角被未央反复摩挲得有些发软。
   - id: farewell_cake
     name: 盐花柠檬蛋糕
@@ -785,6 +789,8 @@ clues:
     text: 配方边缘写满不同甜度的尝试，显然有人认真记住了未央每次试吃时的表情。
   - id: annotated_star_map
     name: 多年星图批注
+    category: 成长记录
+    source_hint: 旧图书馆
     text: 未央留下的练习图跨越许多个季节，她对远方的向往并不是为了逃避今天。
   - id: lit_star_route
     name: 点亮的远方星路
@@ -798,6 +804,18 @@ clues:
   - id: festival_safe
     name: 平安的星灯祭
     text: 失控的搬运车已经停下。镇民各自接过工作，广场不再需要未央留下善后。
+
+deductions:
+  - id: departure_is_her_choice
+    name: 远行是未央自己的选择
+    required_clues: [capital_ticket, annotated_star_map]
+    conclusion_keywords:
+      - [未央, 她]
+      - [选择, 想去, 愿望]
+    success_text: 车票与多年星图放在一起，远行不再像临时逃避，而是一项被她反复确认过的愿望。
+    failure_hint: 试着分清「别人希望她怎样」与「她长期想做什么」。
+    unlock_flags: [deduced_departure_choice]
+    grant_clues: []
 
 endings:
   - id: tide_beyond

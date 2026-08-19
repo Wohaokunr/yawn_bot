@@ -239,6 +239,32 @@ schedule:
 |---|---|---|
 | `id` / `name` | ✔ | 名称进 KP 场景块「[已发现线索]」（只有名字 + id） |
 | `text` | ✔ | 发现时以「〔线索〕name」播报**一次**。永不进任何提示词——别在 text 里写「KP 应如何如何」 |
+| `category` | | 线索板上的公开分类，默认「线索」 |
+| `source_hint` | | 分享后可公开显示的来源提示，不得包含秘密正文 |
+
+## deductions（联合推理）
+
+玩家用 `/推理 线索A + 线索B：结论` 提交证据组合。多人局需另一名调查员
+`/赞成推理`，系统按以下声明确定性裁决，LLM 不判断答案：
+
+```yaml
+deductions:
+  - id: inside_key_used
+    name: 有人从馆内开门
+    required_clues: [altered_slip, brass_scrape]
+    conclusion_keywords:
+      - [馆内, 里面, 内侧]
+      - [钥匙, 开门]
+    success_text: 两条证据彼此印证。
+    failure_hint: 试着判断钥匙来自门的哪一侧。
+    unlock_flags: [inside_open]
+    grant_clues: []
+    once: true
+    failure_time_cost: 5
+```
+
+每个关键词组至少命中一个词；所有组均命中且证据集合完全一致才成功。成功必须
+写入至少一个 flag 或奖励线索。失败提示只能给方向，不能列出缺失线索或正确答案。
 
 ## endings（结局）
 
@@ -299,6 +325,8 @@ time:
 | `always` | 恒真占位 |
 | `clue:<id>` | 线索已发现 |
 | `clues:<a>+<b>` | 多条线索全部已发现（AND） |
+| `deduction:<id>` | 指定联合推理已经成立 |
+| `deductions:<a>+<b>` | 多项联合推理均已成立 |
 | `monster_dead:<id>` | 怪物已被击杀 |
 | `scene:<id>` | 当前场景 |
 | `all_players_incapped` | 全员倒地 |

@@ -34,6 +34,7 @@ _ALL_TABS = (
     "tab-npcs",
     "tab-monsters",
     "tab-clues",
+    "tab-deductions",
     "tab-endings",
     "tab-events",
     "tab-yaml",

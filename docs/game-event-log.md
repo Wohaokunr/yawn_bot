@@ -44,6 +44,9 @@ jsonl = export_events_jsonl("GAME_ID", game_kind="rpg")
 具名事件触发，以及两种玩法的结构化行动接收。行动只记录类型和座位，
 不记录 `aux` 正文。
 
+RPG 还记录服务中断、新手引导步骤和联合推理的发起/确认/成败/撤回。推理事件
+只包含推论或线索 id，不记录玩家输入的原始结论；引导事件只包含步骤 id。
+
 ## 隐私与故障语义
 
 - 不写入提示词、AI 原始响应、密钥、签名、Cookie、QQ `user_id`、私聊正文、
@@ -54,4 +57,5 @@ jsonl = export_events_jsonl("GAME_ID", game_kind="rpg")
 - 队列满时只丢弃事件并记录告警，不等待背压；拒绝数量和写入失败分别记录到
   `yawnbot_queue_rejections_total` 与 `yawnbot_event_log_write_failures_total`。
 - 阶段耗时、AI 延迟/超时/降级和结局分布见
-  [`docs/metrics.md`](metrics.md)；P1-7 再基于事件实现公开/个人视角回放。
+  [`docs/metrics.md`](metrics.md)；公开/个人视角回放见
+  [`docs/game-replay.md`](game-replay.md)。

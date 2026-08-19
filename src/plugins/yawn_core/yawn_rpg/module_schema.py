@@ -261,6 +261,7 @@ def _validate_condition(  # noqa: C901,PLR0911,PLR0912
     scenes: set[str],
     monsters: set[str],
     clues: set[str],
+    deductions: set[str] | None = None,
 ) -> Optional[str]:
     """校验条件表达式内的引用；合法返回 None，否则返回错误描述。
 
@@ -291,6 +292,16 @@ def _validate_condition(  # noqa: C901,PLR0911,PLR0912
         elif kind == "monster_dead":
             if value not in monsters:
                 return f"引用了未定义的怪物 {value!r}"
+        elif kind == "deduction":
+            if value not in (deductions or set()):
+                return f"引用了未定义的推论 {value!r}"
+        elif kind == "deductions":
+            parts = [v for v in value.split("+") if v]
+            if not parts:
+                return f"deductions 至少需要一个推论：{term!r}"
+            missing = [v for v in parts if v not in (deductions or set())]
+            if missing:
+                return f"引用了未定义的推论 {'、'.join(missing)}"
         elif kind == "scene":
             if value not in scenes:
                 return f"引用了未定义的场景 {value!r}"
@@ -563,6 +574,48 @@ class Clue(BaseModel):
     id: str
     name: str
     text: str
+    category: str = "线索"
+    source_hint: str = ""
+
+
+class Deduction(BaseModel):
+    """由系统确定性裁决的团队推论。"""
+
+    id: str
+    name: str
+    required_clues: list[str]
+    conclusion_keywords: list[list[str]]
+    success_text: str
+    failure_hint: str = "现有证据还不足以支持这个结论。"
+    unlock_flags: list[str] = []
+    grant_clues: list[str] = []
+    once: bool = True
+    failure_time_cost: int = 5
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "Deduction":
+        if not self.required_clues or len(self.required_clues) != len(
+            set(self.required_clues)
+        ):
+            raise ValueError(  # noqa: TRY003
+                f"推论 {self.id}：required_clues 必须非空且不可重复"
+            )
+        if not self.conclusion_keywords or any(
+            not group or any(not word.strip() for word in group)
+            for group in self.conclusion_keywords
+        ):
+            raise ValueError(  # noqa: TRY003
+                f"推论 {self.id}：conclusion_keywords 必须包含非空关键词组"
+            )
+        if not self.unlock_flags and not self.grant_clues:
+            raise ValueError(  # noqa: TRY003
+                f"推论 {self.id}：至少需要一种可观察的推进效果"
+            )
+        if self.failure_time_cost < 0:
+            raise ValueError(  # noqa: TRY003
+                f"推论 {self.id}：failure_time_cost 不能为负数"
+            )
+        return self
 
 
 class Ending(BaseModel):
@@ -626,6 +679,7 @@ class ModuleDef(BaseModel):
     npcs: list[NPC] = []
     monsters: list[Monster] = []
     clues: list[Clue] = []
+    deductions: list[Deduction] = []
     endings: list[Ending] = []
     # 具名剧情事件（纯 KP 上下文，见 PlotEvent）
     events: list[PlotEvent] = []
@@ -648,12 +702,14 @@ class ModuleDef(BaseModel):
         monster_ids = [m.id for m in self.monsters]
         clue_ids = [c.id for c in self.clues]
         event_ids = [e.id for e in self.events]
+        deduction_ids = [d.id for d in self.deductions]
         for label, ids in (
             ("场景", scene_ids),
             ("NPC", npc_ids),
             ("怪物", monster_ids),
             ("线索", clue_ids),
             ("事件", event_ids),
+            ("推论", deduction_ids),
         ):
             dup = {i for i in ids if ids.count(i) > 1}
             if dup:
@@ -666,6 +722,15 @@ class ModuleDef(BaseModel):
         npcs = set(npc_ids)
         monsters = set(monster_ids)
         clues = set(clue_ids)
+        deductions = set(deduction_ids)
+        for deduction in self.deductions:
+            missing_required = sorted(set(deduction.required_clues) - clues)
+            missing_grants = sorted(set(deduction.grant_clues) - clues)
+            if missing_required or missing_grants:
+                missing = missing_required + missing_grants
+                raise ValueError(  # noqa: TRY003
+                    f"推论 {deduction.id} 引用了未定义的线索 {'、'.join(missing)}"
+                )
         public_text = " ".join(
             [
                 self.name,
@@ -716,7 +781,9 @@ class ModuleDef(BaseModel):
                 if ex.to_scene not in scenes:
                     msg = f"场景 {scene.id} 出口指向未定义的场景 {ex.to_scene!r}"
                     raise ValueError(msg)
-                err = _validate_condition(ex.condition, scenes, monsters, clues)
+                err = _validate_condition(
+                    ex.condition, scenes, monsters, clues, deductions
+                )
                 if err is not None:
                     msg = f"场景 {scene.id} 出口条件非法：{err}"
                     raise ValueError(msg)
@@ -768,12 +835,16 @@ class ModuleDef(BaseModel):
                 if not entry.away and entry.scene not in scenes:
                     msg = f"NPC {npc.id} 行程引用了未定义的场景 {entry.scene!r}"
                     raise ValueError(msg)
-                err = _validate_condition(entry.condition, scenes, monsters, clues)
+                err = _validate_condition(
+                    entry.condition, scenes, monsters, clues, deductions
+                )
                 if err is not None:
                     msg = f"NPC {npc.id} 行程条件非法：{err}"
                     raise ValueError(msg)
         for ending in self.endings:
-            err = _validate_condition(ending.condition, scenes, monsters, clues)
+            err = _validate_condition(
+                ending.condition, scenes, monsters, clues, deductions
+            )
             if err is not None:
                 msg = f"结局 {ending.id} 条件非法：{err}"
                 raise ValueError(msg)
@@ -785,7 +856,9 @@ class ModuleDef(BaseModel):
                 raise ValueError(msg)
         # 事件条件校验仿结局，但不拒恒真（序幕事件恒真无害，见 PlotEvent）
         for event in self.events:
-            err = _validate_condition(event.condition, scenes, monsters, clues)
+            err = _validate_condition(
+                event.condition, scenes, monsters, clues, deductions
+            )
             if err is not None:
                 msg = f"事件 {event.id} 条件非法：{err}"
                 raise ValueError(msg)
@@ -808,6 +881,9 @@ class ModuleDef(BaseModel):
     def clue(self, clue_id: str) -> Optional[Clue]:
         """按 id 查线索。"""
         return next((c for c in self.clues if c.id == clue_id), None)
+
+    def deduction(self, deduction_id: str) -> Optional[Deduction]:
+        return next((d for d in self.deductions if d.id == deduction_id), None)
 
     # ── NPC 在场解析（时间 + 事件条件；死亡过滤在引擎层）────
 
@@ -896,9 +972,10 @@ class ConditionContext:
     elapsed_minutes: int = 0
     # 引擎记录的事件标记（名称 → 累计次数）
     flags: dict[str, int] = field(default_factory=dict)
+    deductions: set[str] = field(default_factory=set)
 
 
-def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
+def evaluate_condition(  # noqa: C901,PLR0911,PLR0912,PLR0915
     condition: Optional[str],
     ctx: ConditionContext,
 ) -> bool:
@@ -940,6 +1017,13 @@ def evaluate_condition(  # noqa: C901,PLR0911,PLR0912
                 return False
         elif kind == "monster_dead" and value:
             if value not in ctx.dead_monsters:
+                return False
+        elif kind == "deduction" and value:
+            if value not in ctx.deductions:
+                return False
+        elif kind == "deductions" and value:
+            parts = [v for v in value.split("+") if v]
+            if not parts or not all(v in ctx.deductions for v in parts):
                 return False
         elif kind == "scene" and value:
             if ctx.current_scene != value:

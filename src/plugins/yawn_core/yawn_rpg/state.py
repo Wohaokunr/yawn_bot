@@ -51,6 +51,9 @@ class ActionKind(str, Enum):
     WAIT = "wait"  # 原地等待（value=分钟数）
     ASSIST = "assist"  # 协助（aux="目标玩家|技能"）
     SHARE_CLUE = "share_clue"  # 公开本人持有线索（aux=线索名/id）
+    PROPOSE_DEDUCTION = "propose_deduction"
+    CONFIRM_DEDUCTION = "confirm_deduction"
+    WITHDRAW_DEDUCTION = "withdraw_deduction"
     PASS_TURN = "pass_turn"
     # ── 建卡期私聊行动 ──
     REROLL = "reroll"  # 整卡重掷
@@ -111,6 +114,17 @@ class SubmitResult(str, Enum):
     STALE = "stale"
 
 
+VALID_TERMINATION_REASONS = frozenset(
+    {
+        "normal_ending",
+        "manual_stop",
+        "server_shutdown",
+        "engine_error",
+        "signup_timeout",
+    }
+)
+
+
 def relationship_band(value: int) -> str:
     """把内部关系值映射为不暴露裸数值的定性状态。"""
     value = max(_RELATION_MIN, min(_RELATION_MAX, value))
@@ -149,6 +163,16 @@ class PlayerState:
 
 
 @dataclass
+class PendingDeduction:
+    proposer_user_id: int
+    clue_ids: tuple[str, ...]
+    conclusion: str
+    scene_id: str
+    explore_round: int
+    confirmations: set[int] = field(default_factory=set)
+
+
+@dataclass
 class Game:
     """单局游戏的内存状态（一群同时仅一局）。"""
 
@@ -178,6 +202,12 @@ class Game:
     # 线索发现后归属发现者；未指定发现者的旧路径直接公开。
     clue_owners: dict[str, set[int]] = field(default_factory=dict)
     public_clues: set[str] = field(default_factory=set)
+    completed_deductions: set[str] = field(default_factory=set)
+    deduction_confirmers: dict[str, set[int]] = field(default_factory=dict)
+    pending_deduction: Optional[PendingDeduction] = None
+    failed_deduction_signatures: set[tuple[tuple[str, ...], str]] = field(
+        default_factory=set
+    )
     # 已触发的 once 检定点 id
     fired_checks: set[str] = field(default_factory=set)
     # 检定成功的检定点 id（grant_clue 据此拒绝覆盖失败检定的线索）
@@ -253,6 +283,8 @@ class Game:
     )
     # 事件日志使用独立的进程内稳定 id，不依赖 ORM 是否成功写入。
     event_log_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    termination_reason: Optional[str] = None
+    tutorial_steps_shown: dict[int, set[str]] = field(default_factory=dict)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -313,6 +345,7 @@ class Game:
             clock_start_minutes=self.clock_start_minutes,
             elapsed_minutes=self.elapsed_minutes,
             flags=dict(self.flags),
+            deductions=set(self.completed_deductions),
         )
 
     def start_explore_round(self, _timeout: float) -> None:
@@ -326,6 +359,7 @@ class Game:
         self.explore_acted.clear()
         self.explore_deadline = 0.0
         self.assists.clear()
+        self.pending_deduction = None
         self.npc_emotion_rapport_delta.clear()
         self.npc_emotion_attitude_delta.clear()
 
@@ -603,8 +637,14 @@ def discard_game(game: Game) -> None:
     game_registry.release_game("rpg", game.group_id)
 
 
-async def stop_game(game: Game) -> None:
-    """强制结束对局：先摘 worker 引用再取消，等待清理完成。"""
+async def stop_game(game: Game, reason: str = "manual_stop") -> None:
+    """立即终止对局并等待清理；重复调用保持幂等。"""
+    if reason not in VALID_TERMINATION_REASONS:
+        raise ValueError(  # noqa: TRY003
+            f"unknown RPG termination reason: {reason}"
+        )
+    if game.termination_reason is None:
+        game.termination_reason = reason
     game.phase = Phase.ENDED
     task = game.worker
     game.worker = None
@@ -617,3 +657,10 @@ async def stop_game(game: Game) -> None:
     # run_game(), so its finally block cannot release the registries.
     if _games.get(game.group_id) is game:
         discard_game(game)
+
+
+async def stop_all_games(reason: str = "server_shutdown") -> None:
+    """终止当前进程内全部 RPG 对局，供插件/服务关闭钩子使用。"""
+    await asyncio.gather(
+        *(stop_game(game, reason=reason) for game in list(_games.values()))
+    )

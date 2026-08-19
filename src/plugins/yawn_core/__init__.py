@@ -17,6 +17,8 @@ from . import (
     permission,
     presence,
     reminder,
+    replay,
+    replay_commands,
 )
 
 __all__ = [
@@ -32,6 +34,8 @@ __all__ = [
     "permission",
     "presence",
     "reminder",
+    "replay",
+    "replay_commands",
 ]
 
 

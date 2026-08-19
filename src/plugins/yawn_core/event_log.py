@@ -43,6 +43,7 @@ _SAFE_STRING_KEYS = frozenset(
         "action_result",
         "board",
         "ending_id",
+        "deduction_id",
         "event_id",
         "from_scene",
         "module_id",
@@ -51,9 +52,12 @@ _SAFE_STRING_KEYS = frozenset(
         "result",
         "scene_id",
         "to_scene",
+        "termination_reason",
+        "step",
         "winner",
     }
 )
+_SAFE_STRING_LIST_KEYS = frozenset({"clue_ids"})
 _SAFE_INT_KEYS = frozenset(
     {
         "count",
@@ -109,6 +113,9 @@ def _safe_payload(payload: Mapping[str, object] | None) -> dict[str, object]:
                 output[key] = raw_value
         elif key in _SAFE_BOOL_KEYS and isinstance(raw_value, bool):
             output[key] = raw_value
+        elif key in _SAFE_STRING_LIST_KEYS and isinstance(raw_value, (list, tuple)):
+            values = [value for item in raw_value if (value := _safe_identifier(item))]
+            output[key] = values[:16]
     return output
 
 

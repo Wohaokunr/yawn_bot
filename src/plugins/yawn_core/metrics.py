@@ -70,6 +70,11 @@ _METRIC_HELP = {
     "yawnbot_game_endings_total": "Game endings grouped by low-cardinality outcome.",
     "yawnbot_game_phase_duration_seconds": "Completed game phase duration in seconds.",
     "yawnbot_queue_rejections_total": "Rejected action or event-log queue submissions.",
+    "yawnbot_rpg_tutorial_total": (
+        "RPG tutorial steps grouped by operation and outcome."
+    ),
+    "yawnbot_rpg_deductions_total": "RPG deduction outcomes.",
+    "yawnbot_rpg_terminations_total": "RPG non-story termination reasons.",
 }
 
 _Labels = tuple[tuple[str, str], ...]
@@ -205,6 +210,27 @@ def record_event_log_write_failure(game_kind: str) -> None:
     increment_counter(
         "yawnbot_event_log_write_failures_total",
         labels={"game_kind": game_kind},
+    )
+
+
+def record_rpg_tutorial(operation: str, outcome: str) -> None:
+    increment_counter(
+        "yawnbot_rpg_tutorial_total",
+        labels={"operation": operation, "outcome": outcome},
+    )
+
+
+def record_rpg_deduction(outcome: str) -> None:
+    increment_counter(
+        "yawnbot_rpg_deductions_total",
+        labels={"outcome": outcome},
+    )
+
+
+def record_rpg_termination(reason: str) -> None:
+    increment_counter(
+        "yawnbot_rpg_terminations_total",
+        labels={"reason": reason},
     )
 
 
@@ -467,6 +493,9 @@ __all__ = [
     "record_game_ending",
     "record_phase_change",
     "record_queue_rejection",
+    "record_rpg_deduction",
+    "record_rpg_termination",
+    "record_rpg_tutorial",
     "render_prometheus",
     "reset_metrics_for_tests",
     "snapshot_metrics",
