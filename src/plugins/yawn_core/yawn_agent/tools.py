@@ -20,7 +20,12 @@ from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_memory import AgentMemory
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
-from .capabilities import BotGroupCapabilities, target_can_be_muted
+from .capabilities import (
+    BotGroupCapabilities,
+    probe_group_capabilities,
+    target_can_be_muted,
+    user_can_manage_group,
+)
 
 MAX_TOOL_ROUNDS = 4
 MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -34,7 +39,9 @@ _ALLOWED_FILE_HOSTS = frozenset(
 )
 
 
-def build_tool_schemas(capabilities: BotGroupCapabilities) -> list[dict[str, Any]]:
+def build_tool_schemas(
+    capabilities: BotGroupCapabilities, *, allow_admin_tools: bool = False
+) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     definitions = [
         ("get_group_info", "读取当前群信息", {}),
@@ -135,7 +142,7 @@ def build_tool_schemas(capabilities: BotGroupCapabilities) -> list[dict[str, Any
                 },
             }
         )
-    if capabilities.can_manage:
+    if capabilities.can_manage and allow_admin_tools:
         if capabilities.has("set_group_ban"):
             tools.append(
                 {
@@ -245,7 +252,13 @@ _DEFAULT_ADMIN_ALLOWLIST = frozenset(_ADMIN_TOOLS)
 
 
 async def _check_tool_policy(
-    session: Any, group_id: int, name: str, capabilities: BotGroupCapabilities
+    session: Any,
+    group_id: int,
+    name: str,
+    capabilities: BotGroupCapabilities,
+    *,
+    bot: Any,
+    actor_user_id: int | None,
 ) -> None:
     required = _READ_ACTIONS.get(name)
     if required and not capabilities.has(required):
@@ -258,6 +271,11 @@ async def _check_tool_policy(
         raise PermissionError("当前 OneBot 不支持群文件上传")
     if name in _ADMIN_TOOLS and not capabilities.can_manage:
         raise PermissionError("机器人没有群管理权限")
+    if name in _ADMIN_TOOLS and (
+        actor_user_id is None
+        or not await user_can_manage_group(bot, group_id, actor_user_id)
+    ):
+        raise PermissionError("调用者没有群管理权限")
     if name not in _ADMIN_TOOLS or session is None:
         return
     config = await session.get(GroupAgentConfig, group_id)
@@ -330,7 +348,16 @@ async def execute_tool(
     """执行单个工具；每次调用都重新执行能力和配额校验。"""
 
     try:
-        await _check_tool_policy(session, group_id, name, capabilities)
+        capabilities = await probe_group_capabilities(bot, group_id, refresh=True)
+        await _check_tool_policy(
+            session,
+            group_id,
+            name,
+            capabilities,
+            bot=bot,
+            actor_user_id=actor_user_id,
+        )
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         if name == "get_group_info":
             result = await bot.call_api("get_group_info", group_id=group_id)
         elif name == "get_group_member":
@@ -347,6 +374,10 @@ async def execute_tool(
                     AgentMemory.subject_user_id == int(args["user_id"]),
                     AgentMemory.memory_type == "profile",
                     AgentMemory.visibility.in_(("group", "public")),
+                    (
+                        AgentMemory.expires_at.is_(None)
+                        | (AgentMemory.expires_at >= now)
+                    ),
                 )
                 .limit(10)
             )
@@ -367,7 +398,13 @@ async def execute_tool(
             limit = max(1, min(int(args.get("limit", 20)), 40))
             stmt = (
                 select(GroupAgentMessage)
-                .where(GroupAgentMessage.group_id == group_id)
+                .where(
+                    GroupAgentMessage.group_id == group_id,
+                    (
+                        GroupAgentMessage.expires_at.is_(None)
+                        | (GroupAgentMessage.expires_at >= now)
+                    ),
+                )
                 .order_by(GroupAgentMessage.id.desc())
                 .limit(limit)
             )
@@ -387,7 +424,13 @@ async def execute_tool(
         elif name == "get_group_activity":
             stmt = (
                 select(GroupAgentMessage)
-                .where(GroupAgentMessage.group_id == group_id)
+                .where(
+                    GroupAgentMessage.group_id == group_id,
+                    (
+                        GroupAgentMessage.expires_at.is_(None)
+                        | (GroupAgentMessage.expires_at >= now)
+                    ),
+                )
                 .order_by(GroupAgentMessage.id.desc())
                 .limit(60)
             )
@@ -410,6 +453,10 @@ async def execute_tool(
                     AgentMemory.group_id == group_id,
                     AgentMemory.visibility.in_(("group", "public")),
                     AgentMemory.content.contains(query),
+                    (
+                        AgentMemory.expires_at.is_(None)
+                        | (AgentMemory.expires_at >= now)
+                    ),
                 )
                 .limit(10)
             )

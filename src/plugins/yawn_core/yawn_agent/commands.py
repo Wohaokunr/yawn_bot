@@ -2,6 +2,7 @@
 """群聊 Agent 配置和记忆管理命令。"""
 
 import json
+from datetime import datetime, timezone
 
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
@@ -109,7 +110,14 @@ async def handle_agent_profile(event: GroupMessageEvent, session: async_scoped_s
         await agent_profile.finish("请在群聊中使用")
     raw_user_id = args.extract_plain_text().strip()
     user_id = int(raw_user_id) if raw_user_id.isdigit() else int(event.get_user_id())
-    stmt = select(AgentMemory).where(AgentMemory.group_id == int(event.group_id), AgentMemory.subject_user_id == user_id, AgentMemory.memory_type == "profile").order_by(AgentMemory.salience.desc()).limit(10)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stmt = select(AgentMemory).where(
+        AgentMemory.group_id == int(event.group_id),
+        AgentMemory.subject_user_id == user_id,
+        AgentMemory.memory_type == "profile",
+        AgentMemory.visibility.in_(("group", "public")),
+        AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now),
+    ).order_by(AgentMemory.salience.desc()).limit(10)
     rows = (await session.execute(stmt)).scalars().all()
     if not rows:
         await agent_profile.finish("暂无该成员的人物画像")
@@ -129,7 +137,12 @@ async def handle_agent_clear(event: GroupMessageEvent, session: async_scoped_ses
 async def handle_agent_export(event: GroupMessageEvent, session: async_scoped_session, _perm: None = require_feature("group_agent")) -> None:  # pyright: ignore[reportArgumentType]
     if not isinstance(event, GroupMessageEvent) or not is_group_admin(event):
         await agent_export.finish("导出群聊 Agent 数据仅限群主或管理员")
-    stmt = select(AgentMemory).where(AgentMemory.group_id == int(event.group_id), AgentMemory.visibility.in_(("group", "public"))).order_by(AgentMemory.id.asc()).limit(200)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stmt = select(AgentMemory).where(
+        AgentMemory.group_id == int(event.group_id),
+        AgentMemory.visibility.in_(("group", "public")),
+        AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now),
+    ).order_by(AgentMemory.id.asc()).limit(200)
     rows = (await session.execute(stmt)).scalars().all()
     payload = [{"type": row.memory_type, "key": row.memory_key, "subject_user_id": row.subject_user_id, "content": row.content, "visibility": row.visibility} for row in rows]
     await agent_export.finish(Message(json.dumps({"group_id": int(event.group_id), "memories": payload}, ensure_ascii=False)))

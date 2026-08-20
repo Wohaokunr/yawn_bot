@@ -22,13 +22,15 @@ _CAPABILITY_TTL = 60.0
 _capability_cache: dict[tuple[int, int], tuple[float, BotGroupCapabilities]] = {}
 
 
-async def probe_group_capabilities(bot: Any, group_id: int) -> BotGroupCapabilities:
+async def probe_group_capabilities(
+    bot: Any, group_id: int, *, refresh: bool = False
+) -> BotGroupCapabilities:
     """读取机器人自身群角色；API 不可用时按普通成员降级。"""
 
     key = (int(getattr(bot, "self_id", 0) or 0), int(group_id))
     cached = _capability_cache.get(key)
     now = time.monotonic()
-    if cached is not None and now - cached[0] < _CAPABILITY_TTL:
+    if not refresh and cached is not None and now - cached[0] < _CAPABILITY_TTL:
         return cached[1]
     role = "member"
     self_id = int(getattr(bot, "self_id", 0) or 0)
@@ -64,6 +66,19 @@ def reset_capability_cache() -> None:
     _capability_cache.clear()
 
 
+async def user_can_manage_group(bot: Any, group_id: int, user_id: int) -> bool:
+    """实时确认调用者仍是群主或管理员。"""
+
+    try:
+        info = await bot.call_api(
+            "get_group_member_info", group_id=group_id, user_id=user_id
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    role = str(info.get("role") or "member") if isinstance(info, dict) else "member"
+    return role in {"owner", "admin"}
+
+
 async def target_can_be_muted(bot: Any, group_id: int, user_id: int, bot_role: str) -> bool:
     try:
         info = await bot.call_api("get_group_member_info", group_id=group_id, user_id=user_id)
@@ -77,5 +92,11 @@ async def target_can_be_muted(bot: Any, group_id: int, user_id: int, bot_role: s
     return bot_role in {"owner", "admin"}
 
 
-__all__ = ["BotGroupCapabilities", "probe_group_capabilities", "reset_capability_cache", "target_can_be_muted"]
+__all__ = [
+    "BotGroupCapabilities",
+    "probe_group_capabilities",
+    "reset_capability_cache",
+    "target_can_be_muted",
+    "user_can_manage_group",
+]
 
