@@ -37,6 +37,7 @@ FEATURE_REGISTRY: dict[str, str] = {
     "rpg": "跑团",
     "reminder": "定时提醒",
     "fanqie": "番茄小说",
+    "group_agent": "群聊 Agent",
 }
 
 

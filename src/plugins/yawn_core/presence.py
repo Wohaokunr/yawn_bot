@@ -28,10 +28,16 @@ async def track_user(  # noqa: C901, PLR0915
     nickname: str | None = None
     if sender is not None:
         nickname = getattr(sender, "card", None) or getattr(sender, "nickname", None)
+    role = (
+        str(getattr(sender, "role", "member") or "member")
+        if sender is not None
+        else "member"
+    )
+    title = getattr(sender, "title", None) if sender is not None else None
     group_id_raw = getattr(event, "group_id", None)
     group_id = int(group_id_raw) if group_id_raw is not None else None
 
-    async def prepare() -> None:
+    async def prepare() -> None:  # noqa: C901, PLR0912
         bot_user = await session.get(BotUser, user_id)
         if bot_user is None:
             session.add(
@@ -83,12 +89,19 @@ async def track_user(  # noqa: C901, PLR0915
                     first_seen_at=now,
                     last_seen_at=now,
                     group_nickname=nickname,
+                    role=role,
+                    title=title,
+                    last_role_sync_at=now,
                 )
             )
         else:
             user_group.last_seen_at = now
             if nickname:
                 user_group.group_nickname = nickname
+            user_group.role = role
+            if title is not None:
+                user_group.title = title
+            user_group.last_role_sync_at = now
 
     for attempt in range(_MAX_COMMIT_ATTEMPTS):
         try:

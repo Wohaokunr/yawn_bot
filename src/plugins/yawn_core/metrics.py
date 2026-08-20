@@ -75,6 +75,7 @@ _METRIC_HELP = {
     ),
     "yawnbot_rpg_deductions_total": "RPG deduction outcomes.",
     "yawnbot_rpg_terminations_total": "RPG non-story termination reasons.",
+    "yawnbot_agent_cache_total": "Agent prompt or media cache outcomes.",
 }
 
 _Labels = tuple[tuple[str, str], ...]
@@ -256,6 +257,15 @@ def record_ai_degradation(component: str, reason: str) -> None:
     increment_counter(
         "yawnbot_ai_degradations_total",
         labels={"component": component, "reason": reason},
+    )
+
+
+def record_agent_cache(kind: str, outcome: str) -> None:
+    """Record low-cardinality Agent cache hits and misses."""
+
+    increment_counter(
+        "yawnbot_agent_cache_total",
+        labels={"component": kind, "outcome": outcome},
     )
 
 

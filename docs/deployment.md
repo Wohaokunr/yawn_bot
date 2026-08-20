@@ -150,14 +150,48 @@ uv run python -m compileall -q src tools/rpg_module_editor
 git diff --check
 ```
 
-然后验证 NoneBot 按正式 `pyproject.toml` 发现四个业务插件：
+然后验证 NoneBot 按正式 `pyproject.toml` 发现五个业务插件：
 
 ```bash
-uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_rpg','yawn_core:yawn_werewolf','yawn_core:yawn_fanqie'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
+uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_rpg','yawn_core:yawn_werewolf','yawn_core:yawn_fanqie','yawn_core:yawn_agent'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
 ```
 
 此检查只验证导入和注册，不会连接 QQ 或请求 AI 服务。启动日志还应显示 yawn_core
 子插件启动报告；若 RPG 或狼人杀为 `失败`，不要把该版本投入运行。
+
+### 5.1 群聊 Agent 人设
+
+全局默认人设可通过 `.env` 中的 `AGENT_PERSONA_*` 字段配置；群主或管理员可在群内使用：
+
+```text
+/Agent人设 查看
+/Agent人设 设置 name=Yawn tone=温和 style=短句为主
+/Agent人设 重置
+/Agent隐私 退出
+/Agent隐私 恢复
+```
+
+群级设置只覆盖人设表达字段，不改变隐私边界、工具权限或系统规则。Agent 原始消息按
+群配置保留，并支持成员主动退出；迁移升级仍由维护者手动执行。
+
+### 5.2 群聊 Agent 模型与媒体缓存
+
+Agent 使用全局角色模型配置；未填写角色模型时回退到 `AI_MODEL`：
+
+```text
+AGENT_DIALOGUE_MODEL=高级对话模型
+AGENT_MEMORY_MODEL=普通记忆模型
+AGENT_VISION_MODEL=图片识别模型
+AGENT_DIALOGUE_MULTIMODAL=auto
+AGENT_MEDIA_CACHE_TTL=86400
+AGENT_MEDIA_CACHE_DIR=data/agent_media
+AGENT_MEDIA_ALLOWED_HOSTS=图片来源域名
+```
+
+`auto` 会先尝试对话模型的多模态输入；端点明确拒绝图片时，调用视觉模型生成
+带来源标记的文本转述。群管理员可使用 `/Agent设置 媒体缓存 开|关` 控制短期缓存。
+缓存按群和媒体内容哈希隔离，过期任务会清理原图与识别记录。启动调试日志会对
+API key 等凭据脱敏。
 
 ## 6. 启动与进程管理
 

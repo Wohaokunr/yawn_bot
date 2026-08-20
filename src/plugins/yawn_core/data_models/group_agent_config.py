@@ -1,0 +1,62 @@
+from datetime import datetime
+from typing import Optional
+
+from nonebot_plugin_orm import Model
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+
+class GroupAgentConfig(Model):
+    """群聊 Agent 配置；一群一份。"""
+
+    group_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("yawn_core_botgroup.group_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    persona: Mapped[str] = mapped_column(Text, default="友好、自然、简洁的群友")
+    persona_override: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    persona_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    persona_version: Mapped[int] = mapped_column(Integer, default=1)
+    trigger_mode: Mapped[str] = mapped_column(
+        String(24), default="mention_or_proactive"
+    )
+    proactive_probability: Mapped[float] = mapped_column(Float, default=0.15)
+    idle_threshold_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=20)
+    daily_limit: Mapped[int] = mapped_column(Integer, default=12)
+    raw_retention_days: Mapped[int] = mapped_column(Integer, default=7)
+    cross_group_visibility: Mapped[str] = mapped_column(
+        String(24), default="public_summary"
+    )
+    media_cache_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_agent_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    proactive_day: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    proactive_count: Mapped[int] = mapped_column(Integer, default=0)
+    active_topic: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    emotion_state: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    last_response_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_response_input_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_response_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    recent_response_fingerprints: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    context_epoch: Mapped[int] = mapped_column(Integer, default=0)
+    last_compacted_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    tool_day: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    admin_tool_count: Mapped[int] = mapped_column(Integer, default=0)
+    admin_tool_daily_limit: Mapped[int] = mapped_column(Integer, default=30)
+    tool_allowlist: Mapped[list[str]] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.current_timestamp(), onupdate=func.current_timestamp()
+    )
