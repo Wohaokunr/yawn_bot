@@ -33,6 +33,10 @@ class UserGroup(Model):
 
     group_nickname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
+    role: Mapped[str] = mapped_column(String(16), default="member")
+    title: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_role_sync_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
     # 群内扩展字段
     group_affinity: Mapped[int] = mapped_column(default=0)
     exp: Mapped[int] = mapped_column(default=0)

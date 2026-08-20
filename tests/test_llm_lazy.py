@@ -30,6 +30,12 @@ def test_config_allows_ai_api_key_to_be_omitted(llm_module: Any) -> None:
     assert config.ai_api_key is None
 
 
+def test_config_repr_masks_api_key_and_resolves_role_defaults(llm_module: Any) -> None:
+    config = llm_module.AIChatConfig(ai_api_key="secret", ai_model="fallback")
+    assert "secret" not in repr(config)
+    assert llm_module.get_agent_model("agent_dialogue") == llm_module.ai_config.ai_model
+
+
 @pytest.mark.asyncio
 async def test_missing_key_degrades_all_completions_without_client(
     llm_module: Any,
@@ -76,3 +82,35 @@ def test_client_is_created_once_on_first_use(
             "base_url": "https://example.test/v1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_roles_select_distinct_models(
+    llm_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Completions:
+        async def create(self, **kwargs: object) -> Any:
+            calls.append(kwargs)
+            message = type("Message", (), {"content": "ok", "tool_calls": []})()
+            choice = type("Choice", (), {"message": message, "finish_reason": "stop"})()
+            return type("Response", (), {"choices": [choice]})()
+
+    fake = type(
+        "Client", (), {"chat": type("Chat", (), {"completions": Completions()})()}
+    )()
+    monkeypatch.setattr(llm_module, "client", fake)
+    monkeypatch.setattr(llm_module.ai_config, "ai_api_key", "fixture-key")
+    monkeypatch.setattr(llm_module.ai_config, "agent_dialogue_model", "advanced-agent")
+    monkeypatch.setattr(llm_module.ai_config, "agent_memory_model", "ordinary-memory")
+
+    await llm_module.complete(
+        [{"role": "user", "content": "dialogue"}], role="agent_dialogue"
+    )
+    await llm_module.complete(
+        [{"role": "user", "content": "memory"}], role="agent_memory"
+    )
+
+    assert [item["model"] for item in calls] == ["advanced-agent", "ordinary-memory"]
