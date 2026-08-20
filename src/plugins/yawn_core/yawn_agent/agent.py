@@ -27,7 +27,7 @@ from ..llm import (
     get_agent_model,
     ai_config,
 )
-from .capabilities import probe_group_capabilities
+from .capabilities import probe_group_capabilities, user_can_manage_group
 from .collector import enqueue, ensure_worker, group_lock
 from .context import ActivitySnapshot, build_context
 from .media import get_cached_caption, prepare_image_inputs, store_caption
@@ -176,8 +176,13 @@ async def _persist_message(
 async def _load_context(
     session: Any, group_id: int, config: GroupAgentConfig, bot_id: int | None = None
 ) -> dict[str, Any]:
+    now = _now()
     message_stmt = select(GroupAgentMessage).where(
-        GroupAgentMessage.group_id == group_id
+        GroupAgentMessage.group_id == group_id,
+        (
+            GroupAgentMessage.expires_at.is_(None)
+            | (GroupAgentMessage.expires_at >= now)
+        ),
     )
     if bot_id is not None:
         message_stmt = message_stmt.where(GroupAgentMessage.bot_id == bot_id)
@@ -224,7 +229,7 @@ async def _load_context(
         .where(
             AgentMemory.group_id == group_id,
             AgentMemory.visibility.in_(("group", "public")),
-            (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= _now())),
+            (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
         )
         .order_by(AgentMemory.salience.desc(), AgentMemory.updated_at.desc())
         .limit(30)
@@ -263,7 +268,6 @@ async def _load_context(
         }
         for row in relation_rows
     ]
-    now = _now()
     activity = ActivitySnapshot(
         rows[0].received_at if rows else None,
         messages_5m=sum((now - row.received_at).total_seconds() < 300 for row in rows),
@@ -355,7 +359,13 @@ async def process_group_message(
                 return
             context = await _load_context(session, group_id, config, bot_id)
             capabilities = await probe_group_capabilities(bot, group_id)
-            tools = build_tool_schemas(capabilities)
+            actor_user_id = int(event.get_user_id())
+            allow_admin_tools = await user_can_manage_group(
+                bot, group_id, actor_user_id
+            )
+            tools = build_tool_schemas(
+                capabilities, allow_admin_tools=allow_admin_tools
+            )
             media_blocks, cached_captions, media_digests = await prepare_image_inputs(
                 bot,
                 group_id,
@@ -504,7 +514,7 @@ async def process_group_message(
                             args,
                             bot=bot,
                             group_id=group_id,
-                            actor_user_id=int(event.get_user_id()),
+                            actor_user_id=actor_user_id,
                             session=session,
                             capabilities=capabilities,
                         )

@@ -76,7 +76,13 @@ async def _tick() -> None:
                 (
                     await session.execute(
                         select(GroupAgentMessage)
-                        .where(GroupAgentMessage.group_id == config.group_id)
+                        .where(
+                            GroupAgentMessage.group_id == config.group_id,
+                            (
+                                GroupAgentMessage.expires_at.is_(None)
+                                | (GroupAgentMessage.expires_at >= now)
+                            ),
+                        )
                         .order_by(GroupAgentMessage.id.desc())
                         .limit(60)
                     )

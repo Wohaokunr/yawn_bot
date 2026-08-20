@@ -1,4 +1,4 @@
-# ruff: noqa: TID252,RET504,C901,PLR0911,ASYNC240,PLR0913,SIM105
+# ruff: noqa: TID252,RET504,C901,ASYNC240,PLR0913,SIM105
 """Short-lived media materialization and vision-caption cache for Agent."""
 
 from __future__ import annotations
@@ -77,14 +77,18 @@ def _identifier(ref: dict[str, Any]) -> str:
     return "unknown"
 
 
-async def _fetch_url(url: str) -> bytes | None:
+def _url_allowed(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not host
-        or host not in _allowed_hosts()
-    ):
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(host)
+        and host in _allowed_hosts()
+    )
+
+
+async def _fetch_url(url: str) -> bytes | None:
+    if not _url_allowed(url):
         return None
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
@@ -110,7 +114,6 @@ async def _load_bytes(
             and _valid_image(data, url)
         ):
             return data, url
-        return None
     candidate_text = str(ref.get("path") or ref.get("file") or "").strip()
     if candidate_text:
         candidate = Path(candidate_text).expanduser().resolve()
@@ -182,7 +185,7 @@ async def prepare_image_inputs(
             # A provider may still be able to fetch the original URL.  It is
             # only passed through when it was explicitly supplied by OneBot.
             url = str(ref.get("url") or "").strip()
-            if url.startswith(("http://", "https://")):
+            if _url_allowed(url):
                 blocks.append({"type": "image_url", "image_url": {"url": url}})
             continue
         data, hint = loaded

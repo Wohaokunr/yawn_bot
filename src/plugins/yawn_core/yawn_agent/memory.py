@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_media_cache import AgentMediaCache
@@ -24,6 +25,22 @@ def score_topic(messages: list[str]) -> float:
     count = len([item for item in messages if item.strip()])
     unique = len({item.strip() for item in messages if item.strip()})
     return min(1.0, count / 12 + unique / 40)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _bounded_float(value: object, default: float) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed):
+        return default
+    return max(0.0, min(parsed, 1.0))
 
 
 def build_summary(messages: list[dict[str, Any]], *, max_chars: int = 1000) -> str:
@@ -111,7 +128,7 @@ async def _store_model_facts(
         evidence = _safe_evidence(item.get("evidence_message_ids"), valid_ids)
         if not key or not content or not evidence:
             continue
-        confidence = max(0.0, min(float(item.get("confidence", 0.5)), 1.0))
+        confidence = _bounded_float(item.get("confidence"), 0.5)
         existing = await session.scalar(
             select(AgentMemory).where(
                 AgentMemory.group_id == group_id,
@@ -129,7 +146,7 @@ async def _store_model_facts(
                     memory_key=key,
                     content=content,
                     evidence_message_ids=evidence,
-                    salience=max(0.0, min(float(item.get("salience", 0.6)), 1.0)),
+                    salience=_bounded_float(item.get("salience"), 0.6),
                     confidence=confidence,
                     visibility="group",
                     expires_at=now + timedelta(days=90),
@@ -178,7 +195,7 @@ async def _store_model_relations(
                     subject_user_id=subject,
                     object_user_id=target,
                     relation_type=relation_type,
-                    confidence=max(0.0, min(float(item.get("confidence", 0.5)), 1.0)),
+                    confidence=_bounded_float(item.get("confidence"), 0.5),
                     evidence_count=len(evidence),
                     last_seen_at=now,
                 )
@@ -186,7 +203,12 @@ async def _store_model_relations(
         else:
             edge.evidence_count += len(evidence)
             edge.confidence = min(
-                1.0, max(edge.confidence, float(item.get("confidence", 0.5))) + 0.01
+                1.0,
+                max(
+                    edge.confidence,
+                    _bounded_float(item.get("confidence"), 0.5),
+                )
+                + 0.01,
             )
             edge.last_seen_at = now
 
@@ -194,7 +216,7 @@ async def _store_model_relations(
 async def compact_group_memory(
     session: Any, group_id: int, *, now: datetime | None = None
 ) -> int:
-    now = now or datetime.now()
+    now = now or _now()
     config = await session.get(GroupAgentConfig, group_id)
     cursor = int(config.last_compacted_message_id or 0) if config else 0
     rows = (
@@ -314,11 +336,19 @@ async def compact_group_memory(
 async def list_memories(
     session: Any, group_id: int, limit: int = 20
 ) -> list[AgentMemory]:
+    now = _now()
     return list(
         (
             await session.execute(
                 select(AgentMemory)
-                .where(AgentMemory.group_id == group_id)
+                .where(
+                    AgentMemory.group_id == group_id,
+                    AgentMemory.visibility.in_(("group", "public")),
+                    (
+                        AgentMemory.expires_at.is_(None)
+                        | (AgentMemory.expires_at >= now)
+                    ),
+                )
                 .order_by(AgentMemory.updated_at.desc())
                 .limit(limit)
             )
@@ -356,6 +386,16 @@ async def delete_group_memories(session: Any, group_id: int) -> int:
     ):
         result = await session.execute(delete(model).where(model.group_id == group_id))
         counts.append(int(result.rowcount or 0))
+    config = await session.get(GroupAgentConfig, group_id)
+    if config is not None:
+        config.active_topic = None
+        config.emotion_state = {}
+        config.last_response_fingerprint = None
+        config.last_response_input_fingerprint = None
+        config.last_response_at = None
+        config.recent_response_fingerprints = []
+        config.last_compacted_message_id = None
+        config.context_epoch += 1
     await session.commit()
     return sum(counts)
 
@@ -405,6 +445,16 @@ async def delete_member_memories(session: Any, group_id: int, user_id: int) -> i
             GroupAgentMessage.group_id == group_id, GroupAgentMessage.user_id == user_id
         )
     )
+    config = await session.get(GroupAgentConfig, group_id)
+    if config is not None and config.last_compacted_message_id is not None:
+        remaining_max = await session.scalar(
+            select(func.max(GroupAgentMessage.id)).where(
+                GroupAgentMessage.group_id == group_id
+            )
+        )
+        config.last_compacted_message_id = min(
+            int(config.last_compacted_message_id), int(remaining_max or 0)
+        ) or None
     await session.commit()
     return (
         len(memory_delete_ids)
