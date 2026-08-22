@@ -93,6 +93,7 @@ def _collect_plugin_metadata() -> list[PluginMetadata]:
         try:
             mod = importlib.import_module(f".{modname}", pkg_name)
         except Exception:  # noqa: BLE001
+            logger.warning(f"帮助面板加载子模块 {modname} 失败，已跳过", exc_info=True)
             continue
         meta = getattr(mod, "__plugin_meta__", None)
         if isinstance(meta, PluginMetadata):

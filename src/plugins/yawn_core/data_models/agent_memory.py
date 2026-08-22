@@ -19,11 +19,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 class AgentMemory(Model):
     """群摘要、人物画像、关系和回忆的统一存储。"""
 
+    # 去重查询按 memory_type 过滤，唯一约束必须包含它，
+    # 否则同键不同类型的行会在提交时 IntegrityError。
     __table_args__ = (
         UniqueConstraint(
             "scope",
             "group_id",
             "subject_user_id",
+            "memory_type",
             "memory_key",
             name="uq_agent_memory_key",
         ),

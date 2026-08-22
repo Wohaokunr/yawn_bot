@@ -100,8 +100,10 @@
   超时（`WW_AI_DECISION_TIMEOUT` / `WW_AI_SPEECH_TIMEOUT` 默认 90s；
   狼人阶段 `WW_WOLF_TIMEOUT` 180s，投票 90s，发言 120s），否则会
   `finish_reason=length` 截断返空或全程超时托管。
-- 终辩（`SHERIFF_REVOTE`）引擎窗口 60s（`engine._FINAL_SPEECH_TIMEOUT`），
-  AI 发言超时在 `_llm_speech` 内夹取到 50s。
+- 终辩（`SHERIFF_REVOTE`）引擎窗口 60s（`config.SHERIFF_FINAL_SPEECH_SECONDS`，
+  `engine._FINAL_SPEECH_TIMEOUT` 与 `ai_player._SHERIFF_FINAL_SPEECH_WINDOW`
+  共用该常量），AI 发言超时在 `_llm_speech` 内夹取到 54s
+  （60s 窗口 × `_PHASE_WINDOW_RATIO=0.9`）。
 - **降级链**：LLM 失败 → 格式纠正重试一次 → 仍失败按阶段安全默认
   （弃票 / 过 / 不竞选 / 撕警徽 / 空刀托管）。任何失败都不卡局。
 

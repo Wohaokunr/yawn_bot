@@ -1,0 +1,324 @@
+/* ── 樱花粉奶油 · 二次元主题 ───────────────────────────── */
+:root {
+  --sakura-100: #fff0f5;
+  --sakura-200: #ffe3ec;
+  --sakura-300: #ffbcd1;
+  --sakura-400: #ff9dbb;
+  --sakura-500: #ff7fa8;
+  --sakura-600: #f2608d;
+  --sakura-700: #d63f71;
+  --mint-400: #7ee8c3;
+  --mint-500: #34c896;
+  --sky-400: #8ec5ff;
+  --sky-500: #5b9df6;
+  --lavender-400: #c4b0ff;
+  --lavender-500: #9a7df0;
+  --ink: #53414c;
+  --ink-secondary: #9a8390;
+  --cream: #fff9fb;
+  --line: #ffe9f0;
+  --font-display: "ZCOOL KuaiLe", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: var(--cream);
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(60% 42% at 8% -8%, #ffe4ee 0%, transparent 62%),
+    radial-gradient(52% 40% at 100% 2%, #e3f2ff 0%, transparent 58%),
+    radial-gradient(56% 46% at 46% 112%, #f3ebff 0%, transparent 60%),
+    radial-gradient(40% 34% at 88% 82%, #e2f7ee 0%, transparent 58%),
+    linear-gradient(180deg, #fff9fb, #fff4f8);
+  background-attachment: fixed;
+}
+
+/* 轻装饰：奶油底上的樱花圆点纹理 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image: radial-gradient(#ffd6e4 1.2px, transparent 1.2px);
+  background-size: 26px 26px;
+  opacity: 0.32;
+  pointer-events: none;
+}
+
+::selection { background: var(--sakura-200); color: var(--sakura-700); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--sakura-200);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--sakura-300); }
+
+.center-screen { min-height: 100vh; display: grid; place-items: center; }
+
+/* ── 展示字体：圆润可爱 ── */
+h1, h2, h3, h4, h5,
+.ant-statistic-content,
+.ant-card-head-title,
+.brand {
+  font-family: var(--font-display);
+  font-weight: 400;
+}
+
+/* ── 登录页 ── */
+.login-page {
+  position: relative;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(58% 48% at 12% 16%, #ffdfe9 0%, transparent 62%),
+    radial-gradient(50% 44% at 88% 10%, #e0f1ff 0%, transparent 60%),
+    radial-gradient(56% 50% at 80% 90%, #efe5ff 0%, transparent 62%),
+    radial-gradient(44% 40% at 16% 88%, #dcf5ea 0%, transparent 60%),
+    linear-gradient(180deg, #fff9fb, #fff2f6);
+}
+
+.login-card {
+  position: relative;
+  width: min(420px, 100%);
+  border-radius: 26px;
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 80px rgba(242, 96, 141, 0.22);
+  animation: pop-in 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+}
+.login-card .ant-alert { margin-bottom: 20px; border-radius: 14px; }
+
+.brand-mark {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: white;
+  font-size: 28px;
+  background: linear-gradient(135deg, var(--sakura-400), var(--lavender-500));
+  box-shadow: 0 10px 24px rgba(242, 96, 141, 0.35);
+  margin-bottom: 18px;
+}
+.brand-mark::after {
+  content: "✨";
+  position: absolute;
+  top: -10px;
+  right: -14px;
+  font-size: 18px;
+  animation: twinkle 2.4s ease-in-out infinite;
+}
+
+/* 登录页飘落花瓣（轻装饰） */
+.petals { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+.petals i {
+  position: absolute;
+  top: -30px;
+  width: 15px;
+  height: 15px;
+  opacity: 0.75;
+  background: linear-gradient(135deg, var(--sakura-300), var(--sakura-500));
+  border-radius: 100% 0 100% 0;
+  animation: petal-fall linear infinite;
+}
+.petals i:nth-child(1) { left: 6%;  animation-duration: 12s;  animation-delay: -2s; }
+.petals i:nth-child(2) { left: 18%; animation-duration: 15s;  animation-delay: -7s;  width: 11px; height: 11px; }
+.petals i:nth-child(3) { left: 32%; animation-duration: 10s;  animation-delay: -4s; }
+.petals i:nth-child(4) { left: 50%; animation-duration: 14s;  animation-delay: -9s;  width: 12px; height: 12px; }
+.petals i:nth-child(5) { left: 66%; animation-duration: 11s;  animation-delay: -1s; }
+.petals i:nth-child(6) { left: 80%; animation-duration: 16s;  animation-delay: -6s;  width: 10px; height: 10px; }
+.petals i:nth-child(7) { left: 92%; animation-duration: 13s;  animation-delay: -3s; }
+
+/* ── 应用骨架 ── */
+.app-layout { min-height: 100vh; }
+.app-sider { border-right: 1px solid var(--line); }
+
+.brand {
+  height: 68px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--sakura-700);
+  font-size: 22px;
+  letter-spacing: 0.03em;
+}
+.brand .anticon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: white;
+  font-size: 20px;
+  background: linear-gradient(135deg, var(--sakura-400), var(--lavender-500));
+  box-shadow: 0 6px 16px rgba(242, 96, 141, 0.35);
+}
+.brand span {
+  background: linear-gradient(120deg, var(--sakura-600), var(--lavender-500));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.app-header {
+  height: 64px;
+  padding: 0 24px;
+  background: rgba(255, 252, 254, 0.8);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  backdrop-filter: blur(12px);
+}
+
+.app-content { padding: 28px; max-width: 1600px; width: 100%; margin: 0 auto; }
+
+/* 页面入场：逐个轻微上浮 */
+.app-content > * { animation: rise-in 0.5s cubic-bezier(0.22, 0.9, 0.32, 1) both; }
+.app-content > *:nth-child(1) { animation-delay: 0.02s; }
+.app-content > *:nth-child(2) { animation-delay: 0.07s; }
+.app-content > *:nth-child(3) { animation-delay: 0.12s; }
+.app-content > *:nth-child(4) { animation-delay: 0.17s; }
+.app-content > *:nth-child(5) { animation-delay: 0.22s; }
+.app-content > *:nth-child(6) { animation-delay: 0.27s; }
+.app-content > *:nth-child(n + 7) { animation-delay: 0.32s; }
+
+.page-heading { margin-bottom: 22px; }
+.page-heading h2 { margin: 0 0 4px !important; color: var(--ink); }
+.section-row { margin-top: 16px; }
+
+/* ── 软糖卡片 ── */
+.app-content .ant-card {
+  border: 1px solid var(--line);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+.app-content .ant-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(242, 96, 141, 0.16);
+}
+
+/* ── 统计卡 ── */
+.stat-card { position: relative; overflow: hidden; }
+.stat-card::after {
+  content: "✨";
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  font-size: 16px;
+  opacity: 0;
+  transform: scale(0.4) rotate(-20deg);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.stat-card:hover::after { opacity: 0.9; transform: scale(1) rotate(8deg); }
+
+.stat-badge {
+  width: 52px;
+  height: 52px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: white;
+  font-size: 24px;
+}
+.tone-sakura   { background: linear-gradient(135deg, var(--sakura-400), var(--sakura-600));   box-shadow: 0 8px 20px rgba(242, 96, 141, 0.35); }
+.tone-mint     { background: linear-gradient(135deg, var(--mint-400), var(--mint-500));       box-shadow: 0 8px 20px rgba(52, 200, 150, 0.30); }
+.tone-sky      { background: linear-gradient(135deg, var(--sky-400), var(--sky-500));         box-shadow: 0 8px 20px rgba(91, 157, 246, 0.30); }
+.tone-lavender { background: linear-gradient(135deg, var(--lavender-400), var(--lavender-500)); box-shadow: 0 8px 20px rgba(154, 125, 240, 0.32); }
+
+/* ── 胶囊软糖 Tag ── */
+.ant-tag {
+  border: none;
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(242, 96, 141, 0.10);
+}
+
+/* 实时连接呼吸光点 */
+.status-tag { display: inline-flex; align-items: center; }
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  margin-right: 6px;
+  animation: breathe 1.8s ease-in-out infinite;
+}
+
+/* ── 渐变软糖主按钮 ── */
+.ant-btn-primary {
+  border: none;
+  background: linear-gradient(135deg, var(--sakura-400) 0%, var(--sakura-600) 100%);
+  box-shadow: 0 6px 18px rgba(242, 96, 141, 0.35);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+.ant-btn-primary:not(:disabled):hover {
+  background: linear-gradient(135deg, #ffb0c8 0%, #f4759b 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(242, 96, 141, 0.45);
+}
+.ant-btn-primary:not(:disabled):active { transform: translateY(0); }
+
+/* ── 表格与杂项 ── */
+.ant-table { border-radius: 16px; }
+.ant-tabs-ink-bar { border-radius: 3px; height: 3px !important; }
+.ant-drawer .ant-drawer-content { border-radius: 20px 0 0 20px; }
+.ant-modal .ant-modal-content { border-radius: 20px; }
+.ant-progress-bg { border-radius: 999px; }
+
+.status-line { padding: 10px 0; border-bottom: 1px solid var(--sakura-100); }
+.status-line:last-child { border-bottom: 0; }
+.settings-form { margin-top: 22px; }
+.settings-form .ant-input-number { width: 100%; }
+.table-search { max-width: 360px; margin-bottom: 16px; }
+.pagination-only .ant-table-container { display: none; }
+pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320px; overflow: auto; }
+
+/* ── 动画 ── */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(14px); }
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.92) translateY(10px); }
+}
+@keyframes petal-fall {
+  0%   { transform: translateY(-5vh) rotate(0deg); }
+  100% { transform: translateY(108vh) rotate(420deg); }
+}
+@keyframes twinkle {
+  0%, 100% { opacity: 0.4; transform: scale(0.85) rotate(0deg); }
+  50%      { opacity: 1;   transform: scale(1.1) rotate(12deg); }
+}
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 143, 172, 0.45); }
+  50%      { box-shadow: 0 0 0 5px rgba(255, 143, 172, 0); }
+}
+
+@media (max-width: 768px) {
+  .app-content { padding: 18px 12px; }
+  .app-header { padding: 0 12px; }
+  .page-heading .ant-input-search { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

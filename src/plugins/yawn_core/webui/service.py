@@ -1,0 +1,509 @@
+# ruff: noqa: FBT001,TC001,TC002,TID252
+"""WebUI 查询与写入服务。"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from nonebot import get_bots
+from nonebot_plugin_orm import get_session
+from sqlalchemy import String, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..data_models.agent_audit import AgentAudit
+from ..data_models.agent_memory import AgentMemory
+from ..data_models.bot_group import BotGroup
+from ..data_models.bot_user import BotUser
+from ..data_models.global_user_feature import GlobalUserFeature
+from ..data_models.group_agent_config import GroupAgentConfig
+from ..data_models.group_feature import GroupFeature
+from ..data_models.user_feature import UserFeature
+from ..data_models.user_group import UserGroup
+from ..data_models.web_admin_audit import WebAdminAudit
+from ..metrics import snapshot_metrics
+from ..permission import FEATURE_REGISTRY
+from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
+
+TRIGGER_MODES = frozenset(
+    {"mention_only", "mention_or_reply", "explicit_wakeup", "mention_or_proactive"}
+)
+ADMIN_TOOLS = frozenset({"mute_member", "create_group_announcement"})
+
+
+# 全库约定 naive datetime 为北京时间（UTC+8），序列化时必须按此时区标注，
+# 否则前端会把库里的北京时间当作 UTC 显示，整体偏移 8 小时。
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=BEIJING_TZ)
+    return value.isoformat()
+
+
+def version(value: datetime | None) -> str | None:
+    return iso(value)
+
+
+def page_meta(page: int, page_size: int, total: int) -> dict[str, int]:
+    return {"page": page, "pageSize": page_size, "total": total}
+
+
+async def overview() -> dict[str, Any]:
+    async with get_session() as session:
+        group_count = int(
+            await session.scalar(select(func.count()).select_from(BotGroup)) or 0
+        )
+        user_count = int(
+            await session.scalar(select(func.count()).select_from(BotUser)) or 0
+        )
+        enabled_agents = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(GroupAgentConfig)
+                .where(GroupAgentConfig.enabled.is_(True))
+            )
+            or 0
+        )
+        recent = list(
+            (
+                await session.execute(
+                    select(AgentAudit).order_by(AgentAudit.id.desc()).limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    from .. import get_sub_plugin_load_report
+
+    report = get_sub_plugin_load_report()
+    wanted = {"群聊 Agent", "狼人杀", "跑团"}
+    plugins = [
+        {"name": "Core", "state": "loaded", "detail": None},
+        *[
+            {"name": item.label, "state": item.state, "detail": item.detail}
+            for item in report
+            if item.label in wanted
+        ],
+    ]
+    return {
+        "bots": [str(bot_id) for bot_id in sorted(get_bots())],
+        "plugins": plugins,
+        "counts": {
+            "groups": group_count,
+            "users": user_count,
+            "enabledAgents": enabled_agents,
+        },
+        "recentAgentActions": [serialize_agent_audit(row) for row in recent],
+        "metrics": snapshot_metrics(),
+        "generatedAt": datetime.now(BEIJING_TZ).isoformat(),
+    }
+
+
+async def list_groups(
+    session: AsyncSession, *, page: int, page_size: int, search: str
+) -> tuple[list[dict[str, Any]], int]:
+    conditions = []
+    if search:
+        pattern = f"%{search}%"
+        conditions.append(
+            or_(
+                BotGroup.group_name.ilike(pattern),
+                BotGroup.group_id.cast(String).like(pattern),
+            )
+        )
+    count_stmt = select(func.count()).select_from(BotGroup)
+    stmt = select(BotGroup).order_by(BotGroup.last_active_at.desc(), BotGroup.group_id)
+    if conditions:
+        count_stmt = count_stmt.where(*conditions)
+        stmt = stmt.where(*conditions)
+    total = int(await session.scalar(count_stmt) or 0)
+    rows = list(
+        (await session.execute(stmt.offset((page - 1) * page_size).limit(page_size)))
+        .scalars()
+        .all()
+    )
+    group_ids = [row.group_id for row in rows]
+    member_counts: dict[int, int] = {}
+    configs: dict[int, GroupAgentConfig] = {}
+    if group_ids:
+        member_counts = {
+            int(group_id): int(count)
+            for group_id, count in (
+                await session.execute(
+                    select(UserGroup.group_id, func.count())
+                    .where(UserGroup.group_id.in_(group_ids))
+                    .group_by(UserGroup.group_id)
+                )
+            ).all()
+        }
+        configs = {
+            row.group_id: row
+            for row in (
+                await session.execute(
+                    select(GroupAgentConfig).where(
+                        GroupAgentConfig.group_id.in_(group_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+    return [
+        {
+            "groupId": str(row.group_id),
+            "groupName": row.group_name,
+            "firstSeenAt": iso(row.first_seen_at),
+            "lastActiveAt": iso(row.last_active_at),
+            "memberCount": member_counts.get(row.group_id, 0),
+            "agentEnabled": configs[row.group_id].enabled
+            if row.group_id in configs
+            else True,
+        }
+        for row in rows
+    ], total
+
+
+async def get_group(session: AsyncSession, group_id: int) -> dict[str, Any] | None:
+    row = await session.get(BotGroup, group_id)
+    if row is None:
+        return None
+    member_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(UserGroup)
+            .where(UserGroup.group_id == group_id)
+        )
+        or 0
+    )
+    return {
+        "groupId": str(row.group_id),
+        "groupName": row.group_name,
+        "firstSeenAt": iso(row.first_seen_at),
+        "lastActiveAt": iso(row.last_active_at),
+        "memberCount": member_count,
+        "features": await group_feature_rows(session, group_id),
+    }
+
+
+async def list_group_members(
+    session: AsyncSession, group_id: int, *, page: int, page_size: int, search: str
+) -> tuple[list[dict[str, Any]], int]:
+    stmt = (
+        select(UserGroup, BotUser)
+        .join(BotUser, BotUser.user_id == UserGroup.user_id)
+        .where(UserGroup.group_id == group_id)
+    )
+    count_stmt = (
+        select(func.count())
+        .select_from(UserGroup)
+        .where(UserGroup.group_id == group_id)
+    )
+    if search:
+        pattern = f"%{search}%"
+        clause = or_(
+            BotUser.nickname.ilike(pattern),
+            UserGroup.group_nickname.ilike(pattern),
+            BotUser.user_id.cast(String).like(pattern),
+        )
+        stmt = stmt.where(clause)
+        count_stmt = count_stmt.join(
+            BotUser, BotUser.user_id == UserGroup.user_id
+        ).where(clause)
+    total = int(await session.scalar(count_stmt) or 0)
+    rows = (
+        await session.execute(
+            stmt.order_by(UserGroup.last_seen_at.desc(), UserGroup.user_id)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+    return [
+        {
+            "userId": str(user.user_id),
+            "nickname": user.nickname,
+            "groupNickname": membership.group_nickname,
+            "role": membership.role,
+            "title": membership.title,
+            "lastSeenAt": iso(membership.last_seen_at),
+            "active": membership.is_active,
+        }
+        for membership, user in rows
+    ], total
+
+
+async def list_users(
+    session: AsyncSession, *, page: int, page_size: int, search: str
+) -> tuple[list[dict[str, Any]], int]:
+    stmt = select(BotUser).order_by(BotUser.last_interaction_at.desc(), BotUser.user_id)
+    count_stmt = select(func.count()).select_from(BotUser)
+    if search:
+        pattern = f"%{search}%"
+        clause = or_(
+            BotUser.nickname.ilike(pattern),
+            BotUser.user_id.cast(String).like(pattern),
+        )
+        stmt = stmt.where(clause)
+        count_stmt = count_stmt.where(clause)
+    total = int(await session.scalar(count_stmt) or 0)
+    rows = list(
+        (await session.execute(stmt.offset((page - 1) * page_size).limit(page_size)))
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "userId": str(row.user_id),
+            "nickname": row.nickname,
+            "firstInteractionAt": iso(row.first_interaction_at),
+            "lastInteractionAt": iso(row.last_interaction_at),
+            "affinity": row.affinity,
+        }
+        for row in rows
+    ], total
+
+
+async def group_feature_rows(
+    session: AsyncSession, group_id: int
+) -> list[dict[str, Any]]:
+    overrides = {
+        row.feature: row
+        for row in (
+            await session.execute(
+                select(GroupFeature).where(GroupFeature.group_id == group_id)
+            )
+        )
+        .scalars()
+        .all()
+    }
+    return [
+        {
+            "key": key,
+            "name": name,
+            "override": overrides[key].enabled if key in overrides else None,
+            "effective": overrides[key].enabled if key in overrides else True,
+            "source": "group" if key in overrides else "default",
+        }
+        for key, name in FEATURE_REGISTRY.items()
+    ]
+
+
+async def user_feature_rows(
+    session: AsyncSession, user_id: int, group_id: int | None
+) -> list[dict[str, Any]]:
+    if group_id is None:
+        overrides = {
+            row.feature: row
+            for row in (
+                await session.execute(
+                    select(GlobalUserFeature).where(
+                        GlobalUserFeature.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        return [
+            {
+                "key": key,
+                "name": name,
+                "override": overrides[key].enabled if key in overrides else None,
+                "effective": overrides[key].enabled if key in overrides else True,
+                "source": "global_user" if key in overrides else "default",
+            }
+            for key, name in FEATURE_REGISTRY.items()
+        ]
+    group_overrides = {
+        row.feature: row
+        for row in (
+            await session.execute(
+                select(GroupFeature).where(GroupFeature.group_id == group_id)
+            )
+        )
+        .scalars()
+        .all()
+    }
+    overrides = {
+        row.feature: row
+        for row in (
+            await session.execute(
+                select(UserFeature).where(
+                    UserFeature.group_id == group_id, UserFeature.user_id == user_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+    result = []
+    for key, name in FEATURE_REGISTRY.items():
+        user_row = overrides.get(key)
+        group_row = group_overrides.get(key)
+        effective = (
+            user_row.enabled if user_row else group_row.enabled if group_row else True
+        )
+        source = "user" if user_row else "group" if group_row else "default"
+        result.append(
+            {
+                "key": key,
+                "name": name,
+                "override": user_row.enabled if user_row else None,
+                "effective": effective,
+                "source": source,
+            }
+        )
+    return result
+
+
+async def set_group_feature(
+    session: AsyncSession, group_id: int, feature: str, override: bool | None
+) -> None:
+    row = await session.get(GroupFeature, {"group_id": group_id, "feature": feature})
+    if override is None:
+        if row is not None:
+            await session.delete(row)
+        return
+    if row is None:
+        session.add(GroupFeature(group_id=group_id, feature=feature, enabled=override))
+    else:
+        row.enabled = override
+
+
+async def set_user_feature(
+    session: AsyncSession,
+    user_id: int,
+    feature: str,
+    override: bool | None,
+    *,
+    group_id: int | None,
+) -> None:
+    if group_id is None:
+        row = await session.get(
+            GlobalUserFeature, {"user_id": user_id, "feature": feature}
+        )
+        if override is None:
+            if row is not None:
+                await session.delete(row)
+        elif row is None:
+            session.add(
+                GlobalUserFeature(user_id=user_id, feature=feature, enabled=override)
+            )
+        else:
+            row.enabled = override
+        return
+    row = await session.get(
+        UserFeature, {"group_id": group_id, "user_id": user_id, "feature": feature}
+    )
+    if override is None:
+        if row is not None:
+            await session.delete(row)
+    elif row is None:
+        session.add(
+            UserFeature(
+                group_id=group_id, user_id=user_id, feature=feature, enabled=override
+            )
+        )
+    else:
+        row.enabled = override
+
+
+def serialize_agent_config(
+    row: GroupAgentConfig | None, group_id: int
+) -> dict[str, Any]:
+    if row is None:
+        row = GroupAgentConfig(group_id=group_id)
+    return {
+        "groupId": str(group_id),
+        "enabled": row.enabled,
+        "triggerMode": row.trigger_mode,
+        "proactiveProbability": row.proactive_probability,
+        "idleThresholdMinutes": row.idle_threshold_minutes,
+        "cooldownMinutes": row.cooldown_minutes,
+        "dailyLimit": row.daily_limit,
+        "rawRetentionDays": row.raw_retention_days,
+        "mediaCacheEnabled": row.media_cache_enabled,
+        "adminToolDailyLimit": row.admin_tool_daily_limit,
+        "toolAllowlist": list(row.tool_allowlist or []),
+        "proactiveToday": row.proactive_count,
+        "adminToolsToday": row.admin_tool_count,
+        "version": version(row.updated_at),
+    }
+
+
+def serialize_persona(row: GroupAgentConfig | None, group_id: int) -> dict[str, Any]:
+    return {
+        "groupId": str(group_id),
+        "enabled": row.persona_enabled if row else True,
+        "resolved": resolve_persona(row),
+        "overrides": dict(row.persona_override or {}) if row else {},
+        "fields": list(PERSONA_FIELDS),
+        "version": version(row.updated_at) if row else None,
+    }
+
+
+def serialize_memory(row: AgentMemory) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "groupId": str(row.group_id) if row.group_id is not None else None,
+        "subjectUserId": str(row.subject_user_id)
+        if row.subject_user_id is not None
+        else None,
+        "scope": row.scope,
+        "type": row.memory_type,
+        "key": row.memory_key,
+        "content": row.content,
+        "salience": row.salience,
+        "confidence": row.confidence,
+        "visibility": row.visibility,
+        "createdAt": iso(row.created_at),
+        "updatedAt": iso(row.updated_at),
+        "expiresAt": iso(row.expires_at),
+    }
+
+
+def serialize_agent_audit(row: AgentAudit) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "groupId": str(row.group_id),
+        "actorUserId": str(row.actor_user_id)
+        if row.actor_user_id is not None
+        else None,
+        "toolName": row.tool_name,
+        "arguments": row.arguments,
+        "result": row.result,
+        "detail": row.detail,
+        "createdAt": iso(row.created_at),
+    }
+
+
+def serialize_web_audit(row: WebAdminAudit) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "requestId": row.request_id,
+        "actorSession": row.actor_session,
+        "action": row.action,
+        "resourceType": row.resource_type,
+        "resourceId": row.resource_id,
+        "result": row.result,
+        "detail": row.detail,
+        "createdAt": iso(row.created_at),
+    }
+
+
+async def delete_one_memory(
+    session: AsyncSession, group_id: int, memory_id: int
+) -> int:
+    row = await session.scalar(
+        select(AgentMemory).where(
+            AgentMemory.group_id == group_id,
+            AgentMemory.id == memory_id,
+        )
+    )
+    if row is None:
+        return 0
+    await session.delete(row)
+    return 1

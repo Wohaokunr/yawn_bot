@@ -53,37 +53,42 @@ __plugin_meta__ = PluginMetadata(
     },
 )
 
-superusers = frozenset(get_driver().config.superusers)
-_superuser_ids = tuple(int(user_id) for user_id in superusers if str(user_id).isdigit())
 friend_request = on_request()
 
 approve_cmd = on_command("approve", aliases={"同意"}, priority=1, block=True)
 reject_cmd = on_command("reject", aliases={"拒绝"}, priority=1, block=True)
 list_cmd = on_command("pending", aliases={"待审批"}, priority=1, block=True)
 
-logger.debug(superusers)
+
+def _superusers() -> frozenset[str]:
+    """运行时读取，避免模块导入时快照导致 SUPERUSERS 变更不生效。"""
+    return frozenset(get_driver().config.superusers)
+
+
+def _superuser_ids() -> tuple[int, ...]:
+    return tuple(int(uid) for uid in _superusers() if str(uid).isdigit())
 
 
 def _is_superuser(user_id: int) -> bool:
-    return str(user_id) in superusers
+    return str(user_id) in _superusers()
 
 
 async def _notify_one_superuser(bot: Any, user_id: int, message: Message) -> None:
     try:
         await bot.send_private_msg(user_id=user_id, message=message)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            f"发送好友申请通知失败: user_id={user_id}, error={exc!r}"
-        )
+        logger.warning(f"发送好友申请通知失败: user_id={user_id}, error={exc!r}")
 
 
 async def _notify_superusers(bot: Any, message: Message) -> None:
     """通知所有已配置超管；未配置超管时只记录日志，不阻断好友申请入库。"""
-    if not _superuser_ids:
+    superuser_ids = _superuser_ids()
+    if not superuser_ids:
         logger.warning("未配置 SUPERUSERS，跳过好友申请通知")
         return
-    for user_id in _superuser_ids:
+    for user_id in superuser_ids:
         await _notify_one_superuser(bot, user_id, message)
+
 
 @friend_request.handle()
 async def handle_friend_request(
@@ -110,13 +115,13 @@ async def handle_friend_request(
     await session.commit()
 
     message = Message(
-        MessageSegment.text("有新的好友申请\n")+
-        MessageSegment.text("---------------\n")+
-        MessageSegment.text(f"|用户： {user_id} \n")+
-        MessageSegment.text(f"|验证信息: {comment}\n")+
-        MessageSegment.text("---------------\n")+
-        MessageSegment.text(f"/approve {user_id} 同意 | /reject {user_id} 拒绝\n")
-        )
+        MessageSegment.text("有新的好友申请\n")
+        + MessageSegment.text("---------------\n")
+        + MessageSegment.text(f"|用户： {user_id} \n")
+        + MessageSegment.text(f"|验证信息: {comment}\n")
+        + MessageSegment.text("---------------\n")
+        + MessageSegment.text(f"/approve {user_id} 同意 | /reject {user_id} 拒绝\n")
+    )
 
     await _notify_superusers(bot, message)
 
@@ -129,9 +134,7 @@ async def handle_list(
     if not _is_superuser(int(event.user_id)):
         await list_cmd.finish("你没有好友申请审批权限")
 
-    stmt = select(FriendRequest).where(
-        FriendRequest.status == "pending"
-    )
+    stmt = select(FriendRequest).where(FriendRequest.status == "pending")
     result = await session.execute(stmt)
     rows = result.scalars().all()
 
@@ -141,10 +144,7 @@ async def handle_list(
     lines = ["待审批好友申请:"]
     for r in rows:
         comment = r.comment or "无"
-        lines.append(
-            f"  用户: {r.user_id}"
-            f"  验证: {comment}"
-        )
+        lines.append(f"  用户: {r.user_id}  验证: {comment}")
     lines.append("使用 /approve <QQ号> 同意这个请求 \n 使用/reject <QQ号> 拒绝这个请求")
     await list_cmd.finish("\n".join(lines))
 

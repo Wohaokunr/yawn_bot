@@ -88,3 +88,9 @@ class Config(BaseModel):
     # 有 AI 参与时警长竞选报名窗口的延长量（秒）：
     # 给 AI 的竞选决策留出 LLM 调用时间，避免迟到的上警被丢弃
     ww_ai_register_buffer: int = 15
+
+
+# 警长平票终辩的固定窗口（秒）：引擎据此计时，AI 驱动据此夹取发言
+# 调用超时，两处必须共用同一值。属游戏规则而非部署调参项，故不进
+# Config 字段。
+SHERIFF_FINAL_SPEECH_SECONDS = 60

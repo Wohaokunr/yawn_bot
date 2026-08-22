@@ -36,6 +36,7 @@ __all__ = [
     "reminder",
     "replay",
     "replay_commands",
+    "webui",
 ]
 
 
@@ -153,3 +154,6 @@ async def _report_sub_plugin_status() -> None:
 
 
 _SUB_PLUGIN_LOAD_REPORT = _load_sub_plugins()
+
+# WebUI 需要读取上面的子插件加载报告，因此在核心初始化完成后注册。
+from . import webui as webui

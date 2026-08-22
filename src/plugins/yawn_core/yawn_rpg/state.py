@@ -511,6 +511,11 @@ def game_of_user(user_id: int) -> Optional[Game]:
     return _games.get(group_id)
 
 
+def all_games() -> list[Game]:
+    """当前进程内全部对局的快照（WebUI 对局监控用）。"""
+    return list(_games.values())
+
+
 def create_game(
     group_id: int,
     host_user_id: int,

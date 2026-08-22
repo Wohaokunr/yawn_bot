@@ -79,6 +79,69 @@ def test_trigger_modes_distinguish_mentions_replies_and_explicit_wakeup() -> Non
     assert not should_respond(event, Bot(), "mention_only")
 
 
+def test_reply_to_bot_detection_falls_back_to_reply_chain() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.agent import should_respond
+    from src.plugins.yawn_core.yawn_agent.message_parser import NormalizedMessage
+
+    class Bot:
+        self_id = "100"
+
+    class Event:
+        group_id = 1
+        message: tuple[object, ...] = ()
+        reply = None
+
+        def get_user_id(self) -> str:
+            return "200"
+
+        def get_plaintext(self) -> str:
+            return "这句话没有唤醒词"
+
+    direct = NormalizedMessage(
+        plain_text="这句话没有唤醒词",
+        segments=[],
+        reply_chain=[
+            {"message_id": 1, "user_id": 100, "nickname": "Yawn", "text": "机器人的话"}
+        ],
+    )
+    assert should_respond(Event(), Bot(), normalized=direct)
+
+    deeper_only = NormalizedMessage(
+        plain_text="这句话没有唤醒词",
+        segments=[],
+        reply_chain=[
+            {"message_id": 2, "user_id": 300, "nickname": "别人", "text": "别人的话"},
+            {"message_id": 1, "user_id": 100, "nickname": "Yawn", "text": "机器人的话"},
+        ],
+    )
+    assert not should_respond(Event(), Bot(), normalized=deeper_only)
+
+
+def test_mention_detection_includes_adapter_to_me_after_at_segment_removed() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.agent import should_respond
+
+    class Bot:
+        self_id = "100"
+
+    class Event:
+        # 适配器的 _check_at_me 会把指向机器人的 @ 段移除并置 to_me,
+        # event.message 里不再有 at 段。
+        group_id = 1
+        message: tuple[object, ...] = ()
+        reply = None
+        to_me = True
+
+        def get_user_id(self) -> str:
+            return "200"
+
+        def get_plaintext(self) -> str:
+            return "帮我看看这个"
+
+    assert should_respond(Event(), Bot(), "mention_only")
+
+
 def test_explicit_wakeup_does_not_match_embedded_english_syllables() -> None:
     _load_agent_modules()
     from src.plugins.yawn_core.yawn_agent.agent import should_respond

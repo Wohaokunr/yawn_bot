@@ -987,17 +987,14 @@ async def _deliver_reminder(
 
         permission_user_id = reminder.creator_user_id
         permission_group_id: int | None = reminder.group_id
-        if (
-            reminder.target_type == "private"
-            and reminder.target_user_id is not None
-        ):
+        if reminder.target_type == "private" and reminder.target_user_id is not None:
             permission_user_id = reminder.target_user_id
             permission_group_id = None
         if not await check_feature_permission(
             permission_user_id,
             permission_group_id,
             "reminder",
-            cast("async_scoped_session", session),
+            session,
         ):
             return "feature_disabled"
 
@@ -1056,8 +1053,7 @@ async def _run_reminder_job(reminder_id: int) -> None:
             _remove_reminder_job(reminder_id)
             return
         is_once = (
-            getattr(reminder, "schedule_type", _SCHEDULE_RECURRING)
-            == _SCHEDULE_ONCE
+            getattr(reminder, "schedule_type", _SCHEDULE_RECURRING) == _SCHEDULE_ONCE
         )
     status = await _deliver_reminder(reminder_id, force=False)
     if status == "missing":
@@ -2058,11 +2054,7 @@ async def _handle_group_selection(
     group_id: int | None = None
     if text.isdigit():
         index = int(text)
-        group_id = (
-            groups[index - 1].group_id
-            if 1 <= index <= len(groups)
-            else index
-        )
+        group_id = groups[index - 1].group_id if 1 <= index <= len(groups) else index
     if group_id is None:
         await reminder_cmd.reject_arg(
             "reminder_choice",

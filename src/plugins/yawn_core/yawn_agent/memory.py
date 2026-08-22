@@ -1,4 +1,4 @@
-# ruff: noqa: E501,F401,I001,TID252,PLR0912,PLR0913,PLR0917,C901,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100,DTZ005
+# ruff: noqa: E501,F401,I001,TID252,PLR0912,PLR0913,PLR0917,C901,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100,DTZ005,PLR2004
 """群聊 Agent 记忆整理、增量提取与隐私清理。"""
 
 from __future__ import annotations
@@ -6,10 +6,12 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
+from nonebot import logger
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_media_cache import AgentMediaCache
@@ -17,6 +19,11 @@ from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import ai_config, complete, get_agent_model, get_client
+from .context import now_beijing
+from .log import dbg, dbg_exc
+from .media import unlink_cache_file
+
+_COMPACT_BATCH_LIMIT = 500
 
 
 def score_topic(messages: list[str]) -> float:
@@ -25,10 +32,6 @@ def score_topic(messages: list[str]) -> float:
     count = len([item for item in messages if item.strip()])
     unique = len({item.strip() for item in messages if item.strip()})
     return min(1.0, count / 12 + unique / 40)
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _bounded_float(value: object, default: float) -> float:
@@ -69,7 +72,14 @@ async def _model_summary(payload: list[dict[str, Any]]) -> dict[str, Any] | None
     # Memory LLM work is opt-in through the ordinary role model.  A missing
     # role stays deterministic instead of silently spending the dialogue
     # model's budget during the nightly compaction job.
-    if not str(getattr(ai_config, "agent_memory_model", "") or "").strip() or get_client() is None:
+    if (
+        not str(getattr(ai_config, "agent_memory_model", "") or "").strip()
+        or get_client() is None
+    ):
+        dbg(
+            "记忆整理: 跳过 LLM 摘要(agent_memory_model 未配置或 LLM client 不可用),"
+            "回退到确定性摘要"
+        )
         return None
     messages = [
         {
@@ -93,7 +103,18 @@ async def _model_summary(payload: list[dict[str, Any]]) -> dict[str, Any] | None
         max_tokens=800,
         timeout=30,
     )
-    return _parse_json_reply(response) if response else None
+    if not response:
+        dbg("记忆整理: LLM 摘要返回空,回退到确定性摘要")
+        return None
+    parsed = _parse_json_reply(response)
+    if parsed is None:
+        dbg(f"记忆整理: LLM 返回无法解析为 JSON,回退到确定性摘要 raw={response!r}")
+    else:
+        dbg(
+            f"记忆整理: LLM 摘要解析成功 facts={len(parsed.get('facts') or [])} "
+            f"relations={len(parsed.get('relations') or [])}"
+        )
+    return parsed
 
 
 def _safe_evidence(raw: object, valid_ids: set[int]) -> list[int]:
@@ -106,12 +127,57 @@ def _safe_evidence(raw: object, valid_ids: set[int]) -> list[int]:
     )[:50]
 
 
-async def _store_model_facts(
+async def _prefetch_profiles(
+    session: Any, group_id: int
+) -> dict[tuple[int, str], AgentMemory]:
+    """一次取回本群全部画像记忆，避免逐条标量查询。"""
+
+    rows = (
+        (
+            await session.execute(
+                select(AgentMemory).where(
+                    AgentMemory.group_id == group_id,
+                    AgentMemory.memory_type == "profile",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {(int(row.subject_user_id or 0), str(row.memory_key)): row for row in rows}
+
+
+async def _prefetch_relations(
+    session: Any, group_id: int
+) -> dict[tuple[int, int, str], AgentRelation]:
+    """一次取回本群全部关系边，避免逐条标量查询。"""
+
+    rows = (
+        (
+            await session.execute(
+                select(AgentRelation).where(AgentRelation.group_id == group_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        (
+            int(row.subject_user_id),
+            int(row.object_user_id),
+            str(row.relation_type),
+        ): row
+        for row in rows
+    }
+
+
+def _store_model_facts(
     session: Any,
     group_id: int,
     facts: object,
     valid_ids: set[int],
     now: datetime,
+    profiles: dict[tuple[int, str], AgentMemory],
 ) -> None:
     if not isinstance(facts, list):
         return
@@ -129,40 +195,39 @@ async def _store_model_facts(
         if not key or not content or not evidence:
             continue
         confidence = _bounded_float(item.get("confidence"), 0.5)
-        existing = await session.scalar(
-            select(AgentMemory).where(
-                AgentMemory.group_id == group_id,
-                AgentMemory.subject_user_id == user_id,
-                AgentMemory.memory_type == "profile",
-                AgentMemory.memory_key == key,
-            )
-        )
+        existing = profiles.get((user_id, key))
         if existing is None:
-            session.add(
-                AgentMemory(
-                    group_id=group_id,
-                    subject_user_id=user_id,
-                    memory_type="profile",
-                    memory_key=key,
-                    content=content,
-                    evidence_message_ids=evidence,
-                    salience=_bounded_float(item.get("salience"), 0.6),
-                    confidence=confidence,
-                    visibility="group",
-                    expires_at=now + timedelta(days=90),
-                )
+            row = AgentMemory(
+                group_id=group_id,
+                subject_user_id=user_id,
+                memory_type="profile",
+                memory_key=key,
+                content=content,
+                evidence_message_ids=evidence,
+                salience=_bounded_float(item.get("salience"), 0.6),
+                confidence=confidence,
+                visibility="group",
+                expires_at=now + timedelta(days=90),
             )
+            session.add(row)
+            profiles[(user_id, key)] = row
         else:
             existing.content = content
-            existing.evidence_message_ids = list(
+            merged_ids: list[int] = list(
                 dict.fromkeys([*(existing.evidence_message_ids or []), *evidence])
-            )[-50:]
+            )
+            existing.evidence_message_ids = merged_ids[-50:]
             existing.confidence = min(1.0, max(existing.confidence, confidence) + 0.02)
             existing.expires_at = now + timedelta(days=90)
 
 
-async def _store_model_relations(
-    session: Any, group_id: int, relations: object, valid_ids: set[int], now: datetime
+def _store_model_relations(
+    session: Any,
+    group_id: int,
+    relations: object,
+    valid_ids: set[int],
+    now: datetime,
+    edges: dict[tuple[int, int, str], AgentRelation],
 ) -> None:
     if not isinstance(relations, list):
         return
@@ -180,26 +245,19 @@ async def _store_model_relations(
         evidence = _safe_evidence(item.get("evidence_message_ids"), valid_ids)
         if not relation_type or not evidence or subject == target:
             continue
-        edge = await session.scalar(
-            select(AgentRelation).where(
-                AgentRelation.group_id == group_id,
-                AgentRelation.subject_user_id == subject,
-                AgentRelation.object_user_id == target,
-                AgentRelation.relation_type == relation_type,
-            )
-        )
+        edge = edges.get((subject, target, relation_type))
         if edge is None:
-            session.add(
-                AgentRelation(
-                    group_id=group_id,
-                    subject_user_id=subject,
-                    object_user_id=target,
-                    relation_type=relation_type,
-                    confidence=_bounded_float(item.get("confidence"), 0.5),
-                    evidence_count=len(evidence),
-                    last_seen_at=now,
-                )
+            row = AgentRelation(
+                group_id=group_id,
+                subject_user_id=subject,
+                object_user_id=target,
+                relation_type=relation_type,
+                confidence=_bounded_float(item.get("confidence"), 0.5),
+                evidence_count=len(evidence),
+                last_seen_at=now,
             )
+            session.add(row)
+            edges[(subject, target, relation_type)] = row
         else:
             edge.evidence_count += len(evidence)
             edge.confidence = min(
@@ -216,9 +274,11 @@ async def _store_model_relations(
 async def compact_group_memory(
     session: Any, group_id: int, *, now: datetime | None = None
 ) -> int:
-    now = now or _now()
+    now = now or now_beijing()
     config = await session.get(GroupAgentConfig, group_id)
     cursor = int(config.last_compacted_message_id or 0) if config else 0
+    dbg(f"群 {group_id} 记忆整理开始: 游标={cursor} 批量上限={_COMPACT_BATCH_LIMIT}")
+    # 游标过滤下推到 SQL；只加载尚未整理过的消息，且批量有上限。
     rows = (
         (
             await session.execute(
@@ -227,8 +287,10 @@ async def compact_group_memory(
                     GroupAgentMessage.group_id == group_id,
                     GroupAgentMessage.expires_at.is_not(None),
                     GroupAgentMessage.expires_at >= now,
+                    GroupAgentMessage.id > cursor,
                 )
                 .order_by(GroupAgentMessage.id)
+                .limit(_COMPACT_BATCH_LIMIT)
             )
         )
         .scalars()
@@ -245,9 +307,12 @@ async def compact_group_memory(
         .scalars()
         .all()
     )
-    visible_rows = [row for row in rows if row.user_id not in opted_out]
-    fresh_rows = [row for row in visible_rows if row.id > cursor]
-    if visible_rows:
+    fresh_rows = [row for row in rows if row.user_id not in opted_out]
+    dbg(
+        f"群 {group_id} 记忆整理: 待整理消息 {len(rows)} 条,隐私退出过滤后 "
+        f"{len(fresh_rows)} 条(隐私退出用户 {sorted(opted_out)})"
+    )
+    if fresh_rows and config is not None:
         payload = [
             {
                 "id": row.id,
@@ -255,11 +320,15 @@ async def compact_group_memory(
                 "name": row.sender_name,
                 "text": row.normalized_text,
             }
-            for row in visible_rows
+            for row in fresh_rows
         ]
         generated = await _model_summary(payload)
         summary = str((generated or {}).get("summary") or "").strip() or build_summary(
             payload
+        )
+        dbg(
+            f"群 {group_id} 记忆整理摘要: 来源={'LLM' if generated and str((generated or {}).get('summary') or '').strip() else '确定性回退'} "
+            f"salience={score_topic([item['text'] for item in payload]):.2f} 摘要={summary!r}"
         )
         key = f"daily:{now:%Y-%m-%d}"
         existing = await session.scalar(
@@ -270,7 +339,7 @@ async def compact_group_memory(
             )
         )
         salience = score_topic([item["text"] for item in payload])
-        evidence_ids = [row.id for row in visible_rows[-50:]]
+        evidence_ids = [row.id for row in fresh_rows[-50:]]
         if existing is None:
             session.add(
                 AgentMemory(
@@ -291,18 +360,29 @@ async def compact_group_memory(
             existing.salience = salience
             existing.evidence_message_ids = evidence_ids
             existing.expires_at = now + timedelta(days=30)
-        if fresh_rows:
-            valid_ids = {row.id for row in fresh_rows}
-            if generated:
-                await _store_model_facts(
-                    session, group_id, generated.get("facts"), valid_ids, now
-                )
-                await _store_model_relations(
-                    session, group_id, generated.get("relations"), valid_ids, now
-                )
-            await _extract_structured_memories(session, group_id, fresh_rows, now)
-            if config:
-                config.last_compacted_message_id = max(row.id for row in fresh_rows)
+        valid_ids = {row.id for row in fresh_rows}
+        profiles = await _prefetch_profiles(session, group_id)
+        edges = await _prefetch_relations(session, group_id)
+        if generated:
+            _store_model_facts(
+                session, group_id, generated.get("facts"), valid_ids, now, profiles
+            )
+            _store_model_relations(
+                session,
+                group_id,
+                generated.get("relations"),
+                valid_ids,
+                now,
+                edges,
+            )
+        _extract_structured_memories(
+            session, group_id, fresh_rows, now, profiles, edges
+        )
+        config.last_compacted_message_id = max(row.id for row in fresh_rows)
+        dbg(
+            f"群 {group_id} 记忆整理抽取完成: 画像记录={len(profiles)} "
+            f"关系边={len(edges)} 新游标={config.last_compacted_message_id}"
+        )
     deleted = await session.execute(
         delete(GroupAgentMessage).where(
             GroupAgentMessage.group_id == group_id,
@@ -329,14 +409,22 @@ async def compact_group_memory(
             AgentRelation.last_seen_at < now - timedelta(days=180),
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # 唯一约束与去重口径不一致时的兜底：放弃本群本轮整理而非毒化会话。
+        await session.rollback()
+        logger.warning("群 %s Agent 记忆整理提交冲突，已回滚", group_id)
+        dbg_exc(f"群 {group_id} 记忆整理提交冲突,本轮已回滚")
+    else:
+        dbg(f"群 {group_id} 记忆整理完成: 删除过期消息 {int(deleted.rowcount or 0)} 条")
     return int(deleted.rowcount or 0)
 
 
 async def list_memories(
     session: Any, group_id: int, limit: int = 20
 ) -> list[AgentMemory]:
-    now = _now()
+    now = now_beijing()
     return list(
         (
             await session.execute(
@@ -349,7 +437,7 @@ async def list_memories(
                         | (AgentMemory.expires_at >= now)
                     ),
                 )
-                .order_by(AgentMemory.updated_at.desc())
+                .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
                 .limit(limit)
             )
         )
@@ -368,14 +456,7 @@ async def delete_group_memories(session: Any, group_id: int) -> int:
         .scalars()
         .all()
     )
-    for row in media_rows:
-        if row.cache_path:
-            try:
-                from pathlib import Path
-
-                Path(row.cache_path).unlink(missing_ok=True)
-            except OSError:
-                pass
+    cache_paths = [str(row.cache_path) for row in media_rows if row.cache_path]
     counts = []
     for model in (
         AgentMemory,
@@ -397,6 +478,13 @@ async def delete_group_memories(session: Any, group_id: int) -> int:
         config.last_compacted_message_id = None
         config.context_epoch += 1
     await session.commit()
+    # 先提交删除再清理磁盘文件，提交失败时不会留下悬空文件引用。
+    for cache_path in cache_paths:
+        unlink_cache_file(cache_path)
+    dbg(
+        f"群 {group_id} 记忆全量清除完成: memory={counts[0]} relation={counts[1]} "
+        f"message={counts[2]} audit={counts[3]} media={counts[4]} 磁盘文件={len(cache_paths)}"
+    )
     return sum(counts)
 
 
@@ -452,10 +540,14 @@ async def delete_member_memories(session: Any, group_id: int, user_id: int) -> i
                 GroupAgentMessage.group_id == group_id
             )
         )
-        config.last_compacted_message_id = min(
-            int(config.last_compacted_message_id), int(remaining_max or 0)
-        ) or None
+        config.last_compacted_message_id = (
+            min(int(config.last_compacted_message_id), int(remaining_max or 0)) or None
+        )
     await session.commit()
+    dbg(
+        f"群 {group_id} 成员 {user_id} 记忆清除完成: memory={len(memory_delete_ids)} "
+        f"message={int(message_result.rowcount or 0)} relation={int(relation_result.rowcount or 0)}"
+    )
     return (
         len(memory_delete_ids)
         + int(message_result.rowcount or 0)
@@ -463,8 +555,13 @@ async def delete_member_memories(session: Any, group_id: int, user_id: int) -> i
     )
 
 
-async def _extract_structured_memories(
-    session: Any, group_id: int, rows: list[GroupAgentMessage], now: datetime
+def _extract_structured_memories(
+    session: Any,
+    group_id: int,
+    rows: list[GroupAgentMessage],
+    now: datetime,
+    profiles: dict[tuple[int, str], AgentMemory],
+    edges: dict[tuple[int, int, str], AgentRelation],
 ) -> None:
     """从明确的自述句提取低风险画像，避免把整段原文当长期事实。"""
 
@@ -474,34 +571,28 @@ async def _extract_structured_memories(
         if match:
             key = "display_name"
             content = match.group(1)
-            existing = await session.scalar(
-                select(AgentMemory).where(
-                    AgentMemory.group_id == group_id,
-                    AgentMemory.subject_user_id == row.user_id,
-                    AgentMemory.memory_type == "profile",
-                    AgentMemory.memory_key == key,
-                )
-            )
+            existing = profiles.get((int(row.user_id), key))
             if existing is None:
-                session.add(
-                    AgentMemory(
-                        group_id=group_id,
-                        subject_user_id=row.user_id,
-                        memory_type="profile",
-                        memory_key=key,
-                        content=content,
-                        evidence_message_ids=[row.id],
-                        salience=0.8,
-                        confidence=0.85,
-                        visibility="group",
-                        expires_at=now + timedelta(days=90),
-                    )
+                record = AgentMemory(
+                    group_id=group_id,
+                    subject_user_id=row.user_id,
+                    memory_type="profile",
+                    memory_key=key,
+                    content=content,
+                    evidence_message_ids=[row.id],
+                    salience=0.8,
+                    confidence=0.85,
+                    visibility="group",
+                    expires_at=now + timedelta(days=90),
                 )
+                session.add(record)
+                profiles[(int(row.user_id), key)] = record
             else:
                 existing.content = content
-                existing.evidence_message_ids = list(
+                merged_ids: list[int] = list(
                     dict.fromkeys([*(existing.evidence_message_ids or []), row.id])
-                )[-50:]
+                )
+                existing.evidence_message_ids = merged_ids[-50:]
                 existing.confidence = min(1.0, existing.confidence + 0.05)
                 existing.expires_at = now + timedelta(days=90)
         mentions = set(re.findall(r"@([0-9]{5,12})", text))
@@ -509,26 +600,19 @@ async def _extract_structured_memories(
             target = int(mention)
             if target == row.user_id:
                 continue
-            edge = await session.scalar(
-                select(AgentRelation).where(
-                    AgentRelation.group_id == group_id,
-                    AgentRelation.subject_user_id == row.user_id,
-                    AgentRelation.object_user_id == target,
-                    AgentRelation.relation_type == "mentions",
-                )
-            )
+            edge = edges.get((int(row.user_id), target, "mentions"))
             if edge is None:
-                session.add(
-                    AgentRelation(
-                        group_id=group_id,
-                        subject_user_id=row.user_id,
-                        object_user_id=target,
-                        relation_type="mentions",
-                        confidence=0.55,
-                        evidence_count=1,
-                        last_seen_at=now,
-                    )
+                record = AgentRelation(
+                    group_id=group_id,
+                    subject_user_id=row.user_id,
+                    object_user_id=target,
+                    relation_type="mentions",
+                    confidence=0.55,
+                    evidence_count=1,
+                    last_seen_at=now,
                 )
+                session.add(record)
+                edges[(int(row.user_id), target, "mentions")] = record
             else:
                 edge.evidence_count += 1
                 edge.confidence = min(1.0, edge.confidence + 0.02)

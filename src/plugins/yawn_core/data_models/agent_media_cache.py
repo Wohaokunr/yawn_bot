@@ -2,7 +2,16 @@ from datetime import datetime
 from typing import Optional
 
 from nonebot_plugin_orm import Model
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 
@@ -20,7 +29,11 @@ class AgentMediaCache(Model):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    group_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    group_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("yawn_core_botgroup.group_id", ondelete="CASCADE"),
+        index=True,
+    )
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     media_type: Mapped[str] = mapped_column(String(24), default="image")
     cache_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
@@ -32,7 +45,8 @@ class AgentMediaCache(Model):
         DateTime, server_default=func.current_timestamp(), index=True
     )
     last_access_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
-

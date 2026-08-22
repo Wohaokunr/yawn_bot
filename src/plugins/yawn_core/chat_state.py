@@ -170,7 +170,9 @@ async def _worker_loop(
                         MessageSegment.text("处理消息时出了点问题，请再试一次~"),
                     )
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug(
+                        f"向用户 {user_id} 发送处理失败提示时出错", exc_info=True
+                    )
             finally:
                 state.queue.task_done()
     finally:

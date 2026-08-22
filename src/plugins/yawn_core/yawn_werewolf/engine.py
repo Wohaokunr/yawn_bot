@@ -22,7 +22,7 @@ from sqlalchemy import select
 from ..event_log import record_game_event  # noqa: TID252
 from ..replay import register_replay_participants  # noqa: TID252
 from . import ai_player, api
-from .config import Config
+from .config import SHERIFF_FINAL_SPEECH_SECONDS, Config
 from .models import WerewolfGame, WerewolfPlayer
 from .roles import (
     BOARDS,
@@ -57,8 +57,11 @@ config = get_plugin_config(Config)
 
 _BJ_TZ = timezone(timedelta(hours=8))
 
-# 警长平票终辩的固定时长（秒）
-_FINAL_SPEECH_TIMEOUT = 60
+# 警长平票终辩的固定时长（秒），与 AI 驱动共用 config 常量
+_FINAL_SPEECH_TIMEOUT = SHERIFF_FINAL_SPEECH_SECONDS
+
+# 违规禁言时长（秒）：踢出/猎人违规/警长违规/发言违规等统一使用
+_MUTE_BAN_SECONDS = 1800
 
 # 夜间心跳播报文案：轮换使用。不得包含角色 / 座位 / 阶段信息——
 # 夜间子阶段可能被跳过（如女巫双药已用），任何"缺席的播报"
@@ -221,7 +224,7 @@ async def _unban_all_players(game: Game) -> None:
         await _unban(game, p.user_id)
     for p in game.players:
         if not p.alive:
-            await _ban(game, p.user_id, 1800)
+            await _ban(game, p.user_id, _MUTE_BAN_SECONDS)
 
 
 async def _ban_living_except(
@@ -231,7 +234,7 @@ async def _ban_living_except(
     """禁言所有存活玩家（可排除一人），用于决策窗口控场。"""
     for p in game.alive_players():
         if p.user_id != except_user_id:
-            await _ban(game, p.user_id, 1800)
+            await _ban(game, p.user_id, _MUTE_BAN_SECONDS)
 
 
 async def _unban_living(game: Game) -> None:
@@ -798,7 +801,7 @@ async def _last_words(game: Game, cfg: Config, player: PlayerState) -> None:
                 break
     finally:
         game.current_speaker = None
-    await _ban(game, player.user_id, 1800)
+    await _ban(game, player.user_id, _MUTE_BAN_SECONDS)
 
 
 async def _hunter_prompt(
@@ -831,15 +834,15 @@ async def _hunter_prompt(
             if action.kind is ActionKind.SHOOT:
                 target = game.player_by_seat(action.value or -1)
                 if target is not None and target.alive:
-                    await _ban(game, hunter.user_id, 1800)
+                    await _ban(game, hunter.user_id, _MUTE_BAN_SECONDS)
                     return target.seat
                 await _announce(game, "开枪目标无效，请重新发送 /开枪 N")
             elif action.kind in (ActionKind.NO_SHOOT, ActionKind.SKIP):
                 # 无效目标与超时都有反馈，显式放弃也补一条确认
                 await _dm(game, hunter, "收到，你选择不开枪，猎枪已压下。")
-                await _ban(game, hunter.user_id, 1800)
+                await _ban(game, hunter.user_id, _MUTE_BAN_SECONDS)
                 return None
-        await _ban(game, hunter.user_id, 1800)
+        await _ban(game, hunter.user_id, _MUTE_BAN_SECONDS)
         return None
     finally:
         await _unban_living(game)
@@ -1000,7 +1003,7 @@ async def _badge_transfer(
             game,
             f"{sheriff.seat}号 超时未移交警徽，警徽随之失效，本局不再有警长",
         )
-    await _ban(game, sheriff.user_id, 1800)
+    await _ban(game, sheriff.user_id, _MUTE_BAN_SECONDS)
 
 
 # ── 发言与投票 ────────────────────────────────────────────
@@ -1111,7 +1114,7 @@ async def _speech_rotation(  # noqa: C901,PLR0912,PLR0913,PLR0915
                 await _announce(game, f"{speaker.seat}号 超时未发言")
         finally:
             game.current_speaker = None
-        await _ban(game, speaker.user_id, 1800)
+        await _ban(game, speaker.user_id, _MUTE_BAN_SECONDS)
     await _unban_all_players(game)
 
 
