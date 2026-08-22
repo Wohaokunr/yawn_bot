@@ -80,7 +80,7 @@ async def overview() -> dict[str, Any]:
     from .. import get_sub_plugin_load_report
 
     report = get_sub_plugin_load_report()
-    wanted = {"群聊 Agent", "狼人杀", "跑团"}
+    wanted = {"群聊 Agent", "狼人杀", "跑团", "番茄小说"}
     plugins = [
         {"name": "Core", "state": "loaded", "detail": None},
         *[
@@ -421,6 +421,9 @@ def serialize_agent_config(
         "enabled": row.enabled,
         "triggerMode": row.trigger_mode,
         "proactiveProbability": row.proactive_probability,
+        "proactiveActiveEnabled": row.proactive_active_enabled,
+        "proactiveActiveProbability": row.proactive_active_probability,
+        "proactiveActiveWindowMinutes": row.proactive_active_window_minutes,
         "idleThresholdMinutes": row.idle_threshold_minutes,
         "cooldownMinutes": row.cooldown_minutes,
         "dailyLimit": row.daily_limit,

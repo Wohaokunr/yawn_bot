@@ -35,6 +35,10 @@ class GroupAgentConfig(Model):
     proactive_probability: Mapped[float] = mapped_column(Float, default=0.15)
     idle_threshold_minutes: Mapped[int] = mapped_column(Integer, default=30)
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=20)
+    # 热闹插话：话题间隙内像真人群友一样插嘴，与冷场暖场分开配置。
+    proactive_active_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    proactive_active_probability: Mapped[float] = mapped_column(Float, default=0.08)
+    proactive_active_window_minutes: Mapped[int] = mapped_column(Integer, default=8)
     daily_limit: Mapped[int] = mapped_column(Integer, default=12)
     raw_retention_days: Mapped[int] = mapped_column(Integer, default=7)
     cross_group_visibility: Mapped[str] = mapped_column(

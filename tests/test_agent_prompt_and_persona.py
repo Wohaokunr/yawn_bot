@@ -1,4 +1,4 @@
-# ruff: noqa: TC002
+# ruff: noqa: TC001,TC002
 from __future__ import annotations
 
 import sys
@@ -215,3 +215,207 @@ def test_prompt_cache_key_includes_model_and_persona_version() -> None:
     ) != prompt_cache_key(
         persona={"name": "Yawn"}, tools=tools, model="ordinary", persona_version=1
     )
+
+
+class _FixedRoll:
+    """可控概率骰子：should_proactively_speak 接受 random.Random 鸭子类型。"""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def random(self) -> float:
+        return self.value
+
+
+def _make_proactive_config(**overrides: object):
+    from types import SimpleNamespace
+    from typing import cast
+
+    from src.plugins.yawn_core.data_models.group_agent_config import GroupAgentConfig
+
+    values: dict[str, object] = {
+        "group_id": 1,
+        "enabled": True,
+        "daily_limit": 12,
+        "cooldown_minutes": 20,
+        "idle_threshold_minutes": 30,
+        "proactive_probability": 0.15,
+        "proactive_active_enabled": True,
+        "proactive_active_probability": 0.08,
+        "proactive_active_window_minutes": 8,
+    }
+    values.update(overrides)
+    return cast("GroupAgentConfig", SimpleNamespace(**values))
+
+
+def test_proactive_active_mode_triggers_on_topic_gap() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    make_config = _make_proactive_config
+    now = now_beijing()
+    snapshot = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=3),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=5,
+        last_member_message_at=now - timedelta(minutes=3),
+    )
+    assert (
+        should_proactively_speak(make_config(), snapshot, now, rng=_FixedRoll(0.0))
+        == "active"
+    )
+
+
+def test_proactive_active_mode_rejects_rushing_and_stale_gap() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    make_config = _make_proactive_config
+    now = now_beijing()
+
+    def snapshot(member_idle_minutes: float):
+        return ActivitySnapshot(
+            last_message_at=now - timedelta(minutes=member_idle_minutes),
+            last_agent_at=now - timedelta(minutes=40),
+            member_messages_60m=5,
+            last_member_message_at=now - timedelta(minutes=member_idle_minutes),
+        )
+
+    # 真人消息刚发 1 分钟：话题还在进行中，抢话不像真人。
+    assert (
+        should_proactively_speak(make_config(), snapshot(1), now, rng=_FixedRoll(0.0))
+        is None
+    )
+    # 真人消息 20 分钟前：话题间隙已过，也达不到暖场阈值。
+    assert (
+        should_proactively_speak(make_config(), snapshot(20), now, rng=_FixedRoll(0.0))
+        is None
+    )
+    # 窗口内有真人消息但 60 分钟总量不足：群里并没有在聊。
+    quiet = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=3),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=2,
+        last_member_message_at=now - timedelta(minutes=3),
+    )
+    assert (
+        should_proactively_speak(make_config(), quiet, now, rng=_FixedRoll(0.0)) is None
+    )
+    # 插话开关关闭后只剩暖场路径。
+    assert (
+        should_proactively_speak(
+            make_config(proactive_active_enabled=False),
+            snapshot(3),
+            now,
+            rng=_FixedRoll(0.0),
+        )
+        is None
+    )
+
+
+def test_proactive_warmup_mode_triggers_after_idle_threshold() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    make_config = _make_proactive_config
+    now = now_beijing()
+    snapshot = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=40),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=2,
+        last_member_message_at=now - timedelta(minutes=40),
+    )
+    assert (
+        should_proactively_speak(make_config(), snapshot, now, rng=_FixedRoll(0.0))
+        == "warmup"
+    )
+    # 概率骰子未中时同样场景不触发。
+    assert (
+        should_proactively_speak(make_config(), snapshot, now, rng=_FixedRoll(0.99))
+        is None
+    )
+
+
+def test_proactive_rejects_cooldown_and_daily_limit() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    make_config = _make_proactive_config
+    now = now_beijing()
+    cooling = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=40),
+        last_agent_at=now - timedelta(minutes=5),
+    )
+    assert (
+        should_proactively_speak(make_config(), cooling, now, rng=_FixedRoll(0.0))
+        is None
+    )
+    exhausted = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=40),
+        last_agent_at=now - timedelta(minutes=40),
+        proactive_today=12,
+    )
+    assert (
+        should_proactively_speak(make_config(), exhausted, now, rng=_FixedRoll(0.0))
+        is None
+    )
+
+
+def test_complete_with_tools_omits_empty_tools_param() -> None:
+    """空 tools 列表不得透传：OpenAI 兼容端点对空数组直接 400。"""
+
+    _load_agent_modules()
+    import asyncio
+    from types import SimpleNamespace
+
+    import src.plugins.yawn_core.llm as llm_module
+
+    class FakeCompletions:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def create(self, **kwargs: object):
+            self.calls.append(kwargs)
+            message = SimpleNamespace(content="ok", tool_calls=None)
+            choice = SimpleNamespace(message=message, finish_reason="stop")
+            return SimpleNamespace(choices=[choice])
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    original = llm_module.get_client
+    llm_module.get_client = lambda: fake_client
+    try:
+        empty = asyncio.run(
+            llm_module.complete_with_tools(
+                [{"role": "user", "content": "hi"}],
+                [],
+                model="fake",
+                role="test_proactive",
+            )
+        )
+        assert empty is not None
+        assert "tools" not in fake_client.chat.completions.calls[0]
+
+        tools = [{"type": "function", "function": {"name": "t"}}]
+        asyncio.run(
+            llm_module.complete_with_tools(
+                [{"role": "user", "content": "hi"}],
+                tools,
+                model="fake",
+                role="test_proactive",
+            )
+        )
+        assert fake_client.chat.completions.calls[1]["tools"] == tools
+    finally:
+        llm_module.get_client = original

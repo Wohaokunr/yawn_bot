@@ -47,6 +47,9 @@ export interface AgentConfig {
   enabled: boolean;
   triggerMode: string;
   proactiveProbability: number;
+  proactiveActiveEnabled: boolean;
+  proactiveActiveProbability: number;
+  proactiveActiveWindowMinutes: number;
   idleThresholdMinutes: number;
   cooldownMinutes: number;
   dailyLimit: number;
@@ -268,5 +271,84 @@ export interface RpgHistoryGame {
   terminationReason: string | null;
   status: "running" | "finished";
   players: RpgHistoryPlayer[];
+}
+
+// ── 番茄小说(字段口径见后端 webui/fanqie.py) ──
+
+export interface FanqieStatus {
+  available: boolean;
+  limits: {
+    maxChapters: number;
+    userActiveMax: number;
+    groupActiveMax: number;
+    queueMax: number;
+    searchLimit: number;
+    rankLimit: number;
+    fileRetentionHours: number;
+  } | null;
+  active: { queued: number; running: number } | null;
+}
+
+export interface FanqieBookSummary {
+  bookId: string;
+  title: string;
+  author: string;
+  description: string;
+  url: string;
+  rank: number | null;
+  readCount: number | null;
+  wordCount: number | null;
+}
+
+export interface FanqieChapterRef {
+  index: number;
+  itemId: string;
+  title: string;
+  isLocked: boolean;
+}
+
+export interface FanqieRankCategoryGroup {
+  gender: string;
+  categories: { categoryId: string; name: string }[];
+}
+
+export type FanqieJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export interface FanqieJob {
+  id: number;
+  bookId: string | null;
+  title: string | null;
+  author: string | null;
+  requesterUserId: string;
+  groupId: string | null;
+  groupName: string | null;
+  startChapter: number;
+  endChapter: number;
+  totalChapters: number;
+  completedChapters: number;
+  status: FanqieJobStatus;
+  cancelRequested: boolean;
+  outputName: string | null;
+  sendStatus: string;
+  lastError: string | null;
+  sendError: string | null;
+  createdAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface FanqieJobChapter {
+  chapterIndex: number;
+  itemId: string;
+  title: string;
+  isLocked: boolean;
+  status: string;
+  lastError: string | null;
+  completedAt: string | null;
+}
+
+export interface FanqieJobDetail {
+  job: FanqieJob;
+  chapters: FanqieJobChapter[];
 }
 

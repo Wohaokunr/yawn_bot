@@ -268,7 +268,9 @@ async def complete_with_tools(
                     llm_client.chat.completions.create(
                         model=model or get_agent_model(role),
                         messages=messages,
-                        tools=tools,
+                        # OpenAI 官方及多数兼容端点对空 tools 数组直接 400；
+                        # 无工具场景（如主动发言）不传该参数。
+                        **({"tools": tools} if tools else {}),
                         stream=False,
                         max_tokens=(
                             max_tokens
