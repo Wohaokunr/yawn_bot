@@ -34,6 +34,12 @@ uv run nb orm downgrade -1                # roll back one step
 
 Notes: `nb orm revision` generates into a temp dir first and only syncs back to `data/` on `upgrade`; detecting `server_default` removals requires `ALEMBIC_CONTEXT={"compare_server_default": true}` in `.env` (already set).
 
+Warnings (learned from the a0445ad1df97 incident, 2026-08):
+
+- With multiple branch heads, `nb orm revision --autogenerate` picks the base head **without regard to which branch owns the changed tables** — yawn_core model changes once got chained onto the main/RPG branch, producing a migration that altered `yawn_core_*` tables before their prerequisites existed and broke fresh installs. After any autogen, verify the new revision's `down_revision` is on the branch that owns the touched tables; otherwise hand-write the migration into `data/nonebot_plugin_orm/migrations/yawn_core/` with `down_revision` set to that branch's head.
+- `migrations/versions/` at the repo root is the ORM's default primary version location. Every `nb orm` command builds its script directory in a temp dir by merging `data/nonebot_plugin_orm/migrations/`, each plugin's `src/**/migrations/`, and `migrations/versions/` — so deleting a migration requires removing it from **every** location, or the next command resurrects it.
+- **`upgrade`/`downgrade`/`stamp`/`sync` delete migration files on completion** (learned from a 2026-08-22 incident): internally `_move_run_scripts` rmtrees `data/nonebot_plugin_orm/migrations/` and copies back only files reachable as ancestors of the command's *destination* revisions. Any destination that doesn't cover all branches therefore **silently deletes the uncovered branches' migration files** (e.g. `stamp <main> <yawn_core>` wiped the entire werewolf and fanqie chains). Prefer full-coverage destinations like `heads`; if a partial destination is unavoidable, back up `data/nonebot_plugin_orm/migrations/` first. `current`/`check`/`heads`/`history` are read-only and never delete files.
+
 ## Architecture
 
 ### Plugin loading

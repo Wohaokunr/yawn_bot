@@ -78,7 +78,7 @@ async def track_user(  # noqa: C901, PLR0915
                     info = await get_bot().call_api("get_group_info", group_id=group_id)
                     bot_group.group_name = info.get("group_name")
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug(f"获取群 {group_id} 名称失败", exc_info=True)
 
         user_group = await session.get(UserGroup, (group_id, user_id))
         if user_group is None:

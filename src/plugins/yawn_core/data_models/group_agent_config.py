@@ -3,12 +3,12 @@ from typing import Optional
 
 from nonebot_plugin_orm import Model
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Float,
     ForeignKey,
     Integer,
-    JSON,
     String,
     Text,
     func,
@@ -47,16 +47,27 @@ class GroupAgentConfig(Model):
     proactive_count: Mapped[int] = mapped_column(Integer, default=0)
     active_topic: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     emotion_state: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    last_response_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    last_response_input_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_response_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    last_response_input_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
     last_response_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    recent_response_fingerprints: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    recent_response_fingerprints: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list
+    )
     context_epoch: Mapped[int] = mapped_column(Integer, default=0)
-    last_compacted_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_compacted_message_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
     tool_day: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     admin_tool_count: Mapped[int] = mapped_column(Integer, default=0)
     admin_tool_daily_limit: Mapped[int] = mapped_column(Integer, default=30)
-    tool_allowlist: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 默认值为全量管理工具；空列表语义为全部禁用。
+    tool_allowlist: Mapped[list[str]] = mapped_column(
+        JSON, default=lambda: ["mute_member", "create_group_announcement"]
+    )
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.current_timestamp(), onupdate=func.current_timestamp()
     )

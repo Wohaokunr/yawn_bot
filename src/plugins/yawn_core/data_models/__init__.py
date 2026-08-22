@@ -16,6 +16,7 @@ from . import (
     scheduled_reminder,
     user_feature,
     user_group,
+    web_admin_audit,
 )
 
 __all__ = [
@@ -36,8 +37,5 @@ __all__ = [
     "scheduled_reminder",
     "user_feature",
     "user_group",
+    "web_admin_audit",
 ]
-
-
-
-

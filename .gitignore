@@ -159,3 +159,12 @@ dmypy.json
 /data/nonebot_plugin_orm/*
 !/data/nonebot_plugin_orm/migrations/
 !/data/nonebot_plugin_orm/migrations/**
+
+# React WebUI dependencies are local; the built dist is intentionally tracked.
+/webui/node_modules/
+/webui/.vite/
+/webui/*.tsbuildinfo
+
+# Generated Python bytecode is never versioned, including under tracked migrations.
+**/__pycache__/
+*.pyc

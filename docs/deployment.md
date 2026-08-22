@@ -48,7 +48,26 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 `AI_API_KEY` 可选。需要私聊 AI 对话或正常的狼人杀 AI 时才应配置。无 key 的 RPG
 部署建议设置 `RPG_AI_ENABLED=false`，以明确启用确定性模式。
 
-### 3.1 运行指标
+### 3.1 Core / Agent 管理 WebUI
+
+WebUI 与 Bot 共用同一个 FastAPI 进程，默认关闭。需要管理台时：
+
+1. 在 `webui/` 执行 `npm ci` 和 `npm run build`，确认生成 `webui/dist/`。
+2. 设置 `WEBUI_ENABLED=true` 和随机生成的 `WEBUI_ADMIN_TOKEN`（至少 32 个字符）。
+3. 反向代理 HTTPS 时设置 `WEBUI_COOKIE_SECURE=true`；管理页面地址为
+   `https://HOST:PORT/webui`，API 前缀为 `/webui/api/v1`。
+   公网部署必须先终止 TLS（反向代理终止即可）：明文 HTTP 链路上未置
+   `Secure` 的会话 Cookie 可能被截取。`WEBUI_COOKIE_SECURE=false` 仅限
+   回环/内网调试。
+4. 首次启用包含 WebUI 审计表的新版本时，备份 SQLite/WAL/SHM 后由维护者执行
+   `uv run nb orm upgrade heads`。
+
+WebUI 只使用单运维 Token，不接管 QQ 登录或 OneBot Token。会话使用 HttpOnly、
+SameSite 严格 Cookie 和 CSRF Header；管理台不展示 Agent 原始群消息正文。WebSocket
+只推送概览快照和数据变更通知，不推送群聊内容。当前仍是单进程部署，不能让多个实例
+同时写入同一局或共用一个 WebSocket 广播状态。
+
+### 3.2 运行指标
 
 P1-6 提供进程内运行指标，不需要额外环境变量、监控 SDK 或数据库迁移。运维适配器
 可调用 `yawn_core.metrics.snapshot_metrics()` 获取 JSON 快照，或调用

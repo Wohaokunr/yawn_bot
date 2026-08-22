@@ -25,7 +25,7 @@ from nonebot import get_plugin_config, logger
 from ..llm import complete  # noqa: TID252
 from ..metrics import record_ai_degradation  # noqa: TID252
 from . import api
-from .config import Config
+from .config import SHERIFF_FINAL_SPEECH_SECONDS, Config
 from .dsl import parse_dm_action
 from .roles import BOARDS, Faction, Role, build_role_card
 from .state import (
@@ -91,8 +91,8 @@ _SPEECH_LINGER = 3.0
 # 模型调用只占用阶段窗口的九成，为驱动唤醒、行动入队和
 # 引擎收尾留出余量，避免 AI 回复刚好落在下一阶段。
 _PHASE_WINDOW_RATIO = 0.9
-# 警长平票终辩由引擎使用固定 60 秒发言窗口。
-_SHERIFF_FINAL_SPEECH_WINDOW = 60.0
+# 警长平票终辩由引擎使用固定发言窗口，常量与引擎共用。
+_SHERIFF_FINAL_SPEECH_WINDOW = float(SHERIFF_FINAL_SPEECH_SECONDS)
 
 _PHASE_DESC: dict[Phase, str] = {
     Phase.NIGHT_HALFBLOOD: "夜晚-混血儿认主",

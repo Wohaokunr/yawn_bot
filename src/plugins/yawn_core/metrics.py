@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
+from nonebot import logger
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -164,6 +166,7 @@ def increment_counter(
         with _lock:
             _increment_locked(metric_name, normalized, value)
     except Exception:  # noqa: BLE001
+        logger.debug(f"指标计数更新失败，已忽略: {name}", exc_info=True)
         return
 
 
@@ -182,6 +185,7 @@ def observe_histogram(
             return
         numeric_value = float(value)
     except Exception:  # noqa: BLE001
+        logger.debug(f"指标观测值解析失败，已忽略: {name}", exc_info=True)
         return
     try:
         with _lock:
@@ -189,6 +193,7 @@ def observe_histogram(
             histogram = series.setdefault(normalized, _Histogram())
             histogram.observe(numeric_value)
     except Exception:  # noqa: BLE001
+        logger.debug(f"指标观测值记录失败，已忽略: {name}", exc_info=True)
         return
 
 
@@ -424,8 +429,7 @@ def _format_labels(labels: Mapping[str, object]) -> str:
     if not labels:
         return ""
     parts = [
-        f'{key}="{_escape_label(str(value))}"'
-        for key, value in sorted(labels.items())
+        f'{key}="{_escape_label(str(value))}"' for key, value in sorted(labels.items())
     ]
     return "{" + ",".join(parts) + "}"
 
@@ -450,9 +454,7 @@ def render_prometheus() -> str:
             )
             declared.add((name, "counter"))
         labels = cast("dict[str, str]", item["labels"])
-        lines.append(
-            f"{name}{_format_labels(labels)} {_format_number(item['value'])}"
-        )
+        lines.append(f"{name}{_format_labels(labels)} {_format_number(item['value'])}")
 
     for item in histograms:
         name = str(item["name"])
@@ -470,16 +472,14 @@ def render_prometheus() -> str:
             bucket_labels = dict(labels)
             bucket_labels["le"] = bound
             lines.append(
-                f"{name}_bucket{_format_labels(bucket_labels)} "
-                f"{_format_number(count)}"
+                f"{name}_bucket{_format_labels(bucket_labels)} {_format_number(count)}"
             )
         lines.append(
             f"{name}_sum{_format_labels(labels)} "
             f"{_format_number(cast('float', item['sum']))}"
         )
         lines.append(
-            f"{name}_count{_format_labels(labels)} "
-            f"{_format_number(item['count'])}"
+            f"{name}_count{_format_labels(labels)} {_format_number(item['count'])}"
         )
     return "\n".join(lines) + ("\n" if lines else "")
 

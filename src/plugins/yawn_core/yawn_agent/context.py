@@ -7,6 +7,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+_CST = timezone(timedelta(hours=8))
+
+
+def now_beijing() -> datetime:
+    """北京时间 naive；与 yawn_core 其余模块的时间约定保持一致。"""
+
+    return datetime.now(_CST).replace(tzinfo=None)
+
 
 @dataclass(frozen=True, slots=True)
 class ActivitySnapshot:
@@ -57,7 +65,7 @@ def build_context(
     # Persona belongs to the stable prompt prefix.  Keeping it out of the
     # dynamic JSON prevents a group message from invalidating the cacheable
     # prefix and avoids sending the same policy twice.
-    now = datetime.now(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
+    now = now_beijing().replace(second=0, microsecond=0)
     coldness = coldness_score(activity, now)
     stable_members = sorted(
         [
@@ -109,4 +117,10 @@ def build_context(
     }
 
 
-__all__ = ["ActivitySnapshot", "build_context", "coldness_score", "is_cooldown_active"]
+__all__ = [
+    "ActivitySnapshot",
+    "build_context",
+    "coldness_score",
+    "is_cooldown_active",
+    "now_beijing",
+]

@@ -1,6 +1,6 @@
 """权限核心模块：功能注册表、权限解析链、Depends 依赖工厂。"""
 
-from typing import Optional
+from typing import Optional, Union
 
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, MessageSegment
@@ -9,10 +9,14 @@ from nonebot.matcher import Matcher
 from nonebot.params import Depends
 from nonebot.permission import SUPERUSER
 from nonebot_plugin_orm import async_scoped_session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .data_models.global_user_feature import GlobalUserFeature
 from .data_models.group_feature import GroupFeature
 from .data_models.user_feature import UserFeature
+
+# handler 的 DI 注入 scoped session 与后台任务 get_session() 的普通会话皆收
+_DbSession = Union[AsyncSession, async_scoped_session]
 
 __all__ = [
     "FEATURE_REGISTRY",
@@ -78,7 +82,7 @@ async def check_feature_permission(
     user_id: int,
     group_id: Optional[int],
     feature: str,
-    session: async_scoped_session,
+    session: _DbSession,
 ) -> bool:
     """检查用户是否有权使用指定功能。
 

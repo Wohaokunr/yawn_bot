@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from nonebot import get_plugin_config
 from pydantic import BaseModel, Field
 
+from .log import dbg
+
 if TYPE_CHECKING:
     from ..data_models.group_agent_config import GroupAgentConfig
 
@@ -51,8 +53,7 @@ defaults = get_plugin_config(AgentPersonaDefaults)
 
 def _default_dict() -> dict[str, str]:
     return {
-        key: str(getattr(defaults, f"agent_persona_{key}"))
-        for key in PERSONA_FIELDS
+        key: str(getattr(defaults, f"agent_persona_{key}")) for key in PERSONA_FIELDS
     }
 
 
@@ -67,13 +68,13 @@ def resolve_persona(config: GroupAgentConfig | None) -> dict[str, str]:
     if config is None:
         return result
     legacy = _clean_value(config.persona)
-    if legacy and legacy != "友好、自然、简洁的群友" and not config.persona_override:
+    # 与配置的全局默认值比较，避免环境变量覆盖默认人设后误判旧数据。
+    default_identity = _clean_value(defaults.agent_persona_identity)
+    if legacy and legacy != default_identity and not config.persona_override:
         result["speech_style"] = legacy
     if config.persona_enabled:
         override = (
-            config.persona_override
-            if isinstance(config.persona_override, dict)
-            else {}
+            config.persona_override if isinstance(config.persona_override, dict) else {}
         )
         for raw_key, value in override.items():
             key = PERSONA_ALIASES.get(str(raw_key), str(raw_key))
@@ -81,6 +82,11 @@ def resolve_persona(config: GroupAgentConfig | None) -> dict[str, str]:
                 cleaned = _clean_value(value)
                 if cleaned:
                     result[key] = cleaned
+    dbg(
+        f"人设解析完成: group={getattr(config, 'group_id', None)} "
+        f"persona_enabled={config.persona_enabled} "
+        f"persona_version={config.persona_version} persona={result}"
+    )
     return result
 
 

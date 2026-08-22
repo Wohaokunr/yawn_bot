@@ -73,6 +73,7 @@ async def _ensure_group_record(
         session.add(BotGroup(group_id=group_id))
         await session.flush()
 
+
 __plugin_meta__ = PluginMetadata(
     name="管理面板",
     description="个人面板与群管理面板",
@@ -174,9 +175,7 @@ global_group_feature_cmd = on_command(
 global_user_feature_cmd = on_command(
     "全局用户功能", permission=SUPERUSER, priority=2, block=True
 )
-perm_query_cmd = on_command(
-    "权限查询", permission=SUPERUSER, priority=2, block=True
-)
+perm_query_cmd = on_command("权限查询", permission=SUPERUSER, priority=2, block=True)
 admin_chat_view_cmd = on_command(
     "查看用户对话", permission=SUPERUSER, priority=2, block=True
 )
@@ -209,9 +208,7 @@ async def _get_user_role_in_group(
         )
         return info.get("role", "member")
     except Exception:  # noqa: BLE001
-        logger.warning(
-            f"获取用户 {user_id} 在群 {group_id} 的角色失败"
-        )
+        logger.warning(f"获取用户 {user_id} 在群 {group_id} 的角色失败")
         return "member"
 
 
@@ -261,52 +258,34 @@ async def _build_group_personal_panel(
     group_name: Optional[str],
 ) -> str:
     """构建群聊个人面板文本。"""
-    lines: list[str] = [
-        f"═══ 个人面板 · {group_name or '未知群聊'} ═══"
-    ]
+    lines: list[str] = [f"═══ 个人面板 · {group_name or '未知群聊'} ═══"]
 
     bot_user = await session.get(BotUser, user_id)
     if bot_user:
         lines.append(f"昵称: {bot_user.nickname or '未知'}")
         lines.append(f"好感度: {bot_user.affinity}")
 
-    ug = await session.get(
-        UserGroup, (group_id, user_id)
-    )
+    ug = await session.get(UserGroup, (group_id, user_id))
     if ug:
         lines.append(
-            f"群好感度: {ug.group_affinity} | "
-            f"经验: {ug.exp} | 金币: {ug.coins}"
+            f"群好感度: {ug.group_affinity} | 经验: {ug.exp} | 金币: {ug.coins}"
         )
-        lines.append(
-            f"首次发言: {_fmt_time(ug.first_seen_at)}"
-        )
-        lines.append(
-            f"最后发言: {_fmt_time(ug.last_seen_at)}"
-        )
+        lines.append(f"首次发言: {_fmt_time(ug.first_seen_at)}")
+        lines.append(f"最后发言: {_fmt_time(ug.last_seen_at)}")
 
     # 签到数据
-    cu = await session.get(
-        CheckinUser, (group_id, user_id)
-    )
+    cu = await session.get(CheckinUser, (group_id, user_id))
     if cu:
         lines.append(
-            f"签到: 累计{cu.total_days}天 | "
-            f"连续{cu.streak_days}天 | 积分{cu.points}"
+            f"签到: 累计{cu.total_days}天 | 连续{cu.streak_days}天 | 积分{cu.points}"
         )
 
     # 功能状态
-    statuses = await get_user_feature_status(
-        user_id, group_id, session
-    )
+    statuses = await get_user_feature_status(user_id, group_id, session)
     lines.append("─── 功能状态 ───")
-    for i, (_key, display, enabled, source) in enumerate(
-        statuses, 1
-    ):
+    for i, (_key, display, enabled, source) in enumerate(statuses, 1):
         icon = "✓" if enabled else "✗"
-        lines.append(
-            f"  {i}. {icon} {display}（{source}）"
-        )
+        lines.append(f"  {i}. {icon} {display}（{source}）")
 
     lines.append("──────────────")
     lines.append("输入「功能 <序号>」查看详情")
@@ -323,18 +302,10 @@ async def _build_private_main_panel(
 
     bot_user = await session.get(BotUser, user_id)
     if bot_user:
-        lines.append(
-            f"昵称: {bot_user.nickname or '未知'}"
-        )
+        lines.append(f"昵称: {bot_user.nickname or '未知'}")
         lines.append(f"全局好感度: {bot_user.affinity}")
-        lines.append(
-            f"首次互动: "
-            f"{_fmt_time(bot_user.first_interaction_at)}"
-        )
-        lines.append(
-            f"最后活跃: "
-            f"{_fmt_time(bot_user.last_interaction_at)}"
-        )
+        lines.append(f"首次互动: {_fmt_time(bot_user.first_interaction_at)}")
+        lines.append(f"最后活跃: {_fmt_time(bot_user.last_interaction_at)}")
 
     # 签到汇总
     total_days = await session.scalar(
@@ -349,20 +320,17 @@ async def _build_private_main_panel(
     )
     if total_days or total_points:
         lines.append("─── 签到汇总 ───")
-        lines.append(
-            f"  总签到天数: {total_days} | "
-            f"总积分: {total_points}"
-        )
+        lines.append(f"  总签到天数: {total_days} | 总积分: {total_points}")
 
     # 群聊数量
     group_count = await session.scalar(
-        select(func.count()).select_from(UserGroup).where(
-            UserGroup.user_id == user_id
-        )
+        select(func.count()).select_from(UserGroup).where(UserGroup.user_id == user_id)
     )
     # 对话数量
     chat_count = await session.scalar(
-        select(func.count()).select_from(ChatSession).where(
+        select(func.count())
+        .select_from(ChatSession)
+        .where(
             ChatSession.user_id == user_id,
             ChatSession.group_id == None,  # noqa: E711
             ChatSession.is_deleted == False,  # noqa: E712
@@ -385,9 +353,7 @@ def _build_group_list_text(
     for i, g in enumerate(groups, 1):
         tag = "[管理员] " if g["is_admin"] else ""
         name = g["group_name"] or "未知群聊"
-        lines.append(
-            f"{i}. {tag}{name} ({g['group_id']})"
-        )
+        lines.append(f"{i}. {tag}{name} ({g['group_id']})")
     lines.append("──────────────")
     lines.append("输入群序号查看详情 | 输入「返回」回主菜单")
     return "\n".join(lines)
@@ -404,10 +370,8 @@ def _build_group_detail_text(
         f"═══ {name} ═══",
         f"  群号: {group['group_id']}",
         f"  首次加入: {_fmt_time(group['first_seen_at'])}",
-        f"  群最后活跃: "
-        f"{_fmt_time(group['last_active_at'])}",
-        f"  我的最后发言: "
-        f"{_fmt_time(group['last_seen_at'])}",
+        f"  群最后活跃: {_fmt_time(group['last_active_at'])}",
+        f"  我的最后发言: {_fmt_time(group['last_seen_at'])}",
     ]
     if is_admin:
         lines.append("  身份: 管理员")
@@ -430,9 +394,7 @@ def _fmt_session_list(
             if s.updated_at
             else f"{s.created_at:%m-%d %H:%M}"
         )
-        lines.append(
-            f"  {i}. [{s.id}] {title} ({time_str})"
-        )
+        lines.append(f"  {i}. [{s.id}] {title} ({time_str})")
     return "\n".join(lines)
 
 
@@ -445,17 +407,11 @@ def _fmt_message_list(
     lines: list[str] = []
     for msg in messages:
         role_label = "我" if msg.role == "user" else "AI"
-        preview = (
-            msg.content[:_PREVIEW_CHAR_LIMIT]
-            .replace("\n", " ")
-        )
+        preview = msg.content[:_PREVIEW_CHAR_LIMIT].replace("\n", " ")
         if len(msg.content) > _PREVIEW_CHAR_LIMIT:
             preview += "..."
         time_str = f"{msg.created_at:%m-%d %H:%M}"
-        lines.append(
-            f"  [{msg.id}] {role_label} ({time_str}): "
-            f"{preview}"
-        )
+        lines.append(f"  [{msg.id}] {role_label} ({time_str}): {preview}")
     return "\n".join(lines)
 
 
@@ -478,8 +434,7 @@ def _build_chat_detail_text(
 ) -> str:
     """构建对话详情文本。"""
     lines = [
-        f"═══ 对话 #{target.id}："
-        f"{target.title or '未命名'} ═══",
+        f"═══ 对话 #{target.id}：{target.title or '未命名'} ═══",
         f"消息数：{len(messages)}",
         "",
         _fmt_message_list(messages),
@@ -498,19 +453,15 @@ async def _build_admin_panel(
     group_name: Optional[str],
 ) -> str:
     """构建群管理面板文本。"""
-    lines: list[str] = [
-        f"═══ 群管理 · {group_name or '未知群聊'} ═══"
-    ]
+    lines: list[str] = [f"═══ 群管理 · {group_name or '未知群聊'} ═══"]
 
     # 群基础信息
     member_count: Optional[int] = None
     try:
-        ginfo = await bot.call_api(
-            "get_group_info", group_id=group_id
-        )
+        ginfo = await bot.call_api("get_group_info", group_id=group_id)
         member_count = ginfo.get("member_count")
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug(f"获取群 {group_id} 成员数失败", exc_info=True)
 
     info_parts = [f"群号: {group_id}"]
     if member_count is not None:
@@ -518,9 +469,9 @@ async def _build_admin_panel(
     lines.append(" | ".join(info_parts))
 
     tracked = await session.scalar(
-        select(func.count()).select_from(UserGroup).where(
-            UserGroup.group_id == group_id
-        )
+        select(func.count())
+        .select_from(UserGroup)
+        .where(UserGroup.group_id == group_id)
     )
     lines.append(f"已追踪用户: {tracked or 0}")
 
@@ -529,9 +480,7 @@ async def _build_admin_panel(
 
     grp = await session.get(BotGroup, group_id)
     if grp:
-        lines.append(
-            f"群最后活跃: {_fmt_time(grp.last_active_at)}"
-        )
+        lines.append(f"群最后活跃: {_fmt_time(grp.last_active_at)}")
 
     # 功能开关列表
     lines.append("─── 功能开关 ───")
@@ -558,19 +507,11 @@ async def _build_user_feature_text(
     group_id: int,
 ) -> str:
     """构建用户功能管理子面板文本。"""
-    statuses = await get_user_feature_status(
-        target_user_id, group_id, session
-    )
-    lines = [
-        f"═══ 用户 {target_user_id} 功能管理 ═══"
-    ]
-    for i, (_key, display, enabled, source) in enumerate(
-        statuses, 1
-    ):
+    statuses = await get_user_feature_status(target_user_id, group_id, session)
+    lines = [f"═══ 用户 {target_user_id} 功能管理 ═══"]
+    for i, (_key, display, enabled, source) in enumerate(statuses, 1):
         icon = "✓" if enabled else "✗"
-        lines.append(
-            f"  {i}. {icon} {display}（{source}）"
-        )
+        lines.append(f"  {i}. {icon} {display}（{source}）")
     lines.append("──────────────")
     lines.append("输入「开启 <序号>」或「关闭 <序号>」切换")
     lines.append("输入「返回」回群管理面板")
@@ -608,9 +549,7 @@ async def handle_panel_entry(
         matcher.state["view"] = "main"
     else:
         # 私聊模式：展示全量数据 + 菜单
-        panel_text = await _build_private_main_panel(
-            session, user_id
-        )
+        panel_text = await _build_private_main_panel(session, user_id)
         matcher.state["mode"] = "private"
         matcher.state["view"] = "main"
 
@@ -647,13 +586,9 @@ async def handle_panel_choice(
     mode: str = matcher.state.get("mode", "group")
 
     if mode == "group":
-        await _handle_group_panel(
-            matcher, session, text
-        )
+        await _handle_group_panel(matcher, session, text)
     else:
-        await _handle_private_panel(
-            bot, matcher, session, text
-        )
+        await _handle_private_panel(bot, matcher, session, text)
 
 
 async def _handle_group_panel(
@@ -667,18 +602,13 @@ async def _handle_group_panel(
 
     if text.startswith("功能"):
         parts = text.split()
-        if (
-            len(parts) < _MIN_DELETE_PARTS
-            or not parts[1].isdigit()
-        ):
+        if len(parts) < _MIN_DELETE_PARTS or not parts[1].isdigit():
             await panel_cmd.reject_arg(
                 "panel_choice",
                 "格式：功能 <序号>",
             )
         idx = int(parts[1])
-        statuses = await get_user_feature_status(
-            user_id, group_id, session
-        )
+        statuses = await get_user_feature_status(user_id, group_id, session)
         if idx < 1 or idx > len(statuses):
             await panel_cmd.reject_arg(
                 "panel_choice",
@@ -694,15 +624,12 @@ async def _handle_group_panel(
             f"输入「功能 <序号>」查看详情\n"
             f"输入「取消」退出"
         )
-        await panel_cmd.reject_arg(
-            "panel_choice", detail
-        )
+        await panel_cmd.reject_arg("panel_choice", detail)
 
     # 无效输入
     await panel_cmd.reject_arg(
         "panel_choice",
-        "输入「功能 <序号>」查看详情，"
-        "或「取消」退出",
+        "输入「功能 <序号>」查看详情，或「取消」退出",
     )
 
 
@@ -716,29 +643,17 @@ async def _handle_private_panel(
     view: str = matcher.state.get("view", "main")
 
     if view == "main":
-        await _private_view_main(
-            bot, matcher, session, text
-        )
+        await _private_view_main(bot, matcher, session, text)
     elif view == "groups":
-        await _private_view_groups(
-            matcher, session, text
-        )
+        await _private_view_groups(matcher, session, text)
     elif view == "group_detail":
-        await _private_view_group_detail(
-            matcher, text
-        )
+        await _private_view_group_detail(matcher, text)
     elif view == "chat_list":
-        await _private_view_chat_list(
-            matcher, session, text
-        )
+        await _private_view_chat_list(matcher, session, text)
     elif view == "chat_detail":
-        await _private_view_chat_detail(
-            matcher, session, text
-        )
+        await _private_view_chat_detail(matcher, session, text)
     else:
-        await panel_cmd.reject_arg(
-            "panel_choice", "未知视图，请输入「取消」退出"
-        )
+        await panel_cmd.reject_arg("panel_choice", "未知视图，请输入「取消」退出")
 
 
 async def _private_view_main(
@@ -764,16 +679,13 @@ async def _private_view_main(
         if not user_groups:
             await panel_cmd.reject_arg(
                 "panel_choice",
-                "你还没有和我共同存在的群聊哦~\n"
-                "输入「取消」退出",
+                "你还没有和我共同存在的群聊哦~\n输入「取消」退出",
             )
 
         groups: list[dict] = []
         for ug in user_groups:
             grp: "BotGroup" = ug.group
-            role = await _get_user_role_in_group(
-                bot, grp.group_id, user_id
-            )
+            role = await _get_user_role_in_group(bot, grp.group_id, user_id)
             groups.append(
                 {
                     "group_id": grp.group_id,
@@ -794,9 +706,7 @@ async def _private_view_main(
 
     elif text == "2":
         # 进入对话管理
-        sessions = await _get_user_sessions(
-            session, user_id
-        )
+        sessions = await _get_user_sessions(session, user_id)
         matcher.state["sessions"] = sessions
         matcher.state["view"] = "chat_list"
         await panel_cmd.reject_arg(
@@ -807,8 +717,7 @@ async def _private_view_main(
     else:
         await panel_cmd.reject_arg(
             "panel_choice",
-            "请输入 1 或 2 选择功能，"
-            "或「取消」退出",
+            "请输入 1 或 2 选择功能，或「取消」退出",
         )
 
 
@@ -820,19 +729,14 @@ async def _private_view_groups(
     """群聊列表视图：选择群查看详情或返回。"""
     if text == "返回":
         user_id: int = matcher.state["user_id"]
-        panel_text = await _build_private_main_panel(
-            session, user_id
-        )
+        panel_text = await _build_private_main_panel(session, user_id)
         matcher.state["view"] = "main"
-        await panel_cmd.reject_arg(
-            "panel_choice", panel_text
-        )
+        await panel_cmd.reject_arg("panel_choice", panel_text)
 
     if not text.isdigit():
         await panel_cmd.reject_arg(
             "panel_choice",
-            "请输入有效的群序号，"
-            "或「返回」回主菜单",
+            "请输入有效的群序号，或「返回」回主菜单",
         )
 
     idx = int(text)
@@ -849,9 +753,7 @@ async def _private_view_groups(
     matcher.state["view"] = "group_detail"
     await panel_cmd.reject_arg(
         "panel_choice",
-        _build_group_detail_text(
-            selected, is_admin=selected["is_admin"]
-        ),
+        _build_group_detail_text(selected, is_admin=selected["is_admin"]),
     )
 
 
@@ -884,36 +786,24 @@ async def _private_view_chat_list(
 
     if text == "返回":
         # 重建主菜单
-        sessions = await _get_user_sessions(
-            session, user_id
-        )
+        sessions = await _get_user_sessions(session, user_id)
         matcher.state["sessions"] = sessions
         matcher.state["view"] = "main"
         panel_text = await _build_private_main_panel(
             session,
             user_id,
         )
-        await panel_cmd.reject_arg(
-            "panel_choice", panel_text
-        )
+        await panel_cmd.reject_arg("panel_choice", panel_text)
 
     # 删除对话
-    if (
-        text.startswith("删除")
-        and not text.startswith("删除消息")
-    ):
+    if text.startswith("删除") and not text.startswith("删除消息"):
         parts = text.split()
-        if (
-            len(parts) < _MIN_DELETE_PARTS
-            or not parts[1].isdigit()
-        ):
+        if len(parts) < _MIN_DELETE_PARTS or not parts[1].isdigit():
             await panel_cmd.reject_arg(
                 "panel_choice",
                 "格式：删除 <序号>\n例如：删除 1",
             )
-        sessions: list[ChatSession] = matcher.state[
-            "sessions"
-        ]
+        sessions: list[ChatSession] = matcher.state["sessions"]
         idx = int(parts[1])
         if idx < 1 or idx > len(sessions):
             await panel_cmd.reject_arg(
@@ -928,18 +818,13 @@ async def _private_view_chat_list(
         target.is_deleted = True
         await session.commit()
 
-        logger.info(
-            f"用户删除了对话 #{target_id}「{target_title}」"
-        )
+        logger.info(f"用户删除了对话 #{target_id}「{target_title}」")
         # 刷新列表
-        sessions = await _get_user_sessions(
-            session, user_id
-        )
+        sessions = await _get_user_sessions(session, user_id)
         matcher.state["sessions"] = sessions
         await panel_cmd.reject_arg(
             "panel_choice",
-            f"已删除对话「{target_title}」\n\n"
-            + _build_chat_list_text(sessions),
+            f"已删除对话「{target_title}」\n\n" + _build_chat_list_text(sessions),
         )
 
     # 进入对话详情
@@ -953,9 +838,7 @@ async def _private_view_chat_list(
             )
 
         target = sessions[idx - 1]
-        messages = await _get_session_messages(
-            session, target.id
-        )
+        messages = await _get_session_messages(session, target.id)
         matcher.state["view"] = "chat_detail"
         matcher.state["current_session"] = target
         await panel_cmd.reject_arg(
@@ -966,8 +849,7 @@ async def _private_view_chat_list(
     # 无效输入
     await panel_cmd.reject_arg(
         "panel_choice",
-        "请输入有效序号，或「删除 <序号>」，"
-        "或「返回」回主菜单",
+        "请输入有效序号，或「删除 <序号>」，或「返回」回主菜单",
     )
 
 
@@ -980,9 +862,7 @@ async def _private_view_chat_detail(
     user_id: int = matcher.state["user_id"]
 
     if text == "返回":
-        sessions = await _get_user_sessions(
-            session, user_id
-        )
+        sessions = await _get_user_sessions(session, user_id)
         matcher.state["sessions"] = sessions
         matcher.state["view"] = "chat_list"
         matcher.state.pop("current_session", None)
@@ -994,10 +874,7 @@ async def _private_view_chat_detail(
     # 删除消息
     if text.startswith("删除消息"):
         parts = text.split()
-        if (
-            len(parts) < _MIN_DELETE_PARTS
-            or not parts[1].isdigit()
-        ):
+        if len(parts) < _MIN_DELETE_PARTS or not parts[1].isdigit():
             await panel_cmd.reject_arg(
                 "panel_choice",
                 "格式：删除消息 <消息ID>",
@@ -1011,9 +888,7 @@ async def _private_view_chat_detail(
                 "未找到该消息，请检查 ID 是否正确",
             )
 
-        current: ChatSession = matcher.state[
-            "current_session"
-        ]
+        current: ChatSession = matcher.state["current_session"]
         if msg.session_id != current.id:
             await panel_cmd.reject_arg(
                 "panel_choice",
@@ -1025,13 +900,10 @@ async def _private_view_chat_detail(
         logger.info(f"用户删除了消息 #{msg_id}")
 
         # 刷新详情
-        messages = await _get_session_messages(
-            session, current.id
-        )
+        messages = await _get_session_messages(session, current.id)
         await panel_cmd.reject_arg(
             "panel_choice",
-            f"已删除消息 #{msg_id}\n\n"
-            + _build_chat_detail_text(current, messages),
+            f"已删除消息 #{msg_id}\n\n" + _build_chat_detail_text(current, messages),
         )
 
     # 无效操作
@@ -1054,9 +926,7 @@ async def handle_group_admin_entry(
 ) -> None:
     """群管理面板入口：权限检查，构建管理面板。"""
     if not isinstance(event, GroupMessageEvent):
-        await group_admin_cmd.finish(
-            "请在群聊中使用群管理功能~"
-        )
+        await group_admin_cmd.finish("请在群聊中使用群管理功能~")
 
     # 权限检查：群管/群主 或 超级用户
     superusers = get_driver().config.superusers
@@ -1064,9 +934,7 @@ async def handle_group_admin_entry(
     is_su = str(user_id) in superusers
 
     if not is_su and not is_group_admin(event):
-        await group_admin_cmd.finish(
-            "仅群主、群管理员或超级用户可使用群管理功能"
-        )
+        await group_admin_cmd.finish("仅群主、群管理员或超级用户可使用群管理功能")
 
     group_id = event.group_id
     group_name: Optional[str] = None
@@ -1080,9 +948,7 @@ async def handle_group_admin_entry(
     matcher.state["group_name"] = group_name
     matcher.state["view"] = "main"
 
-    panel_text = await _build_admin_panel(
-        session, bot, group_id, group_name
-    )
+    panel_text = await _build_admin_panel(session, bot, group_id, group_name)
     # 先发送面板内容，再进入 got 等待输入
     await group_admin_cmd.send(panel_text)
 
@@ -1113,14 +979,16 @@ async def handle_group_admin_choice(
 
     view: str = matcher.state.get("view", "main")
     group_id: int = matcher.state["group_id"]
-    group_name: Optional[str] = matcher.state.get(
-        "group_name"
-    )
+    group_name: Optional[str] = matcher.state.get("group_name")
 
     if view == "user_feature":
         await _admin_view_user_feature(
-            bot, matcher, session, text,
-            group_id, group_name,
+            bot,
+            matcher,
+            session,
+            text,
+            group_id,
+            group_name,
         )
         return
 
@@ -1129,10 +997,7 @@ async def handle_group_admin_choice(
     # 进入用户功能管理
     if text.startswith("用户"):
         parts = text.split()
-        if (
-            len(parts) < _MIN_DELETE_PARTS
-            or not parts[1].isdigit()
-        ):
+        if len(parts) < _MIN_DELETE_PARTS or not parts[1].isdigit():
             await group_admin_cmd.reject_arg(
                 "admin_choice",
                 "格式：用户 <QQ号>",
@@ -1140,27 +1005,17 @@ async def handle_group_admin_choice(
         target_uid = int(parts[1])
 
         # 确保 UserGroup 存在（FK 约束）
-        await _ensure_scope_records(
-            session, user_id=target_uid, group_id=group_id
-        )
-        ug = await session.get(
-            UserGroup, (group_id, target_uid)
-        )
+        await _ensure_scope_records(session, user_id=target_uid, group_id=group_id)
+        ug = await session.get(UserGroup, (group_id, target_uid))
         if ug is None:
-            ug = UserGroup(
-                group_id=group_id, user_id=target_uid
-            )
+            ug = UserGroup(group_id=group_id, user_id=target_uid)
             session.add(ug)
             await session.flush()
 
         matcher.state["target_user_id"] = target_uid
         matcher.state["view"] = "user_feature"
-        panel_text = await _build_user_feature_text(
-            session, target_uid, group_id
-        )
-        await group_admin_cmd.reject_arg(
-            "admin_choice", panel_text
-        )
+        panel_text = await _build_user_feature_text(session, target_uid, group_id)
+        await group_admin_cmd.reject_arg("admin_choice", panel_text)
 
     # 切换功能开关
     if text.isdigit():
@@ -1191,25 +1046,18 @@ async def handle_group_admin_choice(
 
         await session.commit()
         status_text = "开启" if new_enabled else "关闭"
-        logger.info(
-            f"群 {group_id} {status_text}了功能「{display}」"
-        )
+        logger.info(f"群 {group_id} {status_text}了功能「{display}」")
 
-        panel_text = await _build_admin_panel(
-            session, bot, group_id, group_name
-        )
+        panel_text = await _build_admin_panel(session, bot, group_id, group_name)
         await group_admin_cmd.reject_arg(
             "admin_choice",
-            f"已{status_text}功能「{display}」\n\n"
-            + panel_text,
+            f"已{status_text}功能「{display}」\n\n" + panel_text,
         )
 
     # 无效输入
     await group_admin_cmd.reject_arg(
         "admin_choice",
-        "输入功能序号切换开关，"
-        "「用户 <QQ号>」管理用户功能，"
-        "或「取消」退出",
+        "输入功能序号切换开关，「用户 <QQ号>」管理用户功能，或「取消」退出",
     )
 
 
@@ -1227,12 +1075,8 @@ async def _admin_view_user_feature(  # noqa: PLR0913, PLR0917
     if text == "返回":
         matcher.state["view"] = "main"
         matcher.state.pop("target_user_id", None)
-        panel_text = await _build_admin_panel(
-            session, bot, group_id, group_name
-        )
-        await group_admin_cmd.reject_arg(
-            "admin_choice", panel_text
-        )
+        panel_text = await _build_admin_panel(session, bot, group_id, group_name)
+        await group_admin_cmd.reject_arg("admin_choice", panel_text)
 
     # 开启/关闭 <序号>
     parts = text.split()
@@ -1252,17 +1096,11 @@ async def _admin_view_user_feature(  # noqa: PLR0913, PLR0917
 
         feat_key, display = features[idx - 1]
 
-        await _ensure_scope_records(
-            session, user_id=target_uid, group_id=group_id
-        )
+        await _ensure_scope_records(session, user_id=target_uid, group_id=group_id)
         # 确保 UserGroup 存在
-        ug = await session.get(
-            UserGroup, (group_id, target_uid)
-        )
+        ug = await session.get(UserGroup, (group_id, target_uid))
         if ug is None:
-            ug = UserGroup(
-                group_id=group_id, user_id=target_uid
-            )
+            ug = UserGroup(group_id=group_id, user_id=target_uid)
             session.add(ug)
             await session.flush()
 
@@ -1288,25 +1126,19 @@ async def _admin_view_user_feature(  # noqa: PLR0913, PLR0917
         await session.commit()
         status_text = "开启" if enabled else "关闭"
         logger.info(
-            f"群 {group_id} 为用户 {target_uid} "
-            f"{status_text}了功能「{display}」"
+            f"群 {group_id} 为用户 {target_uid} {status_text}了功能「{display}」"
         )
 
-        panel_text = await _build_user_feature_text(
-            session, target_uid, group_id
-        )
+        panel_text = await _build_user_feature_text(session, target_uid, group_id)
         await group_admin_cmd.reject_arg(
             "admin_choice",
-            f"已为用户 {target_uid} "
-            f"{status_text}功能「{display}」\n\n"
-            + panel_text,
+            f"已为用户 {target_uid} {status_text}功能「{display}」\n\n" + panel_text,
         )
 
     # 无效输入
     await group_admin_cmd.reject_arg(
         "admin_choice",
-        "输入「开启 <序号>」或「关闭 <序号>」切换，"
-        "或「返回」回群管理面板",
+        "输入「开启 <序号>」或「关闭 <序号>」切换，或「返回」回群管理面板",
     )
 
 
@@ -1322,18 +1154,13 @@ async def handle_global_group_feature(
     """超管管理任意群的功能开关。"""
     text = args.extract_plain_text().strip()
     parts = text.split()
-    if (
-        len(parts) < _MIN_GLOBAL_CMD_PARTS
-        or not parts[0].isdigit()
-    ):
+    if len(parts) < _MIN_GLOBAL_CMD_PARTS or not parts[0].isdigit():
         await global_group_feature_cmd.finish(
             "格式：/全局群功能 <群号> 开启/关闭 <功能名>"
         )
 
     group_id = int(parts[0])
-    action_enabled, feature_key = _parse_action_feature(
-        parts[1:]
-    )
+    action_enabled, feature_key = _parse_action_feature(parts[1:])
     if action_enabled is None or feature_key is None:
         await global_group_feature_cmd.finish(
             "格式：/全局群功能 <群号> 开启/关闭 <功能名>"
@@ -1358,8 +1185,7 @@ async def handle_global_group_feature(
     display = get_feature_display(feature_key)
     status_text = "开启" if action_enabled else "关闭"
     logger.info(
-        f"超级管理员 {event.user_id} 为群 {group_id} "
-        f"{status_text}了功能「{display}」"
+        f"超级管理员 {event.user_id} 为群 {group_id} {status_text}了功能「{display}」"
     )
     await global_group_feature_cmd.finish(
         f"已为群 {group_id} {status_text}功能「{display}」"
@@ -1380,10 +1206,7 @@ async def handle_global_user_feature(
     text = args.extract_plain_text().strip()
     parts = text.split()
 
-    if (
-        len(parts) < _MIN_GLOBAL_CMD_PARTS
-        or not parts[0].isdigit()
-    ):
+    if len(parts) < _MIN_GLOBAL_CMD_PARTS or not parts[0].isdigit():
         await global_user_feature_cmd.finish(
             "格式：/全局用户功能 <QQ号> <群号> "
             "开启/关闭 <功能名>\n"
@@ -1400,13 +1223,10 @@ async def handle_global_user_feature(
         group_id = int(parts[1])
         rest_parts = parts[2:]
 
-    action_enabled, feature_key = _parse_action_feature(
-        rest_parts
-    )
+    action_enabled, feature_key = _parse_action_feature(rest_parts)
     if action_enabled is None or feature_key is None:
         await global_user_feature_cmd.finish(
-            "格式：/全局用户功能 <QQ号> [群号] "
-            "开启/关闭 <功能名>"
+            "格式：/全局用户功能 <QQ号> [群号] 开启/关闭 <功能名>"
         )
 
     display = get_feature_display(feature_key)
@@ -1414,12 +1234,8 @@ async def handle_global_user_feature(
 
     if group_id is not None:
         # 群内用户级覆盖
-        await _ensure_scope_records(
-            session, user_id=target_user_id, group_id=group_id
-        )
-        ug = await session.get(
-            UserGroup, (group_id, target_user_id)
-        )
+        await _ensure_scope_records(session, user_id=target_user_id, group_id=group_id)
+        ug = await session.get(UserGroup, (group_id, target_user_id))
         if ug is None:
             ug = UserGroup(
                 group_id=group_id,
@@ -1475,8 +1291,7 @@ async def handle_global_user_feature(
         f"{status_text}了功能「{display}」"
     )
     await global_user_feature_cmd.finish(
-        f"已为用户 {target_user_id} {scope_text}"
-        f"{status_text}功能「{display}」"
+        f"已为用户 {target_user_id} {scope_text}{status_text}功能「{display}」"
     )
 
 
@@ -1490,29 +1305,19 @@ async def handle_perm_query(
     parts = text.split()
 
     if not parts or not parts[0].isdigit():
-        await perm_query_cmd.finish(
-            "格式：/权限查询 <QQ号> [群号]"
-        )
+        await perm_query_cmd.finish("格式：/权限查询 <QQ号> [群号]")
 
     target_user_id = int(parts[0])
     group_id: Optional[int] = None
     if len(parts) > 1 and parts[1].isdigit():
         group_id = int(parts[1])
 
-    statuses = await get_user_feature_status(
-        target_user_id, group_id, session
-    )
+    statuses = await get_user_feature_status(target_user_id, group_id, session)
 
     if group_id is not None:
-        header = (
-            f"═══ 用户 {target_user_id} "
-            f"在群 {group_id} 的权限 ═══"
-        )
+        header = f"═══ 用户 {target_user_id} 在群 {group_id} 的权限 ═══"
     else:
-        header = (
-            f"═══ 用户 {target_user_id} "
-            f"的全局权限（私聊）═══"
-        )
+        header = f"═══ 用户 {target_user_id} 的全局权限（私聊）═══"
 
     lines = [header]
     for _key, display, enabled, source in statuses:
@@ -1534,52 +1339,36 @@ async def handle_admin_view(
     parts = text.split()
 
     if not parts or not parts[0].isdigit():
-        await admin_chat_view_cmd.finish(
-            "格式：/查看用户对话 <QQ号> [会话ID]"
-        )
+        await admin_chat_view_cmd.finish("格式：/查看用户对话 <QQ号> [会话ID]")
 
     target_uid = int(parts[0])
 
     # 查看指定会话的消息
     if len(parts) > 1 and parts[1].isdigit():
         sess_id = int(parts[1])
-        chat_sess = await session.get(
-            ChatSession, sess_id
-        )
-        if (
-            chat_sess is None
-            or chat_sess.user_id != target_uid
-        ):
+        chat_sess = await session.get(ChatSession, sess_id)
+        if chat_sess is None or chat_sess.user_id != target_uid:
             await admin_chat_view_cmd.finish(
-                f"未找到用户 {target_uid} "
-                f"的会话 #{sess_id}"
+                f"未找到用户 {target_uid} 的会话 #{sess_id}"
             )
 
-        messages = await _get_session_messages(
-            session, sess_id
-        )
+        messages = await _get_session_messages(session, sess_id)
         lines = [
-            f"═══ 用户 {target_uid} 的对话 "
-            f"#{sess_id} ═══",
+            f"═══ 用户 {target_uid} 的对话 #{sess_id} ═══",
             f"标题：{chat_sess.title or '未命名'}",
             f"消息数：{len(messages)}",
             "",
             _fmt_message_list(messages),
         ]
-        await admin_chat_view_cmd.finish(
-            "\n".join(lines)
-        )
+        await admin_chat_view_cmd.finish("\n".join(lines))
 
     # 列出用户所有会话
-    sessions = await _get_user_sessions(
-        session, target_uid
-    )
+    sessions = await _get_user_sessions(session, target_uid)
     lines = [
         f"═══ 用户 {target_uid} 的对话列表 ═══",
         _fmt_session_list(sessions),
         "",
-        "使用 /查看用户对话 "
-        f"{target_uid} <会话ID> 查看详情",
+        f"使用 /查看用户对话 {target_uid} <会话ID> 查看详情",
     ]
     await admin_chat_view_cmd.finish("\n".join(lines))
 
@@ -1598,10 +1387,7 @@ async def handle_admin_delete(
     text = args.extract_plain_text().strip()
     parts = text.split()
 
-    if (
-        len(parts) < _MIN_ADMIN_DELETE_PARTS
-        or not parts[0].isdigit()
-    ):
+    if len(parts) < _MIN_ADMIN_DELETE_PARTS or not parts[0].isdigit():
         await admin_chat_delete_cmd.finish(
             "格式：\n"
             "  /删除用户对话 <QQ号> 会话 <会话ID>\n"
@@ -1611,29 +1397,18 @@ async def handle_admin_delete(
     target_uid = int(parts[0])
     target_type = parts[1]
     if not parts[2].isdigit():
-        await admin_chat_delete_cmd.finish(
-            "ID 必须为数字"
-        )
+        await admin_chat_delete_cmd.finish("ID 必须为数字")
     target_id = int(parts[2])
 
     if target_type == "会话":
-        chat_sess = await session.get(
-            ChatSession, target_id
-        )
-        if (
-            chat_sess is None
-            or chat_sess.user_id != target_uid
-        ):
+        chat_sess = await session.get(ChatSession, target_id)
+        if chat_sess is None or chat_sess.user_id != target_uid:
             await admin_chat_delete_cmd.finish(
-                f"未找到用户 {target_uid} 的会话 "
-                f"#{target_id}"
+                f"未找到用户 {target_uid} 的会话 #{target_id}"
             )
         chat_sess.is_deleted = True
         await session.commit()
-        logger.info(
-            f"超管删除了用户 {target_uid} 的会话 "
-            f"#{target_id}"
-        )
+        logger.info(f"超管删除了用户 {target_uid} 的会话 #{target_id}")
         await admin_chat_delete_cmd.finish(
             f"已删除用户 {target_uid} 的会话 #{target_id}"
         )
@@ -1641,34 +1416,21 @@ async def handle_admin_delete(
     elif target_type == "消息":
         msg = await session.get(ChatMessage, target_id)
         if msg is None:
+            await admin_chat_delete_cmd.finish(f"未找到消息 #{target_id}")
+        chat_sess = await session.get(ChatSession, msg.session_id)
+        if chat_sess is None or chat_sess.user_id != target_uid:
             await admin_chat_delete_cmd.finish(
-                f"未找到消息 #{target_id}"
-            )
-        chat_sess = await session.get(
-            ChatSession, msg.session_id
-        )
-        if (
-            chat_sess is None
-            or chat_sess.user_id != target_uid
-        ):
-            await admin_chat_delete_cmd.finish(
-                f"消息 #{target_id} 不属于用户 "
-                f"{target_uid}"
+                f"消息 #{target_id} 不属于用户 {target_uid}"
             )
         msg.is_deleted = True
         await session.commit()
-        logger.info(
-            f"超管删除了用户 {target_uid} 的消息 "
-            f"#{target_id}"
-        )
+        logger.info(f"超管删除了用户 {target_uid} 的消息 #{target_id}")
         await admin_chat_delete_cmd.finish(
             f"已删除用户 {target_uid} 的消息 #{target_id}"
         )
 
     else:
-        await admin_chat_delete_cmd.finish(
-            "类型必须为「会话」或「消息」"
-        )
+        await admin_chat_delete_cmd.finish("类型必须为「会话」或「消息」")
 
 
 # ── 内部工具函数 ──────────────────────────────────────────
