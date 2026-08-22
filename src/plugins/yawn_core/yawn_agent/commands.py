@@ -9,10 +9,11 @@ from nonebot.params import CommandArg
 from nonebot.plugin import on_command
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from ..permission import is_group_admin, require_feature
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy
-from ..data_models.group_agent_config import GroupAgentConfig
+from .config_store import get_or_create_config
 from .context import now_beijing
 from .log import dbg
 from .memory import delete_group_memories, delete_member_memories, list_memories
@@ -31,13 +32,17 @@ agent_persona = on_command("Agent人设", priority=5, block=True)
 agent_privacy = on_command("Agent隐私", priority=5, block=True)
 
 
-async def _get_config(session: async_scoped_session, group_id: int) -> GroupAgentConfig:
-    config = await session.get(GroupAgentConfig, group_id)
-    if config is None:
-        config = GroupAgentConfig(group_id=group_id)
-        session.add(config)
-        await session.flush()
-    return config
+async def _commit(session: async_scoped_session) -> bool:
+    """提交命令产生的状态变更；失败时回滚并提示稍后重试。"""
+
+    try:
+        await session.commit()
+    except SQLAlchemyError:
+        # SQLite busy 等瞬时错误不能上抛毒化 NoneBot 处理器。
+        logger.warning("群聊 Agent 命令状态提交失败,已回滚")
+        await session.rollback()
+        return False
+    return True
 
 
 @agent_command.handle()
@@ -56,16 +61,21 @@ async def handle_agent_command(
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /群聊Agent 拒绝: 非群管理")
         await agent_command.finish("群聊 Agent 仅限群主或管理员管理")
-    config = await _get_config(session, int(event.group_id))
+    config = await get_or_create_config(session, int(event.group_id))
+    if config is None:
+        # 并发创建竞态的输方在对方事务未提交时可能读到空。
+        await agent_command.finish("Agent 配置暂时不可用，请稍后重试")
     text = args.extract_plain_text().strip()
     if text in {"开", "开启", "on"}:
         config.enabled = True
-        await session.commit()
+        if not await _commit(session):
+            await agent_command.finish("操作失败，请稍后重试")
         dbg(f"群 {event.group_id} Agent 已开启")
         await agent_command.finish("群聊 Agent 已开启")
     if text in {"关", "关闭", "off"}:
         config.enabled = False
-        await session.commit()
+        if not await _commit(session):
+            await agent_command.finish("操作失败，请稍后重试")
         dbg(f"群 {event.group_id} Agent 已关闭")
         await agent_command.finish("群聊 Agent 已关闭")
     dbg(f"群 {event.group_id} /群聊Agent 查询状态: enabled={config.enabled}")
@@ -90,16 +100,21 @@ async def handle_agent_settings(
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /Agent设置 拒绝: 非群管理")
         await agent_settings.finish("群聊 Agent 设置仅限群主或管理员")
-    config = await _get_config(session, int(event.group_id))
+    config = await get_or_create_config(session, int(event.group_id))
+    if config is None:
+        await agent_settings.finish("Agent 配置暂时不可用，请稍后重试")
     parts = args.extract_plain_text().split()
     if len(parts) == 2 and parts[0] in {"概率", "probability"}:
         try:
-            config.proactive_probability = max(0.0, min(float(parts[1]), 1.0))
+            probability = max(0.0, min(float(parts[1]), 1.0))
         except ValueError:
             dbg(f"群 {event.group_id} /Agent设置 概率参数非法: {parts[1]!r}")
             await agent_settings.finish("概率需要 0 到 1 之间的数字")
-        await session.commit()
-        dbg(f"群 {event.group_id} 主动概率已更新为 {config.proactive_probability}")
+        config.proactive_probability = probability
+        if not await _commit(session):
+            await agent_settings.finish("操作失败，请稍后重试")
+        # 提交后 config 属性已过期，回复文案用提交前的本地值。
+        dbg(f"群 {event.group_id} 主动概率已更新为 {probability}")
         await agent_settings.finish("主动概率已更新")
     if len(parts) == 2 and parts[0] in {"媒体缓存", "media_cache"}:
         if parts[1].lower() in {"开", "开启", "on", "true"}:
@@ -111,7 +126,8 @@ async def handle_agent_settings(
         else:
             dbg(f"群 {event.group_id} /Agent设置 媒体缓存参数非法: {parts[1]!r}")
             await agent_settings.finish("媒体缓存参数需要 开 或 关")
-        await session.commit()
+        if not await _commit(session):
+            await agent_settings.finish("操作失败，请稍后重试")
         dbg(f"群 {event.group_id} 媒体缓存已{'开启' if cache_enabled else '关闭'}")
         # 提交后 config 属性已过期，回复文案用提交前的本地值。
         await agent_settings.finish(f"媒体缓存已{'开启' if cache_enabled else '关闭'}")
@@ -146,7 +162,9 @@ async def handle_agent_status(
     if not isinstance(event, GroupMessageEvent):
         await agent_status.finish("请在群聊中使用")
     dbg(f"群 {event.group_id} 命令 /Agent状态: user={event.get_user_id()}")
-    config = await _get_config(session, int(event.group_id))
+    config = await get_or_create_config(session, int(event.group_id))
+    if config is None:
+        await agent_status.finish("Agent 配置暂时不可用，请稍后重试")
     dbg(
         f"群 {event.group_id} /Agent状态: enabled={config.enabled} "
         f"trigger_mode={config.trigger_mode!r} probability={config.proactive_probability} "
@@ -279,7 +297,9 @@ async def handle_agent_persona(
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /Agent人设 拒绝: 非群管理")
         await agent_persona.finish("Agent 人设仅限群主或管理员管理")
-    config = await _get_config(session, int(event.group_id))
+    config = await get_or_create_config(session, int(event.group_id))
+    if config is None:
+        await agent_persona.finish("Agent 配置暂时不可用，请稍后重试")
     parts = args.extract_plain_text().strip().split()
     action = parts[0].lower() if parts else "查看"
     if action in {"查看", "show"}:
@@ -296,8 +316,11 @@ async def handle_agent_persona(
         config.persona_override = {}
         config.persona_enabled = True
         config.persona_version += 1
-        await session.commit()
-        dbg(f"群 {event.group_id} 人设已重置,version={config.persona_version}")
+        persona_version = config.persona_version
+        if not await _commit(session):
+            await agent_persona.finish("操作失败，请稍后重试")
+        # 提交后 config 属性已过期，日志用提交前的本地值。
+        dbg(f"群 {event.group_id} 人设已重置,version={persona_version}")
         await agent_persona.finish("已重置为全局默认人设")
     if action in {"设置", "set"}:
         try:
@@ -312,10 +335,13 @@ async def handle_agent_persona(
         }
         config.persona_enabled = True
         config.persona_version += 1
-        await session.commit()
+        persona_version = config.persona_version
+        if not await _commit(session):
+            await agent_persona.finish("操作失败，请稍后重试")
+        # 提交后 config 属性已过期，日志用提交前的本地值。
         dbg(
             f"群 {event.group_id} 人设已更新: fields={sorted(updates)} "
-            f"version={config.persona_version}"
+            f"version={persona_version}"
         )
         await agent_persona.finish("群级人设已更新")
     await agent_persona.finish("用法：/Agent人设 查看|设置 key=value ...|重置|示例")
@@ -349,11 +375,13 @@ async def handle_agent_privacy(
         await delete_member_memories(
             session, int(event.group_id), int(event.get_user_id())
         )
-        await session.commit()
+        if not await _commit(session):
+            await agent_privacy.finish("操作失败，请稍后重试")
         dbg(f"群 {event.group_id} 用户 {event.get_user_id()} 已隐私退出并清除其记忆")
         await agent_privacy.finish("已退出本群 Agent 记忆；后续消息不会被保存")
     privacy.opted_out = False
-    await session.commit()
+    if not await _commit(session):
+        await agent_privacy.finish("操作失败，请稍后重试")
     dbg(f"群 {event.group_id} 用户 {event.get_user_id()} 已恢复 Agent 记忆")
     await agent_privacy.finish("已恢复本群 Agent 记忆")
 

@@ -288,40 +288,45 @@ async def prepare_image_inputs(
                     temporary.write_bytes(data)
                     temporary.replace(path)
             except OSError:
+                # 磁盘写失败时没有可复用的缓存文件；不插入 cache_path 为空
+                # 的 DB 行，让下一次遇到同一张图还能重试写盘。
                 dbg_exc(f"群 {group_id} 媒体缓存磁盘写入失败 digest={digest[:16]}…")
-                path = None
             else:
                 dbg(f"群 {group_id} 媒体缓存磁盘写入完成: {path}")
-            existing = await _find_cache(session, group_id, digest, model_name="")
-            if existing is None and session is not None:
-                session.add(
-                    AgentMediaCache(
-                        group_id=group_id,
-                        content_hash=digest,
-                        media_type="image",
-                        cache_path=str(path) if path is not None else None,
-                        model_name="",
-                        status="ready",
-                        size_bytes=len(data),
-                        expires_at=now_beijing()
-                        + timedelta(
-                            seconds=max(
-                                int(getattr(ai_config, "agent_media_cache_ttl", 86400)),
-                                60,
-                            )
-                        ),
+                existing = await _find_cache(session, group_id, digest, model_name="")
+                if existing is None and session is not None:
+                    session.add(
+                        AgentMediaCache(
+                            group_id=group_id,
+                            content_hash=digest,
+                            media_type="image",
+                            cache_path=str(path),
+                            model_name="",
+                            status="ready",
+                            size_bytes=len(data),
+                            expires_at=now_beijing()
+                            + timedelta(
+                                seconds=max(
+                                    int(
+                                        getattr(
+                                            ai_config, "agent_media_cache_ttl", 86400
+                                        )
+                                    ),
+                                    60,
+                                )
+                            ),
+                        )
                     )
-                )
-                try:
-                    await session.flush()
-                except SQLAlchemyError:
-                    # 并发重复插入会撞唯一约束；回滚后不影响本轮对话。
-                    dbg_exc(
-                        f"群 {group_id} 媒体缓存 DB 行写入失败(多为并发重复),已回滚"
-                    )
-                    await session.rollback()
-                else:
-                    dbg(f"群 {group_id} 媒体缓存 DB 行已写入 digest={digest[:16]}…")
+                    try:
+                        await session.flush()
+                    except SQLAlchemyError:
+                        # 并发重复插入会撞唯一约束；回滚后不影响本轮对话。
+                        dbg_exc(
+                            f"群 {group_id} 媒体缓存 DB 行写入失败(多为并发重复),已回滚"
+                        )
+                        await session.rollback()
+                    else:
+                        dbg(f"群 {group_id} 媒体缓存 DB 行已写入 digest={digest[:16]}…")
         mime = _mime_for_bytes(data, hint)
         blocks.append(
             {"type": "image_url", "image_url": {"url": _data_url(data, mime)}}

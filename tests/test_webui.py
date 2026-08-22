@@ -148,3 +148,57 @@ def test_iso_serializes_naive_datetime_as_beijing_time() -> None:
     assert service.iso(naive) == "2026-08-21T12:00:00+08:00"
     aware_utc = datetime(2026, 8, 21, 4, 0, 0, tzinfo=timezone.utc)
     assert service.iso(aware_utc) == "2026-08-21T04:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_games_live_reports_loaded_sub_plugins_available() -> None:
+    # 回归：games.py 曾用单点相对导入（.yawn_werewolf）解析兄弟包，
+    # 永远抛 ModuleNotFoundError，导致子插件全部启用时前端仍显示"子插件未加载"。
+    games = importlib.import_module("src.plugins.yawn_core.webui.games")
+    payload = (await games.get_live_games(None))["data"]
+
+    assert payload["werewolf"]["available"] is True
+    assert payload["rpg"]["available"] is True
+    assert payload["werewolf"]["games"] == []
+    assert payload["rpg"]["games"] == []
+    # 必须读到子插件注册表的同一模块实例，否则实时对局永远为空。
+    assert (
+        games._werewolf_state()
+        is sys.modules["src.plugins.yawn_core.yawn_werewolf.state"]
+    )
+    assert games._rpg_state() is sys.modules["src.plugins.yawn_core.yawn_rpg.state"]
+    assert (
+        games._werewolf_game_log()
+        is sys.modules["src.plugins.yawn_core.yawn_werewolf.game_log"]
+    )
+
+
+def test_games_resolvers_retry_after_failure() -> None:
+    # 回归：解析失败不得落缓存，否则子插件晚加载后页面无法自动恢复。
+    games = importlib.import_module("src.plugins.yawn_core.webui.games")
+    games._ww_state_resolved = False
+    games._ww_state_module = None
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            # 让真实解析抛错一次，验证失败后 resolved 仍为 False（下次会重试）。
+            import builtins
+
+            real_import = builtins.__import__
+
+            def failing_import(name: str, *args: object, **kwargs: object) -> Any:
+                if "yawn_werewolf" in name:
+                    raise ImportError
+                return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+            patch.setattr(builtins, "__import__", failing_import)
+            assert games._werewolf_state() is None
+            assert games._ww_state_resolved is False
+    finally:
+        games._ww_state_resolved = False
+        games._ww_state_module = None
+    # 真实环境里子插件已加载，下一次调用应恢复并缓存。
+    assert (
+        games._werewolf_state()
+        is sys.modules["src.plugins.yawn_core.yawn_werewolf.state"]
+    )
+    assert games._ww_state_resolved is True

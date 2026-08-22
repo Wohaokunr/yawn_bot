@@ -249,6 +249,9 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
     dbg(
         f"群 {group_id} 主动发言生成: 请求 LLM(user_prompt 含最近 {len(candidate['recent'])} 条消息)"
     )
+    # 与对话路径(process_group_message)保持同一锁协议：生成、发送和
+    # _apply_result 的读-改-写(recent_response_fingerprints、last_agent_at、
+    # 主动计数)都必须在群锁内串行，否则会与对话路径互相覆盖丢更新。
     async with group_lock(group_id, primary_self_id):
         response = await complete_with_tools(  # pyright: ignore[reportArgumentType]
             prompt,  # pyright: ignore[reportArgumentType]
@@ -258,44 +261,46 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
             max_tokens=160,
             timeout=20,
         )
-    text = (response.content or "").strip() if response is not None else ""
-    if not text:
-        dbg(f"群 {group_id} 主动发言放弃: LLM 返回空内容")
-        return
-    dbg(f"群 {group_id} 主动发言生成结果: {text!r}")
-    if text.casefold() in {item.casefold() for item in candidate["fingerprint_texts"]}:
-        dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {text!r}")
-        await _apply_result(
-            group_id,
-            now_beijing(),
-            text=None,
-            day_count=candidate["day_count"],
-        )
-        return
-    # 多机器人部署下逐个尝试；通常只有一个连接，首个即成功。
-    for bot in bots:
-        try:
-            await bot.call_api(
-                "send_group_msg",
-                group_id=group_id,
-                message=Message(text),
+        text = (response.content or "").strip() if response is not None else ""
+        if not text:
+            dbg(f"群 {group_id} 主动发言放弃: LLM 返回空内容")
+            return
+        dbg(f"群 {group_id} 主动发言生成结果: {text!r}")
+        if text.casefold() in {
+            item.casefold() for item in candidate["fingerprint_texts"]
+        }:
+            dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {text!r}")
+            await _apply_result(
+                group_id,
+                now_beijing(),
+                text=None,
+                day_count=candidate["day_count"],
             )
-        except Exception:  # noqa: BLE001
-            logger.warning("群 %s 主动消息发送失败，尝试下一个机器人", group_id)
-            dbg_exc(
-                f"群 {group_id} 主动发言 bot={getattr(bot, 'self_id', None)} 发送失败"
+            return
+        # 多机器人部署下逐个尝试；通常只有一个连接，首个即成功。
+        for bot in bots:
+            try:
+                await bot.call_api(
+                    "send_group_msg",
+                    group_id=group_id,
+                    message=Message(text),
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("群 %s 主动消息发送失败，尝试下一个机器人", group_id)
+                dbg_exc(
+                    f"群 {group_id} 主动发言 bot={getattr(bot, 'self_id', None)} 发送失败"
+                )
+                continue
+            dbg(f"群 {group_id} 主动发言发送成功 bot={getattr(bot, 'self_id', None)}")
+            await _apply_result(
+                group_id,
+                now_beijing(),
+                text=text,
+                day_count=candidate["day_count"],
             )
-            continue
-        dbg(f"群 {group_id} 主动发言发送成功 bot={getattr(bot, 'self_id', None)}")
-        await _apply_result(
-            group_id,
-            now_beijing(),
-            text=text,
-            day_count=candidate["day_count"],
-        )
-        return
-    logger.warning("群 %s 主动消息无可用机器人发送", group_id)
-    dbg(f"群 {group_id} 主动发言失败: {len(bots)} 个机器人均发送失败")
+            return
+        logger.warning("群 %s 主动消息无可用机器人发送", group_id)
+        dbg(f"群 {group_id} 主动发言失败: {len(bots)} 个机器人均发送失败")
 
 
 async def _tick() -> None:

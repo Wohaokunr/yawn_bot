@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from .. import game_registry  # noqa: TID252
 from ..metrics import record_queue_rejection  # noqa: TID252
+from . import game_log
 from .roles import DEFAULT_BOARD_KEY
 
 if TYPE_CHECKING:
@@ -471,11 +472,19 @@ def discard_game(game: Game) -> None:
         if gid == game.group_id:
             _user_index.pop(uid, None)
     game_registry.release_game("werewolf", game.group_id)
+    game_log.clear(game.group_id)
 
 
 async def stop_game(game: Game) -> None:
     """强制结束对局：先摘 worker 引用再取消，等待清理完成。"""
     game.phase = Phase.ENDED
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_SYSTEM,
+        round_no=game.round_no,
+        phase=game.phase,
+        text="对局被管理员强制结束",
+    )
     task = game.worker
     game.worker = None
     if task is not None and not task.done():
