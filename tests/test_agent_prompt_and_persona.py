@@ -243,6 +243,7 @@ def _make_proactive_config(**overrides: object):
         "proactive_active_enabled": True,
         "proactive_active_probability": 0.08,
         "proactive_active_window_minutes": 8,
+        "recent_response_fingerprints": [],
     }
     values.update(overrides)
     return cast("GroupAgentConfig", SimpleNamespace(**values))
@@ -371,6 +372,114 @@ def test_proactive_rejects_cooldown_and_daily_limit() -> None:
         should_proactively_speak(make_config(), exhausted, now, rng=_FixedRoll(0.0))
         is None
     )
+
+
+def test_proactive_decision_parses_speak_true() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    decision = _decide_proactive_reply(
+        '{"speak": true, "topic": "周末爬山", "reason": "话题正热", '
+        '"text": " 山上现在应该挺凉的 "}'
+    )
+    assert decision.should_speak is True
+    assert decision.text == "山上现在应该挺凉的"
+    assert decision.topic == "周末爬山"
+    assert decision.reason == "话题正热"
+
+
+def test_proactive_decision_parses_speak_false_with_reason() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    decision = _decide_proactive_reply(
+        '{"speak": false, "topic": "两人争论配置", "reason": "正在争论", "text": ""}'
+    )
+    assert decision.should_speak is False
+    assert decision.text == ""
+    assert decision.topic == "两人争论配置"
+    assert decision.reason == "正在争论"
+
+
+def test_proactive_decision_tolerates_code_fence_json() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    decision = _decide_proactive_reply(
+        '```json\n{"speak": true, "topic": "晚饭", '
+        '"reason": "", "text": "我也馋了"}\n```'
+    )
+    assert decision.should_speak is True
+    assert decision.text == "我也馋了"
+    assert decision.reason == "模型未说明理由"
+
+
+def test_proactive_decision_speak_true_without_text_is_skipped() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    decision = _decide_proactive_reply('{"speak": true, "text": "  "}')
+    assert decision.should_speak is False
+    assert decision.text == ""
+
+
+def test_proactive_decision_rejects_broken_json_fragment() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    # 疑似 JSON 的碎片不可发到群里，只能静默跳过。
+    assert _decide_proactive_reply('{"speak": tru').should_speak is False
+    assert _decide_proactive_reply('```{"text": "hi"').should_speak is False
+    assert _decide_proactive_reply("   ").should_speak is False
+
+
+def test_proactive_decision_falls_back_to_plain_text() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    decision = _decide_proactive_reply(" 这模型没走 JSON 协议，直接说了一句 ")
+    assert decision.should_speak is True
+    assert decision.text == "这模型没走 JSON 协议，直接说了一句"
+    assert decision.topic is None
+
+
+def test_proactive_prompts_declare_json_protocol_and_silence() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import (
+        _ACTIVE_INTERJECT_PROMPT,
+        _JSON_PROTOCOL,
+        _WARMUP_PROMPT,
+    )
+
+    for key in ("speak", "topic", "reason", "text"):
+        assert key in _JSON_PROTOCOL
+    # 插话与暖场都要把"保持沉默"作为合法结果写进指令。
+    assert "speak=false" in _ACTIVE_INTERJECT_PROMPT
+    assert "speak=false" in _WARMUP_PROMPT
+    # 插话必须先理解内容再决策，且禁止泛泛附和。
+    assert "先读懂" in _ACTIVE_INTERJECT_PROMPT
+    assert "泛泛附和" in _ACTIVE_INTERJECT_PROMPT
+
+
+def test_proactive_user_prompt_injects_recent_lines() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _build_user_prompt
+
+    config = _make_proactive_config(
+        recent_response_fingerprints=[
+            {"text": "早期的一条", "at": "t0", "input": "proactive"},
+            {"text": "昨天聊游戏时说的", "at": "t1", "input": "proactive"},
+            {"text": "对话路径的回复", "at": "t2", "input": "dialogue"},
+            {"text": "", "at": "t3", "input": "proactive"},
+        ]
+    )
+    prompt = _build_user_prompt("active", config)
+    assert "昨天聊游戏时说的" in prompt
+    assert "对话路径的回复" not in prompt
+    assert "不要重复相近的说法" in prompt
+    # 没有近期主动发言时不注入该段。
+    bare = _build_user_prompt("warmup", _make_proactive_config())
+    assert "最近主动发言过" not in bare
 
 
 def test_complete_with_tools_omits_empty_tools_param() -> None:

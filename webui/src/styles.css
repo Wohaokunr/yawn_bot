@@ -13,6 +13,12 @@
   --sky-500: #5b9df6;
   --lavender-400: #c4b0ff;
   --lavender-500: #9a7df0;
+  --tomato-100: #fff2ee;
+  --tomato-200: #ffe0d6;
+  --tomato-300: #ffbca8;
+  --tomato-400: #ff8a70;
+  --tomato-500: #f4694d;
+  --tomato-600: #d94f33;
   --ink: #53414c;
   --ink-secondary: #9a8390;
   --cream: #fff9fb;
@@ -633,6 +639,287 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
 .ww-dot-system { background: #8a8a8a; }
 .ww-dot-announce { background: #c7b7bd; }
 
+/* ── 番茄小说页(书封卡片·番茄红点缀) ── */
+
+/* 英雄横幅:番茄红→樱花粉渐变 + 樱点纹理 */
+.fq-hero {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 22px;
+  padding: 20px 26px;
+  border-radius: 22px;
+  border: 1px solid var(--tomato-200);
+  background:
+    radial-gradient(48% 90% at 94% 6%, rgba(255, 255, 255, 0.35) 0%, transparent 55%),
+    linear-gradient(120deg, var(--tomato-400) 0%, #ff8f95 46%, var(--sakura-500) 100%);
+  box-shadow: 0 16px 40px rgba(244, 105, 77, 0.24);
+  color: #fff;
+}
+.fq-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.22) 1.2px, transparent 1.2px);
+  background-size: 22px 22px;
+  pointer-events: none;
+}
+.fq-hero-main { position: relative; display: flex; align-items: center; gap: 14px; }
+.fq-hero-mark {
+  width: 54px;
+  height: 54px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: 28px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.26);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 8px 20px rgba(217, 79, 51, 0.30);
+}
+.fq-hero-text h2 { margin: 0 0 2px; color: #fff; }
+.fq-hero-text p { margin: 0; font-size: 13px; color: rgba(255, 255, 255, 0.9); }
+.fq-hero-stats { position: relative; display: flex; flex-wrap: wrap; gap: 8px; }
+.fq-hero-deco { position: absolute; pointer-events: none; animation: twinkle 2.8s ease-in-out infinite; }
+.fq-hero-deco-book { top: 12px; right: 20px; font-size: 22px; opacity: 0.85; transform: rotate(14deg); }
+.fq-hero-deco-spark { bottom: 12px; right: 64px; font-size: 14px; }
+
+/* 统计 chip(横幅与抽屉共用):白底软糖 + 彩点 */
+.fq-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 3px 10px rgba(217, 79, 51, 0.16);
+}
+.fq-chip::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.fq-chip-sky    { color: #3d7dce; }
+.fq-chip-tomato { color: #d94f33; }
+.fq-chip-mint   { color: #2f9a70; }
+.fq-chip-gold   { color: #c08a1a; }
+.fq-chip-sakura { color: var(--sakura-700); }
+
+/* 模式切换:番茄渐变胶囊(选中态同时覆盖 thumb 与 item,兼容各版本结构) */
+.fq-modes.ant-segmented {
+  border-radius: 999px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--line);
+}
+.fq-modes .ant-segmented-item { border-radius: 999px; }
+.fq-modes .ant-segmented-item-selected,
+.fq-modes .ant-segmented-item-selected:hover {
+  background: linear-gradient(135deg, var(--tomato-400), var(--sakura-500));
+  box-shadow: 0 4px 12px rgba(244, 105, 77, 0.32);
+  color: #fff;
+}
+.fq-modes .ant-segmented-thumb {
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--tomato-400), var(--sakura-500));
+  box-shadow: 0 4px 12px rgba(244, 105, 77, 0.32);
+}
+
+/* 书封卡片网格 */
+.fq-book-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(164px, 1fr));
+  gap: 18px 16px;
+}
+.fq-book-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 4px 14px rgba(242, 96, 141, 0.08);
+  transition: transform var(--dur-fast) var(--ease-spring), box-shadow var(--dur-med) var(--ease-soft);
+  /* 逐卡错峰浮现;backwards 不锁终态,重渲染不重播 */
+  animation: fq-card-in 0.45s var(--ease-spring) backwards;
+}
+.fq-book-card:nth-child(2) { animation-delay: 0.04s; }
+.fq-book-card:nth-child(3) { animation-delay: 0.08s; }
+.fq-book-card:nth-child(4) { animation-delay: 0.12s; }
+.fq-book-card:nth-child(5) { animation-delay: 0.16s; }
+.fq-book-card:nth-child(6) { animation-delay: 0.20s; }
+.fq-book-card:nth-child(7) { animation-delay: 0.24s; }
+.fq-book-card:nth-child(8) { animation-delay: 0.28s; }
+.fq-book-card:nth-child(n + 9) { animation-delay: 0.32s; }
+.fq-book-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 14px 30px rgba(244, 105, 77, 0.18);
+}
+.fq-book-card .ant-btn { margin-top: auto; }
+.fq-book-title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fq-book-author {
+  font-size: 12px;
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fq-book-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 生成式书封:主题渐变 + 书脊高光 + 首字 + 悬浮光泽 */
+.fq-cover {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px 12px 12px 8px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  box-shadow: 0 5px 12px rgba(83, 65, 76, 0.16);
+}
+.fq-cover::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.5);
+}
+.fq-cover::after {
+  content: "";
+  position: absolute;
+  top: -20%;
+  left: -70%;
+  width: 45%;
+  height: 140%;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  transform: skewX(-18deg);
+  transition: left 0.55s var(--ease-soft);
+  pointer-events: none;
+}
+.fq-book-card:hover .fq-cover::after { left: 125%; }
+.fq-cover-char {
+  font-family: var(--font-display);
+  font-size: 44px;
+  color: #fff;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+.fq-rank {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  min-width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 2px 8px rgba(83, 65, 76, 0.22);
+}
+.fq-cover-0 { background: linear-gradient(150deg, #ff9a7b, #f4553f); }
+.fq-cover-1 { background: linear-gradient(150deg, #ffb3c7, #f2608d); }
+.fq-cover-2 { background: linear-gradient(150deg, #ffd98a, #f2a93b); }
+.fq-cover-3 { background: linear-gradient(150deg, #93e9c8, #34c896); }
+.fq-cover-4 { background: linear-gradient(150deg, #a8cdff, #5b9df6); }
+.fq-cover-5 { background: linear-gradient(150deg, #cbb8f0, #9a7df0); }
+.fq-cover-6 { background: linear-gradient(150deg, #ff8fab, #d63f71); }
+.fq-cover-7 { background: linear-gradient(150deg, #8fe3e0, #38b2ac); }
+
+/* 抽屉书籍头部:大书封 + 信息并排 */
+.fq-book-head {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--tomato-100);
+  background: linear-gradient(150deg, #fff3ec, #fff5f8 55%, #f6efff);
+}
+.fq-cover-lg { width: 108px; flex: none; border-radius: 10px 14px 14px 10px; }
+.fq-cover-lg .fq-cover-char { font-size: 58px; }
+.fq-book-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.fq-book-info .ant-typography { margin: 0; }
+.fq-book-info-title {
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fq-book-id { font-size: 12px; }
+.fq-chapter-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+
+/* 任务状态胶囊:浅底 + 彩点,下载中彩点呼吸 */
+.fq-status::before,
+.fq-send::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background: currentColor;
+}
+.fq-status-queued     { background: #eaf3ff; color: #3d7dce; }
+.fq-status-running    { background: #e6f3ff; color: #2b7cd3; }
+.fq-status-running::before { animation: fq-dot-pulse 1.4s ease-in-out infinite; }
+.fq-status-completed  { background: #e7fbee; color: #2f9a70; }
+.fq-status-failed     { background: #ffeef0; color: #e0526e; }
+.fq-status-cancelled  { background: #f4f1f3; color: #9a8390; }
+.fq-status-cancelling { background: #fff4e2; color: #c07f1d; }
+.fq-send-pending { background: #f4f1f3; color: #9a8390; }
+.fq-send-sent    { background: #e7fbee; color: #2f9a70; }
+.fq-send-failed  { background: #ffeef0; color: #e0526e; }
+
+@keyframes fq-card-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes fq-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.75); }
+}
+
+@media (max-width: 640px) {
+  .fq-hero { padding: 16px 18px; }
+  .fq-hero-deco { display: none; }
+  .fq-book-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px 12px; }
+  .fq-book-head { flex-direction: column; }
+  .fq-cover-lg { width: 96px; }
+}
+
 /* ── 动画 ── */
 @keyframes rise-in {
   from { opacity: 0; transform: translateY(14px); }
@@ -684,4 +971,14 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ── Agent 记忆面板 ── */
+/* 统计卡内的类型分布 + 最后整理时间，纵向排布保持与 Statistic 卡片等高 */
+.ag-stat-line {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  min-height: 64px;
 }

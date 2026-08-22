@@ -3,6 +3,7 @@
 
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ..data_models.group_agent_config import GroupAgentConfig
@@ -24,3 +25,14 @@ async def get_or_create_config(session: Any, group_id: int) -> GroupAgentConfig 
         else:
             dbg(f"群 {group_id} 新建 Agent 配置记录")
     return record
+
+
+async def list_agent_group_ids(session: Any) -> list[int]:
+    """列出所有存在 Agent 配置的群号（含未启用群：过期数据同样需要清理）。"""
+
+    rows = (
+        await session.execute(
+            select(GroupAgentConfig.group_id).order_by(GroupAgentConfig.group_id)
+        )
+    ).scalars()
+    return [int(value) for value in rows]

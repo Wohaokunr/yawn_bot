@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FanqieJob } from "./types";
-import { fanqieJobActions, fanqieRangeError, FANQIE_JOB_STATUS_META } from "./fanqie";
+import { coverThemeIndex, fanqieJobActions, fanqieRangeError, FANQIE_JOB_STATUS_META } from "./fanqie";
 
 function job(overrides: Partial<FanqieJob>): FanqieJob {
   return {
@@ -64,6 +64,17 @@ describe("fanqieJobActions", () => {
     expect(fanqieJobActions(job({ status: "failed" }))).toEqual({ cancel: false, retry: true, send: false });
     expect(fanqieJobActions(job({ status: "cancelled" }))).toEqual({ cancel: false, retry: true, send: false });
     expect(fanqieJobActions(job({ status: "completed" }))).toEqual({ cancel: false, retry: false, send: true });
+  });
+});
+
+describe("coverThemeIndex", () => {
+  it("同一 bookId 结果稳定且落在主题范围内", () => {
+    for (const id of ["7123456789012345678", "abc", "12345", ""]) {
+      const first = coverThemeIndex(id);
+      expect(first).toBeGreaterThanOrEqual(0);
+      expect(first).toBeLessThan(8);
+      expect(coverThemeIndex(id)).toBe(first);
+    }
   });
 });
 

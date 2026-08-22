@@ -18,44 +18,34 @@ import {
   Col,
   Descriptions,
   Drawer,
-  Empty,
   Flex,
   Form,
   Input,
-  InputNumber,
   Layout,
   Menu,
-  Modal,
-  Popconfirm,
-  Progress,
   Row,
   Select,
   Space,
   Spin,
   Statistic,
-  Switch,
   Table,
   Tabs,
   Tag,
   Typography,
 } from "antd";
-import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
+import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { AgentAuditTable, AgentDetailPage, AgentGroupsPage } from "./agent";
 import { api, ApiError, openStatusStream, setCsrfToken } from "./api";
 import { FanqiePage } from "./fanqie";
 import { GamesPage } from "./games";
-import { formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { formatTime, PageHeader, QueryErrorAlert, TablePagination, useApiQuery } from "./shared";
 import type {
-  AgentAudit,
-  AgentConfig,
   FeatureState,
   GroupSummary,
   Member,
-  MemoryItem,
   Overview,
-  Persona,
-  PrivacyItem,
   UserSummary,
   WebAudit,
 } from "./types";
@@ -319,132 +309,11 @@ function UsersPage(): React.JSX.Element {
   }</Card><Drawer open={!!selected} width={680} title={`${selected?.nickname || selected?.userId} · 全局功能`} onClose={() => setSelected(null)}>{featuresLoading ? <Spin /> : selected && <FeatureEditor rows={features} onChange={async (feature, override) => { const result = await api<FeatureState>(`/users/${selected.userId}/features/${feature}`, { method: "PATCH", body: JSON.stringify({ override }) }); setFeatures((current) => current.map((row) => row.key === feature ? result.data : row)); message.success("全局用户功能已更新"); }} />}</Drawer></>;
 }
 
-function AgentGroupsPage(): React.JSX.Element {
-  const [page, setPage] = useState(1); const [search, setSearch] = useState("");
-  const load = useCallback(() => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [page, search]);
-  const query = useApiQuery(load);
-  return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" extra={<Input.Search placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />} /><Card>{
-    query.error && !query.data
-      ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <Table rowKey="groupId" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} columns={[{ title: "群组", render: (_, row: GroupSummary) => <>{row.groupName || "未命名群"}<br /><Text type="secondary">{row.groupId}</Text></> }, { title: "成员", dataIndex: "memberCount" }, { title: "状态", render: (_, row: GroupSummary) => <Tag color={row.agentEnabled ? "green" : "default"}>{row.agentEnabled ? "开启" : "关闭"}</Tag> }, { title: "操作", render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link> }]} />
-  }</Card></>;
-}
-
-function AgentDetailPage(): React.JSX.Element {
-  const { groupId = "" } = useParams();
-  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级配置、人设和数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs destroyOnHidden items={[
-    { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
-    { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
-    { key: "memories", label: "记忆", children: <MemoriesPanel groupId={groupId} /> },
-    { key: "privacy", label: "隐私退出", children: <PrivacyPanel groupId={groupId} /> },
-    { key: "audit", label: "工具审计", children: <AgentAuditsPanel groupId={groupId} /> },
-  ]} /></>;
-}
-
-function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false);
-  const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load);
-  useEffect(() => { if (query.data) form.setFieldsValue(query.data); }, [form, query.data]);
-  const save = async (values: Record<string, unknown>) => {
-    setSaving(true);
-    try {
-      const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, { method: "PATCH", body: JSON.stringify({ ...values, version: query.data?.version }) });
-      form.setFieldsValue(result.data);
-      message.success("Agent 配置已保存");
-      query.reload();
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);
-    } finally { setSaving(false); }
-  };
-  const data = query.data;
-  if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  return <Card><Alert type="info" showIcon message={`今日主动发言 ${data.proactiveToday} 次；管理工具 ${data.adminToolsToday} 次`} /><Form form={form} layout="vertical" onFinish={save} className="settings-form"><Row gutter={16}><Col xs={24} md={8}><Form.Item name="enabled" label="启用 Agent" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="mediaCacheEnabled" label="媒体缓存" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="triggerMode" label="触发模式" rules={[{ required: true }]}><Select options={[{ value: "mention_only", label: "仅 @" }, { value: "mention_or_reply", label: "@ 或回复" }, { value: "explicit_wakeup", label: "@ 或显式唤醒" }, { value: "mention_or_proactive", label: "@ / 回复 / 唤醒 / 主动" }]} /></Form.Item></Col></Row><Row gutter={16}><Col xs={24} md={8}><Form.Item name="proactiveProbability" label="冷场暖场概率"><InputNumber min={0} max={1} step={0.05} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveEnabled" label="热闹插话" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveProbability" label="插话概率"><InputNumber min={0} max={1} step={0.02} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveWindowMinutes" label="插话窗口（分钟）"><InputNumber min={1} max={1440} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="idleThresholdMinutes" label="冷场阈值（分钟）"><InputNumber min={1} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="cooldownMinutes" label="冷却时间（分钟）"><InputNumber min={0} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="dailyLimit" label="主动发言每日上限"><InputNumber min={0} max={1000} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="rawRetentionDays" label="原始消息保留天数"><InputNumber min={1} max={365} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="adminToolDailyLimit" label="管理工具每日上限"><InputNumber min={1} max={1000} /></Form.Item></Col></Row><Form.Item name="toolAllowlist" label="管理工具白名单"><Select mode="multiple" options={[{ value: "mute_member", label: "禁言成员" }, { value: "create_group_announcement", label: "发布群公告" }]} /></Form.Item><Button type="primary" htmlType="submit" loading={saving}>保存配置</Button></Form></Card>;
-}
-
-function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false);
-  const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load);
-  useEffect(() => { if (query.data) form.setFieldsValue({ enabled: query.data.enabled, overrides: query.data.overrides }); }, [form, query.data]);
-  const save = async (values: { enabled: boolean; overrides?: Record<string, string> }) => {
-    setSaving(true);
-    try {
-      await api<Persona>(`/agent/groups/${groupId}/persona`, { method: "PUT", body: JSON.stringify({ version: query.data?.version, enabled: values.enabled, overrides: values.overrides ?? {} }) });
-      message.success("群级人设已保存");
-      query.reload();
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);
-    } finally { setSaving(false); }
-  };
-  const reset = async () => {
-    try {
-      await api<Persona>(`/agent/groups/${groupId}/persona`, { method: "DELETE", headers: query.data?.version ? { "If-Match": query.data.version } : {} });
-      message.success("已恢复全局默认人设");
-      query.reload();
-    } catch (error) {
-      message.error((error as Error).message);
-    }
-  };
-  const data = query.data;
-  if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  return <Card><Form form={form} layout="vertical" onFinish={save}><Form.Item name="enabled" label="启用群级覆盖" valuePropName="checked"><Switch /></Form.Item><Row gutter={16}>{data.fields.map((field) => <Col xs={24} lg={12} key={field}><Form.Item name={["overrides", field]} label={field} extra={`全局值：${data.resolved[field]}`}><Input.TextArea maxLength={240} autoSize={{ minRows: 2, maxRows: 4 }} placeholder="留空则继承全局默认" showCount /></Form.Item></Col>)}</Row><Space><Button type="primary" htmlType="submit" loading={saving}>保存人设</Button><Popconfirm title="恢复全局默认人设？" onConfirm={reset}><Button>恢复默认</Button></Popconfirm></Space></Form></Card>;
-}
-
-function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [page, setPage] = useState(1); const [search, setSearch] = useState("");
-  const load = useCallback(() => api<MemoryItem[]>(`/agent/groups/${groupId}/memories?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search]);
-  const query = useApiQuery(load);
-  const remove = async (id: string) => { await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" }); message.success("记忆已删除"); query.reload(); };
-  const removeMember = async (userId: string) => { const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/members/${userId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条成员数据`); query.reload(); };
-  const removeGroup = async () => { const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条群 Agent 数据`); query.reload(); };
-  const exportData = async () => { const result = await api(`/agent/groups/${groupId}/memories/export`); const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `yawnbot-agent-${groupId}.json`; anchor.click(); URL.revokeObjectURL(url); };
-  return <Card title="公开/群级记忆" extra={<Space><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><Button danger>清理全群 Agent 数据</Button></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
-    query.error && !query.data
-      ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.content}</Paragraph> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Text type="secondary">{row.type} · {row.visibility}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value || "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
-  }</Card>;
-}
-
-function PrivacyPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const load = useCallback(() => api<PrivacyItem[]>(`/agent/groups/${groupId}/privacy?pageSize=100`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load);
-  return <Card><Alert type="info" showIcon message="成员隐私状态只读" description="退出和恢复由成员本人通过群命令操作；管理台仅用于确认数据治理状态。" />{
-    query.error && !query.data
-      ? <div className="section-alert"><QueryErrorAlert error={query.error} onRetry={query.reload} /></div>
-      : <Table rowKey="userId" loading={query.loading} dataSource={query.data ?? []} locale={{ emptyText: <Empty description="暂无成员隐私记录" /> }} columns={[{ title: "用户 ID", dataIndex: "userId" }, { title: "状态", dataIndex: "optedOut", render: (value: boolean) => <Tag color={value ? "orange" : "green"}>{value ? "已退出记忆" : "已恢复"}</Tag> }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }]} />
-  }</Card>;
-}
-
 const RESULT_OPTIONS = [
   { value: "", label: "全部结果" },
   { value: "success", label: "成功" },
   { value: "failed", label: "失败" },
 ];
-
-function AgentAuditTable({ data }: { data: AgentAudit[] }): React.JSX.Element {
-  return <Table rowKey="id" size="small" pagination={false} dataSource={data} columns={[{ title: "时间", dataIndex: "createdAt", render: formatTime }, { title: "群", dataIndex: "groupId" }, { title: "工具", dataIndex: "toolName" }, { title: "结果", dataIndex: "result", render: (value: string) => <Tag color={value === "success" ? "green" : "red"}>{value}</Tag> }, { title: "详情", dataIndex: "detail", ellipsis: true }]} />;
-}
-
-function AgentAuditsPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const [page, setPage] = useState(1); const [result, setResult] = useState("");
-  const load = useCallback(() => api<AgentAudit[]>(`/agent/audits?groupId=${groupId}&page=${page}&pageSize=20&result=${result}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, result]);
-  const query = useApiQuery(load);
-  return <Card extra={<Select value={result} onChange={(value) => { setResult(value); setPage(1); }} options={RESULT_OPTIONS} style={{ width: 120 }} />}>{
-    query.error && !query.data
-      ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <>
-        <AgentAuditTable data={query.data?.rows ?? []} />
-        <TablePagination current={page} total={query.data?.total ?? 0} onChange={setPage} />
-      </>
-  }</Card>;
-}
-
-function TablePagination({ current, total, onChange }: { current: number; total: number; onChange: (page: number) => void }): React.JSX.Element {
-  if (total <= 20) return <></>;
-  const pagination: TablePaginationConfig = { current, total, pageSize: 20, showSizeChanger: false, onChange };
-  return <Table rowKey="placeholder" columns={[]} dataSource={[]} showHeader={false} pagination={pagination} className="pagination-only" />;
-}
 
 function WebAuditsPage(): React.JSX.Element {
   const [page, setPage] = useState(1); const [result, setResult] = useState("");

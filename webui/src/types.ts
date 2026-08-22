@@ -82,8 +82,44 @@ export interface MemoryItem {
   salience: number;
   confidence: number;
   visibility: string;
+  createdAt?: string | null;
   updatedAt: string;
   expiresAt?: string | null;
+}
+
+// 记忆治理状态(口径见后端 webui/service.py agent_memory_status)
+export interface AgentMemoryStatus {
+  groupId: string;
+  pendingMessages: number;
+  lastCompactedMessageId: number | null;
+  lastCompactedAt: string | null;
+  countsByType: Record<string, number>;
+  total: number;
+  oldestUpdatedAt: string | null;
+  newestUpdatedAt: string | null;
+}
+
+export interface AgentRelationItem {
+  id: string;
+  groupId: string;
+  subjectUserId: string;
+  objectUserId: string;
+  type: string;
+  confidence: number;
+  evidenceCount: number;
+  lastSeenAt: string | null;
+}
+
+export interface AgentMessageItem {
+  id: string;
+  groupId: string;
+  userId: string;
+  senderName: string | null;
+  role: string;
+  title: string | null;
+  text: string;
+  receivedAt: string | null;
+  expiresAt: string | null;
 }
 
 export interface PrivacyItem {

@@ -222,3 +222,78 @@ def test_games_resolvers_retry_after_failure() -> None:
         is sys.modules["src.plugins.yawn_core.yawn_werewolf.state"]
     )
     assert games._ww_state_resolved is True
+
+
+def test_memory_create_body_validates_type_and_expiry() -> None:
+    body = app_module.MemoryCreateBody.model_validate(
+        {
+            "type": "manual",
+            "key": "群规",
+            "content": "晚上十一点后保持安静",
+            "subjectUserId": 123,
+            "salience": 0.9,
+            "expiresInDays": None,
+        }
+    )
+    assert body.subject_user_id == 123  # noqa: PLR2004
+    assert body.expires_in_days is None
+
+    with pytest.raises(ValidationError):
+        app_module.MemoryCreateBody.model_validate(
+            {"type": "unknown", "key": "k", "content": "c"}
+        )
+    with pytest.raises(ValidationError):
+        app_module.MemoryCreateBody.model_validate(
+            {"type": "manual", "key": "k", "content": "c", "expiresInDays": 0}
+        )
+    with pytest.raises(ValidationError):
+        app_module.MemoryCreateBody.model_validate(
+            {"type": "manual", "key": "", "content": "c"}
+        )
+
+
+def test_memory_patch_body_requires_updatable_field() -> None:
+    updates = app_module.MemoryPatchBody.model_validate(
+        {"version": "v1", "salience": 0.8, "expiresInDays": None}
+    ).model_dump(exclude_unset=True, exclude={"version"})
+    assert updates == {"salience": 0.8, "expires_in_days": None}
+
+    empty = app_module.MemoryPatchBody.model_validate({"version": "v1"})
+    assert empty.model_dump(exclude_unset=True, exclude={"version"}) == {}
+
+
+def test_privacy_patch_body_accepts_camel_alias() -> None:
+    assert app_module.PrivacyPatchBody.model_validate({"optedOut": True}).opted_out
+
+
+def test_serialize_relation_and_agent_message_as_strings() -> None:
+    relation = service.AgentRelation(
+        id=9_007_199_254_740_993,
+        group_id=9_007_199_254_740_992,
+        subject_user_id=9_007_199_254_740_991,
+        object_user_id=9_007_199_254_740_990,
+        relation_type="mentions",
+        confidence=0.55,
+        evidence_count=3,
+        last_seen_at=datetime(2026, 8, 21, 12, 0, 0),  # noqa: DTZ001
+    )
+    payload = service.serialize_relation(relation)
+    assert payload["id"] == "9007199254740993"
+    assert payload["subjectUserId"] == "9007199254740991"
+    assert payload["evidenceCount"] == 3  # noqa: PLR2004
+
+    message = service.GroupAgentMessage(
+        id=9_007_199_254_740_989,
+        bot_id=1,
+        message_id=42,
+        group_id=9_007_199_254_740_992,
+        user_id=9_007_199_254_740_991,
+        sender_name="阿眠",
+        role="member",
+        normalized_text="你好",
+        received_at=datetime(2026, 8, 21, 12, 0, 0),  # noqa: DTZ001
+        expires_at=datetime(2026, 8, 28, 12, 0, 0),  # noqa: DTZ001
+    )
+    message_payload = service.serialize_agent_message(message)
+    assert message_payload["userId"] == "9007199254740991"
+    assert message_payload["receivedAt"] == "2026-08-21T12:00:00+08:00"
