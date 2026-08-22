@@ -78,6 +78,26 @@ def test_agent_config_and_persona_validation() -> None:
     assert body.tool_allowlist == ["mute_member"]
 
     with pytest.raises(ValidationError):
+        app_module.AgentConfigPatch.model_validate(
+            {"version": None, "proactiveActiveProbability": 1.5}
+        )
+    with pytest.raises(ValidationError):
+        app_module.AgentConfigPatch.model_validate(
+            {"version": None, "proactiveActiveWindowMinutes": 0}
+        )
+    proactive_patch = app_module.AgentConfigPatch.model_validate(
+        {
+            "version": None,
+            "proactiveActiveEnabled": False,
+            "proactiveActiveProbability": 0.1,
+            "proactiveActiveWindowMinutes": 6,
+        }
+    )
+    assert proactive_patch.proactive_active_enabled is False
+    assert proactive_patch.proactive_active_probability == 0.1  # noqa: PLR2004
+    assert proactive_patch.proactive_active_window_minutes == 6  # noqa: PLR2004
+
+    with pytest.raises(ValidationError):
         app_module.PersonaPatch.model_validate(
             {"version": None, "enabled": True, "overrides": {"unknown": "x"}}
         )

@@ -53,18 +53,37 @@ _VISION_SYSTEM_PROMPT = (
 )
 
 
-async def _send_group_text(bot: Bot, group_id: int, text: str) -> bool:
+def _extract_message_id(result: Any) -> int | None:
+    """OneBot 实现对 send_group_msg 返回值不统一：dict、对象或裸 int；0 视为缺失。"""
+
+    raw: Any
+    if isinstance(result, dict):
+        raw = result.get("message_id")
+    else:
+        raw = getattr(result, "message_id", result)
     try:
-        await asyncio.wait_for(
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value or None
+
+
+async def _send_group_text(
+    bot: Bot, group_id: int, text: str
+) -> tuple[bool, int | None]:
+    """返回 (是否发出, message_id)；message_id 缺失不视为发送失败。"""
+
+    try:
+        result = await asyncio.wait_for(
             bot.call_api("send_group_msg", group_id=group_id, message=Message(text)),
             timeout=_SEND_TIMEOUT,
         )
     except Exception:  # noqa: BLE001
         logger.warning("群聊 Agent 发送群消息失败: %s", group_id)
         dbg_exc(f"群 {group_id} 发送群消息失败 text={text!r}")
-        return False
+        return False, None
     dbg(f"群 {group_id} 发送群消息成功 text={text!r}")
-    return True
+    return True, _extract_message_id(result)
 
 
 def contains_word(text: str, word: str) -> bool:
@@ -117,13 +136,57 @@ async def _send_unless_expired(
     *,
     label: str,
     message_id: Any = None,
-) -> bool:
-    """过期触发不发送；返回是否真正发出。"""
+) -> tuple[bool, int | None]:
+    """过期触发不发送；返回 (是否真正发出, message_id)。"""
 
     if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
         dbg(f"群 {group_id} {label}前触发已过期,跳过发送: message_id={message_id}")
-        return False
+        return False, None
     return await _send_group_text(bot, group_id, text)
+
+
+async def persist_bot_reply(
+    session: Any,
+    bot_id: int,
+    group_id: int,
+    message_id: int | None,
+    text: str,
+    retention_days: int,
+) -> None:
+    """把 bot 自己发出的消息以 role="bot" 落库，让后续上下文记得自己说过什么。
+
+    message_id 缺失或撞 (bot_id, message_id) 唯一键时跳过；随调用方事务提交。
+    """
+
+    if not message_id:
+        dbg(f"群 {group_id} bot 发言缺少 message_id,跳过自言落库")
+        return
+    duplicate = await session.scalar(
+        select(GroupAgentMessage).where(
+            GroupAgentMessage.bot_id == bot_id,
+            GroupAgentMessage.message_id == message_id,
+        )
+    )
+    if duplicate is not None:
+        dbg(f"群 {group_id} bot 发言 {message_id} 已落库过,去重跳过")
+        return
+    now = now_beijing()
+    retention = max(1, min(int(retention_days), 365))
+    session.add(
+        GroupAgentMessage(
+            bot_id=bot_id,
+            message_id=message_id,
+            group_id=group_id,
+            user_id=bot_id,
+            sender_name=None,
+            role="bot",
+            title=None,
+            normalized_text=text,
+            received_at=now,
+            expires_at=now + timedelta(days=retention),
+        )
+    )
+    dbg(f"群 {group_id} bot 发言 {message_id} 已加入自言落库(role=bot)")
 
 
 async def _load_context(
@@ -246,6 +309,7 @@ async def _load_context(
     # 活跃度统计按 60 分钟时间窗过滤；rows 只是保留期内的最新 40 条。
     window_start = now - timedelta(hours=1)
     in_window = [row for row in rows if row.received_at >= window_start]
+    member_rows_in_window = [row for row in in_window if row.role != "bot"]
     activity = ActivitySnapshot(
         rows[0].received_at if rows else None,
         messages_5m=sum(
@@ -260,6 +324,10 @@ async def _load_context(
         mentions_60m=sum("@" in row.normalized_text for row in in_window),
         last_agent_at=config.last_agent_at,
         proactive_today=config.proactive_count,
+        last_member_message_at=(
+            member_rows_in_window[0].received_at if member_rows_in_window else None
+        ),
+        member_messages_60m=len(member_rows_in_window),
     )
     dbg(
         f"群 {group_id} 活跃度快照: 5m={activity.messages_5m} 20m={activity.messages_20m} "
@@ -380,8 +448,7 @@ async def _prepare_media_prompt(
     if cached_captions:
         dbg(f"群 {group_id} 追加缓存字幕 {len(cached_captions)} 条到 prompt")
         user_prompt = f"{user_prompt}\n" + "\n".join(
-            f"[图片转述（缓存）] {caption}"
-            for _digest, caption in cached_captions
+            f"[图片转述（缓存）] {caption}" for _digest, caption in cached_captions
         )
     return user_prompt, media_blocks
 
@@ -414,11 +481,22 @@ async def _finalize_reply(
     if duplicate:
         dbg(f"群 {group_id} 回复与近 10 分钟内重复,抑制发送: {content!r}")
         return
-    if not await _send_unless_expired(
+    sent, sent_message_id = await _send_unless_expired(
         bot, group_id, content, enqueued_at, label="正文发送", message_id=message_id
-    ):
+    )
+    if not sent:
         dbg(f"群 {group_id} 回复未发送(触发过期或发送失败),放弃本轮状态更新")
         return
+    # bot 发言进入消息历史：后续上下文能看到自己最近说过什么，
+    # 主动插话才能贴着上文连贯接话而不是自说自话。
+    await persist_bot_reply(
+        session,
+        int(bot.self_id),
+        group_id,
+        sent_message_id,
+        content,
+        int(config.raw_retention_days),
+    )
     recent.append(
         {
             "input": input_fingerprint,
@@ -466,7 +544,9 @@ async def process_group_message(
     )
     async with group_lock(group_id, bot_id):
         if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
-            dbg(f"群 {group_id} 触发在等待群锁期间过期,跳过回复: message_id={message_id}")
+            dbg(
+                f"群 {group_id} 触发在等待群锁期间过期,跳过回复: message_id={message_id}"
+            )
             return
         dbg(f"群 {group_id} 已取得群锁,开始处理")
         async with get_session() as session:
@@ -518,7 +598,9 @@ async def process_group_message(
                 tools=tools,
                 context=context,
                 user_prompt=user_prompt,
-                media_inputs=media_blocks if agent_multimodal_mode() != "false" else None,
+                media_inputs=media_blocks
+                if agent_multimodal_mode() != "false"
+                else None,
             )
             cache_key = prompt_cache_key(
                 persona=resolve_persona(config),

@@ -27,6 +27,9 @@ class ActivitySnapshot:
     mentions_60m: int = 0
     last_agent_at: datetime | None = None
     proactive_today: int = 0
+    # bot 发言落库后，"群里有人说话"要区分真人与 bot 自言。
+    last_member_message_at: datetime | None = None
+    member_messages_60m: int = 0
 
 
 def coldness_score(snapshot: ActivitySnapshot, now: datetime) -> float:

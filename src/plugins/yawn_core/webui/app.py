@@ -53,6 +53,7 @@ from .auth import (
 )
 from .config import API_PATH, BASE_PATH, COOKIE_NAME, DIST_DIR, config
 from .deps import ReadSession, WriteSession, ok, page_params
+from .fanqie import router as fanqie_router
 from .games import router as games_router
 from .hub import hub
 from .service import (
@@ -105,6 +106,15 @@ class AgentConfigPatch(BaseModel):
     ) = Field(default=None, alias="triggerMode")
     proactive_probability: float | None = Field(
         default=None, ge=0, le=1, alias="proactiveProbability"
+    )
+    proactive_active_enabled: bool | None = Field(
+        default=None, alias="proactiveActiveEnabled"
+    )
+    proactive_active_probability: float | None = Field(
+        default=None, ge=0, le=1, alias="proactiveActiveProbability"
+    )
+    proactive_active_window_minutes: int | None = Field(
+        default=None, ge=1, le=1440, alias="proactiveActiveWindowMinutes"
     )
     idle_threshold_minutes: int | None = Field(
         default=None, ge=1, le=10080, alias="idleThresholdMinutes"
@@ -746,6 +756,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
 def register(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(games_router)
+    app.include_router(fanqie_router)
 
     @app.middleware("http")
     async def webui_audit_middleware(request: Request, call_next: Any) -> Response:
