@@ -168,3 +168,6 @@ dmypy.json
 # Generated Python bytecode is never versioned, including under tracked migrations.
 **/__pycache__/
 *.pyc
+
+# Mimosa security-scan plugin local artifacts (root and nested, e.g. webui/)
+.mimosa/

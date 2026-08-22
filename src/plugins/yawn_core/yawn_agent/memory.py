@@ -7,6 +7,7 @@ import json
 import math
 import re
 from datetime import datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 from nonebot import logger
@@ -24,6 +25,13 @@ from .log import dbg, dbg_exc
 from .media import unlink_cache_file
 
 _COMPACT_BATCH_LIMIT = 500
+# 各层记忆的保留期；同日摘要增量合并，画像/关系由整理任务续期。
+SUMMARY_TTL_DAYS = 30
+PROFILE_TTL_DAYS = 90
+RELATION_TTL_DAYS = 180
+AUDIT_TTL_DAYS = 90
+# 相关性重排只看最近 N 条消息，避免老话题稀释当前话题的匹配信号。
+_RELEVANCE_TEXTS = 10
 
 
 def score_topic(messages: list[str]) -> float:
@@ -55,7 +63,7 @@ def build_summary(messages: list[dict[str, Any]], *, max_chars: int = 1000) -> s
     return "\n".join(lines)[-max_chars:]
 
 
-def _parse_json_reply(text: str) -> dict[str, Any] | None:
+def parse_json_reply(text: str) -> dict[str, Any] | None:
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(
@@ -66,6 +74,101 @@ def _parse_json_reply(text: str) -> dict[str, Any] | None:
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def extract_bigrams(text: str) -> set[str]:
+    """ASCII 词级 + 中文 bigram 的轻量分词，供相关性重排使用。"""
+
+    tokens: set[str] = set(re.findall(r"[a-z0-9]{2,}", text.lower()))
+    cjk = re.findall(r"[\u4e00-\u9fff]", text)
+    tokens.update("".join(pair) for pair in pairwise(cjk))
+    return tokens
+
+
+def rank_memories(
+    rows: list[AgentMemory],
+    recent_texts: list[str],
+    speaker_id: int | None,
+    now: datetime,
+    *,
+    limit: int = 30,
+) -> list[AgentMemory]:
+    """按「话题相关性 + 显著度时间衰减 + 置信度 + 发言人加权」重排候选记忆。
+
+    相关性用记忆 key（双倍权重）与 content 同近期消息 bigram 的归一化重叠衡量；
+    显著度按 21 天半衰期衰减，避免旧热点长期霸占注入名额。
+    """
+
+    query_tokens = extract_bigrams(" ".join(recent_texts[-_RELEVANCE_TEXTS:]))
+    denom = max(1, len(query_tokens))
+    scored: list[tuple[float, int, AgentMemory]] = []
+    for row in rows:
+        age_days = max(0.0, (now - (row.updated_at or now)).total_seconds() / 86400.0)
+        key_overlap = len(extract_bigrams(str(row.memory_key or "")) & query_tokens)
+        content_overlap = len(extract_bigrams(str(row.content or "")) & query_tokens)
+        relevance = min(1.0, (2.0 * key_overlap + content_overlap) / denom)
+        speaker_bonus = (
+            0.25
+            if speaker_id is not None and int(row.subject_user_id or 0) == speaker_id
+            else 0.0
+        )
+        base = (
+            float(row.salience or 0.0)
+            * (0.5 ** (age_days / 21.0))
+            * (0.6 + 0.4 * float(row.confidence or 0.0))
+        )
+        scored.append((base + relevance + speaker_bonus, int(row.id or 0), row))
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    return [row for _score, _row_id, row in scored[:limit]]
+
+
+def rank_relations(
+    rows: list[AgentRelation],
+    participant_ids: set[int],
+    *,
+    limit: int = 50,
+    min_related: int = 15,
+) -> list[AgentRelation]:
+    """优先保留近期发言者相关的关系边；不足 min_related 条时按原顺序补足。"""
+
+    related: list[AgentRelation] = []
+    rest: list[AgentRelation] = []
+    for row in rows:
+        if (
+            int(row.subject_user_id) in participant_ids
+            or int(row.object_user_id) in participant_ids
+        ):
+            related.append(row)
+        else:
+            rest.append(row)
+    picked = related[:limit]
+    if len(picked) < min_related:
+        picked.extend(rest[: limit - len(picked)])
+    return picked
+
+
+def merge_daily_summary(existing: str, addition: str, *, max_chars: int = 2000) -> str:
+    """同日多次整理时增量拼接当天摘要，保留最新内容在尾部。"""
+
+    old = (existing or "").strip()
+    new = (addition or "").strip()
+    if not old:
+        return new[-max_chars:]
+    if not new or new == old:
+        return old[-max_chars:]
+    return f"{old}\n{new}"[-max_chars:]
+
+
+def merge_profile_update(
+    old_content: str, old_confidence: float, new_content: str, new_confidence: float
+) -> tuple[str, float]:
+    """画像冲突合并：新内容置信度不低于旧值才覆盖，否则保留旧事实。"""
+
+    if new_content == old_content:
+        return old_content, max(old_confidence, new_confidence)
+    if new_confidence >= old_confidence:
+        return new_content, max(old_confidence, new_confidence)
+    return old_content, old_confidence
 
 
 async def _model_summary(payload: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -106,7 +209,7 @@ async def _model_summary(payload: list[dict[str, Any]]) -> dict[str, Any] | None
     if not response:
         dbg("记忆整理: LLM 摘要返回空,回退到确定性摘要")
         return None
-    parsed = _parse_json_reply(response)
+    parsed = parse_json_reply(response)
     if parsed is None:
         dbg(f"记忆整理: LLM 返回无法解析为 JSON,回退到确定性摘要 raw={response!r}")
     else:
@@ -207,18 +310,26 @@ def _store_model_facts(
                 salience=_bounded_float(item.get("salience"), 0.6),
                 confidence=confidence,
                 visibility="group",
-                expires_at=now + timedelta(days=90),
+                expires_at=now + timedelta(days=PROFILE_TTL_DAYS),
             )
             session.add(row)
             profiles[(user_id, key)] = row
         else:
-            existing.content = content
+            old_content = str(existing.content or "")
+            merged_content, merged_confidence = merge_profile_update(
+                old_content, float(existing.confidence or 0.0), content, confidence
+            )
+            existing.content = merged_content
+            # 相同内容反复确认才提升置信度；内容被覆盖时不额外加分。
+            existing.confidence = min(
+                1.0,
+                merged_confidence + (0.02 if content == old_content else 0.0),
+            )
             merged_ids: list[int] = list(
                 dict.fromkeys([*(existing.evidence_message_ids or []), *evidence])
             )
             existing.evidence_message_ids = merged_ids[-50:]
-            existing.confidence = min(1.0, max(existing.confidence, confidence) + 0.02)
-            existing.expires_at = now + timedelta(days=90)
+            existing.expires_at = now + timedelta(days=PROFILE_TTL_DAYS)
 
 
 def _store_model_relations(
@@ -272,7 +383,11 @@ def _store_model_relations(
 
 
 async def compact_group_memory(
-    session: Any, group_id: int, *, now: datetime | None = None
+    session: Any,
+    group_id: int,
+    min_new_messages: int = 1,
+    *,
+    now: datetime | None = None,
 ) -> int:
     now = now or now_beijing()
     config = await session.get(GroupAgentConfig, group_id)
@@ -296,6 +411,13 @@ async def compact_group_memory(
         .scalars()
         .all()
     )
+    threshold = max(1, int(min_new_messages))
+    if len(rows) < threshold:
+        # 高频定时任务用阈值做廉价跳过：只保留过期清理，不触发 LLM 摘要。
+        dbg(
+            f"群 {group_id} 记忆整理跳过提取: 未整理消息 {len(rows)} 条低于阈值 {threshold}"
+        )
+        rows = []
     opted_out = set(
         (
             await session.execute(
@@ -352,14 +474,19 @@ async def compact_group_memory(
                     salience=salience,
                     confidence=0.6,
                     visibility="group",
-                    expires_at=now + timedelta(days=30),
+                    expires_at=now + timedelta(days=SUMMARY_TTL_DAYS),
                 )
             )
         else:
-            existing.content = summary[:2000]
-            existing.salience = salience
-            existing.evidence_message_ids = evidence_ids
-            existing.expires_at = now + timedelta(days=30)
+            # 同一天多次整理时增量合并，最新批次摘要接在尾部而非覆盖全天。
+            existing.content = merge_daily_summary(
+                str(existing.content or ""), summary[:2000]
+            )
+            existing.salience = max(float(existing.salience or 0.0), salience)
+            existing.evidence_message_ids = list(
+                dict.fromkeys([*(existing.evidence_message_ids or []), *evidence_ids])
+            )[-50:]
+            existing.expires_at = now + timedelta(days=SUMMARY_TTL_DAYS)
         valid_ids = {row.id for row in fresh_rows}
         profiles = await _prefetch_profiles(session, group_id)
         edges = await _prefetch_relations(session, group_id)
@@ -400,13 +527,13 @@ async def compact_group_memory(
     await session.execute(
         delete(AgentAudit).where(
             AgentAudit.group_id == group_id,
-            AgentAudit.created_at < now - timedelta(days=90),
+            AgentAudit.created_at < now - timedelta(days=AUDIT_TTL_DAYS),
         )
     )
     await session.execute(
         delete(AgentRelation).where(
             AgentRelation.group_id == group_id,
-            AgentRelation.last_seen_at < now - timedelta(days=180),
+            AgentRelation.last_seen_at < now - timedelta(days=RELATION_TTL_DAYS),
         )
     )
     try:
@@ -583,18 +710,25 @@ def _extract_structured_memories(
                     salience=0.8,
                     confidence=0.85,
                     visibility="group",
-                    expires_at=now + timedelta(days=90),
+                    expires_at=now + timedelta(days=PROFILE_TTL_DAYS),
                 )
                 session.add(record)
                 profiles[(int(row.user_id), key)] = record
             else:
-                existing.content = content
+                old_content = str(existing.content or "")
+                merged_content, merged_confidence = merge_profile_update(
+                    old_content, float(existing.confidence or 0.0), content, 0.85
+                )
+                existing.content = merged_content
+                existing.confidence = min(
+                    1.0,
+                    merged_confidence + (0.05 if content == old_content else 0.0),
+                )
                 merged_ids: list[int] = list(
                     dict.fromkeys([*(existing.evidence_message_ids or []), row.id])
                 )
                 existing.evidence_message_ids = merged_ids[-50:]
-                existing.confidence = min(1.0, existing.confidence + 0.05)
-                existing.expires_at = now + timedelta(days=90)
+                existing.expires_at = now + timedelta(days=PROFILE_TTL_DAYS)
         mentions = set(re.findall(r"@([0-9]{5,12})", text))
         for mention in mentions:
             target = int(mention)
@@ -624,6 +758,12 @@ __all__ = [
     "compact_group_memory",
     "delete_group_memories",
     "delete_member_memories",
+    "extract_bigrams",
     "list_memories",
+    "merge_daily_summary",
+    "merge_profile_update",
+    "parse_json_reply",
+    "rank_memories",
+    "rank_relations",
     "score_topic",
 ]

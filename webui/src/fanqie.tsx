@@ -23,6 +23,7 @@ import {
   Progress,
   Segmented,
   Select,
+  Skeleton,
   Space,
   Spin,
   Table,
@@ -87,6 +88,22 @@ const FANQIE_RANK_TYPES = [
   { value: "new", label: "新书榜" },
 ];
 
+const FQ_COVER_THEME_COUNT = 8;
+const FQ_RANK_MEDALS = ["🥇", "🥈", "🥉"];
+
+// 书封主题序号:按 bookId 稳定散列,同一本书永远拿到同一渐变。
+export function coverThemeIndex(bookId: string): number {
+  let hash = 0;
+  for (let i = 0; i < bookId.length; i += 1) {
+    hash = (hash * 31 + bookId.charCodeAt(i)) % 100003;
+  }
+  return hash % FQ_COVER_THEME_COUNT;
+}
+
+function coverFirstChar(title: string): string {
+  return (title || "").trim().charAt(0) || "书";
+}
+
 // 章节范围校验:与后端 submit_job 的口径一致,前端先拦一道给即时反馈。
 export function fanqieRangeError(
   start: number | null,
@@ -118,12 +135,13 @@ export function fanqieJobActions(job: FanqieJob): {
 
 function jobStatusTag(status: string): React.JSX.Element {
   const meta = FANQIE_JOB_STATUS_META[status];
-  return <Tag color={meta?.color ?? "default"}>{meta?.label ?? status}</Tag>;
+  // 已知状态用专属胶囊(彩点+浅底);未知值回退默认 Tag。
+  return <Tag className={meta ? `fq-status fq-status-${status}` : undefined}>{meta?.label ?? status}</Tag>;
 }
 
 function sendStatusTag(sendStatus: string): React.JSX.Element {
   const meta = FANQIE_SEND_STATUS_META[sendStatus];
-  return <Tag color={meta?.color ?? "default"}>{meta?.label ?? sendStatus}</Tag>;
+  return <Tag className={meta ? `fq-send fq-send-${sendStatus}` : undefined}>{meta?.label ?? sendStatus}</Tag>;
 }
 
 export function FanqiePage(): React.JSX.Element {
@@ -152,10 +170,22 @@ export function FanqiePage(): React.JSX.Element {
   }
   const active = status.active;
   return <>
-    <PageHeader
-      title="番茄小说"
-      subtitle={`公开小说搜索与 TXT 任务管理 · 排队 ${active?.queued ?? 0} · 下载中 ${active?.running ?? 0} · 单次上限 ${status.limits?.maxChapters ?? "?"} 章`}
-    />
+    <div className="fq-hero">
+      <div className="fq-hero-main">
+        <span className="fq-hero-mark">🍅</span>
+        <div className="fq-hero-text">
+          <h2>番茄小说</h2>
+          <p>公开小说搜索与 TXT 任务管理</p>
+        </div>
+      </div>
+      <div className="fq-hero-stats">
+        <span className="fq-chip fq-chip-sky">排队 {active?.queued ?? 0}</span>
+        <span className="fq-chip fq-chip-tomato">下载中 {active?.running ?? 0}</span>
+        <span className="fq-chip fq-chip-mint">单次上限 {status.limits?.maxChapters ?? "?"} 章</span>
+      </div>
+      <span className="fq-hero-deco fq-hero-deco-book">📖</span>
+      <span className="fq-hero-deco fq-hero-deco-spark">✨</span>
+    </div>
     <Tabs
       activeKey={tab}
       onChange={(key) => setSearchParams(key === "discover" ? {} : { tab: key }, { replace: true })}
@@ -184,6 +214,7 @@ function DiscoverTab({ status, onSubmitted }: { status: FanqieStatus; onSubmitte
   const clearBooks = () => { setBooks(null); setSelected(null); };
   return <>
     <Segmented
+      className="fq-modes"
       value={mode}
       onChange={(value) => { setMode(value as typeof mode); clearBooks(); }}
       options={[
@@ -195,12 +226,16 @@ function DiscoverTab({ status, onSubmitted }: { status: FanqieStatus; onSubmitte
     {mode === "search" && <SearchPanel onResults={setBooks} searchLimit={status.limits?.searchLimit ?? 5} />}
     {mode === "rank" && <RankPanel onResults={setBooks} />}
     {mode === "link" && <LinkPanel onResult={(book) => setBooks(book ? [book] : null)} />}
-    <Card className="section-row" title="选书结果">
+    <Card
+      className="section-row"
+      title="选书结果"
+      extra={books !== null && books.length > 0 ? <Text type="secondary">共 {books.length} 本</Text> : null}
+    >
       {books === null
-        ? <Empty description="先通过搜索、榜单或链接找书" />
+        ? <Empty description="先通过搜索、榜单或链接找书 🍅" />
         : books.length === 0
-          ? <Empty description="没有匹配的书" />
-          : <BookResultsTable books={books} onSelect={setSelected} />}
+          ? <Empty description="没有匹配的书,换个关键词试试" />
+          : <BookCardGrid books={books} ranked={mode === "rank"} onSelect={setSelected} />}
     </Card>
     <BookDrawer
       book={selected}
@@ -349,17 +384,22 @@ function LinkPanel({ onResult }: { onResult: (book: FanqieBookSummary | null) =>
   </Card>;
 }
 
-function BookResultsTable({ books, onSelect }: { books: FanqieBookSummary[]; onSelect: (book: FanqieBookSummary) => void }): React.JSX.Element {
-  const columns: ColumnsType<FanqieBookSummary> = [
-    {
-      title: "书名",
-      render: (_, row) => <><Text strong>{row.title}</Text><br /><Text type="secondary" copyable>{row.bookId}</Text></>,
-    },
-    { title: "作者", dataIndex: "author", width: 140, ellipsis: true },
-    { title: "简介", dataIndex: "description", ellipsis: true },
-    { title: "操作", width: 120, render: (_, row) => <Button type="link" icon={<DownloadOutlined />} onClick={() => onSelect(row)}>选这本书</Button> },
-  ];
-  return <Table rowKey="bookId" size="small" pagination={false} columns={columns} dataSource={books} />;
+// 书封卡片网格:生成式封面(主题渐变+首字),榜单模式下标出名次。
+function BookCardGrid({ books, ranked, onSelect }: { books: FanqieBookSummary[]; ranked: boolean; onSelect: (book: FanqieBookSummary) => void }): React.JSX.Element {
+  return <div className="fq-book-grid">
+    {books.map((book, index) => (
+      <div className="fq-book-card" key={book.bookId}>
+        <div className={`fq-cover fq-cover-${coverThemeIndex(book.bookId)}`}>
+          <span className="fq-cover-char">{coverFirstChar(book.title)}</span>
+          {ranked && <span className="fq-rank">{index < FQ_RANK_MEDALS.length ? FQ_RANK_MEDALS[index] : `#${index + 1}`}</span>}
+        </div>
+        <div className="fq-book-title" title={book.title}>{book.title}</div>
+        <div className="fq-book-author" title={book.author}>{book.author || "—"}</div>
+        <p className="fq-book-desc">{book.description || "暂无简介"}</p>
+        <Button block size="small" type="primary" icon={<DownloadOutlined />} onClick={() => onSelect(book)}>选这本书</Button>
+      </div>
+    ))}
+  </div>;
 }
 
 function BookDrawer({ book, maxChapters, onClose, onSubmitted }: {
@@ -412,22 +452,32 @@ function BookDrawer({ book, maxChapters, onClose, onSubmitted }: {
     onClose={onClose}
     width="min(860px, 100%)"
     title={book ? <Space>{book.title}<Text type="secondary">{book.author}</Text></Space> : "书籍"}
-    extra={chapters.length > 0 ? <Text type="secondary">共 {chapters.length} 章(锁定 {chapters.filter((c) => c.isLocked).length})</Text> : null}
   >
     {!book
       ? <Spin />
       : <>
-        <Descriptions className="section-row" size="small" column={2} items={[
-          { key: "id", label: "Book ID", children: <Text copyable>{book.bookId}</Text> },
-          { key: "author", label: "作者", children: book.author },
-          { key: "desc", label: "简介", span: 2, children: <Paragraph ellipsis={{ rows: 3, expandable: true }}>{book.description || "—"}</Paragraph> },
-        ]} />
+        <div className="fq-book-head">
+          <div className={`fq-cover fq-cover-lg fq-cover-${coverThemeIndex(book.bookId)}`}>
+            <span className="fq-cover-char">{coverFirstChar(book.title)}</span>
+          </div>
+          <div className="fq-book-info">
+            <div className="fq-book-info-title" title={book.title}>{book.title}</div>
+            <Text type="secondary">{book.author}</Text>
+            <Text type="secondary" copyable className="fq-book-id">{book.bookId}</Text>
+            <Paragraph ellipsis={{ rows: 3, expandable: true }}>{book.description || "暂无简介"}</Paragraph>
+            {chapters.length > 0 && <div className="fq-chapter-chips">
+              <span className="fq-chip fq-chip-sakura">共 {chapters.length} 章</span>
+              <span className="fq-chip fq-chip-mint">公开 {chapters.length - chapters.filter((c) => c.isLocked).length}</span>
+              <span className="fq-chip fq-chip-gold">锁定 {chapters.filter((c) => c.isLocked).length}</span>
+            </div>}
+          </div>
+        </div>
         {chaptersQuery.error && !chaptersQuery.data
           ? <QueryErrorAlert error={chaptersQuery.error} onRetry={chaptersQuery.reload} />
           : <>
             <Card className="section-row" size="small" title="目录">
               {chaptersQuery.loading && chapters.length === 0
-                ? <Spin />
+                ? <Skeleton active title={false} paragraph={{ rows: 6 }} />
                 : <Table
                     rowKey="itemId"
                     size="small"
@@ -531,7 +581,7 @@ function JobsTab(): React.JSX.Element {
     {
       title: "状态",
       width: 110,
-      render: (_, row) => <Space direction="vertical" size={0}>{jobStatusTag(row.status)}{row.cancelRequested && row.status !== "cancelled" && <Tag color="orange">取消中</Tag>}</Space>,
+      render: (_, row) => <Space direction="vertical" size={0}>{jobStatusTag(row.status)}{row.cancelRequested && row.status !== "cancelled" && <Tag className="fq-status fq-status-cancelling">取消中</Tag>}</Space>,
     },
     { title: "发送", dataIndex: "sendStatus", width: 100, render: (value: string) => sendStatusTag(value) },
     {
@@ -569,6 +619,7 @@ function JobsTab(): React.JSX.Element {
           columns={columns}
           loading={query.loading}
           dataSource={query.data?.rows ?? []}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无下载任务,先去「找书下载」挑一本吧 🍅" /> }}
           pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }}
         />}
     <JobDetailDrawer jobId={detailId} onClose={() => setDetailId(null)} onChanged={reload} />

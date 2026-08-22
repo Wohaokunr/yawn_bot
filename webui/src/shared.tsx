@@ -1,4 +1,5 @@
-import { Alert, Button, Flex, Typography } from "antd";
+import { Alert, Button, Flex, Table, Typography } from "antd";
+import type { TablePaginationConfig } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const { Title, Text } = Typography;
@@ -66,4 +67,11 @@ export function QueryErrorAlert({ error, onRetry }: { error: string; onRetry: ()
 
 export function PageHeader({ title, subtitle, extra }: { title: string; subtitle: string; extra?: React.ReactNode }): React.JSX.Element {
   return <Flex justify="space-between" align="center" gap={16} wrap className="page-heading"><div><Title level={2}>{title}</Title><Text type="secondary">{subtitle}</Text></div>{extra}</Flex>;
+}
+
+// 少于等于一页时完全隐藏分页；否则只渲染分页条（配合服务端分页表格）。
+export function TablePagination({ current, total, onChange }: { current: number; total: number; onChange: (page: number) => void }): React.JSX.Element {
+  if (total <= 20) return <></>;
+  const pagination: TablePaginationConfig = { current, total, pageSize: 20, showSizeChanger: false, onChange };
+  return <Table rowKey="placeholder" columns={[]} dataSource={[]} showHeader={false} pagination={pagination} className="pagination-only" />;
 }

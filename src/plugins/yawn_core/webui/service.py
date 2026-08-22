@@ -12,11 +12,12 @@ from sqlalchemy import String, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..data_models.agent_audit import AgentAudit
-from ..data_models.agent_memory import AgentMemory
+from ..data_models.agent_memory import AgentMemory, AgentRelation
 from ..data_models.bot_group import BotGroup
 from ..data_models.bot_user import BotUser
 from ..data_models.global_user_feature import GlobalUserFeature
 from ..data_models.group_agent_config import GroupAgentConfig
+from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.group_feature import GroupFeature
 from ..data_models.user_feature import UserFeature
 from ..data_models.user_group import UserGroup
@@ -465,6 +466,89 @@ def serialize_memory(row: AgentMemory) -> dict[str, Any]:
         "createdAt": iso(row.created_at),
         "updatedAt": iso(row.updated_at),
         "expiresAt": iso(row.expires_at),
+    }
+
+
+def serialize_relation(row: AgentRelation) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "groupId": str(row.group_id),
+        "subjectUserId": str(row.subject_user_id),
+        "objectUserId": str(row.object_user_id),
+        "type": row.relation_type,
+        "confidence": row.confidence,
+        "evidenceCount": row.evidence_count,
+        "lastSeenAt": iso(row.last_seen_at),
+    }
+
+
+def serialize_agent_message(row: GroupAgentMessage) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "groupId": str(row.group_id),
+        "userId": str(row.user_id),
+        "senderName": row.sender_name,
+        "role": row.role,
+        "title": row.title,
+        "text": row.normalized_text,
+        "receivedAt": iso(row.received_at),
+        "expiresAt": iso(row.expires_at),
+    }
+
+
+async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str, Any]:
+    """记忆治理状态：未整理消息量、整理游标与按类型的记忆计数。"""
+
+    now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
+    config = await session.get(GroupAgentConfig, group_id)
+    cursor = int(config.last_compacted_message_id or 0) if config else 0
+    pending_clauses = [
+        GroupAgentMessage.group_id == group_id,
+        GroupAgentMessage.id > cursor,
+        GroupAgentMessage.expires_at.is_not(None),
+        GroupAgentMessage.expires_at >= now,
+    ]
+    pending = int(
+        await session.scalar(
+            select(func.count()).select_from(GroupAgentMessage).where(*pending_clauses)
+        )
+        or 0
+    )
+    last_compacted_at = None
+    if cursor > 0:
+        last_compacted_at = await session.scalar(
+            select(GroupAgentMessage.received_at).where(GroupAgentMessage.id == cursor)
+        )
+    memory_clauses = [
+        AgentMemory.group_id == group_id,
+        AgentMemory.visibility.in_(("group", "public")),
+        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
+    ]
+    type_rows = (
+        await session.execute(
+            select(AgentMemory.memory_type, func.count())
+            .where(*memory_clauses)
+            .group_by(AgentMemory.memory_type)
+        )
+    ).all()
+    counts_by_type = {str(row[0]): int(row[1] or 0) for row in type_rows}
+    return {
+        "groupId": str(group_id),
+        "pendingMessages": pending,
+        "lastCompactedMessageId": cursor or None,
+        "lastCompactedAt": iso(last_compacted_at),
+        "countsByType": counts_by_type,
+        "total": sum(counts_by_type.values()),
+        "oldestUpdatedAt": iso(
+            await session.scalar(
+                select(func.min(AgentMemory.updated_at)).where(*memory_clauses)
+            )
+        ),
+        "newestUpdatedAt": iso(
+            await session.scalar(
+                select(func.max(AgentMemory.updated_at)).where(*memory_clauses)
+            )
+        ),
     }
 
 

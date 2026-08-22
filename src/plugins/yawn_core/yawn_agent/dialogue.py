@@ -35,6 +35,7 @@ from .config_store import get_or_create_config
 from .context import ActivitySnapshot, build_context, now_beijing
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
+from .memory import rank_memories, rank_relations
 from .message_parser import NormalizedMessage
 from .persona import resolve_persona
 from .prompt import build_messages, prompt_cache_key
@@ -190,7 +191,12 @@ async def persist_bot_reply(
 
 
 async def _load_context(
-    session: Any, group_id: int, config: GroupAgentConfig, bot_id: int | None = None
+    session: Any,
+    group_id: int,
+    config: GroupAgentConfig,
+    bot_id: int | None = None,
+    *,
+    include_message_age: bool = False,
 ) -> dict[str, Any]:
     now = now_beijing()
     # 隐私退出是读路径级别的：历史消息同样不得进入提示词。
@@ -236,6 +242,12 @@ async def _load_context(
             "role": row.role,
             "title": row.title,
             "text": row.normalized_text,
+            # 主动发言路径开启：让模型分辨"几分钟前在聊什么"与更早的旧话。
+            **(
+                {"minutes_ago": int((now - row.received_at).total_seconds() // 60)}
+                if include_message_age
+                else {}
+            ),
         }
         for row in reversed(rows)
     ]
@@ -260,17 +272,37 @@ async def _load_context(
         for row in member_rows
     ]
     dbg(f"群 {group_id} 加载上下文: 成员 {len(members)} 人(上限 100)")
-    memory_stmt = (
-        select(AgentMemory)
-        .where(
-            AgentMemory.group_id == group_id,
-            AgentMemory.visibility.in_(("group", "public")),
-            (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
-        )
-        .order_by(AgentMemory.salience.desc(), AgentMemory.updated_at.desc())
-        .limit(30)
+    # 相关性信号取自刚加载的消息：近 10 条文本与最后一位发言成员。
+    recent_texts = [str(item["text"] or "") for item in messages[-10:]]
+    speaker_id = next(
+        (
+            int(item["user_id"])
+            for item in reversed(messages)
+            if item.get("role") != "bot"
+        ),
+        None,
     )
-    memory_rows = (await session.execute(memory_stmt)).scalars().all()
+    memory_clauses = [
+        AgentMemory.group_id == group_id,
+        AgentMemory.visibility.in_(("group", "public")),
+        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
+    ]
+    memory_rows = (
+        (
+            await session.execute(
+                select(AgentMemory)
+                .where(*memory_clauses)
+                .order_by(AgentMemory.salience.desc(), AgentMemory.updated_at.desc())
+                .limit(120)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # 候选取回后按当前话题相关性重排：换话题不再注入旧热点，发言人画像优先。
+    memory_rows = rank_memories(
+        list(memory_rows), recent_texts, speaker_id, now, limit=30
+    )
     memories = [
         {
             "type": row.memory_type,
@@ -282,18 +314,25 @@ async def _load_context(
         }
         for row in memory_rows
     ]
-    dbg(f"群 {group_id} 加载上下文: 记忆 {len(memories)} 条(上限 30,按 salience 排序)")
+    dbg(
+        f"群 {group_id} 加载上下文: 记忆 {len(memories)} 条(候选 120 按相关性重排取 30,"
+        f"当前发言人={speaker_id})"
+    )
     relation_rows = (
         (
             await session.execute(
                 select(AgentRelation)
                 .where(AgentRelation.group_id == group_id)
                 .order_by(AgentRelation.confidence.desc())
-                .limit(50)
+                .limit(120)
             )
         )
         .scalars()
         .all()
+    )
+    # 关系边优先保留近期发言者相关的高置信边，避免静默成员长期占用注入名额。
+    relation_rows = rank_relations(
+        list(relation_rows), {int(item["user_id"]) for item in messages}
     )
     relations = [
         {
