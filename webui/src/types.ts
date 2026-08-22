@@ -136,6 +136,7 @@ export interface WerewolfLiveGame {
   phase: string | null;
   phaseLabel: string;
   roundNo: number;
+  currentSpeaker: number | null;
   signupCount: number;
   playerCount: number;
   aiCount: number;
@@ -145,6 +146,38 @@ export interface WerewolfLiveGame {
   workerAlive: boolean;
   players: WerewolfLivePlayer[];
   signup: { userId: number; name: string; isAi: boolean }[];
+}
+
+// 可视化对局事件(内存日志,管理员全可见;口径见 yawn_werewolf/game_log.py)
+export interface WerewolfGameEvent {
+  seq: number;
+  ts: string;
+  type: "phase" | "announce" | "death" | "speech" | "vote_tally" | "ai_decision" | "ai_speech" | "system" | string;
+  roundNo: number | null;
+  phase: string | null;
+  seat: number | null;
+  userId: number | null;
+  name: string | null;
+  text: string | null;
+  extra: {
+    instruction?: string;
+    context?: string;
+    action?: { kind: string; value: number | null } | null;
+    attempt?: number;
+    isAi?: boolean;
+    scene?: string;
+    role?: string;
+    deathCause?: string;
+    winner?: string;
+    votes?: { voterSeat: number; targetSeat: number | null; isSheriff: boolean }[];
+    counts?: Record<string, number>;
+    [key: string]: unknown;
+  };
+}
+
+export interface WerewolfGameDetail {
+  game: WerewolfLiveGame;
+  events: WerewolfGameEvent[];
 }
 
 export interface RpgLivePlayer {

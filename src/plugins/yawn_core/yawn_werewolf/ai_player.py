@@ -24,7 +24,7 @@ from nonebot import get_plugin_config, logger
 
 from ..llm import complete  # noqa: TID252
 from ..metrics import record_ai_degradation  # noqa: TID252
-from . import api
+from . import api, game_log
 from .config import SHERIFF_FINAL_SPEECH_SECONDS, Config
 from .dsl import parse_dm_action
 from .roles import BOARDS, Faction, Role, build_role_card
@@ -35,6 +35,7 @@ from .state import (
     Game,
     Phase,
     PlayerState,
+    display_name_of,
     submit_action,
 )
 
@@ -125,6 +126,31 @@ _SPEECH_PHASES: frozenset[Phase] = frozenset(
     }
 )
 
+# 各发言场景的目标提示（阵营/角色策略由 _speech_strategy 补充）
+_SPEECH_SCENE_PROMPTS: dict[Phase, str] = {
+    Phase.LAST_WORDS: (
+        "你已死亡，现在发表遗言。用它留下最关键的信息："
+        "预言家应报出全部查验记录并给出归票建议；神职可交代尚未公开的情报；"
+        "好人交代你的怀疑与理由；狼人可以用遗言带节奏或掩护队友。"
+    ),
+    Phase.SHERIFF_SPEECH: (
+        "现在是警长竞选发言：说明大家应该投你当警长的理由"
+        "（例如预言家可以宣布查验思路），也可以质疑其他竞选者。"
+    ),
+    Phase.SHERIFF_FINAL_SPEECH: (
+        "警长投票平票，现在是终辩：直接反驳另一位平票者，"
+        "给出大家应该投你而不是 TA 的理由。"
+    ),
+    Phase.DAY_SPEECH: (
+        "现在轮到你白天发言：复盘昨晚倒牌信息、点评之前发言中的矛盾点，"
+        "明确给出你怀疑的对象与理由（或为某人担保）。"
+    ),
+    Phase.PK_SPEECH: (
+        "放逐投票平票，现在是 PK 发言：自证清白，"
+        "并指出另一位平票者的疑点。"
+    ),
+}
+
 
 def _clip_timeout_to_window(preferred: float, window: float) -> float:
     """把 AI 调用总预算限制在引擎阶段窗口内。"""
@@ -152,6 +178,26 @@ _VOTE_PHASES: frozenset[Phase] = frozenset(
 
 
 @dataclass
+class SeatKnowledge:
+    """单个座位的结构化已知信息（引擎同步钩子沉淀）。
+
+    private_log 只保留最近若干条文本，长局中早期查验/用药会被挤出
+    上下文导致 AI 失忆；这些关键事实改为结构化保存，渲染永不丢失。
+    仅 AI 座位会被渲染进提示词，人类座位的记录只是顺带写入，无害。
+    """
+
+    # 预言家查验史：(回合, 目标座位, "狼人"/"好人")
+    checks: list[tuple[int, int, str]] = field(default_factory=list)
+    # 女巫用药状态
+    save_used: bool = False
+    poison_used: bool = False
+    saved_seat: Optional[int] = None
+    poisoned_seat: Optional[int] = None
+    # 狼队友座位（每晚睁眼时刷新为当夜存活队友）
+    wolf_mates: list[int] = field(default_factory=list)
+
+
+@dataclass
 class AIDriver:
     """单局 AI 驱动的内存状态（transcript + 去重表）。"""
 
@@ -163,6 +209,8 @@ class AIDriver:
     )
     # 座位 -> [(收到时的阶段, 私聊文本)]
     private_log: dict[int, list[tuple[Phase, str]]] = field(default_factory=dict)
+    # 座位 -> 结构化已知信息（引擎钩子写入，渲染进提示词）
+    knowledge: dict[int, SeatKnowledge] = field(default_factory=dict)
     # 已处理决策的去重键（含 round/phase/seat/决策种类）
     handled: set[tuple[object, ...]] = field(default_factory=set)
     # 已用过"引擎驳回重试"机会的去重键（每决策点最多重试一次）
@@ -240,11 +288,77 @@ def on_announce(game: Game, text: str) -> None:
 
 
 def record_speech(game: Game, seat: int, text: str) -> None:
-    """发言捕获监听器入口：人类发言记入公共记录。"""
+    """发言捕获监听器入口：人类发言记入公共记录与可视化日志。"""
+    speaker = game.player_by_seat(seat)
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_SPEECH,
+        round_no=game.round_no,
+        phase=game.phase,
+        seat=seat,
+        user_id=speaker.user_id if speaker else None,
+        name=display_name_of(game, speaker.user_id) if speaker else f"{seat}号",
+        text=text[:SPEECH_TRUNCATE],
+        extra={"isAi": False},
+    )
     driver = _drivers.get(game.group_id)
     if driver is None:
         return
     driver.public_log.append(f"[{seat}号发言] {text[:SPEECH_TRUNCATE]}")
+    driver.wake.set()
+
+
+# ── 结构化已知信息钩子（引擎裁决点同步调用，与 on_dm 同类契约：
+#    只写 driver 内部结构 + 置 wake，不写 Game，绝不 await）──
+
+
+def _knowledge_of(driver: AIDriver, seat: int) -> SeatKnowledge:
+    """取（或创建）该座位的已知信息结构。"""
+    return driver.knowledge.setdefault(seat, SeatKnowledge())
+
+
+def note_check(
+    game: Game,
+    seat: int,
+    round_no: int,
+    target: int,
+    identity: str,
+) -> None:
+    """预言家查验结果沉淀（引擎 _phase_seer 裁决后调用）。"""
+    driver = _drivers.get(game.group_id)
+    if driver is None:
+        return
+    _knowledge_of(driver, seat).checks.append((round_no, target, identity))
+    driver.wake.set()
+
+
+def note_potion(
+    game: Game,
+    seat: int,
+    *,
+    save_seat: Optional[int] = None,
+    poison_seat: Optional[int] = None,
+) -> None:
+    """女巫用药沉淀（引擎 _phase_witch 裁决后调用）。"""
+    driver = _drivers.get(game.group_id)
+    if driver is None:
+        return
+    known = _knowledge_of(driver, seat)
+    if save_seat is not None:
+        known.save_used = True
+        known.saved_seat = save_seat
+    if poison_seat is not None:
+        known.poison_used = True
+        known.poisoned_seat = poison_seat
+    driver.wake.set()
+
+
+def note_wolf_mates(game: Game, seat: int, mates: list[int]) -> None:
+    """狼队友名单沉淀（引擎 _phase_wolves 每晚睁眼时调用，随存活刷新）。"""
+    driver = _drivers.get(game.group_id)
+    if driver is None:
+        return
+    _knowledge_of(driver, seat).wolf_mates = list(mates)
     driver.wake.set()
 
 
@@ -496,7 +610,8 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
             await _simple_decide(
                 driver,
                 p,
-                "结合场上局势决定是否开枪（可带走一名存活玩家）。",
+                "结合场上局势与[你的已知信息]决定是否开枪"
+                "（带走你判断最关键的一名存活玩家，也可不开枪）。",
                 fallback=ActionKind.NO_SHOOT,
                 timeout=_decision_timeout(config.ww_hunter_timeout),
             )
@@ -513,7 +628,9 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
             await _simple_decide(
                 driver,
                 p,
-                "决定警徽流向：移交警徽给信任的存活玩家，或撕警徽。",
+                "决定警徽流向：移交警徽给你最信任的存活玩家"
+                "（例如已跳预言家且发言可信的人），或撕警徽。"
+                "警长票算 1.5 票很关键，交给错误的人会帮到对方阵营。",
                 fallback=ActionKind.TEAR_BADGE,
                 timeout=_decision_timeout(config.ww_badge_timeout),
             )
@@ -716,8 +833,9 @@ async def _wolf_decide(
     instruction = (
         f"狼人队友：{_fmt_seats(teammates)}；"
         f"今晚可刀目标（存活非狼人）：{_fmt_seats(targets)}。"
-        "结合[你的私聊]中队友的讨论（【狼队】…）与刀型统计，"
-        "尽量与队友统一目标出刀。"
+        "结合[你的私聊]中队友的讨论（【狼队】…）与刀型统计出刀："
+        "队友提议集中在同一目标且你没有更强理由时，跟刀形成统一刀口；"
+        "优先刀对狼队威胁大的玩家（如跳预言家者、发言强势的好人）。"
     )
     action = await _llm_decide(driver, wolf, instruction, timeout=timeout)
     if (
@@ -768,8 +886,9 @@ async def _knight_decide(driver: AIDriver, knight: PlayerState) -> None:
     targets = [p.seat for p in game.alive_players() if p.seat != knight.seat]
     instruction = (
         f"你是骑士，本发言阶段可以翻牌决斗：可决斗目标 {_fmt_seats(targets)}。"
-        "结合[对局记录]中的发言判断是否有把握决斗到狼人——"
-        "决斗到狼人则其立即死亡并直接进入黑夜；决斗到好人则你死亡。"
+        "结合[对局记录]中的发言与[你的已知信息]判断把握——"
+        "对方发言有明显狼味、或被可信的预言家查杀时才值得决斗；"
+        "决斗到狼人则其立即死亡并直接进入黑夜；决斗到好人则你死亡、白天继续。"
         "有把握就回复 决斗N，没有把握就回复 过（不决斗）。"
     )
     await asyncio.sleep(_SETTLE_DELAY)
@@ -793,9 +912,21 @@ async def _knight_decide(driver: AIDriver, knight: PlayerState) -> None:
 async def _vote_decide(driver: AIDriver, player: PlayerState) -> None:
     """投票决策：失败兜底弃票。"""
     game = driver.game
+    sheriff = game.sheriff()
+    sheriff_note = (
+        f"当前警长 {sheriff.seat}号（其票算 1.5 票），"
+        if sheriff is not None and sheriff.alive
+        else ""
+    )
+    if game.phase in (Phase.SHERIFF_VOTE, Phase.SHERIFF_REVOTE):
+        goal = "选出你认为最可信、能带好节奏的警长。"
+    else:
+        goal = "放逐你判断最像狼人的对象；集中票型通常优于分散，没把握也可弃票。"
     instruction = (
-        f"本轮可投对象：{_fmt_seats(list(game.vote_targets))}，"
-        "结合场上记录决定投给谁（可弃票）。"
+        f"本轮可投对象：{_fmt_seats(list(game.vote_targets))}。"
+        f"{sheriff_note}"
+        "结合[对局记录]中的发言与计票、[你的已知信息]里的积累做决定："
+        f"{goal}"
     )
     action = await _llm_decide(
         driver,
@@ -829,6 +960,8 @@ async def _llm_decide(  # noqa: PLR0911
     game = driver.game
     phase_token = game.phase_token
     messages = _build_decision_messages(driver, player, instruction)
+    # 决策上下文快照（可视化用）：渲染一次截断存档，不影响提示词本体
+    context_snapshot = _render_context(driver, player)[: game_log.MAX_CONTEXT_CHARS]
     logger.debug(
         f"狼人杀群 {game.group_id} {player.seat}号 AI 决策提示词：{instruction}"
         f"\n{messages[-1].get('content', '')}"
@@ -878,6 +1011,29 @@ async def _llm_decide(  # noqa: PLR0911
             return None
         logger.info(f"狼人杀群 {game.group_id} {player.seat}号 AI 决策回复：{text!r}")
         action = parse_dm_action(text, player.user_id, allow_votes=True)
+        game_log.record(
+            game.group_id,
+            game_log.TYPE_AI_DECISION,
+            round_no=game.round_no,
+            phase=game.phase,
+            seat=player.seat,
+            user_id=player.user_id,
+            name=player.display_name,
+            text=text,
+            extra={
+                "instruction": instruction,
+                "context": context_snapshot,
+                "action": (
+                    {
+                        "kind": action.kind.value,
+                        "value": action.value,
+                    }
+                    if action is not None
+                    else None
+                ),
+                "attempt": attempt + 1,
+            },
+        )
         if (
             action is not None and _is_valid_action(game, player, action)
         ):
@@ -998,6 +1154,17 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
             # 仅投递成功才写入公共记录，避免 AI 上下文出现群里没发出的话
             sent = True
             driver.public_log.append(f"[{player.seat}号发言] {text}")
+            game_log.record(
+                game.group_id,
+                game_log.TYPE_SPEECH,
+                round_no=game.round_no,
+                phase=game.phase,
+                seat=player.seat,
+                user_id=player.user_id,
+                name=player.display_name,
+                text=text,
+                extra={"isAi": True},
+            )
             await asyncio.sleep(_SPEECH_LINGER)
     if (
         not sent
@@ -1030,19 +1197,11 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
 async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
     """生成发言/遗言/竞选发言文本。"""
     game = driver.game
-    if game.phase is Phase.LAST_WORDS:
-        scene = "你已死亡，现在发表遗言。"
-    elif game.phase in (
-        Phase.SHERIFF_SPEECH,
-        Phase.SHERIFF_FINAL_SPEECH,
-    ):
-        scene = "现在是警长竞选发言，说明大家该投你的理由。"
-    else:
-        scene = "现在轮到你发言。"
+    scene = _SPEECH_SCENE_PROMPTS.get(game.phase, "现在轮到你发言。")
     system = _identity_prompt(game, player, with_action_rules=False) + (
         "\n【发言规则】只输出发言内容本身（150 字以内），"
-        "不要输出任何指令、格式标记或前缀。发言应符合你的身份立场："
-        "狼人伪装好人、带节奏；好人分析局势、找狼。"
+        "不要输出任何指令、格式标记或前缀。发言应符合你的身份立场与场景目标。"
+        f"{_speech_strategy(player)}"
     )
     user = _render_context(driver, player) + f"\n\n{scene}请发言："
     if game.phase is Phase.LAST_WORDS:
@@ -1057,7 +1216,7 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
         config.ww_ai_speech_timeout,
         speech_window,
     )
-    return await complete(
+    text = await complete(
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -1066,6 +1225,21 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
         timeout=speech_timeout,
         temperature=0.8,
     )
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_AI_SPEECH,
+        round_no=game.round_no,
+        phase=game.phase,
+        seat=player.seat,
+        user_id=player.user_id,
+        name=player.display_name,
+        text=text,
+        extra={
+            "scene": scene,
+            "context": user[: game_log.MAX_CONTEXT_CHARS],
+        },
+    )
+    return text
 
 
 # ── 提示词构建 ────────────────────────────────────────────
@@ -1074,6 +1248,30 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
 def _fmt_seats(seats: list[int]) -> str:
     """座位列表渲染为 "3、5、8"。"""
     return "、".join(str(s) for s in seats) if seats else "无"
+
+
+def _speech_strategy(player: PlayerState) -> str:
+    """按身份给出的发言策略提示（拼在【发言规则】尾部）。"""
+    if player.role is Role.HALFBLOOD and player.owner_seat is not None:
+        return (
+            "发言策略：暗中配合主人的阵营倾向——主人像狼人你就帮狼队带好人节奏，"
+            "主人像好人你就帮着找狼，全程不要暴露你的身份。"
+        )
+    if player.faction is Faction.WOLF:
+        return (
+            "发言策略：伪装好人——可以悍跳预言家或神职、报假查验，"
+            "把怀疑引向真神职与好人，为狼队争取放逐好人；"
+            "留意队友的发言立场，不要互相攻击到穿帮。"
+        )
+    if player.role is Role.SEER:
+        return (
+            "发言策略：查验记录（[你的已知信息]）是你最硬的武器——"
+            "适时报出金水与查杀并解释查验顺序的理由，防备狼人悍跳对跳。"
+        )
+    return (
+        "发言策略：像好人一样分析逻辑——引用具体的发言与投票记录，"
+        "指出矛盾点，明确你的怀疑对象与理由。"
+    )
 
 
 def _identity_prompt(
@@ -1140,8 +1338,34 @@ def _identity_prompt(
     )
 
 
+def _render_knowledge(known: SeatKnowledge) -> str:
+    """把座位已知信息渲染为提示词行；无内容返回空字符串。"""
+    lines: list[str] = []
+    if known.checks:
+        entries = "；".join(
+            f"第{round_no}夜查验 {seat}号={identity}"
+            for round_no, seat, identity in known.checks
+        )
+        lines.append(f"查验记录（完整保留）：{entries}")
+    potion_parts: list[str] = []
+    if known.save_used:
+        target = f"{known.saved_seat}号" if known.saved_seat is not None else ""
+        potion_parts.append(f"解药已用（救过 {target}）" if target else "解药已用")
+    if known.poison_used:
+        target = f"{known.poisoned_seat}号" if known.poisoned_seat is not None else ""
+        potion_parts.append(f"毒药已用（毒过 {target}）" if target else "毒药已用")
+    if potion_parts:
+        lines.append("、".join(potion_parts))
+    if known.wolf_mates:
+        lines.append(
+            f"狼队友座位：{_fmt_seats(known.wolf_mates)}"
+            "（以最新一夜为准，存活情况见[当前局面]）"
+        )
+    return "\n".join(lines)
+
+
 def _render_context(driver: AIDriver, player: PlayerState) -> str:
-    """渲染公共记录 + 本人私聊 + 当前局面。"""
+    """渲染公共记录 + 本人私聊 + 已知信息 + 当前局面。"""
     game = driver.game
     public = list(driver.public_log)[-_CONTEXT_PUBLIC_LINES:]
     private = [text for _, text in driver.private_log.get(player.seat, [])][
@@ -1149,13 +1373,18 @@ def _render_context(driver: AIDriver, player: PlayerState) -> str:
     ]
     public_text = "\n".join(public) if public else "（暂无）"
     private_text = "\n".join(private) if private else "（暂无）"
+    knowledge_text = _render_knowledge(
+        driver.knowledge.get(player.seat, SeatKnowledge())
+    )
+    knowledge_block = f"\n\n[你的已知信息]\n{knowledge_text}" if knowledge_text else ""
     alive = _fmt_seats([p.seat for p in game.alive_players()])
     phase_desc = _PHASE_DESC.get(game.phase, game.phase.value)
     sheriff = game.sheriff()
     sheriff_line = f"，当前警长：{sheriff.seat}号" if sheriff else ""
     return (
         f"[对局记录]\n{public_text}\n\n"
-        f"[你的私聊]\n{private_text}\n\n"
+        f"[你的私聊]\n{private_text}"
+        f"{knowledge_block}\n\n"
         f"[当前局面] 第 {game.round_no} 回合，阶段：{phase_desc}{sheriff_line}；"
         f"存活玩家：{alive}。"
     )

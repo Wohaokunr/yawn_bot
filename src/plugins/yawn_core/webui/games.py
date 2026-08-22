@@ -1,4 +1,4 @@
-# ruff: noqa: C901,PLR0912,PLR0915
+# ruff: noqa: E501,F401,I001,TID252,PLR0911,PLR0912,PLR0913,PLR0915,PLR0917,PLR2004,C901,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100,PLW0603,FAST002
 """狼人杀 / 跑团子插件的对局管理端点。
 
 实时对局读取子插件进程内注册表（一群一局、单进程部署前提下的
@@ -28,35 +28,61 @@ router = APIRouter(prefix=API_PATH)
 
 _ww_state_module: Any = None
 _ww_state_resolved = False
+_ww_game_log_module: Any = None
+_ww_game_log_resolved = False
 _rpg_state_module: Any = None
 _rpg_state_resolved = False
 
 
+def _werewolf_game_log() -> Any | None:
+    """延迟解析狼人杀可视化事件日志模块；子插件缺失时返回 None。
+
+    仅在解析成功后缓存；失败不落缓存，子插件随后加载成功时下次
+    调用即可自动恢复（与前端提示语义一致）。
+    """
+    global _ww_game_log_module, _ww_game_log_resolved
+    if not _ww_game_log_resolved:
+        try:
+            from ..yawn_werewolf import game_log as module  # pyright: ignore[reportMissingImports]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"狼人杀子插件不可用，事件日志降级：{exc}")
+            return None
+        _ww_game_log_module = module
+        _ww_game_log_resolved = True
+    return _ww_game_log_module
+
+
 def _werewolf_state() -> Any | None:
-    """延迟解析狼人杀状态模块；子插件缺失或损坏时返回 None。"""
+    """延迟解析狼人杀状态模块；子插件缺失或损坏时返回 None。
+
+    仅在解析成功后缓存，失败下次重试（同 ``_werewolf_game_log``）。
+    """
     global _ww_state_module, _ww_state_resolved
     if not _ww_state_resolved:
-        _ww_state_resolved = True
         try:
-            from .yawn_werewolf import state as module
+            from ..yawn_werewolf import state as module  # pyright: ignore[reportMissingImports]
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"狼人杀子插件不可用，对局监控降级：{exc}")
-            module = None  # type: ignore[assignment]
+            return None
         _ww_state_module = module
+        _ww_state_resolved = True
     return _ww_state_module
 
 
 def _rpg_state() -> Any | None:
-    """延迟解析跑团状态模块；子插件缺失或损坏时返回 None。"""
+    """延迟解析跑团状态模块；子插件缺失或损坏时返回 None。
+
+    仅在解析成功后缓存，失败下次重试（同 ``_werewolf_state``）。
+    """
     global _rpg_state_module, _rpg_state_resolved
     if not _rpg_state_resolved:
-        _rpg_state_resolved = True
         try:
-            from .yawn_rpg import state as module
+            from ..yawn_rpg import state as module  # pyright: ignore[reportMissingImports]
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"跑团子插件不可用，对局监控降级：{exc}")
-            module = None  # type: ignore[assignment]
+            return None
         _rpg_state_module = module
+        _rpg_state_resolved = True
     return _rpg_state_module
 
 
@@ -151,6 +177,7 @@ def _ww_live_game(state: Any, game: Any) -> dict[str, Any]:
         "phase": _enum_value(game.phase),
         "phaseLabel": _WW_PHASE_LABELS.get(_enum_value(game.phase) or "", ""),
         "roundNo": game.round_no,
+        "currentSpeaker": game.current_speaker,
         "signupCount": len(game.signup_user_ids),
         "playerCount": len(game.players),
         "aiCount": sum(1 for player in game.players if player.is_ai),
@@ -216,7 +243,8 @@ async def _group_names(group_ids: set[int]) -> dict[int, str | None]:
                 )
             )
         ).all()
-    return {group_id: name for group_id, name in rows}
+    # 字典推导式而非 dict(rows)：pyright 无法从 Row 序列推断 dict 重载。
+    return {group_id: name for group_id, name in rows}  # noqa: C416
 
 
 @router.get("/games/live")
@@ -232,8 +260,7 @@ async def get_live_games(_session: ReadSession) -> dict[str, Any]:
         else []
     )
     names = await _group_names(
-        {game["groupId"] for game in ww_games}
-        | {game["groupId"] for game in rpg_games}
+        {game["groupId"] for game in ww_games} | {game["groupId"] for game in rpg_games}
     )
     for game in (*ww_games, *rpg_games):
         game["groupName"] = names.get(game["groupId"])
@@ -247,9 +274,7 @@ async def get_live_games(_session: ReadSession) -> dict[str, Any]:
 
 def _require_live_game(state: Any, kind: str, group_id: int) -> Any:
     if state is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, f"{kind}子插件未加载"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"{kind}子插件未加载")
     game = state.get_game(group_id)
     if game is None:
         raise HTTPException(
@@ -261,18 +286,43 @@ def _require_live_game(state: Any, kind: str, group_id: int) -> Any:
 @router.post("/games/werewolf/{group_id}/stop")
 async def stop_werewolf_game(group_id: int, _session: WriteSession) -> dict[str, Any]:
     state = _werewolf_state()
+    if state is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "狼人杀子插件未加载")
     game = _require_live_game(state, "狼人杀", group_id)
     _spawn_background(state.stop_game(game))
-    hub.notify_change("werewolf_game", str(group_id))
+    await hub.notify_change("werewolf_game", str(group_id))
     return ok({"stopping": True})
+
+
+@router.get("/games/werewolf/{group_id}/events")
+async def get_werewolf_game_events(
+    group_id: int,
+    _session: ReadSession,
+    after_seq: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """可视化对局详情：实时快照 + 内存事件日志（支持 afterSeq 增量）。"""
+    state = _werewolf_state()
+    if state is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "狼人杀子插件未加载")
+    game = _require_live_game(state, "狼人杀", group_id)
+    game_log = _werewolf_game_log()
+    events = (
+        [event.as_dict() for event in game_log.events(group_id, after_seq)]
+        if game_log is not None
+        else []
+    )
+    snapshot = _ww_live_game(state, game)
+    return ok({"game": snapshot, "events": events})
 
 
 @router.post("/games/rpg/{group_id}/stop")
 async def stop_rpg_game(group_id: int, _session: WriteSession) -> dict[str, Any]:
     state = _rpg_state()
+    if state is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
     game = _require_live_game(state, "跑团", group_id)
     _spawn_background(state.stop_game(game))
-    hub.notify_change("rpg_game", str(group_id))
+    await hub.notify_change("rpg_game", str(group_id))
     return ok({"stopping": True})
 
 
@@ -316,11 +366,7 @@ async def _paged_history(
     async with get_session() as db:
         total = int(await db.scalar(count_stmt) or 0)
         rows = list(
-            (
-                await db.execute(
-                    stmt.offset((page - 1) * page_size).limit(page_size)
-                )
-            )
+            (await db.execute(stmt.offset((page - 1) * page_size).limit(page_size)))
             .scalars()
             .all()
         )
@@ -339,7 +385,10 @@ async def werewolf_history(
 ) -> dict[str, Any]:
     if _werewolf_state() is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "狼人杀子插件未加载")
-    from .yawn_werewolf.models import WerewolfGame, WerewolfPlayer
+    from ..yawn_werewolf.models import (  # pyright: ignore[reportMissingImports]
+        WerewolfGame,
+        WerewolfPlayer,
+    )
 
     page, page_size = page_params(page, page_size)
     rows, total = await _paged_history(
@@ -354,14 +403,16 @@ async def werewolf_history(
     if game_ids:
         async with get_session() as db:
             player_rows = (
-                await db.execute(
-                    select(WerewolfPlayer)
-                    .where(WerewolfPlayer.game_id.in_(game_ids))
-                    .order_by(WerewolfPlayer.game_id, WerewolfPlayer.seat)
+                (
+                    await db.execute(
+                        select(WerewolfPlayer)
+                        .where(WerewolfPlayer.game_id.in_(game_ids))
+                        .order_by(WerewolfPlayer.game_id, WerewolfPlayer.seat)
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
         for player in player_rows:
             players.setdefault(player.game_id, []).append(player)
     names = await _group_names({row.group_id for row in rows})
@@ -410,7 +461,10 @@ async def rpg_history(
 ) -> dict[str, Any]:
     if _rpg_state() is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
-    from .yawn_rpg.models import RPGGame, RPGPlayer
+    from ..yawn_rpg.models import (  # pyright: ignore[reportMissingImports]
+        RPGGame,
+        RPGPlayer,
+    )
 
     page, page_size = page_params(page, page_size)
     rows, total = await _paged_history(

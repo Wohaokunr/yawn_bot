@@ -9,9 +9,10 @@
 | 模块 | 职责 |
 |---|---|
 | `engine.py` | 游戏引擎：每局一个 asyncio 任务（`run_game`），独占状态变更与群播报 |
-| `ai_player.py` | AI 驱动：每局一个驱动任务 + 若干后台决策任务，调用 LLM 合成 `Action` |
+| `ai_player.py` | AI 驱动：每局一个驱动任务 + 若干后台决策任务，调用 LLM 合成 `Action`；维护 transcript 与结构化已知信息（`SeatKnowledge`） |
 | `commands.py` | 命令入口：群命令 / 私聊命令 / 私聊自由文本监听，只做校验 + 投入行动 |
 | `state.py` | 内存状态：`Game`/`PlayerState`/`Action`、注册表与身份守卫式清理 |
+| `game_log.py` | WebUI 可视化用内存事件日志（按群环形队列，含发言正文与 AI 决策上下文，管理员全可见；引擎与 AI 驱动都只经模块函数记录，互不写对方状态；`discard_game` 时 `clear`） |
 | `dsl.py` | 自由文本 → `Action` 解析（`parse_dm_action`），人类私聊与 AI 共用 |
 | `roles.py` | 角色/阵营/死因枚举、板子注册表（`BOARDS`/`BoardSpec`，默认板子 `预女猎白`）、身份卡文本 |
 | `api.py` | OneBot V11 安全封装：所有 API 异常降级为 warning，不打断游戏 |
@@ -36,7 +37,14 @@
 - **AI 驱动对 Game 只读**，副作用仅限三个通道：投入 `action_queue`、
   维护自己的 transcript（`public_log`/`private_log`）、代发 AI 群发言。
 - **引擎 → 驱动的钩子必须同步**：`on_dm` / `on_announce` / `record_speech`
+  与结构化记录钩子（`note_check` / `note_potion` / `note_wolf_mates`）
   只记录 + 置 `wake` 事件，绝不 await（引擎主循环正在等它们返回）。
+- **结构化已知信息不靠私聊文本回忆**：查验史、女巫用药、狼队友名单
+  由引擎在裁决点（`_phase_seer` / `_phase_witch` / `_phase_wolves` 睁眼）
+  经 note_* 钩子沉淀进 `AIDriver.knowledge`（按座位），
+  `_render_context` 渲染为 `[你的已知信息]` 块——`private_log` 只保留
+  最近若干条文本，长局中早期私聊会被截掉，这些事实必须结构化保存。
+  新增裁决点若产生值得长期记忆的私有事实，走同样的 note_* 模式。
 - **AI 行动对引擎透明**：引擎不区分行动来源，照常二次裁决；被驳回的
   行动（私聊文本含"无效/无法使用/请重新"）给驱动一次重新决策机会。
 - **骑士决斗中断发言轮换**：`DUEL_PHASES`（DAY_SPEECH/PK_SPEECH）内到达的

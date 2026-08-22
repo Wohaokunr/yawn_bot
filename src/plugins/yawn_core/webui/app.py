@@ -43,6 +43,7 @@ from ..permission import FEATURE_REGISTRY
 from ..yawn_agent.memory import delete_group_memories, delete_member_memories
 from ..yawn_agent.persona import MAX_FIELD_LENGTH, PERSONA_FIELDS
 from .auth import (
+    Session,
     check_admin_token,
     client_key,
     create_session,

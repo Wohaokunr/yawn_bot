@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from ..event_log import record_game_event  # noqa: TID252
 from ..replay import register_replay_participants  # noqa: TID252
-from . import ai_player, api
+from . import ai_player, api, game_log
 from .config import SHERIFF_FINAL_SPEECH_SECONDS, Config
 from .models import WerewolfGame, WerewolfPlayer
 from .roles import (
@@ -157,6 +157,13 @@ def _enter_phase(game: Game, phase: Phase) -> None:
     )
     game.phase = phase
     game.phase_token += 1
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_PHASE,
+        round_no=game.round_no,
+        phase=phase,
+        text=phase.value,
+    )
     record_game_event(
         game,
         "werewolf",
@@ -171,6 +178,13 @@ def _enter_phase(game: Game, phase: Phase) -> None:
 async def _announce(game: Game, text: Union[str, "Message"]) -> None:
     """群播报；机器人缺失时群侧静默，但始终抄送 AI 驱动的公共记录。"""
     ai_player.on_announce(game, str(text))
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_ANNOUNCE,
+        round_no=game.round_no,
+        phase=game.phase,
+        text=str(text),
+    )
     if game.bot is None:
         return
     await api.safe_group_msg(game.bot, game.group_id, text)
@@ -250,6 +264,17 @@ def _kill(game: Game, player: PlayerState, cause: DeathCause) -> None:
     player.alive = False
     player.death_cause = cause
     player.death_round = game.round_no
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_DEATH,
+        round_no=game.round_no,
+        phase=game.phase,
+        seat=player.seat,
+        user_id=player.user_id,
+        name=display_name_of(game, player.user_id),
+        text=f"{player.seat}号 出局",
+        extra={"role": player.role.value, "deathCause": cause.value},
+    )
     logger.info(
         f"狼人杀群 {game.group_id} {player.seat}号 死亡"
         f"（{player.role.value}，死因 {cause.value}，第 {game.round_no} 回合）"
@@ -385,6 +410,12 @@ async def _phase_wolves(  # noqa: C901,PLR0912,PLR0915
         [p for p in game.alive_players() if p.faction is not Faction.WOLF]
     )
     for w in wolves:
+        # 结构化沉淀当夜队友名单（AI 驱动渲染已知信息用，见 ai_player）
+        ai_player.note_wolf_mates(
+            game,
+            w.seat,
+            [m.seat for m in wolves if m.seat != w.seat],
+        )
         await _dm(
             game,
             w,
@@ -520,6 +551,7 @@ async def _phase_witch(  # noqa: C901
                     f"狼人杀群 {game.group_id} 女巫 {witch.seat}号 "
                     f"使用解药救活 {kill_seat}号"
                 )
+                ai_player.note_potion(game, witch.seat, save_seat=kill_seat)
                 await _dm(game, witch, f"已使用解药救活 {kill_seat}号")
                 return True, None
             await _dm(
@@ -540,6 +572,7 @@ async def _phase_witch(  # noqa: C901
                     f"狼人杀群 {game.group_id} 女巫 {witch.seat}号 "
                     f"使用毒药毒杀 {target.seat}号"
                 )
+                ai_player.note_potion(game, witch.seat, poison_seat=target.seat)
                 await _dm(game, witch, f"已使用毒药毒杀 {target.seat}号")
                 return False, target.seat
             await _dm(game, witch, "目标无效或毒药已用，请重新选择")
@@ -587,6 +620,13 @@ async def _phase_seer(game: Game, cfg: Config) -> None:
         logger.info(
             f"狼人杀群 {game.group_id} 预言家 {seer.seat}号 "
             f"查验 {target.seat}号 → {identity}"
+        )
+        ai_player.note_check(
+            game,
+            seer.seat,
+            game.round_no,
+            target.seat,
+            identity,
         )
         await _dm(game, seer, f"查验结果：{target.seat}号 是 {identity}")
         return
@@ -1243,6 +1283,26 @@ async def _collect_votes(  # noqa: C901
         f"（{len(votes)}/{len(eligible)} 人）：{'、'.join(detail_parts) or '无'}"
     )
     await _announce_vote_tally(game, votes, eligible)
+    tally = _vote_counts(game, votes)
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_VOTE_TALLY,
+        round_no=game.round_no,
+        phase=phase,
+        text="计票结果",
+        extra={
+            "votes": [
+                {
+                    "voterSeat": actor.seat,
+                    "targetSeat": seat,
+                    "isSheriff": actor.is_sheriff,
+                }
+                for uid, seat in votes.items()
+                if (actor := game.player_by_user(uid)) is not None
+            ],
+            "counts": {str(seat): count for seat, count in tally.items()},
+        },
+    )
     return votes
 
 
@@ -1978,6 +2038,14 @@ async def _finish(game: Game, winner: Faction) -> None:
     """终局播报 + 写库。"""
     _enter_phase(game, Phase.ENDED)
     winner_name = "狼人阵营" if winner is Faction.WOLF else "好人阵营"
+    game_log.record(
+        game.group_id,
+        game_log.TYPE_SYSTEM,
+        round_no=game.round_no,
+        phase=game.phase,
+        text=f"对局结束：{winner_name}获胜",
+        extra={"winner": winner.value},
+    )
     logger.info(
         f"狼人杀群 {game.group_id} 对局结束："
         f"{winner_name}获胜（第 {game.round_no} 回合）"
