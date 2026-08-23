@@ -155,6 +155,12 @@ def is_memory_compacting(group_id: int) -> bool:
     return bool(lock and lock.locked())
 
 
+def compacting_group_count() -> int:
+    """当前正在进行记忆整理的群数量（进程内瞬时值）。"""
+
+    return sum(1 for lock in _COMPACTION_LOCKS.values() if lock.locked())
+
+
 def memory_retry_due(config: GroupAgentConfig, now: datetime) -> bool:
     failures = max(0, int(config.memory_consecutive_failures or 0))
     attempted = config.memory_last_attempt_at
@@ -1281,6 +1287,7 @@ __all__ = [
     "RELATION_TYPE_CHOICES",
     "build_summary",
     "compact_group_memory",
+    "compacting_group_count",
     "delete_group_memories",
     "delete_member_memories",
     "effective_relation_confidence",

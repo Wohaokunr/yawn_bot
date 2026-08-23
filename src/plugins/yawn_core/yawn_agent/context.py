@@ -26,6 +26,8 @@ class ActivitySnapshot:
     replies_60m: int = 0
     mentions_60m: int = 0
     last_agent_at: datetime | None = None
+    # 主动发言专用冷却基准；与被动回复刷新的 last_agent_at 解耦。
+    last_proactive_at: datetime | None = None
     proactive_today: int = 0
     # bot 发言落库后，"群里有人说话"要区分真人与 bot 自言。
     last_member_message_at: datetime | None = None
@@ -43,13 +45,20 @@ def coldness_score(snapshot: ActivitySnapshot, now: datetime) -> float:
     return max(0.0, min(1.0, idle / 2.0 + 0.35 - activity - interaction))
 
 
+def is_recent(
+    timestamp: datetime | None, now: datetime, minutes: float
+) -> bool:
+    """timestamp 是否落在 now 往前 minutes 分钟内；None 视为很久以前。"""
+
+    return bool(
+        timestamp and now - timestamp < timedelta(minutes=max(minutes, 0))
+    )
+
+
 def is_cooldown_active(
     snapshot: ActivitySnapshot, now: datetime, cooldown_minutes: int
 ) -> bool:
-    return bool(
-        snapshot.last_agent_at
-        and now - snapshot.last_agent_at < timedelta(minutes=max(cooldown_minutes, 0))
-    )
+    return is_recent(snapshot.last_agent_at, now, cooldown_minutes)
 
 
 def build_context(
@@ -120,5 +129,6 @@ __all__ = [
     "build_context",
     "coldness_score",
     "is_cooldown_active",
+    "is_recent",
     "now_beijing",
 ]

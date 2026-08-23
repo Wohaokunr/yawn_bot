@@ -44,7 +44,7 @@ __plugin_meta__ = PluginMetadata(
             {
                 "name": "Agent设置",
                 "aliases": [],
-                "description": "设置主动概率、媒体缓存等参数",
+                "description": "设置暖场概率、插话概率、冷却、媒体缓存等参数",
                 "feature": "group_agent",
                 "scope": "group",
                 "admin": True,

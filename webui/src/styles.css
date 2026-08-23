@@ -252,6 +252,7 @@ h1, h2, h3, h4, h5,
 .tone-mint     { background: linear-gradient(135deg, var(--mint-400), var(--mint-500));       box-shadow: 0 8px 20px rgba(52, 200, 150, 0.30); }
 .tone-sky      { background: linear-gradient(135deg, var(--sky-400), var(--sky-500));         box-shadow: 0 8px 20px rgba(91, 157, 246, 0.30); }
 .tone-lavender { background: linear-gradient(135deg, var(--lavender-400), var(--lavender-500)); box-shadow: 0 8px 20px rgba(154, 125, 240, 0.32); }
+.tone-tomato   { background: linear-gradient(135deg, var(--tomato-400), var(--tomato-600));   box-shadow: 0 8px 20px rgba(244, 105, 77, 0.32); }
 
 /* ── 胶囊软糖 Tag ── */
 .ant-tag {

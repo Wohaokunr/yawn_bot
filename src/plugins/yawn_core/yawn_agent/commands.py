@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..permission import is_group_admin, require_feature
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy
+from ..data_models.group_agent_config import GroupAgentConfig
 from .config_store import get_or_create_config
 from .context import now_beijing
 from .log import dbg
@@ -30,6 +31,42 @@ agent_clear = on_command("Agent清理", priority=5, block=True)
 agent_export = on_command("Agent导出", priority=5, block=True)
 agent_persona = on_command("Agent人设", priority=5, block=True)
 agent_privacy = on_command("Agent隐私", priority=5, block=True)
+
+# 数值型 /Agent设置 子命令：别名 → (配置属性, 上限, 是否整数)；取值夹到 [0, 上限]。
+_NUMERIC_AGENT_SETTINGS: dict[str, tuple[str, float, bool]] = {
+    "概率": ("proactive_probability", 1.0, False),
+    "probability": ("proactive_probability", 1.0, False),
+    "插话概率": ("proactive_active_probability", 1.0, False),
+    "active_probability": ("proactive_active_probability", 1.0, False),
+    "冷却": ("cooldown_minutes", 10080, True),
+    "cooldown": ("cooldown_minutes", 10080, True),
+}
+
+
+async def _apply_numeric_agent_setting(
+    session: async_scoped_session,
+    config: GroupAgentConfig,
+    parts: list[str],
+) -> str | None:
+    """数值型 /Agent设置 子命令；返回回复文案，其他子命令返回 None。"""
+
+    spec = _NUMERIC_AGENT_SETTINGS.get(parts[0]) if len(parts) == 2 else None
+    if spec is None:
+        return None
+    attr, maximum, integer = spec
+    try:
+        value: float | int = int(parts[1]) if integer else float(parts[1])
+    except ValueError:
+        return f"参数需要 0 到 {int(maximum)} 之间的{'整数' if integer else '数字'}"
+    if isinstance(value, int):
+        value = max(0, min(value, int(maximum)))
+    else:
+        value = max(0.0, min(value, maximum))
+    setattr(config, attr, value)
+    if not await _commit(session):
+        return "操作失败，请稍后重试"
+    # 提交后 config 属性已过期，回复文案用提交前的本地值。
+    return f"设置已更新为 {value}"
 
 
 async def _commit(session: async_scoped_session) -> bool:
@@ -80,7 +117,7 @@ async def handle_agent_command(
         await agent_command.finish("群聊 Agent 已关闭")
     dbg(f"群 {event.group_id} /群聊Agent 查询状态: enabled={config.enabled}")
     await agent_command.finish(
-        f"群聊 Agent：{'开启' if config.enabled else '关闭'}\n主动概率：{config.proactive_probability:.0%}\n冷场阈值：{config.idle_threshold_minutes} 分钟\n每日上限：{config.daily_limit}"
+        f"群聊 Agent：{'开启' if config.enabled else '关闭'}\n暖场概率：{config.proactive_probability:.0%}\n插话概率：{config.proactive_active_probability:.0%}\n冷场阈值：{config.idle_threshold_minutes} 分钟\n主动冷却：{config.cooldown_minutes} 分钟\n每日上限：{config.daily_limit}"
     )
 
 
@@ -104,18 +141,13 @@ async def handle_agent_settings(
     if config is None:
         await agent_settings.finish("Agent 配置暂时不可用，请稍后重试")
     parts = args.extract_plain_text().split()
-    if len(parts) == 2 and parts[0] in {"概率", "probability"}:
-        try:
-            probability = max(0.0, min(float(parts[1]), 1.0))
-        except ValueError:
-            dbg(f"群 {event.group_id} /Agent设置 概率参数非法: {parts[1]!r}")
-            await agent_settings.finish("概率需要 0 到 1 之间的数字")
-        config.proactive_probability = probability
-        if not await _commit(session):
-            await agent_settings.finish("操作失败，请稍后重试")
-        # 提交后 config 属性已过期，回复文案用提交前的本地值。
-        dbg(f"群 {event.group_id} 主动概率已更新为 {probability}")
-        await agent_settings.finish("主动概率已更新")
+    numeric_reply = await _apply_numeric_agent_setting(session, config, parts)
+    if numeric_reply is not None:
+        dbg(
+            f"群 {event.group_id} /Agent设置 数值设置 "
+            f"{parts[0]}={parts[1]!r}: {numeric_reply}"
+        )
+        await agent_settings.finish(numeric_reply)
     if len(parts) == 2 and parts[0] in {"媒体缓存", "media_cache"}:
         if parts[1].lower() in {"开", "开启", "on", "true"}:
             config.media_cache_enabled = True
@@ -132,7 +164,10 @@ async def handle_agent_settings(
         # 提交后 config 属性已过期，回复文案用提交前的本地值。
         await agent_settings.finish(f"媒体缓存已{'开启' if cache_enabled else '关闭'}")
     dbg(f"群 {event.group_id} /Agent设置 参数无法识别,返回用法")
-    await agent_settings.finish("用法：/Agent设置 概率 0.15；/Agent设置 媒体缓存 开|关")
+    await agent_settings.finish(
+        "用法：/Agent设置 概率 0.35；/Agent设置 插话概率 0.25；"
+        "/Agent设置 冷却 8；/Agent设置 媒体缓存 开|关"
+    )
 
 
 @agent_memory.handle()

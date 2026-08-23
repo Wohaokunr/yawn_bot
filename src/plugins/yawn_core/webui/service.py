@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,12 +21,13 @@ from ..data_models.global_user_feature import GlobalUserFeature
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.group_feature import GroupFeature
+from ..data_models.scheduled_reminder import ScheduledReminder
 from ..data_models.user_feature import UserFeature
 from ..data_models.user_group import UserGroup
 from ..data_models.web_admin_audit import WebAdminAudit
-from ..metrics import snapshot_metrics
+from ..metrics import snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
-from ..yawn_agent.memory import is_memory_compacting
+from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
 from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
 
 TRIGGER_MODES = frozenset(
@@ -52,6 +55,252 @@ def version(value: datetime | None) -> str | None:
 
 def page_meta(page: int, page_size: int, total: int) -> dict[str, int]:
     return {"page": page, "pageSize": page_size, "total": total}
+
+
+# 概览统计的进程内状态。hub 每 5 秒轮询一次 overview()，
+# DB 聚合走 15 秒 TTL 缓存，把查询压力收敛为每 15 秒一轮；
+# bots/plugins/metrics 快照与 uptime 每次现算，保持实时口径。
+_LOADED_AT = datetime.now(BEIJING_TZ)
+_STATS_TTL_SECONDS = 15.0
+_stats_state: dict[str, Any] = {"cache": None, "expires_at": 0.0, "lock": None}
+
+# 子插件状态模块的懒解析结果；只在解析成功后缓存，失败下次重试
+# （与 webui/games.py 同模式；此处不能 import games.py，会形成循环导入）。
+_live_state_modules: dict[str, Any] = {}
+
+
+def _import_rpg_state() -> Any | None:
+    try:
+        from ..yawn_rpg import state as module  # pyright: ignore[reportMissingImports]
+    except Exception:  # noqa: BLE001
+        return None
+    return module
+
+
+def _import_werewolf_state() -> Any | None:
+    try:
+        from ..yawn_werewolf import (
+            state as module,  # pyright: ignore[reportMissingImports]
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return module
+
+
+def _live_state(kind: str) -> Any | None:
+    """按需解析跑团/狼人杀的进程内对局注册表；子插件缺失时返回 None。"""
+
+    if kind not in _live_state_modules:
+        module = _import_rpg_state() if kind == "rpg" else _import_werewolf_state()
+        if module is None:
+            return None
+        _live_state_modules[kind] = module
+    return _live_state_modules[kind]
+
+
+def _live_game_count(kind: str) -> dict[str, Any]:
+    module = _live_state(kind)
+    if module is None:
+        return {"available": False, "count": 0}
+    try:
+        count = len(module.all_games())
+    except Exception:  # noqa: BLE001
+        count = 0
+    return {"available": True, "count": count}
+
+
+async def _db_stats(now: datetime) -> dict[str, Any]:
+    """一轮 DB 聚合统计；由 ``_cached_db_stats`` 负责 TTL 缓存。"""
+
+    cutoff_24h = now - timedelta(hours=24)
+    # 北京时间当日零点；库内时间列按约定为 naive 北京时间。
+    day_start = datetime(now.year, now.month, now.day)  # noqa: DTZ001
+    today = now.strftime("%Y-%m-%d")
+
+    async with get_session() as session:
+        messages_24h, active_groups_24h = (
+            await session.execute(
+                select(
+                    func.count(GroupAgentMessage.id),
+                    func.count(func.distinct(GroupAgentMessage.group_id)),
+                ).where(GroupAgentMessage.received_at >= cutoff_24h)
+            )
+        ).one()
+        response_groups_24h = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(GroupAgentConfig)
+                .where(GroupAgentConfig.last_response_at >= cutoff_24h)
+            )
+            or 0
+        )
+        proactive_sum = select(
+            func.coalesce(func.sum(GroupAgentConfig.proactive_count), 0)
+        ).where(GroupAgentConfig.proactive_day == today)
+        proactive_today = int(await session.scalar(proactive_sum) or 0)
+        admin_tool_sum = select(
+            func.coalesce(func.sum(GroupAgentConfig.admin_tool_count), 0)
+        ).where(GroupAgentConfig.tool_day == today)
+        admin_tool_today = int(await session.scalar(admin_tool_sum) or 0)
+        rebuild_required = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(GroupAgentConfig)
+                .where(GroupAgentConfig.memory_rebuild_required.is_(True))
+            )
+            or 0
+        )
+        failing_groups = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(GroupAgentConfig)
+                .where(GroupAgentConfig.memory_consecutive_failures > 0)
+            )
+            or 0
+        )
+        recent_error_row = (
+            await session.execute(
+                select(
+                    GroupAgentConfig.group_id,
+                    GroupAgentConfig.memory_last_error,
+                    GroupAgentConfig.memory_last_attempt_at,
+                )
+                .where(GroupAgentConfig.memory_last_error.is_not(None))
+                .order_by(
+                    GroupAgentConfig.memory_last_attempt_at.desc().nulls_last()
+                )
+                .limit(1)
+            )
+        ).first()
+        reminder_errors = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(ScheduledReminder)
+                .where(
+                    ScheduledReminder.enabled.is_(True),
+                    ScheduledReminder.last_error.is_not(None),
+                )
+            )
+            or 0
+        )
+        rpg_ended_today = await _ended_today(session, "rpg", day_start)
+        werewolf_ended_today = await _ended_today(session, "werewolf", day_start)
+        fanqie = await _fanqie_status_counts(session)
+
+    recent_error = None
+    if recent_error_row is not None:
+        group_id, error, attempted = recent_error_row
+        recent_error = {"groupId": str(group_id), "error": error, "at": iso(attempted)}
+
+    return {
+        "activity": {
+            "messages24h": int(messages_24h),
+            "activeGroups24h": int(active_groups_24h),
+            "agentResponseGroups24h": response_groups_24h,
+            "proactiveToday": proactive_today,
+            "adminToolToday": admin_tool_today,
+        },
+        "memory": {
+            "rebuildRequired": rebuild_required,
+            "failingGroups": failing_groups,
+            "recentError": recent_error,
+        },
+        "games": {
+            "live": {
+                "rpg": _live_game_count("rpg"),
+                "werewolf": _live_game_count("werewolf"),
+            },
+            "endedToday": {"rpg": rpg_ended_today, "werewolf": werewolf_ended_today},
+        },
+        "jobs": {
+            "fanqie": fanqie,
+            "reminderErrors": reminder_errors,
+        },
+    }
+
+
+async def _ended_today(
+    session: AsyncSession, kind: str, day_start: datetime
+) -> int | None:
+    """统计今日已结束对局；子插件未加载或表不可用时返回 None 表示口径不可用。"""
+
+    if kind == "rpg":
+        try:
+            from ..yawn_rpg.models import RPGGame
+        except Exception:  # noqa: BLE001
+            return None
+        model, ended_at = RPGGame, RPGGame.ended_at
+    else:
+        try:
+            from ..yawn_werewolf.models import WerewolfGame
+        except Exception:  # noqa: BLE001
+            return None
+        model, ended_at = WerewolfGame, WerewolfGame.ended_at
+    try:
+        return int(
+            await session.scalar(
+                select(func.count())
+                .select_from(model)
+                .where(ended_at.is_not(None), ended_at >= day_start)
+            )
+            or 0
+        )
+    except Exception:  # noqa: BLE001
+        await session.rollback()
+        return None
+
+
+async def _fanqie_status_counts(session: AsyncSession) -> dict[str, Any]:
+    """番茄任务按状态计数；子插件未加载或表不可用时标记 available=False。"""
+
+    try:
+        from ..yawn_fanqie.models import FanqieJob
+    except Exception:  # noqa: BLE001
+        return {"available": False, "byStatus": {}}
+    try:
+        rows = (
+            await session.execute(
+                select(FanqieJob.status, func.count()).group_by(FanqieJob.status)
+            )
+        ).all()
+    except Exception:  # noqa: BLE001
+        await session.rollback()
+        return {"available": False, "byStatus": {}}
+    return {
+        "available": True,
+        "byStatus": {str(status): int(count) for status, count in rows},
+    }
+
+
+def _stats_cache_fresh() -> bool:
+    return (
+        _stats_state["cache"] is not None
+        and time.monotonic() < _stats_state["expires_at"]
+    )
+
+
+async def _cached_db_stats(now: datetime) -> dict[str, Any]:
+    """带 TTL 的 DB 统计入口；并发时只放一个聚合在跑。"""
+
+    if _stats_state["lock"] is None:
+        _stats_state["lock"] = asyncio.Lock()
+    lock: asyncio.Lock = _stats_state["lock"]
+    if _stats_cache_fresh():
+        return _stats_state["cache"]
+    async with lock:
+        if _stats_cache_fresh():
+            return _stats_state["cache"]
+        stats = await _db_stats(now)
+        _stats_state["cache"] = stats
+        _stats_state["expires_at"] = time.monotonic() + _STATS_TTL_SECONDS
+        return stats
+
+
+def reset_stats_cache_for_tests() -> None:
+    """清空概览统计缓存；只供测试隔离使用。"""
+
+    _stats_state["cache"] = None
+    _stats_state["expires_at"] = 0.0
 
 
 async def overview() -> dict[str, Any]:
@@ -91,6 +340,12 @@ async def overview() -> dict[str, Any]:
             if item.label in wanted
         ],
     ]
+    now = datetime.now(BEIJING_TZ)
+    # DB 列为 naive 北京时间（见 now_beijing 约定），聚合查询必须用同口径比较。
+    db_stats = await _cached_db_stats(now.replace(tzinfo=None))
+    metrics_snapshot = snapshot_metrics()
+    memory_stats = dict(db_stats["memory"])
+    memory_stats["compactingGroups"] = compacting_group_count()
     return {
         "bots": [str(bot_id) for bot_id in sorted(get_bots())],
         "plugins": plugins,
@@ -100,8 +355,19 @@ async def overview() -> dict[str, Any]:
             "enabledAgents": enabled_agents,
         },
         "recentAgentActions": [serialize_agent_audit(row) for row in recent],
-        "metrics": snapshot_metrics(),
-        "generatedAt": datetime.now(BEIJING_TZ).isoformat(),
+        "metrics": metrics_snapshot,
+        "stats": {
+            "ai": summarize_ai_metrics(metrics_snapshot),
+            "activity": db_stats["activity"],
+            "memory": memory_stats,
+            "games": db_stats["games"],
+            "jobs": db_stats["jobs"],
+            "uptime": {
+                "startedAt": _LOADED_AT.isoformat(),
+                "uptimeSeconds": (now - _LOADED_AT).total_seconds(),
+            },
+        },
+        "generatedAt": now.isoformat(),
     }
 
 

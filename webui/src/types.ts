@@ -4,7 +4,48 @@ export interface Overview {
   counts: { groups: number; users: number; enabledAgents: number };
   recentAgentActions: AgentAudit[];
   metrics: { counters: unknown[]; histograms: unknown[] };
+  stats: OverviewStats;
   generatedAt: string;
+}
+
+export interface OverviewStats {
+  ai: {
+    requestsTotal: number;
+    success: number;
+    failed: number;
+    successRate: number | null;
+    byOutcome: { outcome: string; count: number }[];
+    avgDurationMs: number | null;
+    p95DurationMs: number | null;
+    degradations: number;
+  };
+  activity: {
+    messages24h: number;
+    activeGroups24h: number;
+    agentResponseGroups24h: number;
+    proactiveToday: number;
+    adminToolToday: number;
+  };
+  memory: {
+    compactingGroups: number;
+    rebuildRequired: number;
+    failingGroups: number;
+    recentError: { groupId: string; error: string; at: string | null } | null;
+  };
+  games: {
+    live: { rpg: LiveGameCount; werewolf: LiveGameCount };
+    endedToday: { rpg: number | null; werewolf: number | null };
+  };
+  jobs: {
+    fanqie: { available: boolean; byStatus: Record<string, number> };
+    reminderErrors: number;
+  };
+  uptime: { startedAt: string; uptimeSeconds: number };
+}
+
+export interface LiveGameCount {
+  available: boolean;
+  count: number;
 }
 
 export interface GroupSummary {
