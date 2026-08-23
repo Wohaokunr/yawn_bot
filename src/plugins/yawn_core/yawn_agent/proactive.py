@@ -1,8 +1,9 @@
-# ruff: noqa: E501,F401,I001,TID252,PLR0911,PLR0912,PLR0913,PLR0915,PLR0917,C901,SIM117,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100,TC003,PLR2004,PERF203
+# ruff: noqa: E501,F401,I001,TID252,PLR0911,PLR0912,PLR0913,PLR0915,PLR0917,C901,SIM117,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100,TC003,PLR2004,PERF203,PERF401
 """主动发言双模式：热闹时像真人群友一样插话，冷场时偶尔暖场。"""
 
 from __future__ import annotations
 
+import asyncio
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -12,7 +13,7 @@ from nonebot import get_bots, get_driver, logger
 from nonebot.adapters.onebot.v11 import Message
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_orm import get_session
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.agent_audit import AgentAudit
@@ -22,9 +23,19 @@ from ..llm import complete
 from .context import ActivitySnapshot, is_cooldown_active, now_beijing
 from .collector import group_lock
 from .config_store import list_agent_group_ids
-from .dialogue import _extract_message_id, _load_context, persist_bot_reply
+from .dialogue import (
+    _activity_window_counts,
+    _extract_message_id,
+    _load_context,
+    persist_bot_reply,
+)
 from .log import dbg, dbg_exc
-from .memory import compact_group_memory, parse_json_reply
+from .memory import (
+    compact_group_memory,
+    memory_retry_due,
+    parse_json_reply,
+    record_memory_failure,
+)
 from .media import cleanup_media_cache
 from .persona import resolve_persona
 from .prompt import build_messages
@@ -250,7 +261,6 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
     )
     dbg(f"主动发言扫描: 启用的 Agent 配置 {len(rows)} 个")
     candidates: list[dict[str, Any]] = []
-    window_start = now - timedelta(hours=1)
     for config in rows:
         # 上一轮若提交过，会话内所有 config 都会过期；逐个刷新，
         # 避免属性访问触发同步惰性加载（MissingGreenlet）。
@@ -262,49 +272,26 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                     f"trigger_mode={config.trigger_mode!r} 不含主动模式"
                 )
                 continue
-            recent = (
-                (
-                    await session.execute(
-                        select(GroupAgentMessage)
-                        .where(
-                            GroupAgentMessage.group_id == config.group_id,
-                            (
-                                GroupAgentMessage.expires_at.is_(None)
-                                | (GroupAgentMessage.expires_at >= now)
-                            ),
-                        )
-                        .order_by(GroupAgentMessage.id.desc())
-                        .limit(60)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if not recent:
+            counts = await _activity_window_counts(session, config.group_id, now)
+            if counts["last_message_at"] is None:
                 dbg(f"群 {config.group_id} 主动发言跳过: 保留期内没有任何消息")
                 continue
-            # recent 按 id 倒序，recent[0] 最新；bot 自己落库的发言
-            # (role="bot") 只计入整体冷场时间，不算"真人在聊"。
-            in_window = [row for row in recent if row.received_at >= window_start]
-            member_in_window = [row for row in in_window if row.role != "bot"]
             day = config.proactive_day or now.strftime("%Y-%m-%d")
             count = config.proactive_count if day == now.strftime("%Y-%m-%d") else 0
+            # bot 自言只计入整体冷场时间，不算"真人在聊"；隐私退出用户
+            # 已由聚合查询排除，与对话读路径口径一致。
             snapshot = ActivitySnapshot(
-                recent[0].received_at,
-                messages_5m=sum(
-                    (now - row.received_at).total_seconds() < 300 for row in recent
-                ),
-                messages_20m=sum(
-                    (now - row.received_at).total_seconds() < 1200 for row in recent
-                ),
-                messages_60m=len(in_window),
-                participants_60m=len({row.user_id for row in in_window}),
+                counts["last_message_at"],
+                messages_5m=counts["messages_5m"],
+                messages_20m=counts["messages_20m"],
+                messages_60m=counts["messages_60m"],
+                participants_60m=counts["participants_60m"],
+                replies_60m=counts["replies_60m"],
+                mentions_60m=counts["mentions_60m"],
                 last_agent_at=config.last_agent_at,
                 proactive_today=count,
-                last_member_message_at=(
-                    member_in_window[0].received_at if member_in_window else None
-                ),
-                member_messages_60m=len(member_in_window),
+                last_member_message_at=counts["last_member_message_at"],
+                member_messages_60m=counts["member_messages_60m"],
             )
             mode = should_proactively_speak(config, snapshot, now)
             if mode is None:
@@ -546,36 +533,80 @@ async def _tick() -> None:
             dbg_exc(f"群 {candidate['group_id']} 主动插话流程异常")
 
 
-async def _compact_tick(min_new_messages: int = 1) -> None:
-    """定时整理摘要并清除超过保留期的原始消息。
+_MEMORY_TRIGGER_COUNT = 12
+_MEMORY_MAX_PENDING_AGE = timedelta(minutes=5)
+_STARTUP_TASKS: set[asyncio.Task[None]] = set()
 
-    未整理消息量低于 min_new_messages 时只做过期清理，不触发 LLM 摘要；
-    高频任务用它做廉价跳过，每日兜底任务保持全量整理。
-    """
+
+async def _memory_due(
+    session: Any, group_id: int, now: datetime, *, force: bool
+) -> bool:
+    config = await session.get(GroupAgentConfig, group_id)
+    if config is None or not memory_retry_due(config, now):
+        return False
+    if force or config.memory_rebuild_required:
+        return True
+    cursor = int(config.last_compacted_message_id or 0)
+    # 不按 expires_at 过滤：过期但未整理的消息被 purge 保留等待重试，
+    # 它们同样要计入触发条件，否则调度器永远不会为它们发起整理。
+    count, oldest = (
+        await session.execute(
+            select(
+                func.count(GroupAgentMessage.id),
+                func.min(GroupAgentMessage.received_at),
+            ).where(
+                GroupAgentMessage.group_id == group_id,
+                GroupAgentMessage.id > cursor,
+            )
+        )
+    ).one()
+    return int(count or 0) >= _MEMORY_TRIGGER_COUNT or bool(
+        oldest and oldest <= now - _MEMORY_MAX_PENDING_AGE
+    )
+
+
+async def _compact_one(group_id: int, now: datetime) -> None:
+    try:
+        async with get_session() as session:
+            await compact_group_memory(session, group_id, now=now)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("群 %s Agent 记忆整理失败", group_id)
+        dbg_exc(f"群 {group_id} 定时记忆整理异常")
+        # 模型失败由 memory.py 在原事务中记录；这里兜住连接、ORM 等意外
+        # 异常，确保 WebUI 仍能看到可靠失败状态并按统一退避重试。
+        try:
+            async with get_session() as status_session:
+                await record_memory_failure(
+                    status_session,
+                    group_id,
+                    f"整理异常: {type(exc).__name__}",
+                    now=now,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("群 %s Agent 记忆失败状态写入失败", group_id)
+
+
+async def _compact_tick(*, force: bool = False, cleanup: bool = False) -> None:
+    """按数量或最老消息年龄触发近实时整理；每日任务强制扫尾。"""
 
     async with get_session() as session:
         group_ids = await list_agent_group_ids(session)
-    dbg(
-        f"定时记忆整理开始: 共 {len(group_ids)} 个群 {group_ids} "
-        f"提取阈值={min_new_messages}"
-    )
-    # 每群独立会话：一个群的错误不能阻断其余群的过期清理。
-    for group_id in group_ids:
+    due: list[int] = []
+    async with get_session() as session:
+        for group_id in group_ids:
+            if await _memory_due(session, group_id, now_beijing(), force=force):
+                due.append(group_id)
+    dbg(f"定时记忆整理扫描: 群={group_ids} 待执行={due} force={force}")
+    if due:
+        await asyncio.gather(*(_compact_one(group_id, now_beijing()) for group_id in due))
+    if cleanup:
         try:
             async with get_session() as session:
-                await compact_group_memory(session, group_id, min_new_messages)
+                await cleanup_media_cache(session)
+                await session.commit()
         except Exception:  # noqa: BLE001
-            logger.exception("群 %s Agent 记忆整理失败", group_id)
-            dbg_exc(f"群 {group_id} 定时记忆整理异常")
-    try:
-        async with get_session() as session:
-            await cleanup_media_cache(session)
-            # get_session() 不会自动提交；缺少这一步清理会被静默回滚。
-            await session.commit()
-    except Exception:  # noqa: BLE001
-        logger.exception("Agent 媒体缓存清理失败")
-        dbg_exc("每日媒体缓存清理异常")
-    dbg("每日记忆整理结束")
+            logger.exception("Agent 媒体缓存清理失败")
+            dbg_exc("每日媒体缓存清理异常")
 
 
 @get_driver().on_startup
@@ -603,22 +634,24 @@ async def _restore_jobs() -> None:
             replace_existing=True,
             coalesce=True,
             max_instances=1,
+            kwargs={"force": True, "cleanup": True},
         )
         dbg("已注册定时任务 yawn_core_agent:compact(每日 03:30 记忆整理兜底)")
-    # 高频增量整理：活跃群白天就能沉淀记忆；低于阈值时廉价跳过。
+    # 每分钟廉价扫描；高流量 12 条触发，稀疏群最老待处理消息 5 分钟触发。
     if scheduler.get_job("yawn_core_agent:compact_fast") is None:
         scheduler.add_job(
             _compact_tick,
-            "cron",
-            hour="*/4",
-            minute=40,
+            "interval",
+            minutes=1,
             id="yawn_core_agent:compact_fast",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
-            kwargs={"min_new_messages": 60},
         )
-        dbg("已注册定时任务 yawn_core_agent:compact_fast(每 4 小时增量整理)")
+        dbg("已注册定时任务 yawn_core_agent:compact_fast(每分钟近实时整理扫描)")
+    startup_task = asyncio.create_task(_compact_tick(force=True))
+    _STARTUP_TASKS.add(startup_task)
+    startup_task.add_done_callback(_STARTUP_TASKS.discard)
 
 
 __all__ = ["should_proactively_speak"]

@@ -982,3 +982,236 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
   justify-content: center;
   min-height: 64px;
 }
+
+/* ── 关系图谱 ── */
+/* 图谱画布：奶油底 + 樱花圆点纹理呼应全局背景，SVG 覆写交互光标 */
+.rg-wrap {
+  position: relative;
+  height: 620px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(var(--sakura-200) 1.2px, transparent 1.2px) 0 0 / 26px 26px,
+    linear-gradient(160deg, var(--cream), var(--sakura-100));
+  overflow: hidden;
+  touch-action: none;
+}
+/* 氛围光斑：两团柔光在点阵纹理上缓慢漂移，营造纵深 */
+.rg-wrap::before,
+.rg-wrap::after {
+  content: "";
+  position: absolute;
+  inset: -22%;
+  pointer-events: none;
+  z-index: 0;
+}
+.rg-wrap::before {
+  background: radial-gradient(circle at 28% 24%, rgba(255, 143, 172, 0.16), transparent 46%);
+  animation: rg-aurora-a 18s ease-in-out infinite alternate;
+}
+.rg-wrap::after {
+  background: radial-gradient(circle at 74% 72%, rgba(196, 176, 255, 0.14), transparent 46%);
+  animation: rg-aurora-b 22s ease-in-out infinite alternate;
+}
+.rg-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  user-select: none;
+  position: relative;
+  z-index: 1;
+}
+.rg-svg:active { cursor: grabbing; }
+/* 程序性变换（适配/缩放按钮）平滑过渡；滚轮与拖拽期间由组件移除该类 */
+.rg-viewport-anim { transition: transform 0.45s var(--ease-soft); }
+.rg-node { cursor: grab; }
+.rg-node circle { transition: stroke var(--dur-fast) var(--ease-soft); }
+.rg-node:hover circle { stroke: var(--sakura-500); }
+.rg-node text { pointer-events: none; }
+/* 节点内层：入场弹跳 + hover 弹性放大（外层 g 只承担位移，互不冲突） */
+.rg-node-core {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform var(--dur-med) var(--ease-spring);
+  animation: rg-node-pop 0.5s var(--ease-spring) backwards;
+  animation-delay: calc(var(--i, 0) * 22ms);
+}
+.rg-node:hover .rg-node-core { transform: scale(1.14); }
+/* 选中环：旋转虚线 + 柔光 */
+.rg-node-select-ring {
+  fill: none;
+  stroke: #d63f71;
+  stroke-width: 2;
+  stroke-dasharray: 4 5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: rg-ring-spin 7s linear infinite;
+  filter: drop-shadow(0 0 4px rgba(214, 63, 113, 0.45));
+}
+.rg-node-initial {
+  fill: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+.rg-node-label {
+  fill: var(--ink);
+  font-size: 12px;
+  paint-order: stroke;
+  stroke: var(--cream);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.rg-edge-label {
+  fill: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--cream);
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+  animation: rg-label-pop 0.3s var(--ease-spring) backwards;
+}
+.rg-edge {
+  transition: opacity var(--dur-med) var(--ease-soft);
+  animation: rg-edge-in 0.6s var(--ease-soft) 0.12s backwards;
+}
+.rg-edge path { transition: opacity var(--dur-fast) var(--ease-soft); }
+/* 激活边的辉光垫底：同色加宽低透明度，不用 filter 保住大图性能 */
+.rg-edge-glow { opacity: 0.28; }
+/* mentions 弱语义边：虚线缓慢流动 */
+.rg-edge-dashed .rg-edge-line { animation: rg-dash-flow 1.6s linear infinite; }
+/* 浮层工具栏 / 图例 / 提示：半透明白卡与全站软糖卡片同语言 */
+.rg-toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 14px;
+  background: rgba(255, 249, 251, 0.88);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(4px);
+}
+.rg-isolate-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+.rg-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  max-width: 60%;
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: rgba(255, 249, 251, 0.88);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(4px);
+  font-size: 12px;
+  color: var(--ink);
+}
+.rg-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.rg-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.rg-hint {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 2;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  background: rgba(255, 249, 251, 0.8);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+.rg-truncated {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  max-width: 46%;
+  border-radius: 12px;
+}
+.rg-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+}
+.rg-loading-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+}
+
+/* 最大化：暗化遮罩 + 浮层面板弹入；antd 抽屉层级更高，详情仍可正常弹出 */
+.rg-maximize-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 899;
+  background: rgba(83, 65, 76, 0.32);
+  backdrop-filter: blur(2px);
+  animation: rg-fade-in 0.3s var(--ease-soft);
+}
+.rg-wrap.rg-maximized {
+  position: fixed;
+  inset: 14px;
+  z-index: 900;
+  height: auto;
+  border-radius: 22px;
+  box-shadow: 0 24px 80px rgba(214, 63, 113, 0.28);
+  animation: pop-in 0.45s var(--ease-spring);
+}
+
+/* ── 关系图谱动画 ── */
+@keyframes rg-node-pop {
+  from { opacity: 0; transform: scale(0.3); }
+}
+@keyframes rg-edge-in {
+  from { opacity: 0; }
+}
+@keyframes rg-label-pop {
+  from { opacity: 0; transform: translateY(4px); }
+}
+@keyframes rg-dash-flow {
+  to { stroke-dashoffset: -24; }
+}
+@keyframes rg-ring-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes rg-aurora-a {
+  from { transform: translate(-4%, -3%) scale(1); }
+  to { transform: translate(4%, 3%) scale(1.14); }
+}
+@keyframes rg-aurora-b {
+  from { transform: translate(4%, 3%) scale(1.12); }
+  to { transform: translate(-4%, -3%) scale(1); }
+}
+@keyframes rg-fade-in {
+  from { opacity: 0; }
+}

@@ -1,4 +1,4 @@
-# ruff: noqa: TC001,TC002
+# ruff: noqa: TC001,TC002,PLR2004
 from __future__ import annotations
 
 import sys
@@ -54,7 +54,97 @@ def test_prompt_prefix_is_stable_when_only_context_changes() -> None:
     )
     assert first_hash == second_hash
     assert first[0] == second[0]
-    assert first[1] != second[1]
+    # 易变内容变化不得波及稳定层：第 2 条（稳定层）字节一致，第 3 条（易变层）变化。
+    assert first[1] == second[1]
+    assert first[2] != second[2]
+
+
+def _build_messages_layered(
+    context: dict, tools: list
+) -> tuple[list[dict], str]:
+    from src.plugins.yawn_core.yawn_agent.prompt import build_messages
+
+    return build_messages(
+        persona={"name": "Yawn"}, tools=tools, context=context, user_prompt="在吗"
+    )
+
+
+def test_context_layering_separates_slow_memories_from_volatile_block() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.prompt import (
+        split_context,
+        stable_context_key,
+    )
+
+    tools = [{"type": "function", "function": {"name": "send_text"}}]
+    context = {
+        "group_id": 100,
+        "group_name": "测试群",
+        "active_topic": "晚饭",
+        "activity": {"messages_5m": 3},
+        "members": [{"user_id": 1, "name": "阿眠"}],
+        "messages": [{"user_id": 1, "text": "晚饭吃什么"}],
+        "memories": [
+            {
+                "type": "summary",
+                "key": "daily:2026-08-22",
+                "content": "群里聊了晚饭安排",
+                "source_scope": "group_summary",
+            },
+            {
+                "type": "profile",
+                "key": "display_name",
+                "content": "阿眠",
+                "source_scope": "speaker",
+            },
+            {
+                "type": "summary",
+                "key": "public_daily:2026-08-21",
+                "content": "公共话题",
+                "source_scope": "shared_public",
+            },
+        ],
+        "relations": ["阿眠(1) —mentions→ 小李(2)"],
+    }
+    messages, _ = _build_messages_layered(context, tools)
+    assert len(messages) == 4
+    stable_json = messages[1]["content"]
+    volatile_json = messages[2]["content"]
+    assert "daily:2026-08-22" in stable_json
+    assert "public_daily:2026-08-21" in stable_json
+    assert "active_topic" not in stable_json
+    assert "晚饭安排" not in volatile_json
+    assert "阿眠" in volatile_json and "mentions" in volatile_json
+
+    # 同一整理窗口内新消息到达：易变层变化、稳定层字节不变，
+    # 服务端前缀缓存可命中到稳定层为止。
+    evolved = {
+        **context,
+        "active_topic": "火锅",
+        "messages": [{"user_id": 2, "text": "去吃火锅"}],
+        "memories": [
+            context["memories"][0],
+            context["memories"][2],
+            {
+                "type": "profile",
+                "key": "display_name",
+                "content": "别人",
+                "source_scope": "topic",
+            },
+        ],
+    }
+    again, _ = _build_messages_layered(evolved, tools)
+    assert again[1] == messages[1]
+    assert again[2] != messages[2]
+    assert stable_context_key(context) == stable_context_key(evolved)
+    assert stable_context_key(context) != stable_context_key(
+        {**evolved, "group_name": "改名后的群"}
+    )
+
+    # 缺省上下文（无稳定记忆）时稳定层不携带空 memories 噪声。
+    stable, volatile = split_context({"active_topic": "a"})
+    assert stable == {}
+    assert volatile["memories"] == []
 
 
 def test_trigger_modes_distinguish_mentions_replies_and_explicit_wakeup() -> None:

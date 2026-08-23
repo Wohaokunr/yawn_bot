@@ -12,7 +12,7 @@ from sqlalchemy import String, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..data_models.agent_audit import AgentAudit
-from ..data_models.agent_memory import AgentMemory, AgentRelation
+from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.bot_group import BotGroup
 from ..data_models.bot_user import BotUser
 from ..data_models.global_user_feature import GlobalUserFeature
@@ -24,6 +24,7 @@ from ..data_models.user_group import UserGroup
 from ..data_models.web_admin_audit import WebAdminAudit
 from ..metrics import snapshot_metrics
 from ..permission import FEATURE_REGISTRY
+from ..yawn_agent.memory import is_memory_compacting
 from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
 
 TRIGGER_MODES = frozenset(
@@ -429,6 +430,7 @@ def serialize_agent_config(
         "cooldownMinutes": row.cooldown_minutes,
         "dailyLimit": row.daily_limit,
         "rawRetentionDays": row.raw_retention_days,
+        "crossGroupVisibility": row.cross_group_visibility,
         "mediaCacheEnabled": row.media_cache_enabled,
         "adminToolDailyLimit": row.admin_tool_daily_limit,
         "toolAllowlist": list(row.tool_allowlist or []),
@@ -454,12 +456,14 @@ def serialize_memory(row: AgentMemory) -> dict[str, Any]:
         "id": str(row.id),
         "groupId": str(row.group_id) if row.group_id is not None else None,
         "subjectUserId": str(row.subject_user_id)
-        if row.subject_user_id is not None
+        if int(row.subject_user_id or 0) != 0
         else None,
         "scope": row.scope,
         "type": row.memory_type,
         "key": row.memory_key,
         "content": row.content,
+        "sourceKind": row.source_kind,
+        "relatedUserIds": [str(value) for value in row.related_user_ids or []],
         "salience": row.salience,
         "confidence": row.confidence,
         "visibility": row.visibility,
@@ -476,9 +480,111 @@ def serialize_relation(row: AgentRelation) -> dict[str, Any]:
         "subjectUserId": str(row.subject_user_id),
         "objectUserId": str(row.object_user_id),
         "type": row.relation_type,
+        "sourceKind": row.source_kind,
+        "note": row.note,
         "confidence": row.confidence,
         "evidenceCount": row.evidence_count,
         "lastSeenAt": iso(row.last_seen_at),
+    }
+
+
+# 图谱端点与导出端点同口径：全量边上限 5000，超出时以 meta.truncated 告知前端。
+RELATION_GRAPH_LIMIT = 5000
+
+
+async def load_relation_graph(
+    session: AsyncSession, group_id: int
+) -> dict[str, Any]:
+    """关系图谱数据：全群边 + 成员节点（含无边成员，linked 标记是否出现在边中）。"""
+
+    opted_out = set(
+        (
+            await session.execute(
+                select(AgentPrivacy.user_id).where(
+                    AgentPrivacy.group_id == group_id,
+                    AgentPrivacy.opted_out.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    relation_clauses = [AgentRelation.group_id == group_id]
+    if opted_out:
+        relation_clauses.extend(
+            (
+                AgentRelation.subject_user_id.not_in(opted_out),
+                AgentRelation.object_user_id.not_in(opted_out),
+            )
+        )
+    relation_rows = list(
+        (
+            await session.execute(
+                select(AgentRelation)
+                .where(*relation_clauses)
+                .order_by(AgentRelation.id)
+                .limit(RELATION_GRAPH_LIMIT + 1)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    relation_truncated = len(relation_rows) > RELATION_GRAPH_LIMIT
+    if relation_truncated:
+        relation_rows = relation_rows[:RELATION_GRAPH_LIMIT]
+
+    degrees: dict[int, int] = {}
+    for row in relation_rows:
+        degrees[int(row.subject_user_id)] = (
+            degrees.get(int(row.subject_user_id), 0) + 1
+        )
+        degrees[int(row.object_user_id)] = degrees.get(int(row.object_user_id), 0) + 1
+
+    member_rows = list(
+        (
+            await session.execute(
+                select(UserGroup, BotUser)
+                .join(BotUser, BotUser.user_id == UserGroup.user_id)
+                .where(UserGroup.group_id == group_id)
+                .order_by(UserGroup.user_id)
+                .limit(RELATION_GRAPH_LIMIT + 1)
+            )
+        )
+        .all()
+    )
+    member_truncated = len(member_rows) > RELATION_GRAPH_LIMIT
+    if member_truncated:
+        member_rows = member_rows[:RELATION_GRAPH_LIMIT]
+
+    nodes: dict[int, dict[str, Any]] = {}
+    for membership, user in member_rows:
+        nodes[int(user.user_id)] = {
+            "userId": str(user.user_id),
+            "nickname": user.nickname,
+            "groupNickname": membership.group_nickname,
+            "role": membership.role,
+            "linked": int(user.user_id) in degrees,
+            "degree": degrees.get(int(user.user_id), 0),
+        }
+    # 关系端点可能已不在成员表（退群残留），补齐为昵称回退节点，避免边悬空。
+    for user_id, degree in degrees.items():
+        if user_id not in nodes:
+            nodes[user_id] = {
+                "userId": str(user_id),
+                "nickname": "",
+                "groupNickname": None,
+                "role": "member",
+                "linked": True,
+                "degree": degree,
+            }
+
+    return {
+        "nodes": [nodes[key] for key in sorted(nodes)],
+        "edges": [serialize_relation(row) for row in relation_rows],
+        "meta": {
+            "relationTruncated": relation_truncated,
+            "memberTruncated": member_truncated,
+        },
     }
 
 
@@ -502,11 +608,11 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
     now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
     config = await session.get(GroupAgentConfig, group_id)
     cursor = int(config.last_compacted_message_id or 0) if config else 0
+    # 与整理取数口径一致：过期但未整理的消息仍算待整理（purge 会保留
+    # 到硬上限），状态页不得把它们显示成"已无积压"。
     pending_clauses = [
         GroupAgentMessage.group_id == group_id,
         GroupAgentMessage.id > cursor,
-        GroupAgentMessage.expires_at.is_not(None),
-        GroupAgentMessage.expires_at >= now,
     ]
     pending = int(
         await session.scalar(
@@ -549,6 +655,14 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
                 select(func.max(AgentMemory.updated_at)).where(*memory_clauses)
             )
         ),
+        "rebuildRequired": bool(config and config.memory_rebuild_required),
+        "lastAttemptAt": iso(config.memory_last_attempt_at if config else None),
+        "lastSuccessAt": iso(config.memory_last_success_at if config else None),
+        "lastError": config.memory_last_error if config else None,
+        "consecutiveFailures": int(
+            config.memory_consecutive_failures if config else 0
+        ),
+        "inFlight": is_memory_compacting(group_id),
     }
 
 

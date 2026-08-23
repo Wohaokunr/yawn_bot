@@ -192,8 +192,11 @@ async def handle_agent_profile(
     if raw_user_id and not raw_user_id.isdigit():
         await agent_profile.finish(
             "Agent画像 需要 QQ 号作为参数，例如 /Agent画像 12345"
-        )
+    )
     user_id = int(raw_user_id) if raw_user_id.isdigit() else int(event.get_user_id())
+    privacy = await session.get(AgentPrivacy, (int(event.group_id), user_id))
+    if privacy is not None and privacy.opted_out:
+        await agent_profile.finish("该成员已退出 Agent 记忆")
     now = now_beijing()
     stmt = (
         select(AgentMemory)
@@ -246,25 +249,16 @@ async def handle_agent_export(
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /Agent导出 拒绝: 非群管理")
         await agent_export.finish("导出群聊 Agent 数据仅限群主或管理员")
-    now = now_beijing()
-    stmt = (
-        select(AgentMemory)
-        .where(
-            AgentMemory.group_id == int(event.group_id),
-            AgentMemory.visibility.in_(("group", "public")),
-            AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now),
-        )
-        .order_by(AgentMemory.id.asc())
-        .limit(200)
-    )
-    rows = (await session.execute(stmt)).scalars().all()
+    rows = await list_memories(session, int(event.group_id), limit=200)
     payload = [
         {
             "type": row.memory_type,
             "key": row.memory_key,
-            "subject_user_id": row.subject_user_id,
+            "subject_user_id": int(row.subject_user_id or 0) or None,
             "content": row.content,
             "visibility": row.visibility,
+            "source_kind": row.source_kind,
+            "related_user_ids": list(row.related_user_ids or []),
         }
         for row in rows
     ]

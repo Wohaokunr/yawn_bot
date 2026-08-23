@@ -3887,6 +3887,7 @@ async def _persist_start(game: Game) -> None:
                 module_id=module.id,
                 module_name=module.name,
                 player_count=len(game.players),
+                event_log_id=game.event_log_id,
                 started_at=_now_bj(),
             )
             session.add(row)

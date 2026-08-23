@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { wwSeatPosition } from "./games";
+import { rpgActionOptions, wwSeatPosition } from "./games";
 
 describe("wwSeatPosition", () => {
   it("1 号位在正上方", () => {
@@ -26,5 +26,20 @@ describe("wwSeatPosition", () => {
     const pos = wwSeatPosition(1, 0);
     expect(Number.isFinite(pos.x)).toBe(true);
     expect(Number.isFinite(pos.y)).toBe(true);
+  });
+});
+
+describe("rpgActionOptions", () => {
+  it("按进行中阶段提供玩家行动", () => {
+    expect(rpgActionOptions("PLAY").map((item) => item.value)).toEqual(["SAY", "WAIT", "PASS_TURN"]);
+  });
+
+  it("报名阶段只提供管理员开局行动", () => {
+    expect(rpgActionOptions("SIGNUP").map((item) => item.value)).toEqual(["MODULE_SELECT", "START_GAME"]);
+  });
+
+  it("其他阶段不允许管理台投递", () => {
+    expect(rpgActionOptions("CHAR_CREATE")).toEqual([]);
+    expect(rpgActionOptions(null)).toEqual([]);
   });
 });
