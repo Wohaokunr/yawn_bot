@@ -170,6 +170,23 @@ def test_router_json_is_strict_and_validates_route_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_shared_completion_uses_light_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yawn_core import llm
+
+    captured: dict[str, object] = {}
+
+    async def fake_complete(_messages: object, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    assert await ai_social.complete([]) == "ok"
+    assert captured["task"] == "rpg_npc_router"
+
+
+@pytest.mark.asyncio
 async def test_router_timeout_and_invalid_json_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

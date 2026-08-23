@@ -23,6 +23,7 @@ from ..permission import check_feature_permission
 from .collector import enqueue, ensure_worker
 from .config_store import get_or_create_config
 from .context import now_beijing
+from .conversation import observe_member_message
 from .dialogue import contains_word, process_group_message
 from .log import dbg, dbg_exc
 from .message_parser import NormalizedMessage, parse_message
@@ -203,7 +204,16 @@ async def handle_group_agent_message(
     # 避免异步引擎上触发同步惰性加载（MissingGreenlet）。
     trigger_mode = config.trigger_mode
     await _persist_message(bot, event, normalized, _session)
-    if not should_respond(event, bot, trigger_mode, normalized=normalized):
+    respond = should_respond(event, bot, trigger_mode, normalized=normalized)
+    observe_member_message(
+        int(bot.self_id),
+        int(event.group_id),
+        user_id=int(event.get_user_id()),
+        message_id=int(getattr(event, "message_id", 0) or 0) or None,
+        explicit_trigger=respond,
+        observed_at=now_beijing(),
+    )
+    if not respond:
         return
     if not enqueue(int(event.group_id), (bot, event, normalized), int(bot.self_id)):
         logger.warning("群聊 Agent 队列已满: %s", event.group_id)

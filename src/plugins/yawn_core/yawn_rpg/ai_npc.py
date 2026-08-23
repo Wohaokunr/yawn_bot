@@ -142,6 +142,7 @@ async def generate_npc_line(  # noqa: PLR0913, PLR0917
     try:
         line = await complete(
             messages,
+            task="rpg_npc",
             max_tokens=cfg.rpg_npc_max_tokens,
             temperature=cfg.rpg_npc_temperature,
             timeout=cfg.rpg_npc_timeout,

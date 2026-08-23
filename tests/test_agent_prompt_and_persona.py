@@ -1,10 +1,13 @@
-# ruff: noqa: TC001,TC002,PLR2004
+# ruff: noqa: TC001,TC002,TC003,PLR2004
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import nonebot
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -378,10 +381,22 @@ def test_proactive_active_mode_rejects_rushing_and_stale_gap() -> None:
             last_member_message_at=now - timedelta(minutes=member_idle_minutes),
         )
 
-    # 真人消息刚发 1 分钟：话题还在进行中，抢话不像真人。
+    # 普通群真人消息刚发 15 秒：先等满 30 秒把零散消息合起来。
     assert (
-        should_proactively_speak(make_config(), snapshot(1), now, rng=_FixedRoll(0.0))
+        should_proactively_speak(
+            make_config(), snapshot(0.25), now, rng=_FixedRoll(0.0)
+        )
         is None
+    )
+    # 1 分钟插话窗口不再与 90 秒最小间隔形成永远不可达的死区。
+    assert (
+        should_proactively_speak(
+            make_config(proactive_active_window_minutes=1),
+            snapshot(0.75),
+            now,
+            rng=_FixedRoll(0.0),
+        )
+        == "active"
     )
     # 真人消息 13 分钟前：插话窗口(12 分钟)已过，也未到暖场阈值(15 分钟)。
     assert (
@@ -397,6 +412,19 @@ def test_proactive_active_mode_rejects_rushing_and_stale_gap() -> None:
     )
     assert (
         should_proactively_speak(make_config(), quiet, now, rng=_FixedRoll(0.0)) is None
+    )
+    # 持续刷屏群无需等待 30 秒静默，否则高活跃群反而永远无法候选。
+    busy = ActivitySnapshot(
+        last_message_at=now - timedelta(seconds=2),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=20,
+        member_messages_5m=6,
+        member_participants_5m=2,
+        last_member_message_at=now - timedelta(seconds=2),
+    )
+    assert (
+        should_proactively_speak(make_config(), busy, now, rng=_FixedRoll(0.0))
+        == "active"
     )
     # 插话开关关闭后只剩暖场路径。
     assert (
@@ -564,6 +592,7 @@ def test_proactive_decision_parses_speak_true() -> None:
         '"text": " 山上现在应该挺凉的 "}'
     )
     assert decision.should_speak is True
+    assert decision.action == "speak"
     assert decision.text == "山上现在应该挺凉的"
     assert decision.topic == "周末爬山"
     assert decision.reason == "话题正热"
@@ -577,6 +606,7 @@ def test_proactive_decision_parses_speak_false_with_reason() -> None:
         '{"speak": false, "topic": "两人争论配置", "reason": "正在争论", "text": ""}'
     )
     assert decision.should_speak is False
+    assert decision.action == "wait"
     assert decision.text == ""
     assert decision.topic == "两人争论配置"
     assert decision.reason == "正在争论"
@@ -593,6 +623,22 @@ def test_proactive_decision_tolerates_code_fence_json() -> None:
     assert decision.should_speak is True
     assert decision.text == "我也馋了"
     assert decision.reason == "模型未说明理由"
+
+
+def test_proactive_decision_supports_wait_and_close_actions() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    waiting = _decide_proactive_reply(
+        '{"action":"wait","speak":false,"reason":"群友正在互聊","text":""}'
+    )
+    closing = _decide_proactive_reply(
+        '{"action":"close","speak":false,"reason":"话题结束","text":""}'
+    )
+    assert waiting.action == "wait"
+    assert closing.action == "close"
+    assert not waiting.should_speak
+    assert not closing.should_speak
 
 
 def test_proactive_decision_speak_true_without_text_is_skipped() -> None:
@@ -632,7 +678,7 @@ def test_proactive_prompts_declare_json_protocol_and_silence() -> None:
         _WARMUP_PROMPT,
     )
 
-    for key in ("speak", "topic", "reason", "text"):
+    for key in ("action", "speak", "topic", "reason", "text"):
         assert key in _JSON_PROTOCOL
     # 插话与暖场都要把"保持沉默"作为合法结果写进指令。
     assert "speak=false" in _ACTIVE_INTERJECT_PROMPT
@@ -640,6 +686,18 @@ def test_proactive_prompts_declare_json_protocol_and_silence() -> None:
     # 插话必须先理解内容再决策，且禁止泛泛附和。
     assert "先读懂" in _ACTIVE_INTERJECT_PROMPT
     assert "泛泛附和" in _ACTIVE_INTERJECT_PROMPT
+
+
+def test_followup_prompt_uses_memory_naturally_and_can_wait() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _build_user_prompt
+
+    prompt = _build_user_prompt("followup", _make_proactive_config(), turn=2)
+    for phrase in ("群总结", "人物画像", "人物关系", "自然隐式", "当前消息"):
+        assert phrase in prompt
+    assert "wait" in prompt
+    assert "close" in prompt
+    assert "第 2 条候选发言" in prompt
 
 
 def test_proactive_user_prompt_injects_recent_lines() -> None:
@@ -661,6 +719,238 @@ def test_proactive_user_prompt_injects_recent_lines() -> None:
     # 没有近期主动发言时不注入该段。
     bare = _build_user_prompt("warmup", _make_proactive_config())
     assert "最近主动发言过" not in bare
+
+
+@pytest.mark.asyncio
+async def test_proactive_generation_uses_light_task_and_safe_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import proactive
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_complete(
+        _messages: list[object], **kwargs: object
+    ) -> str:
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(proactive, "complete", fake_complete)
+    monkeypatch.setattr(proactive.ai_config, "ai_max_tokens", 1024)
+    assert await proactive._generate_proactive_reply([]) == "ok"
+    monkeypatch.setattr(proactive.ai_config, "ai_max_tokens", 4096)
+    assert await proactive._generate_proactive_reply([]) == "ok"
+
+    assert [call["max_tokens"] for call in calls] == [2048, 4096]
+    assert {call["task"] for call in calls} == {"agent_proactive"}
+    assert {call["timeout"] for call in calls} == {25.0}
+
+
+@pytest.mark.asyncio
+async def test_unsupported_dialogue_profile_preflights_images_through_caption_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    normalized = SimpleNamespace(prompt_text=lambda: "看看这张图")
+
+    async def describe(*_args: object, **_kwargs: object) -> str:
+        return "[图片转述] 一只猫"
+
+    monkeypatch.setattr(
+        dialogue,
+        "resolve_llm_request",
+        lambda _task: SimpleNamespace(multimodal="unsupported"),
+    )
+    monkeypatch.setattr(dialogue, "_describe_images", describe)
+    prompt, blocks = await dialogue._prepare_media_prompt(
+        1,
+        normalized,
+        object(),
+        object(),
+        [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}],
+        [],
+        ["digest"],
+    )
+
+    assert "[图片转述] 一只猫" in prompt
+    assert blocks == []
+
+
+@pytest.mark.asyncio
+async def test_image_caption_uses_configured_image_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    captured: dict[str, object] = {}
+
+    async def complete(_messages: object, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "一只猫"
+
+    monkeypatch.setattr(dialogue, "complete", complete)
+    result = await dialogue._caption_single_image(
+        1,
+        SimpleNamespace(prompt_text=lambda: "这是什么"),
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}},
+    )
+
+    assert result == "一只猫"
+    assert captured["task"] == "agent_image"
+
+
+def test_conversation_batch_deadline_uses_quiet_or_hard_limit() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import conversation
+
+    session = conversation.ConversationSession(
+        session_id=1,
+        started_at=100.0,
+        last_bot_at=100.0,
+        bot_turns=1,
+        topic="测试",
+        batch_first_at=110.0,
+        batch_last_at=140.0,
+    )
+    # last+20=160，但 first+45=155，持续刷屏也必须在硬期限评估。
+    assert conversation.batch_due_at(session) == 155.0
+    session.batch_last_at = 120.0
+    assert conversation.batch_due_at(session) == 140.0
+
+
+def test_conversation_turn_limit_closes_session() -> None:
+    _load_agent_modules()
+    import time
+
+    from src.plugins.yawn_core.yawn_agent import conversation
+
+    conversation.reset_for_tests()
+    now = time.monotonic()
+    for turn in range(conversation.CONVERSATION_MAX_BOT_TURNS):
+        conversation.mark_bot_reply(
+            9, 100, topic="同一话题", source="test", now=now + turn
+        )
+    assert conversation.current_conversation(9, 100) is None
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 0.5) -> None:
+    import asyncio
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError
+        await asyncio.sleep(0.005)
+
+
+@pytest.mark.asyncio
+async def test_conversation_batches_messages_and_preserves_next_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _load_agent_modules()
+    import asyncio
+
+    from src.plugins.yawn_core.yawn_agent import conversation, proactive
+    from src.plugins.yawn_core.yawn_agent.context import now_beijing
+
+    await conversation.shutdown_conversations()
+    monkeypatch.setattr(conversation, "CONVERSATION_QUIET_SECONDS", 0.01)
+    monkeypatch.setattr(conversation, "CONVERSATION_MAX_BATCH_SECONDS", 0.03)
+    batches: list[Any] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def handler(batch: Any) -> None:
+        batches.append(batch)
+        if len(batches) == 1:
+            first_started.set()
+            await release_first.wait()
+
+    conversation.set_followup_handler(handler)
+    conversation.mark_bot_reply(9, 100, topic="测试话题", source="test")
+    conversation.observe_member_message(
+        9,
+        100,
+        user_id=1,
+        message_id=11,
+        explicit_trigger=False,
+        observed_at=now_beijing(),
+    )
+    conversation.observe_member_message(
+        9,
+        100,
+        user_id=2,
+        message_id=12,
+        explicit_trigger=False,
+        observed_at=now_beijing(),
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=0.5)
+    # 第一批已经入选后到达的新消息不能取消候选，也不能被清掉；进入下一批。
+    conversation.observe_member_message(
+        9,
+        100,
+        user_id=3,
+        message_id=13,
+        explicit_trigger=False,
+        observed_at=now_beijing(),
+    )
+    release_first.set()
+    await _wait_until(lambda: len(batches) == 2)
+    assert batches[0].message_ids == (11, 12)
+    assert batches[1].message_ids == (13,)
+    await conversation.shutdown_conversations()
+    conversation.set_followup_handler(proactive._process_followup)
+
+
+@pytest.mark.asyncio
+async def test_explicit_trigger_cancels_only_unselected_auto_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _load_agent_modules()
+    import asyncio
+
+    from src.plugins.yawn_core.yawn_agent import conversation, proactive
+    from src.plugins.yawn_core.yawn_agent.context import now_beijing
+
+    await conversation.shutdown_conversations()
+    monkeypatch.setattr(conversation, "CONVERSATION_QUIET_SECONDS", 0.01)
+    called: list[Any] = []
+
+    async def handler(batch: Any) -> None:
+        called.append(batch)
+
+    conversation.set_followup_handler(handler)
+    conversation.mark_bot_reply(9, 100, topic="测试话题", source="test")
+    conversation.observe_member_message(
+        9,
+        100,
+        user_id=1,
+        message_id=11,
+        explicit_trigger=False,
+        observed_at=now_beijing(),
+    )
+    conversation.observe_member_message(
+        9,
+        100,
+        user_id=2,
+        message_id=12,
+        explicit_trigger=True,
+        observed_at=now_beijing(),
+    )
+    await asyncio.sleep(0.04)
+    assert called == []
+    assert conversation.current_conversation(9, 100) is not None
+    await conversation.shutdown_conversations()
+    conversation.set_followup_handler(proactive._process_followup)
 
 
 def test_complete_with_tools_omits_empty_tools_param() -> None:
@@ -690,8 +980,7 @@ def test_complete_with_tools_omits_empty_tools_param() -> None:
             llm_module.complete_with_tools(
                 [{"role": "user", "content": "hi"}],
                 [],
-                model="fake",
-                role="test_proactive",
+                task="agent_proactive",
             )
         )
         assert empty is not None
@@ -701,9 +990,8 @@ def test_complete_with_tools_omits_empty_tools_param() -> None:
         asyncio.run(
             llm_module.complete_with_tools(
                 [{"role": "user", "content": "hi"}],
-                tools,
-                model="fake",
-                role="test_proactive",
+                tools,  # pyright: ignore[reportArgumentType]
+                task="agent_proactive",
             )
         )
         assert fake_client.chat.completions.calls[1]["tools"] == tools

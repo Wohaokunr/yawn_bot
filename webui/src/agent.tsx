@@ -10,6 +10,7 @@ import {
   Form,
   Input,
   InputNumber,
+  List,
   Popconfirm,
   Progress,
   Row,
@@ -38,21 +39,47 @@ import type {
   AgentRelationItem,
   GroupSummary,
   MemoryItem,
+  MemorySubjectItem,
   Persona,
   PrivacyItem,
 } from "./types";
 
 const { Text, Paragraph } = Typography;
 
-// 记忆类型标签：与后端 memory_type 口径对齐（summary/profile 为整理任务产出，manual 为运维手填）。
+// 记忆类型标签：与后端 memory_type 口径对齐（summary/profile 为整理任务产出，core 为反复确认后晋升的不过期事实，manual 为运维手填）。
 export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> = {
   summary: { label: "群摘要", color: "geekblue" },
   profile: { label: "成员画像", color: "purple" },
+  core: { label: "核心记忆", color: "red" },
   manual: { label: "置顶事实", color: "gold" },
 };
 
 export function memoryTypeLabel(type: string): string {
   return MEMORY_TYPE_META[type]?.label ?? type;
+}
+
+// 画像键中文标签：与后端 memory.py 的 _FACT_KEYS 对齐（多值键内容以「、」连接），
+// 手工新增的自定义键原样展示。
+export const PROFILE_KEY_META: Record<string, string> = {
+  display_name: "昵称/自称",
+  preferred_address: "偏好称呼",
+  hobby: "爱好",
+  preference: "偏好",
+  skill: "技能",
+  recurring_topic: "常聊话题",
+};
+
+export function profileKeyLabel(key: string): string {
+  return PROFILE_KEY_META[key] ?? key;
+}
+
+// 画像成员的展示名：群名片优先、全局昵称兜底，解析失败回退 QQ 号（与关系图谱同口径）。
+export function memberDisplayName(
+  groupNickname: string | null | undefined,
+  nickname: string | null | undefined,
+  userId: string,
+): string {
+  return (groupNickname || nickname || "").trim() || userId;
 }
 
 // 关系类型与来源口径：与后端 memory.py 的枚举/别名表对齐，自定义类型原样展示。
@@ -91,6 +118,7 @@ export function AgentDetailPage(): React.JSX.Element {
     { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
     { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
     { key: "memories", label: "记忆", children: <MemoriesPanel groupId={groupId} /> },
+    { key: "profiles", label: "成员画像", children: <MemberProfilesPanel groupId={groupId} /> },
     { key: "relations", label: "关系边", children: <RelationsPanel groupId={groupId} /> },
     { key: "messages", label: "消息记录", children: <AgentMessagesPanel groupId={groupId} /> },
     { key: "privacy", label: "隐私退出", children: <PrivacyPanel groupId={groupId} /> },
@@ -156,13 +184,39 @@ interface MemoryFormValues {
   expiresInDays: number | null;
 }
 
+// 记忆编辑抽屉：记忆表格与成员画像面板共用，只改内容/权重/置信度/有效期。
+function MemoryEditDrawer({ memory, saving, onClose, onSave }: { memory: MemoryItem | null; saving: boolean; onClose: () => void; onSave: (values: MemoryFormValues) => void }): React.JSX.Element {
+  const [form] = Form.useForm();
+  useEffect(() => {
+    if (memory) {
+      form.setFieldsValue({
+        content: memory.content,
+        salience: memory.salience,
+        confidence: memory.confidence,
+        expiresInDays: memory.expiresAt ? Math.max(1, Math.ceil((new Date(memory.expiresAt).getTime() - Date.now()) / 86400000)) : null,
+      });
+    }
+  }, [form, memory]);
+  return <Drawer open={!!memory} width={520} title={`编辑记忆 · ${memory?.key ?? ""}`} onClose={onClose}>
+    <Form form={form} layout="vertical" onFinish={(values) => onSave(values as MemoryFormValues)}>
+      <Form.Item name="content" label="内容" rules={[{ required: true, message: "请输入内容" }]}><Input.TextArea autoSize={{ minRows: 4, maxRows: 10 }} maxLength={2000} showCount /></Form.Item>
+      <Row gutter={16}>
+        <Col span={12}><Form.Item name="salience" label="显著度（注入优先级）" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} /></Form.Item></Col>
+        <Col span={12}><Form.Item name="confidence" label="置信度" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} /></Form.Item></Col>
+      </Row>
+      <Form.Item name="expiresInDays" label="有效期（天）"><InputNumber min={1} max={3650} placeholder="清空则永久有效" style={{ width: "100%" }} /></Form.Item>
+      <Space><Button type="primary" htmlType="submit" loading={saving}>保存</Button><Button onClick={onClose}>取消</Button></Space>
+    </Form>
+  </Drawer>;
+}
+
 function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp();
+  const [, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1); const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<MemoryItem | null>(null);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [editForm] = Form.useForm();
   const [createForm] = Form.useForm();
   const load = useCallback(() => api<MemoryItem[]>(`/agent/groups/${groupId}/memories?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search]);
   const query = useApiQuery(load);
@@ -192,15 +246,7 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
       message.error((error as Error).message);
     }
   };
-  const openEdit = (row: MemoryItem) => {
-    setEditing(row);
-    editForm.setFieldsValue({
-      content: row.content,
-      salience: row.salience,
-      confidence: row.confidence,
-      expiresInDays: row.expiresAt ? Math.max(1, Math.ceil((new Date(row.expiresAt).getTime() - Date.now()) / 86400000)) : null,
-    });
-  };
+  const openEdit = (row: MemoryItem) => setEditing(row);
   const saveEdit = async (values: MemoryFormValues) => {
     if (!editing) return;
     setSaving(true);
@@ -241,19 +287,9 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
     <Card title="公开/群级记忆" extra={<Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><Button danger>清理全群 Agent 数据</Button></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.content}</Paragraph> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value || "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> }, { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
+        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.content}</Paragraph> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> }, { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
     }</Card>
-    <Drawer open={!!editing} width={520} title={`编辑记忆 · ${editing?.key ?? ""}`} onClose={() => setEditing(null)}>
-      <Form form={editForm} layout="vertical" onFinish={saveEdit}>
-        <Form.Item name="content" label="内容" rules={[{ required: true, message: "请输入内容" }]}><Input.TextArea autoSize={{ minRows: 4, maxRows: 10 }} maxLength={2000} showCount /></Form.Item>
-        <Row gutter={16}>
-          <Col span={12}><Form.Item name="salience" label="显著度（注入优先级）" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} /></Form.Item></Col>
-          <Col span={12}><Form.Item name="confidence" label="置信度" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} /></Form.Item></Col>
-        </Row>
-        <Form.Item name="expiresInDays" label="有效期（天）"><InputNumber min={1} max={3650} placeholder="清空则永久有效" style={{ width: "100%" }} /></Form.Item>
-        <Space><Button type="primary" htmlType="submit" loading={saving}>保存</Button><Button onClick={() => setEditing(null)}>取消</Button></Space>
-      </Form>
-    </Drawer>
+    <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />
     <Drawer open={creating} width={520} title="新增记忆" onClose={() => setCreating(false)}>
       <Form form={createForm} layout="vertical" onFinish={saveCreate} initialValues={{ type: "manual", salience: 0.7, confidence: 0.9 }}>
         <Form.Item name="type" label="类型" rules={[{ required: true }]}><Select options={Object.entries(MEMORY_TYPE_META).map(([value, meta]) => ({ value, label: meta.label }))} /></Form.Item>
@@ -268,6 +304,131 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
         <Space><Button type="primary" htmlType="submit" loading={saving}>新增</Button><Button onClick={() => setCreating(false)}>取消</Button></Space>
       </Form>
     </Drawer>
+  </>;
+}
+
+// 画像分组展示顺序：core 为反复确认晋升的不过期事实，置前展示。
+const PROFILE_TYPE_ORDER = ["core", "profile", "manual"];
+
+function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Element {
+  const { message } = AntApp.useApp();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const userId = searchParams.get("userId") ?? "";
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState<MemoryItem | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setDraft(userId); }, [userId]);
+  const setUserId = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set("userId", value); else next.delete("userId");
+    setSearchParams(next, { replace: true });
+  };
+  const subjectsLoad = useCallback(() => api<MemorySubjectItem[]>(`/agent/groups/${groupId}/memories/subjects`).then((r) => r.data), [groupId]);
+  const subjectsQuery = useApiQuery(subjectsLoad);
+  const subjects = subjectsQuery.data ?? [];
+  const memberLoad = useCallback(() => userId
+    ? api<MemoryItem[]>(`/agent/groups/${groupId}/memories?subjectUserId=${userId}&pageSize=100`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 }))
+    : Promise.resolve({ rows: [] as MemoryItem[], total: 0 }), [groupId, userId]);
+  const memberQuery = useApiQuery(memberLoad);
+  const rows = memberQuery.data?.rows ?? [];
+  const grouped = PROFILE_TYPE_ORDER
+    .map((type) => ({ type, items: rows.filter((row) => row.type === type) }))
+    .filter((group) => group.items.length > 0);
+  const counts = { profile: 0, core: 0, manual: 0 } as Record<string, number>;
+  for (const row of rows) counts[row.type] = (counts[row.type] ?? 0) + 1;
+  const subject = subjects.find((item) => item.userId === userId);
+  const memberOptions = subjects.map((item) => ({
+    value: item.userId,
+    label: `${memberDisplayName(item.groupNickname, item.nickname, item.userId)}（${item.userId}）· 画像 ${item.counts.profile} / 核心 ${item.counts.core}`,
+  }));
+  const remove = async (id: string) => {
+    await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" });
+    message.success("记忆已删除");
+    memberQuery.reload(); subjectsQuery.reload();
+  };
+  const saveEdit = async (values: MemoryFormValues) => {
+    if (!editing) return;
+    setSaving(true);
+    try {
+      await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.updatedAt }) });
+      message.success("记忆已更新");
+      setEditing(null);
+      memberQuery.reload(); subjectsQuery.reload();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); memberQuery.reload(); subjectsQuery.reload(); setEditing(null); }
+      else message.error((error as Error).message);
+    } finally { setSaving(false); }
+  };
+  return <>
+    <Card title="成员画像" extra={<Space wrap>
+      <AutoComplete
+        value={draft}
+        options={memberOptions}
+        onChange={(value) => setDraft(value)}
+        onSelect={(value) => setUserId(String(value))}
+        onInputKeyDown={(event) => { if (event.key === "Enter" && draft.trim()) setUserId(draft.trim()); }}
+        filterOption={(input, option) => `${String(option?.value ?? "")} ${String(option?.label ?? "")}`.toLowerCase().includes(input.toLowerCase())}
+        placeholder="输入或选择成员 QQ"
+        style={{ width: 320 }}
+        allowClear
+      />
+      <Button type="primary" disabled={!draft.trim()} onClick={() => setUserId(draft.trim())}>查看画像</Button>
+      {userId && <Button onClick={() => setUserId("")}>返回列表</Button>}
+    </Space>}>
+      <Alert type="info" showIcon className="section-alert" message="画像由记忆整理自动生成，也可在「记忆」页手工新增；已退出记忆（隐私）的成员不展示。" />
+      {userId
+        ? (memberQuery.error && !memberQuery.data
+          ? <QueryErrorAlert error={memberQuery.error} onRetry={memberQuery.reload} />
+          : <>
+            <div className="ag-stat-line" style={{ marginBottom: 12 }}>
+              <Space wrap size={[8, 8]}>
+                <Text strong>{memberDisplayName(subject?.groupNickname, subject?.nickname, userId)}</Text>
+                <Text type="secondary" copyable>{userId}</Text>
+                {PROFILE_TYPE_ORDER.map((type) => <Tag key={type} color={MEMORY_TYPE_META[type]?.color}>{memoryTypeLabel(type)} × {counts[type] ?? 0}</Tag>)}
+              </Space>
+              <Text type="secondary">最近更新：{rows[0] ? formatTime(rows[0].updatedAt) : "—"}</Text>
+            </div>
+            {memberQuery.data && memberQuery.data.total > rows.length && <Alert type="warning" showIcon className="section-alert" message={`该成员共 ${memberQuery.data.total} 条记录，仅展示最近 100 条`} />}
+            {memberQuery.loading
+              ? <Spin />
+              : rows.length === 0
+                ? <Empty description="该成员暂无画像" />
+                : grouped.map((group) => <Card key={group.type} size="small" className="section-row" title={<Space size={8}><Tag color={MEMORY_TYPE_META[group.type]?.color}>{memoryTypeLabel(group.type)}</Tag><Text type="secondary">{group.items.length} 条</Text></Space>}>
+                  <List dataSource={group.items} renderItem={(row) => (
+                    <List.Item actions={[
+                      <Button key="edit" type="link" size="small" onClick={() => setEditing(row)}>编辑</Button>,
+                      <Popconfirm key="remove" title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" size="small" danger>删除</Button></Popconfirm>,
+                    ]}>
+                      <List.Item.Meta
+                        title={<Space wrap size={[8, 4]}>
+                          <Text strong>{profileKeyLabel(row.key)}</Text>
+                          {row.key !== profileKeyLabel(row.key) && <Text type="secondary">{row.key}</Text>}
+                          <Text type="secondary">{row.sourceKind === "manual" ? "手工" : "自动"} · {row.expiresAt ? `有效期至 ${formatTime(row.expiresAt)}` : "永久"} · 更新 {formatTime(row.updatedAt)}</Text>
+                        </Space>}
+                        description={<>
+                          <Paragraph copyable style={{ marginBottom: 8 }}>{row.content}</Paragraph>
+                          <Space wrap size={[16, 4]}>
+                            <Space size={6}>置信度<Progress percent={Math.round(row.confidence * 100)} size="small" style={{ width: 90 }} strokeColor="var(--ant-color-success)" /></Space>
+                            <Space size={6}>显著度<Progress percent={Math.round(row.salience * 100)} size="small" style={{ width: 90 }} /></Space>
+                          </Space>
+                        </>}
+                      />
+                    </List.Item>
+                  )} />
+                </Card>)}
+          </>)
+        : (subjectsQuery.error && !subjectsQuery.data
+          ? <QueryErrorAlert error={subjectsQuery.error} onRetry={subjectsQuery.reload} />
+          : <Table rowKey="userId" loading={subjectsQuery.loading} dataSource={subjects} pagination={{ pageSize: 20, showSizeChanger: false }} locale={{ emptyText: <Empty description="暂无成员画像" /> }} columns={[
+            { title: "成员", render: (_, row: MemorySubjectItem) => <>{memberDisplayName(row.groupNickname, row.nickname, row.userId)}<br /><Text type="secondary" copyable>{row.userId}</Text></> },
+            { title: "成员画像", dataIndex: ["counts", "profile"], width: 100 },
+            { title: "核心记忆", dataIndex: ["counts", "core"], width: 100 },
+            { title: "置顶事实", dataIndex: ["counts", "manual"], width: 100 },
+            { title: "最近更新", dataIndex: "updatedAt", render: formatTime, width: 170 },
+            { title: "操作", width: 110, render: (_, row: MemorySubjectItem) => <Button type="link" onClick={() => setUserId(row.userId)}>查看画像</Button> },
+          ]} />)}
+    </Card>
+    <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />
   </>;
 }
 

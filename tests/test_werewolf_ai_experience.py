@@ -237,6 +237,7 @@ async def test_llm_speech_prompts_are_scene_and_faction_aware(
     game.phase = state.Phase.DAY_SPEECH
     await ai_player._llm_speech(driver, wolf)
 
+    assert {call["task"] for call in calls} == {"ww_speech"}
     last_words_user = calls[0]["messages"][-1]["content"]
     assert "遗言" in last_words_user and "查验记录" in last_words_user
     final_user = calls[1]["messages"][-1]["content"]

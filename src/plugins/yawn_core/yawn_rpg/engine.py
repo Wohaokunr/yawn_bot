@@ -2246,6 +2246,7 @@ async def run_kp_turn(
             if game.tools_broken:
                 final_text = await complete(
                     messages,
+                    task="rpg_kp",
                     max_tokens=cfg.rpg_kp_max_tokens,
                     temperature=cfg.rpg_kp_temperature,
                     timeout=timeout,
@@ -2256,6 +2257,7 @@ async def run_kp_turn(
                 if module is None:
                     final_text = await complete(
                         messages,
+                        task="rpg_kp",
                         max_tokens=cfg.rpg_kp_max_tokens,
                         temperature=cfg.rpg_kp_temperature,
                         timeout=timeout,
@@ -2277,6 +2279,7 @@ async def run_kp_turn(
             msg = await complete_with_tools(
                 messages,
                 game.tools_cache,
+                task="rpg_kp",
                 max_tokens=cfg.rpg_kp_max_tokens,
                 temperature=cfg.rpg_kp_temperature,
                 timeout=timeout,
@@ -2293,6 +2296,7 @@ async def run_kp_turn(
                 remain = turn_deadline - _loop_time()
                 final_text = await complete(
                     messages,
+                    task="rpg_kp",
                     max_tokens=cfg.rpg_kp_max_tokens,
                     temperature=cfg.rpg_kp_temperature,
                     timeout=max(remain - 1, 1),
@@ -2327,6 +2331,7 @@ async def run_kp_turn(
             if remain > 1:
                 final_text = await complete(
                     messages,
+                    task="rpg_kp",
                     max_tokens=cfg.rpg_kp_max_tokens,
                     temperature=cfg.rpg_kp_temperature,
                     timeout=min(cfg.rpg_kp_timeout, remain),

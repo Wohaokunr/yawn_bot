@@ -49,6 +49,7 @@ async def complete(
 
     return await llm_complete(
         messages,
+        task="rpg_npc_router",
         max_tokens=max_tokens,
         temperature=temperature,
         timeout=timeout,

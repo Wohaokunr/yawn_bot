@@ -7,7 +7,7 @@ import asyncio
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from nonebot import get_bots, get_driver, logger
 from nonebot.adapters.onebot.v11 import Message
@@ -19,10 +19,20 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
-from ..llm import complete
+from ..llm import ai_config, complete
 from .context import ActivitySnapshot, is_recent, now_beijing
 from .collector import group_lock
 from .config_store import list_agent_group_ids
+from .conversation import (
+    CONVERSATION_MAX_BOT_TURNS,
+    ConversationBatch,
+    close_conversation,
+    conversation_is_current,
+    mark_bot_reply,
+    prune_expired_conversations,
+    set_followup_handler,
+    shutdown_conversations,
+)
 from .dialogue import (
     _activity_window_counts,
     _extract_message_id,
@@ -32,6 +42,7 @@ from .dialogue import (
 from .log import dbg, dbg_exc
 from .memory import (
     compact_group_memory,
+    decay_stale_relations,
     memory_retry_due,
     parse_json_reply,
     record_memory_failure,
@@ -40,16 +51,22 @@ from .media import cleanup_media_cache
 from .persona import resolve_persona
 from .prompt import build_messages
 
-# 插话前至少等真人消息沉底 90 秒：刚发完消息就接话像在抢话，
-# 话题自然间隙里插话才像真人群友。
-_ACTIVE_MIN_GAP_SECONDS = 90.0
+# 普通活跃场景等 30 秒把零散消息合起来；持续刷屏由高活跃通道直接候选，
+# 不再依赖群聊出现 90 秒空隙。
+_ACTIVE_MIN_GAP_SECONDS = 30.0
 # 60 分钟内真人消息不足此数说明群里并没有在聊，不插话。
 _ACTIVE_MIN_MEMBER_MESSAGES = 2
+_BUSY_MEMBER_MESSAGES_5M = 6
+_BUSY_MEMBER_PARTICIPANTS_5M = 2
 # 被动回复（被@答话）后的短守卫：刚答完话立刻主动插话显得话痨，
 # 但只挡这几分钟，不再封锁整个主动冷却期。
 _POST_REPLY_GUARD_MINUTES = 5.0
 # 暖场概率封顶：冷得再久也别超过这个值，防止死群被高频轰炸。
 _WARMUP_PROBABILITY_CAP = 0.6
+# 主动回复可能启用任务级推理且要输出 JSON；384 tokens 会让推理模型在正文前
+# 触发 finish_reason="length"，因此至少给 2048，并保留部署方更高的全局预算。
+_PROACTIVE_MIN_MAX_TOKENS = 2048
+_PROACTIVE_TIMEOUT_SECONDS = 25.0
 
 _ACTIVE_INTERJECT_PROMPT = (
     "群里正在聊天。先读懂最近的消息：现在在聊什么话题、谁在积极参与、"
@@ -73,12 +90,39 @@ _WARMUP_PROMPT = (
     "不要问“大家在吗”“在干什么”，不要自称 AI 或助手。"
 )
 
+_FOLLOWUP_PROMPT = (
+    "你刚刚已经参与了这个话题，群友随后又发来一批消息。判断他们是否在延续、"
+    "回应或自然关联到当前话题。不要因为每条新消息都抢着回答：群友彼此聊得顺畅时"
+    "可以 wait；话题已结束、明显转移或不适合继续时 close；只有确实能推动对话、"
+    "回应群友或自然接梗时才 speak。\n"
+    "续聊必须承接当前批次，1~2 句、口语化，不重新打招呼，不另起无关话题。"
+)
+
+_MEMORY_USE_PROMPT = (
+    "结合上下文中的长期记忆，但要自然隐式使用：群总结用于判断群里常聊什么和"
+    "未完话题；人物画像用于称呼、兴趣切入点和表达分寸；人物关系只用于调整互动"
+    "语气。当前消息永远优先于旧记忆；只在高度相关时体现，不复述记忆清单、"
+    "source_scope 或关系清单，也不要声称自己在读取记忆。"
+)
+
 _JSON_PROTOCOL = (
     "只返回 JSON，不要输出其他任何内容："
-    '{"speak": true或false, "topic": "当前话题的简短概括", '
+    '{"action": "speak、wait 或 close", "speak": true或false, '
+    '"topic": "当前话题的简短概括", '
     '"reason": "一句话说明为何开口或沉默", '
     '"text": "要发送的消息，保持沉默时为空字符串"}'
 )
+
+
+async def _generate_proactive_reply(messages: list[Any]) -> str | None:
+    """用统一预算生成主动首轮或短会话续聊决策。"""
+
+    return await complete(  # pyright: ignore[reportArgumentType]
+        messages,  # pyright: ignore[reportArgumentType]
+        task="agent_proactive",
+        max_tokens=max(_PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)),
+        timeout=_PROACTIVE_TIMEOUT_SECONDS,
+    )
 
 
 def _clamp_probability(value: Any) -> float:
@@ -109,10 +153,18 @@ def _skip_backoff_timestamp(now: datetime, cooldown_minutes: int) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class _ProactiveDecision:
-    should_speak: bool
+    action: str
     text: str
     topic: str | None
     reason: str
+
+    @property
+    def should_speak(self) -> bool:
+        return self.action == "speak" and bool(self.text)
+
+
+class _RandomSource(Protocol):
+    def random(self) -> float: ...
 
 
 def _decide_proactive_reply(raw: str) -> _ProactiveDecision:
@@ -121,19 +173,25 @@ def _decide_proactive_reply(raw: str) -> _ProactiveDecision:
     cleaned = raw.strip()
     if not cleaned:
         return _ProactiveDecision(
-            should_speak=False, text="", topic=None, reason="LLM 返回空内容"
+            action="wait", text="", topic=None, reason="LLM 返回空内容"
         )
     parsed = parse_json_reply(cleaned)
     if parsed is not None:
         text = str(parsed.get("text") or "").strip()
-        should_speak = bool(parsed.get("speak")) and bool(text)
+        raw_action = str(parsed.get("action") or "").strip().lower()
+        if raw_action not in {"speak", "wait", "close"}:
+            raw_action = "speak" if bool(parsed.get("speak")) and text else "wait"
+        if raw_action == "speak" and not text:
+            raw_action = "wait"
         topic = str(parsed.get("topic") or "").strip() or None
         reason = str(parsed.get("reason") or "").strip() or (
-            "模型未说明理由" if should_speak else "模型判定此刻不适合发言"
+            "模型未说明理由"
+            if raw_action == "speak"
+            else "模型判定此刻不适合发言"
         )
         return _ProactiveDecision(
-            should_speak=should_speak,
-            text=text if should_speak else "",
+            action=raw_action,
+            text=text if raw_action == "speak" else "",
             topic=topic,
             reason=reason,
         )
@@ -141,13 +199,13 @@ def _decide_proactive_reply(raw: str) -> _ProactiveDecision:
     # 按旧行为整段当发言发出去，保持对不吐 JSON 模型的兼容。
     if cleaned.startswith(("{", "```")):
         return _ProactiveDecision(
-            should_speak=False,
+            action="wait",
             text="",
             topic=None,
             reason="LLM 返回了无法解析的 JSON",
         )
     return _ProactiveDecision(
-        should_speak=True,
+        action="speak",
         text=cleaned,
         topic=None,
         reason="模型按纯文本回复,回退为直接发言",
@@ -165,9 +223,22 @@ def _recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
     return [line for line in lines if line][-4:]
 
 
-def _build_user_prompt(mode: str, config: GroupAgentConfig) -> str:
-    base = _ACTIVE_INTERJECT_PROMPT if mode == "active" else _WARMUP_PROMPT
-    parts = [base, _JSON_PROTOCOL]
+def _build_user_prompt(
+    mode: str, config: GroupAgentConfig, *, turn: int | None = None
+) -> str:
+    if mode == "active":
+        base = _ACTIVE_INTERJECT_PROMPT
+    elif mode == "followup":
+        base = _FOLLOWUP_PROMPT
+    else:
+        base = _WARMUP_PROMPT
+    parts = [base, _MEMORY_USE_PROMPT]
+    if turn is not None:
+        parts.append(
+            f"这是本话题中 Bot 的第 {turn} 条候选发言，最多 "
+            f"{CONVERSATION_MAX_BOT_TURNS} 条。"
+        )
+    parts.append(_JSON_PROTOCOL)
     recent = _recent_proactive_lines(config)
     if recent:
         parts.append(
@@ -183,7 +254,7 @@ def should_proactively_speak(
     snapshot: ActivitySnapshot,
     now: datetime,
     *,
-    rng: random.Random | None = None,
+    rng: _RandomSource | None = None,
 ) -> str | None:
     """返回本次主动发言模式："active"（热闹插话）、"warmup"（冷场暖场）或 None。
 
@@ -241,7 +312,8 @@ def should_proactively_speak(
         dbg(f"群 {group_id} 主动发言拒绝: 保留期内没有任何消息")
         return None
 
-    # 插话模式：真人在聊，话题间隙内自然插嘴。
+    # 插话模式：普通群先等 30 秒合批；持续刷屏群允许在消息流中候选，
+    # 否则它们永远等不到自然间隙，反而比安静群更难触发。
     if not config.proactive_active_enabled:
         dbg(f"群 {group_id} 主动发言拒绝: 热闹插话未开启")
         return None
@@ -250,7 +322,11 @@ def should_proactively_speak(
         return None
     member_idle = (now - snapshot.last_member_message_at).total_seconds()
     window_seconds = max(int(config.proactive_active_window_minutes), 1) * 60
-    if member_idle < _ACTIVE_MIN_GAP_SECONDS:
+    busy_flow = (
+        snapshot.member_messages_5m >= _BUSY_MEMBER_MESSAGES_5M
+        and snapshot.member_participants_5m >= _BUSY_MEMBER_PARTICIPANTS_5M
+    )
+    if not busy_flow and member_idle < _ACTIVE_MIN_GAP_SECONDS:
         dbg(
             f"群 {group_id} 主动发言拒绝: 真人消息刚发 {member_idle:.0f}s, "
             f"不抢话(最小间隔 {_ACTIVE_MIN_GAP_SECONDS:.0f}s)"
@@ -271,8 +347,11 @@ def should_proactively_speak(
     probability = _clamp_probability(config.proactive_active_probability)
     if roll < probability:
         dbg(
-            f"群 {group_id} 插话模式触发: 真人消息 {member_idle:.0f}s 前 "
+            f"群 {group_id} 插话模式触发: {'持续刷屏' if busy_flow else '自然间隙'} "
+            f"真人消息 {member_idle:.0f}s 前 "
             f"roll={roll:.3f} probability={probability:.2f} "
+            f"5m 真人={snapshot.member_messages_5m}/"
+            f"{snapshot.member_participants_5m}人 "
             f"60m 真人消息={snapshot.member_messages_60m}"
         )
         return "active"
@@ -328,6 +407,8 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                 proactive_today=count,
                 last_member_message_at=counts["last_member_message_at"],
                 member_messages_60m=counts["member_messages_60m"],
+                member_messages_5m=counts["member_messages_5m"],
+                member_participants_5m=counts["member_participants_5m"],
             )
             mode = should_proactively_speak(config, snapshot, now)
             if mode is None:
@@ -361,6 +442,9 @@ async def _apply_result(
     day_count: int,
     bot_id: int | None,
     message_id: int | None,
+    mode: str,
+    reason: str,
+    session_turn: int,
 ) -> None:
     """在调用方事务内落库：成功推进 last_proactive_at/last_agent_at；
     未发出（内容门拦截、生成失败、撞重）只把 last_proactive_at 回拨到
@@ -385,7 +469,12 @@ async def _apply_result(
                 group_id=config.group_id,
                 actor_user_id=None,
                 tool_name="proactive_reply",
-                arguments={},
+                arguments={
+                    "mode": mode,
+                    "action": "speak",
+                    "session_turn": session_turn,
+                    "reason": reason[:240],
+                },
                 result="success",
                 detail=text[:500],
             )
@@ -429,21 +518,20 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
             # 让插话贴着群里的真实话题而不是只看 8 条消息的切片；
             # 消息附带 minutes_ago 便于模型判断话题的新旧与节奏。
             context = await _load_context(
-                session, group_id, config, include_message_age=True
+                session,
+                group_id,
+                config,
+                include_message_age=True,
+                include_active_profiles=True,
             )
             prompt, _fingerprint = build_messages(
                 persona=resolve_persona(config),
                 tools=[],
                 context=context,
-                user_prompt=_build_user_prompt(mode, config),
+                user_prompt=_build_user_prompt(mode, config, turn=1),
             )
             dbg(f"群 {group_id} 主动发言生成: 模式={mode}, 请求 LLM")
-            raw = await complete(  # pyright: ignore[reportArgumentType]
-                prompt,  # pyright: ignore[reportArgumentType]
-                role="agent_dialogue",
-                max_tokens=384,
-                timeout=25,
-            )
+            raw = await _generate_proactive_reply(prompt)
             now = now_beijing()
             if raw is None:
                 # 持续失败只留 warning 会被淹没；同时推进 last_agent_at
@@ -459,6 +547,9 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
                     message_id=None,
+                    mode=mode,
+                    reason="LLM 返回空内容",
+                    session_turn=1,
                 )
                 await session.commit()
                 return
@@ -476,7 +567,12 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                         group_id=config.group_id,
                         actor_user_id=None,
                         tool_name="proactive_reply",
-                        arguments={},
+                        arguments={
+                            "mode": mode,
+                            "action": decision.action,
+                            "session_turn": 1,
+                            "reason": decision.reason[:240],
+                        },
                         result="skip",
                         detail=decision.reason[:500],
                     )
@@ -489,6 +585,9 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
                     message_id=None,
+                    mode=mode,
+                    reason=decision.reason,
+                    session_turn=1,
                 )
                 await session.commit()
                 return
@@ -508,12 +607,16 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
                     message_id=None,
+                    mode=mode,
+                    reason="近期回复撞重",
+                    session_turn=1,
                 )
                 await session.commit()
                 return
             # 多机器人部署下逐个尝试；通常只有一个连接，首个即成功。
             sent = False
             sent_message_id: int | None = None
+            sent_bot_id = primary_self_id
             for bot in bots:
                 try:
                     result = await bot.call_api(
@@ -528,6 +631,7 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     )
                     continue
                 sent = True
+                sent_bot_id = int(str(getattr(bot, "self_id", "") or 0))
                 sent_message_id = _extract_message_id(result)
                 dbg(
                     f"群 {group_id} 主动发言发送成功 bot={getattr(bot, 'self_id', None)}"
@@ -547,8 +651,17 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                 now=now,
                 text=text,
                 day_count=candidate["day_count"],
-                bot_id=primary_self_id,
+                bot_id=sent_bot_id,
                 message_id=sent_message_id,
+                mode=mode,
+                reason=decision.reason,
+                session_turn=1,
+            )
+            mark_bot_reply(
+                sent_bot_id,
+                group_id,
+                topic=decision.topic or str(config.active_topic or ""),
+                source=mode,
             )
             try:
                 await session.commit()
@@ -558,9 +671,160 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                 await session.rollback()
 
 
+async def _process_followup(batch: ConversationBatch) -> None:
+    """处理一个已经完成 20~45 秒合批的短会话续聊候选。"""
+
+    bot_id, group_id = batch.key
+    if not conversation_is_current(batch):
+        dbg(
+            f"群 {group_id} 短会话候选已失效: session={batch.session_id}"
+        )
+        return
+    bot = next(
+        (
+            item
+            for item in get_bots().values()
+            if int(str(getattr(item, "self_id", "") or 0)) == bot_id
+        ),
+        None,
+    )
+    if bot is None:
+        close_conversation(bot_id, group_id, reason="会话机器人已离线")
+        return
+
+    async with group_lock(group_id, bot_id):
+        if not conversation_is_current(batch):
+            return
+        async with get_session() as session:
+            config = await session.get(GroupAgentConfig, group_id)
+            if (
+                config is None
+                or not config.enabled
+                or config.trigger_mode != "mention_or_proactive"
+            ):
+                close_conversation(bot_id, group_id, reason="配置关闭连续水群")
+                return
+            now = now_beijing()
+            day = now.strftime("%Y-%m-%d")
+            day_count = config.proactive_count if config.proactive_day == day else 0
+            if day_count >= int(config.daily_limit):
+                dbg(
+                    f"群 {group_id} 短会话关闭: 今日自动发言已达上限"
+                    f"({day_count}/{config.daily_limit})"
+                )
+                close_conversation(bot_id, group_id, reason="达到每日上限")
+                return
+            context = await _load_context(
+                session,
+                group_id,
+                config,
+                bot_id,
+                include_message_age=True,
+                focus_user_ids=batch.user_ids,
+                message_cutoff=batch.cutoff_at,
+                include_active_profiles=True,
+            )
+            prompt, _fingerprint = build_messages(
+                persona=resolve_persona(config),
+                tools=[],
+                context=context,
+                user_prompt=_build_user_prompt(
+                    "followup", config, turn=batch.bot_turns + 1
+                ),
+            )
+            dbg(
+                f"群 {group_id} 短会话续聊生成: session={batch.session_id} "
+                f"turn={batch.bot_turns + 1} users={batch.user_ids}"
+            )
+            raw = await _generate_proactive_reply(prompt)
+            decision = _decide_proactive_reply(raw or "")
+            action = decision.action
+            reason = decision.reason
+            text = decision.text
+            if action == "speak" and text.casefold() in {
+                str(item.get("text") or "").casefold()
+                for item in (config.recent_response_fingerprints or [])
+                if isinstance(item, dict)
+            }:
+                action = "wait"
+                text = ""
+                reason = "续聊内容与近期回复撞重"
+
+            if action != "speak":
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": "followup",
+                            "action": action,
+                            "session_turn": batch.bot_turns + 1,
+                            "session_id": batch.session_id,
+                            "reason": reason[:240],
+                        },
+                        result=action,
+                        detail=reason[:500],
+                    )
+                )
+                await session.commit()
+                dbg(
+                    f"群 {group_id} 短会话决策: session={batch.session_id} "
+                    f"action={action} reason={reason!r}"
+                )
+                if action == "close":
+                    close_conversation(bot_id, group_id, reason=reason)
+                return
+
+            try:
+                result = await bot.call_api(
+                    "send_group_msg",
+                    group_id=group_id,
+                    message=Message(text),
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("群 %s 短会话续聊发送失败", group_id)
+                dbg_exc(
+                    f"群 {group_id} 短会话发送失败 session={batch.session_id}"
+                )
+                return
+            sent_message_id = _extract_message_id(result)
+            if decision.topic:
+                config.active_topic = decision.topic[:240]
+            sent_at = now_beijing()
+            await _apply_result(
+                session,
+                config,
+                now=sent_at,
+                text=text,
+                day_count=day_count,
+                bot_id=bot_id,
+                message_id=sent_message_id,
+                mode="followup",
+                reason=reason,
+                session_turn=batch.bot_turns + 1,
+            )
+            mark_bot_reply(
+                bot_id,
+                group_id,
+                topic=decision.topic or batch.topic,
+                source="followup",
+                preserve_pending=True,
+            )
+            try:
+                await session.commit()
+            except SQLAlchemyError:
+                logger.warning("群 %s 短会话续聊状态提交失败", group_id)
+                dbg_exc(f"群 {group_id} 短会话状态提交失败,已回滚")
+                await session.rollback()
+
+
 async def _tick() -> None:
     """调度入口；只负责候选筛选，具体回复由普通 Agent 流程处理。"""
 
+    pruned = prune_expired_conversations()
+    if pruned:
+        dbg(f"主动发言 tick: 清理 {pruned} 个过期短会话")
     bots = [bot for bot in get_bots().values() if bot is not None]
     if not bots:
         dbg("主动发言 tick: 没有已连接的机器人,跳过")
@@ -577,8 +841,11 @@ async def _tick() -> None:
             dbg_exc(f"群 {candidate['group_id']} 主动插话流程异常")
 
 
-_MEMORY_TRIGGER_COUNT = 12
-_MEMORY_MAX_PENDING_AGE = timedelta(minutes=5)
+set_followup_handler(_process_followup)
+
+
+_MEMORY_TRIGGER_COUNT = 16
+_MEMORY_MAX_PENDING_AGE = timedelta(minutes=8)
 _STARTUP_TASKS: set[asyncio.Task[None]] = set()
 
 
@@ -646,10 +913,15 @@ async def _compact_tick(*, force: bool = False, cleanup: bool = False) -> None:
     if cleanup:
         try:
             async with get_session() as session:
+                # 每日一次把沉寂超过 90 天的自动关系边置信度衰减落库，
+                # 与读取侧分段降权互补；放在每日任务避免整理路径写放大。
+                decayed = await decay_stale_relations(session, now_beijing())
+                if decayed:
+                    dbg(f"每日关系衰减: 更新 {decayed} 条陈旧 auto 边")
                 await cleanup_media_cache(session)
                 await session.commit()
         except Exception:  # noqa: BLE001
-            logger.exception("Agent 媒体缓存清理失败")
+            logger.exception("Agent 每日缓存/关系衰减清理失败")
             dbg_exc("每日媒体缓存清理异常")
 
 
@@ -681,7 +953,7 @@ async def _restore_jobs() -> None:
             kwargs={"force": True, "cleanup": True},
         )
         dbg("已注册定时任务 yawn_core_agent:compact(每日 03:30 记忆整理兜底)")
-    # 每分钟廉价扫描；高流量 12 条触发，稀疏群最老待处理消息 5 分钟触发。
+    # 每分钟廉价扫描；高流量 16 条触发，稀疏群最老待处理消息 8 分钟触发。
     if scheduler.get_job("yawn_core_agent:compact_fast") is None:
         scheduler.add_job(
             _compact_tick,
@@ -696,6 +968,16 @@ async def _restore_jobs() -> None:
     startup_task = asyncio.create_task(_compact_tick(force=True))
     _STARTUP_TASKS.add(startup_task)
     startup_task.add_done_callback(_STARTUP_TASKS.discard)
+
+
+@get_driver().on_shutdown
+async def _shutdown_jobs() -> None:
+    await shutdown_conversations()
+    for task in list(_STARTUP_TASKS):
+        task.cancel()
+    if _STARTUP_TASKS:
+        await asyncio.gather(*_STARTUP_TASKS, return_exceptions=True)
+    _STARTUP_TASKS.clear()
 
 
 __all__ = ["should_proactively_speak"]

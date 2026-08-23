@@ -17,7 +17,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.agent_media_cache import AgentMediaCache
-from ..llm import ai_config, get_agent_model
+from ..llm import ai_config, resolve_llm_request
 from .context import now_beijing
 from .log import dbg, dbg_exc
 
@@ -256,7 +256,10 @@ async def prepare_image_inputs(
         if cache_enabled:
             # 字幕按产出它的视觉模型命中，切换模型后不复用旧结果。
             cached_caption = await _find_cache(
-                session, group_id, digest, model_name=get_agent_model("agent_vision")
+                session,
+                group_id,
+                digest,
+                model_name=resolve_llm_request("agent_image").model,
             )
             if cached_caption is not None and cached_caption.caption:
                 dbg(
