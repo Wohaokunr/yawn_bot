@@ -32,14 +32,14 @@ class GroupAgentConfig(Model):
     trigger_mode: Mapped[str] = mapped_column(
         String(24), default="mention_or_proactive"
     )
-    proactive_probability: Mapped[float] = mapped_column(Float, default=0.15)
-    idle_threshold_minutes: Mapped[int] = mapped_column(Integer, default=30)
-    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=20)
+    proactive_probability: Mapped[float] = mapped_column(Float, default=0.35)
+    idle_threshold_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=8)
     # 热闹插话：话题间隙内像真人群友一样插嘴，与冷场暖场分开配置。
     proactive_active_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    proactive_active_probability: Mapped[float] = mapped_column(Float, default=0.08)
-    proactive_active_window_minutes: Mapped[int] = mapped_column(Integer, default=8)
-    daily_limit: Mapped[int] = mapped_column(Integer, default=12)
+    proactive_active_probability: Mapped[float] = mapped_column(Float, default=0.25)
+    proactive_active_window_minutes: Mapped[int] = mapped_column(Integer, default=12)
+    daily_limit: Mapped[int] = mapped_column(Integer, default=30)
     raw_retention_days: Mapped[int] = mapped_column(Integer, default=7)
     cross_group_visibility: Mapped[str] = mapped_column(
         String(24), default="public_summary"
@@ -47,6 +47,9 @@ class GroupAgentConfig(Model):
     media_cache_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     last_agent_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # 主动发言专用冷却基准：与被动回复写入的 last_agent_at 解耦，
+    # 被@答话不再封锁主动发言一个完整冷却期。
+    last_proactive_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     proactive_day: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     proactive_count: Mapped[int] = mapped_column(Integer, default=0)
     active_topic: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

@@ -20,7 +20,7 @@ from ..data_models.agent_audit import AgentAudit
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import complete
-from .context import ActivitySnapshot, is_cooldown_active, now_beijing
+from .context import ActivitySnapshot, is_recent, now_beijing
 from .collector import group_lock
 from .config_store import list_agent_group_ids
 from .dialogue import (
@@ -40,20 +40,24 @@ from .media import cleanup_media_cache
 from .persona import resolve_persona
 from .prompt import build_messages
 
-# 插话前至少等真人消息沉底 2 分钟：刚发完消息就接话像在抢话，
+# 插话前至少等真人消息沉底 90 秒：刚发完消息就接话像在抢话，
 # 话题自然间隙里插话才像真人群友。
-_ACTIVE_MIN_GAP_SECONDS = 120.0
+_ACTIVE_MIN_GAP_SECONDS = 90.0
 # 60 分钟内真人消息不足此数说明群里并没有在聊，不插话。
-_ACTIVE_MIN_MEMBER_MESSAGES = 3
+_ACTIVE_MIN_MEMBER_MESSAGES = 2
+# 被动回复（被@答话）后的短守卫：刚答完话立刻主动插话显得话痨，
+# 但只挡这几分钟，不再封锁整个主动冷却期。
+_POST_REPLY_GUARD_MINUTES = 5.0
+# 暖场概率封顶：冷得再久也别超过这个值，防止死群被高频轰炸。
+_WARMUP_PROBABILITY_CAP = 0.6
 
 _ACTIVE_INTERJECT_PROMPT = (
     "群里正在聊天。先读懂最近的消息：现在在聊什么话题、谁在积极参与、"
     "聊到哪一步了、气氛如何，注意消息里的 minutes_ago 是几分钟前发的。\n"
-    "然后判断你此刻插话是否自然。出现以下任一情况就保持沉默(speak=false)："
-    "正在聊私密或敏感话题；有人正在争论或情绪激烈；话题刚刚收尾；"
-    "最近消息大多是图片、表情包等没有可回应文字的内容；"
-    "你没有任何针对具体内容的反应可说。\n"
-    "如果适合插话，就顺着话题对某条具体消息或具体观点做出反应，"
+    "你已经被选中可以插话，默认值得开口——像真人群友一样自然加入聊天。"
+    "只有明显不合适时才保持沉默(speak=false)：正在聊非常私密或敏感的话题、"
+    "有人正在激烈争吵、或你确实对当前内容毫无反应可说。\n"
+    "插话时顺着话题对某条具体消息或具体观点做出反应，"
     "像随手打的一条消息：1~2 句、口语化，可以带点情绪或吐槽；"
     "不要开场白和客套，不要总结聊天记录，不要只回“哈哈”“确实”这类泛泛附和，"
     "不要自称 AI 或助手。"
@@ -61,11 +65,11 @@ _ACTIVE_INTERJECT_PROMPT = (
 
 _WARMUP_PROMPT = (
     "群里冷场有一会儿了。先回想冷场前群里最后在聊什么。\n"
-    "然后判断此刻值不值得开口：如果有没聊完的话题可以自然接上，"
-    "或有一个贴合群成员兴趣的轻松新话题，就说点什么活跃气氛；"
-    "如果找不到不突兀的话题就保持沉默(speak=false)，硬找话说比安静更尴尬。\n"
-    "开口时 1~2 句、口语化、自然随意；可以延续之前没聊完的话题、"
-    "分享一个小见闻，或抛一个轻松的新话题；"
+    "你已经被选中可以开口，默认值得说点什么活跃气氛——"
+    "接上没聊完的话题、分享一个贴合群成员兴趣的小见闻、"
+    "或抛一个轻松的新话题都可以。只有确实找不到任何不突兀的开口方式时"
+    "才保持沉默(speak=false)。\n"
+    "开口时 1~2 句、口语化、自然随意；"
     "不要问“大家在吗”“在干什么”，不要自称 AI 或助手。"
 )
 
@@ -82,6 +86,25 @@ def _clamp_probability(value: Any) -> float:
         return max(0.0, min(float(value), 1.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _warmup_probability(config: GroupAgentConfig, idle_seconds: float) -> float:
+    """冷得越久越可能开口：阈值时为基准值，两倍阈值后翻倍，封顶 0.6。"""
+
+    base = _clamp_probability(config.proactive_probability)
+    threshold = max(int(config.idle_threshold_minutes), 1) * 60
+    scale = 1.0 + min(max(idle_seconds / threshold - 1.0, 0.0), 1.0)
+    return min(base * scale, _WARMUP_PROBABILITY_CAP)
+
+
+def _skip_backoff_timestamp(now: datetime, cooldown_minutes: int) -> datetime:
+    """内容门跳过/生成失败后的退避时间戳：让剩余冷却只剩半个冷却期
+    （至少 2 分钟），而不是整个冷却期；未发言也绝不刷新 last_agent_at。"""
+
+    cooldown = max(int(cooldown_minutes), 0)
+    backoff = max(2, cooldown // 2)
+    # 冷却比退避短时时间戳会略微落在未来，效果等同于把剩余冷却拉到退避值。
+    return now - timedelta(minutes=cooldown - backoff)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +189,10 @@ def should_proactively_speak(
 
     两模式天然互斥：暖场要求全部消息冷场超阈值，插话要求真人消息
     落在窗口内，因此同一时刻至多一个分支可用。
+
+    冷却基准与被动回复解耦：主动→主动的冷却看 last_proactive_at；
+    被@答话只触发 _POST_REPLY_GUARD_MINUTES 的短守卫，不再封锁
+    整个主动冷却期。
     """
 
     group_id = getattr(config, "group_id", None)
@@ -178,10 +205,18 @@ def should_proactively_speak(
             f"({snapshot.proactive_today}/{config.daily_limit})"
         )
         return None
-    if is_cooldown_active(snapshot, now, config.cooldown_minutes):
+    if is_recent(snapshot.last_proactive_at, now, int(config.cooldown_minutes)):
         dbg(
-            f"群 {group_id} 主动发言拒绝: 冷却中"
-            f"(最后发言 {snapshot.last_agent_at},冷却 {config.cooldown_minutes} 分钟)"
+            f"群 {group_id} 主动发言拒绝: 主动冷却中"
+            f"(上次主动 {snapshot.last_proactive_at},"
+            f"冷却 {config.cooldown_minutes} 分钟)"
+        )
+        return None
+    if is_recent(snapshot.last_agent_at, now, _POST_REPLY_GUARD_MINUTES):
+        dbg(
+            f"群 {group_id} 主动发言拒绝: 刚回复过消息,短守卫期内"
+            f"(最后发言 {snapshot.last_agent_at},"
+            f"守卫 {_POST_REPLY_GUARD_MINUTES:.0f} 分钟)"
         )
         return None
     roll = (rng or random).random()
@@ -190,7 +225,7 @@ def should_proactively_speak(
     if snapshot.last_message_at is not None:
         idle_seconds = (now - snapshot.last_message_at).total_seconds()
         if idle_seconds >= config.idle_threshold_minutes * 60:
-            probability = _clamp_probability(config.proactive_probability)
+            probability = _warmup_probability(config, idle_seconds)
             if roll < probability:
                 dbg(
                     f"群 {group_id} 暖场模式触发: 已冷场 {idle_seconds:.0f}s "
@@ -289,6 +324,7 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                 replies_60m=counts["replies_60m"],
                 mentions_60m=counts["mentions_60m"],
                 last_agent_at=config.last_agent_at,
+                last_proactive_at=config.last_proactive_at,
                 proactive_today=count,
                 last_member_message_at=counts["last_member_message_at"],
                 member_messages_60m=counts["member_messages_60m"],
@@ -326,10 +362,13 @@ async def _apply_result(
     bot_id: int | None,
     message_id: int | None,
 ) -> None:
-    """在调用方事务内落库：成功或退避都推进 last_agent_at，防止下分钟反复抽卡。"""
+    """在调用方事务内落库：成功推进 last_proactive_at/last_agent_at；
+    未发出（内容门拦截、生成失败、撞重）只把 last_proactive_at 回拨到
+    剩余半个冷却期，既防下分钟反复抽卡，也不让一次跳过封锁太久。"""
 
-    config.last_agent_at = now
     if text:
+        config.last_proactive_at = now
+        config.last_agent_at = now
         config.proactive_day = now.strftime("%Y-%m-%d")
         config.proactive_count = day_count + 1
         history = list(config.recent_response_fingerprints or [])
@@ -361,7 +400,12 @@ async def _apply_result(
         )
         dbg(f"群 {config.group_id} 主动发言计数推进: 今日已用 {day_count + 1} 条")
     else:
-        dbg(f"群 {config.group_id} 主动发言未发出,仅推进 last_agent_at 防反复抽卡")
+        backoff_at = _skip_backoff_timestamp(now, int(config.cooldown_minutes))
+        if config.last_proactive_at is None or config.last_proactive_at < backoff_at:
+            config.last_proactive_at = backoff_at
+        dbg(
+            f"群 {config.group_id} 主动发言未发出,退避剩余半个冷却期至 {backoff_at}"
+        )
 
 
 async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None:

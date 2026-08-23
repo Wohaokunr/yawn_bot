@@ -413,6 +413,79 @@ def snapshot_metrics() -> dict[str, object]:
     return {"counters": counters, "histograms": histograms}
 
 
+def _percentile_from_buckets(
+    buckets: Mapping[str, int], count: int, quantile: float
+) -> float | None:
+    """从累积 bucket 推导分位数；count 为 0 时返回 None。"""
+
+    if count <= 0:
+        return None
+    threshold = count * quantile
+    for bound in sorted(buckets, key=float):
+        if buckets[bound] >= threshold:
+            return float(bound)
+    return None
+
+
+def summarize_ai_metrics(snapshot: dict[str, object]) -> dict[str, object]:
+    """把 AI 相关指标快照汇总为概览页可直接渲染的健康数据。
+
+    输入是 ``snapshot_metrics()`` 的返回值；进程重启后计数从零开始，
+    汇总值只代表当前进程累计口径。
+    """
+
+    counters = cast("list[dict[str, object]]", snapshot.get("counters", []))
+    histograms = cast("list[dict[str, object]]", snapshot.get("histograms", []))
+
+    by_outcome: dict[str, int] = {}
+    total = success = 0
+    degradations = 0
+    for item in counters:
+        name = str(item.get("name", ""))
+        value = int(cast("int", item.get("value", 0)))
+        if name == "yawnbot_ai_requests_total":
+            labels = cast("dict[str, str]", item.get("labels", {}))
+            outcome = labels.get("outcome", "unknown")
+            by_outcome[outcome] = by_outcome.get(outcome, 0) + value
+            total += value
+            if outcome == "success":
+                success += value
+        elif name == "yawnbot_ai_degradations_total":
+            degradations += value
+
+    duration_count = 0
+    duration_total = 0.0
+    merged_buckets: dict[str, int] = {}
+    for item in histograms:
+        if str(item.get("name", "")) != "yawnbot_ai_request_duration_seconds":
+            continue
+        histogram_count = int(cast("int", item.get("count", 0)))
+        duration_count += histogram_count
+        duration_total += float(cast("float", item.get("sum", 0.0)))
+        buckets = cast("dict[str, int]", item.get("buckets", {}))
+        for bound, bucket_count in buckets.items():
+            merged_buckets[bound] = merged_buckets.get(bound, 0) + bucket_count
+
+    avg_ms = duration_total * 1000 / duration_count if duration_count else None
+    p95_seconds = _percentile_from_buckets(merged_buckets, duration_count, 0.95)
+    return {
+        "requestsTotal": total,
+        "success": success,
+        "failed": total - success,
+        "successRate": (success / total) if total else None,
+        "byOutcome": sorted(
+            (
+                {"outcome": outcome, "count": count}
+                for outcome, count in by_outcome.items()
+            ),
+            key=lambda item: -item["count"],
+        ),
+        "avgDurationMs": avg_ms,
+        "p95DurationMs": p95_seconds * 1000 if p95_seconds is not None else None,
+        "degradations": degradations,
+    }
+
+
 def _format_number(value: object) -> str:
     if isinstance(value, int):
         return str(value)
@@ -510,4 +583,5 @@ __all__ = [
     "reset_metrics_for_tests",
     "snapshot_metrics",
     "start_game_phase",
+    "summarize_ai_metrics",
 ]

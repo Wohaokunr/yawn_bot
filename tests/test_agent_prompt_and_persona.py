@@ -326,13 +326,13 @@ def _make_proactive_config(**overrides: object):
     values: dict[str, object] = {
         "group_id": 1,
         "enabled": True,
-        "daily_limit": 12,
-        "cooldown_minutes": 20,
-        "idle_threshold_minutes": 30,
-        "proactive_probability": 0.15,
+        "daily_limit": 30,
+        "cooldown_minutes": 8,
+        "idle_threshold_minutes": 15,
+        "proactive_probability": 0.35,
         "proactive_active_enabled": True,
-        "proactive_active_probability": 0.08,
-        "proactive_active_window_minutes": 8,
+        "proactive_active_probability": 0.25,
+        "proactive_active_window_minutes": 12,
         "recent_response_fingerprints": [],
     }
     values.update(overrides)
@@ -383,16 +383,16 @@ def test_proactive_active_mode_rejects_rushing_and_stale_gap() -> None:
         should_proactively_speak(make_config(), snapshot(1), now, rng=_FixedRoll(0.0))
         is None
     )
-    # 真人消息 20 分钟前：话题间隙已过，也达不到暖场阈值。
+    # 真人消息 13 分钟前：插话窗口(12 分钟)已过，也未到暖场阈值(15 分钟)。
     assert (
-        should_proactively_speak(make_config(), snapshot(20), now, rng=_FixedRoll(0.0))
+        should_proactively_speak(make_config(), snapshot(13), now, rng=_FixedRoll(0.0))
         is None
     )
     # 窗口内有真人消息但 60 分钟总量不足：群里并没有在聊。
     quiet = ActivitySnapshot(
         last_message_at=now - timedelta(minutes=3),
         last_agent_at=now - timedelta(minutes=40),
-        member_messages_60m=2,
+        member_messages_60m=1,
         last_member_message_at=now - timedelta(minutes=3),
     )
     assert (
@@ -445,9 +445,11 @@ def test_proactive_rejects_cooldown_and_daily_limit() -> None:
 
     make_config = _make_proactive_config
     now = now_beijing()
+    # 主动→主动冷却看 last_proactive_at：5 分钟前主动过、冷却 8 分钟，拒绝。
     cooling = ActivitySnapshot(
         last_message_at=now - timedelta(minutes=40),
-        last_agent_at=now - timedelta(minutes=5),
+        last_agent_at=now - timedelta(minutes=60),
+        last_proactive_at=now - timedelta(minutes=5),
     )
     assert (
         should_proactively_speak(make_config(), cooling, now, rng=_FixedRoll(0.0))
@@ -455,13 +457,102 @@ def test_proactive_rejects_cooldown_and_daily_limit() -> None:
     )
     exhausted = ActivitySnapshot(
         last_message_at=now - timedelta(minutes=40),
-        last_agent_at=now - timedelta(minutes=40),
-        proactive_today=12,
+        last_agent_at=now - timedelta(minutes=60),
+        proactive_today=30,
     )
     assert (
         should_proactively_speak(make_config(), exhausted, now, rng=_FixedRoll(0.0))
         is None
     )
+
+
+def test_proactive_post_reply_guard_short_and_decoupled() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    make_config = _make_proactive_config
+    now = now_beijing()
+
+    def chatting(last_agent_minutes: float):
+        return ActivitySnapshot(
+            last_message_at=now - timedelta(minutes=3),
+            last_agent_at=now - timedelta(minutes=last_agent_minutes),
+            member_messages_60m=5,
+            last_member_message_at=now - timedelta(minutes=3),
+        )
+
+    # 被@答话在 8 分钟前：已超出 5 分钟短守卫，不再封锁主动插话
+    #（旧逻辑会被整个 20 分钟冷却挡掉）。
+    assert (
+        should_proactively_speak(
+            make_config(), chatting(8), now, rng=_FixedRoll(0.0)
+        )
+        == "active"
+    )
+    # 被动回复 3 分钟前：短守卫期内，拒绝。
+    assert (
+        should_proactively_speak(
+            make_config(), chatting(3), now, rng=_FixedRoll(0.0)
+        )
+        is None
+    )
+
+
+def test_warmup_probability_ramps_with_idle_and_caps() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import (
+        _warmup_probability,
+        should_proactively_speak,
+    )
+
+    make_config = _make_proactive_config
+    config = make_config()
+    now = now_beijing()
+    threshold = int(config.idle_threshold_minutes) * 60
+    # 阈值时为基准值，两倍阈值翻倍到 0.7 后封顶 0.6。
+    assert round(_warmup_probability(config, threshold), 6) == 0.35
+    assert round(_warmup_probability(config, threshold * 2), 6) == 0.6
+    assert round(_warmup_probability(config, threshold * 10), 6) == 0.6
+
+    # 行为验证：同一颗未中的骰子，冷场更久后能命中暖场。
+    def frozen(idle_minutes: float):
+        return ActivitySnapshot(
+            last_message_at=now - timedelta(minutes=idle_minutes),
+            last_agent_at=now - timedelta(minutes=60),
+        )
+
+    assert (
+        should_proactively_speak(
+            make_config(), frozen(15), now, rng=_FixedRoll(0.5)
+        )
+        is None
+    )
+    assert (
+        should_proactively_speak(
+            make_config(), frozen(30), now, rng=_FixedRoll(0.5)
+        )
+        == "warmup"
+    )
+
+
+def test_skip_backoff_leaves_half_cooldown() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import _skip_backoff_timestamp
+
+    now = now_beijing()
+    # 默认 8 分钟冷却：跳过后剩余 4 分钟，而不是整个冷却期。
+    assert _skip_backoff_timestamp(now, 8) == now - timedelta(minutes=4)
+    # 冷却配得极短时退避也不低于 2 分钟。
+    assert _skip_backoff_timestamp(now, 0) == now + timedelta(minutes=2)
 
 
 def test_proactive_decision_parses_speak_true() -> None:
