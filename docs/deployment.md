@@ -198,22 +198,30 @@ uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproj
 群级设置只覆盖人设表达字段，不改变隐私边界、工具权限或系统规则。Agent 原始消息按
 群配置保留，并支持成员主动退出；迁移升级仍由维护者手动执行。
 
-### 5.2 群聊 Agent 模型与媒体缓存
+### 5.2 共享 LLM 模型路由与媒体缓存
 
-Agent 使用全局角色模型配置；未填写角色模型时回退到 `AI_MODEL`：
+Core、Agent、RPG 与狼人杀共用默认、轻量、识图三个模型档位。轻量模型留空时
+回退到默认模型；识图模型留空时无法为不支持图片的模型生成独立图片转述：
 
 ```text
-AGENT_DIALOGUE_MODEL=高级对话模型
-AGENT_MEMORY_MODEL=普通记忆模型
-AGENT_VISION_MODEL=图片识别模型
-AGENT_DIALOGUE_MULTIMODAL=auto
+AI_MODEL=高级默认模型
+AI_LIGHT_MODEL=轻量模型
+AI_VISION_MODEL=图片识别模型
+AI_DEFAULT_THINKING=auto
+AI_LIGHT_THINKING=disabled
+AI_VISION_THINKING=disabled
+AI_DEFAULT_MULTIMODAL=auto
+AGENT_DIALOGUE_LLM_PROFILE=default
+AGENT_MEMORY_LLM_PROFILE=light
+AGENT_IMAGE_LLM_PROFILE=vision
 AGENT_MEDIA_CACHE_TTL=86400
 AGENT_MEDIA_CACHE_DIR=data/agent_media
 AGENT_MEDIA_ALLOWED_HOSTS=图片来源域名
 ```
 
-`auto` 会先尝试对话模型的多模态输入；端点明确拒绝图片时，调用视觉模型生成
-带来源标记的文本转述。群管理员可使用 `/Agent设置 媒体缓存 开|关` 控制短期缓存。
+模型、推理策略和 Agent/RPG/狼人杀任务路由可在 WebUI 的“环境配置”页面统一修改，
+保存后重启生效。图片能力设为 `auto` 时会先尝试任务模型；端点明确拒绝图片后，
+调用识图任务生成带来源标记的文本转述。群管理员可使用 `/Agent设置 媒体缓存 开|关` 控制短期缓存。
 缓存按群和媒体内容哈希隔离，过期任务会清理原图与识别记录。启动调试日志会对
 API key 等凭据脱敏。
 

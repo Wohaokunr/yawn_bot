@@ -29,6 +29,7 @@ if nonebot.get_plugin("yawn_core") is None:
 
 memory = importlib.import_module("src.plugins.yawn_core.yawn_agent.memory")
 dialogue = importlib.import_module("src.plugins.yawn_core.yawn_agent.dialogue")
+proactive = importlib.import_module("src.plugins.yawn_core.yawn_agent.proactive")
 models = importlib.import_module("src.plugins.yawn_core.data_models.agent_memory")
 message_models = importlib.import_module(
     "src.plugins.yawn_core.data_models.group_agent_message"
@@ -425,7 +426,7 @@ def test_store_model_relations_normalizes_type_and_stores_note() -> None:
     assert edge.note == "常一起开黑打游戏"
 
 
-def test_store_model_relations_fills_note_only_when_empty() -> None:
+def test_store_model_relations_refreshes_note_only_with_high_confidence() -> None:
     session = _FakeSession()
     existing = _relation(
         1, 111, 222, 0.6, relation_type="好友", note="已有备注"
@@ -437,7 +438,15 @@ def test_store_model_relations_fills_note_only_when_empty() -> None:
             "type": "好友",
             "note": "整理任务的新备注",
             "evidence_message_ids": [10],
-        }
+        },
+        {
+            "subject_user_id": 111,
+            "object_user_id": 222,
+            "type": "好友",
+            "note": "高置信新背景",
+            "evidence_message_ids": [10],
+            "confidence": 0.8,
+        },
     ]
 
     memory._store_model_relations(
@@ -453,9 +462,10 @@ def test_store_model_relations_fills_note_only_when_empty() -> None:
     )
 
     assert session.added == []
-    assert existing.note == "已有备注"
-    assert existing.confidence == pytest.approx(0.61)
-    assert existing.evidence_count == 2
+    # 低置信观察不得覆盖已有备注；置信度明显更高的新证据允许刷新。
+    assert existing.note == "高置信新背景"
+    assert existing.confidence == pytest.approx(0.81)
+    assert existing.evidence_count == 3
 
 
 def test_store_model_relations_preserves_manual_and_agent_edges() -> None:
@@ -525,7 +535,7 @@ def test_public_summary_rejects_member_identity_and_quotes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_summary_uses_resolved_memory_model_fallback(monkeypatch) -> None:
+async def test_model_summary_uses_memory_task_route(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     async def fake_complete(_messages, **kwargs):
@@ -533,13 +543,12 @@ async def test_model_summary_uses_resolved_memory_model_fallback(monkeypatch) ->
         return '{"summary":"摘要","public_summary":"","facts":[],"relations":[]}'
 
     monkeypatch.setattr(memory, "get_client", lambda: object())
-    monkeypatch.setattr(memory, "get_agent_model", lambda _role: "fallback-ai-model")
     monkeypatch.setattr(memory, "complete", fake_complete)
     result = await memory._model_summary(
         [{"id": 1, "user_id": 1, "name": "甲", "role": "member", "text": "内容"}]
     )
     assert result is not None and result["summary"] == "摘要"
-    assert captured["model"] == "fallback-ai-model"
+    assert captured["task"] == "agent_memory"
 
 
 @pytest.mark.asyncio
@@ -739,7 +748,10 @@ async def test_compaction_processes_every_contiguous_message(monkeypatch) -> Non
                     user_id=1,
                     sender_name="成员",
                     role="member",
-                    normalized_text=f"消息 {index}",
+                    normalized_text=(
+                        f"第 {index} 条群聊消息：大家从晚饭吃什么一路聊到了"
+                        "周末的爬山计划与装备清单。"
+                    ),
                     received_at=NOW,
                     expires_at=NOW + timedelta(days=7),
                 )
@@ -804,8 +816,11 @@ async def test_privacy_rows_advance_cursor_but_never_enter_model(monkeypatch) ->
                     message_id=index,
                     group_id=100,
                     user_id=user_id,
+                    sender_name="成员",
                     role="member",
-                    normalized_text=f"消息 {index}",
+                    normalized_text=(
+                        f"第 {index} 条群聊内容：大家从晚饭吃什么聊到了周末安排。"
+                    ),
                     received_at=NOW,
                     expires_at=NOW + timedelta(days=7),
                 )
@@ -853,7 +868,7 @@ async def test_invalid_summary_keeps_cursor_and_records_backoff(monkeypatch) -> 
                 group_id=100,
                 user_id=1,
                 role="member",
-                normalized_text="需要记住",
+                normalized_text="这句话需要被模型整理，用于验证失败路径会保留游标并记录退避状态。",
                 received_at=NOW,
                 expires_at=NOW + timedelta(days=7),
             )
@@ -1185,7 +1200,7 @@ async def test_expired_pending_messages_still_get_compacted_after_recovery(
                 user_id=1,
                 sender_name="成员",
                 role="member",
-                normalized_text="过期但未整理的素材",
+                normalized_text="这是过期但尚未整理的素材，恢复后必须仍能进入整理批次而不是被静默丢弃。",
                 received_at=NOW - timedelta(days=9),
                 expires_at=NOW - timedelta(days=2),
             )
@@ -1528,4 +1543,649 @@ async def test_search_group_memory_reranks_substring_candidates() -> None:
         assert len(result) == 10
         # 重排后新鲜高显著记忆排第一，而非被先入库的陈旧记录挤出。
         assert result[0]["content"] == "刚整理的爬山计划"
+    await engine.dispose()
+
+
+# ---------- 多值画像与核心记忆 ----------
+
+
+def test_merge_list_profile_update_appends_and_dedupes() -> None:
+    # 空旧值：直接返回新值。
+    assert memory.merge_list_profile_update("", 0.5, "爬山", 0.7) == ("爬山", 0.7)
+    # 不同值追加；互为子串的详略表述保留更长版本，避免"爬山"与"喜欢爬山"并存。
+    assert memory.merge_list_profile_update("爬山", 0.6, "编程", 0.7) == (
+        "爬山、编程",
+        0.7,
+    )
+    assert memory.merge_list_profile_update("爬山", 0.6, "喜欢爬山", 0.7) == (
+        "喜欢爬山",
+        0.7,
+    )
+    # 已存在的值走确认路径：内容不变、置信度取 max。
+    assert memory.merge_list_profile_update("爬山、编程", 0.6, "编程", 0.8) == (
+        "爬山、编程",
+        0.8,
+    )
+    # 超出上限淘汰最旧值（FIFO）。
+    merged, _confidence = memory.merge_list_profile_update(
+        "一、二、三、四、五", 0.9, "六", 0.5
+    )
+    assert merged == "二、三、四、五、六"
+
+
+def test_store_model_facts_appends_list_key_values() -> None:
+    session = _FakeSession()
+    existing = _memory(
+        memory_id=1, key="hobby", content="爬山", confidence=0.6, subject_user_id=111
+    )
+    profiles = {(111, "hobby"): existing}
+
+    memory._store_model_facts(
+        session,
+        100,
+        [
+            {
+                "user_id": 111,
+                "key": "hobby",
+                "content": "编程",
+                "evidence_message_ids": [10],
+                "confidence": 0.7,
+            }
+        ],
+        {10},
+        {111},
+        {10: 111},
+        NOW,
+        profiles,
+    )
+
+    # 多值键追加而非覆盖；内容变化不触发确认棘轮。
+    assert existing.content == "爬山、编程"
+    assert existing.confidence == pytest.approx(0.7)
+
+    memory._store_model_facts(
+        session,
+        100,
+        [
+            {
+                "user_id": 111,
+                "key": "hobby",
+                "content": "编程",
+                "evidence_message_ids": [11],
+            }
+        ],
+        {11},
+        {111},
+        {11: 111},
+        NOW,
+        profiles,
+    )
+    # 同值复现走确认路径：内容不变、置信度 +0.02。
+    assert existing.content == "爬山、编程"
+    assert existing.confidence == pytest.approx(0.72)
+    assert session.added == []
+
+
+def test_maybe_promote_core_requires_repeated_confirmation() -> None:
+    row = _memory(memory_id=1, subject_user_id=111, confidence=0.85)
+    row.source_kind = "auto"
+    row.evidence_message_ids = [1, 2, 3]
+    memory._maybe_promote_core(row)
+    assert row.memory_type == "core"
+    assert row.expires_at is None
+
+    # 置信度或证据数不足都不晋升。
+    weak = _memory(memory_id=2, subject_user_id=111, confidence=0.84)
+    weak.source_kind = "auto"
+    weak.evidence_message_ids = [1, 2, 3]
+    memory._maybe_promote_core(weak)
+    assert weak.memory_type == "profile"
+
+    thin = _memory(memory_id=3, subject_user_id=111, confidence=0.9)
+    thin.source_kind = "auto"
+    thin.evidence_message_ids = [1, 2]
+    memory._maybe_promote_core(thin)
+    assert thin.memory_type == "profile"
+
+    # 手工行不参与自动晋升。
+    manual = _memory(memory_id=4, subject_user_id=111, confidence=0.95)
+    manual.source_kind = "manual"
+    manual.evidence_message_ids = [1, 2, 3]
+    memory._maybe_promote_core(manual)
+    assert manual.memory_type == "profile"
+
+
+# ---------- 检索排序：IDF、按类型半衰期、话题提示 ----------
+
+
+def test_rank_memories_weights_rare_token_higher_than_common() -> None:
+    # 同等基础分下，命中"只出现在少数行"的稀有 token 比两行都有的常见
+    # token 得分更高，常见 bigram 不再稀释稀有命中的信号。
+    rows = [
+        _memory(memory_id=1, content="晚饭吃了火锅", salience=0.5),
+        _memory(memory_id=2, content="中午也是火锅局", salience=0.5),
+        _memory(memory_id=3, content="原神深渊打法", salience=0.5),
+    ]
+
+    ranked = memory.rank_memories(rows, ["今天吃火锅还是打原神"], None, NOW)
+
+    assert ranked[0].id == 3
+
+
+def test_rank_memories_core_rows_skip_time_decay() -> None:
+    core = _memory(
+        memory_id=1, memory_type="core", salience=0.6, updated_days_ago=120
+    )
+    fresh_profile = _memory(
+        memory_id=2, memory_type="profile", salience=0.6, updated_days_ago=2
+    )
+
+    ranked = memory.rank_memories([fresh_profile, core], [], None, NOW)
+
+    # 120 天前的核心记忆不被时间衰减埋没，仍排在 2 天前的普通画像之前。
+    assert ranked[0] is core
+
+
+def test_rank_memories_topic_hint_recalls_without_displacing_window() -> None:
+    weather = _memory(memory_id=1, content="周末天气很适合爬山", salience=0.5)
+    genshin = _memory(memory_id=2, content="原神深渊十二层攻略", salience=0.5)
+    recent = ["今天天气怎么样", "明天好像要下雨"] * 5
+
+    # 无提示：天气相关记忆领先。
+    plain = memory.rank_memories([weather, genshin], recent, None, NOW)
+    assert plain[0] is weather
+
+    # 活跃话题提示并入查询集后，相关记忆反超；近期消息窗口不受挤占。
+    hinted = memory.rank_memories(
+        [weather, genshin], recent, None, NOW, topic_hint="原神深渊"
+    )
+    assert hinted[0] is genshin
+
+
+# ---------- 整理管线：低信号跳过与核心晋升（数据库集成） ----------
+
+
+async def _setup_memory_tables(engine: Any) -> None:
+    tables = [
+        config_models.GroupAgentConfig.__table__,
+        message_models.GroupAgentMessage.__table__,
+        models.AgentMemory.__table__,
+        models.AgentRelation.__table__,
+        models.AgentPrivacy.__table__,
+        audit_models.AgentAudit.__table__,
+        user_group_models.UserGroup.__table__,
+    ]
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: models.AgentMemory.metadata.create_all(
+                sync_connection, tables=tables
+            )
+        )
+
+
+def _agent_message_row(message_id: int, text: str, *, user_id: int = 1) -> Any:
+    return message_models.GroupAgentMessage(
+        bot_id=9,
+        message_id=message_id,
+        group_id=100,
+        user_id=user_id,
+        sender_name="成员",
+        role="member",
+        normalized_text=text,
+        received_at=NOW,
+        expires_at=NOW + timedelta(days=7),
+    )
+
+
+@pytest.mark.asyncio
+async def test_low_signal_batch_skips_model_but_extracts(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _setup_memory_tables(engine)
+
+    async def forbidden_summary(_payload, **_kwargs):
+        raise AssertionError("低信号批次不应调用模型")
+
+    monkeypatch.setattr(memory, "_model_summary", forbidden_summary)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(config_models.GroupAgentConfig(group_id=100))
+        session.add_all(
+            [
+                _agent_message_row(index, text)
+                for index, text in enumerate(
+                    (
+                        "[图片]",
+                        "哈哈哈",
+                        "hhh",
+                        "。。。6",
+                        "好的",
+                        "[表情]",
+                        "嗯嗯",
+                        "666",
+                        "来的",
+                        "大家好，我叫阿眠",
+                    ),
+                    start=1,
+                )
+            ]
+        )
+        await session.commit()
+
+        assert await memory.compact_group_memory(session, 100, now=NOW) == 10
+        config = await session.get(config_models.GroupAgentConfig, 100)
+        assert config is not None
+        assert config.last_compacted_message_id == 10
+        assert config.memory_consecutive_failures == 0
+
+        # 低信号批次不产生摘要，但确定性昵称提取仍然落库。
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(models.AgentMemory)
+                .where(models.AgentMemory.memory_type == "summary")
+            )
+            == 0
+        )
+        display = await session.scalar(
+            select(models.AgentMemory).where(
+                models.AgentMemory.memory_key == "display_name"
+            )
+        )
+        assert display is not None
+        assert display.content == "阿眠"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_promotes_reconfirmed_display_name_to_core(
+    monkeypatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _setup_memory_tables(engine)
+
+    async def forbidden_summary(_payload, **_kwargs):
+        raise AssertionError("低信号批次不应调用模型")
+
+    monkeypatch.setattr(memory, "_model_summary", forbidden_summary)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(config_models.GroupAgentConfig(group_id=100))
+        session.add(
+            models.AgentMemory(
+                group_id=100,
+                subject_user_id=1,
+                memory_type="profile",
+                memory_key="display_name",
+                content="阿眠",
+                evidence_message_ids=[90],
+                source_kind="auto",
+                related_user_ids=[1],
+                salience=0.8,
+                confidence=0.9,
+                visibility="group",
+                expires_at=NOW + timedelta(days=90),
+            )
+        )
+        session.add_all(
+            [
+                _agent_message_row(2, "大家好，叫我阿眠"),
+                _agent_message_row(3, "以后大家叫我阿眠。"),
+            ]
+        )
+        await session.commit()
+
+        assert await memory.compact_group_memory(session, 100, now=NOW) == 2
+        row = await session.scalar(
+            select(models.AgentMemory).where(
+                models.AgentMemory.memory_key == "display_name"
+            )
+        )
+        assert row is not None
+        # 两批证据 + 既有证据达到 3 条、置信度棘轮到 1.0：晋升为核心记忆。
+        assert row.memory_type == "core"
+        assert row.expires_at is None
+        assert row.confidence == pytest.approx(1.0)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_core_memory_survives_purge_and_prefetch() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _setup_memory_tables(engine)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(config_models.GroupAgentConfig(group_id=100))
+        session.add_all(
+            [
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=1,
+                    memory_type="core",
+                    memory_key="display_name",
+                    content="阿眠",
+                    evidence_message_ids=[1, 2, 3],
+                    source_kind="auto",
+                    related_user_ids=[1],
+                    salience=0.8,
+                    confidence=0.9,
+                    visibility="group",
+                    expires_at=None,
+                ),
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=2,
+                    memory_type="profile",
+                    memory_key="hobby",
+                    content="爬山",
+                    evidence_message_ids=[1],
+                    source_kind="auto",
+                    related_user_ids=[2],
+                    salience=0.5,
+                    confidence=0.5,
+                    visibility="group",
+                    expires_at=NOW - timedelta(days=1),
+                ),
+                message_models.GroupAgentMessage(
+                    bot_id=9,
+                    message_id=1,
+                    group_id=100,
+                    user_id=1,
+                    sender_name="成员",
+                    role="member",
+                    normalized_text="旧消息",
+                    received_at=NOW - timedelta(days=10),
+                    expires_at=NOW - timedelta(days=1),
+                ),
+            ]
+        )
+        await session.commit()
+        config = await session.get(config_models.GroupAgentConfig, 100)
+        assert config is not None
+        config.last_compacted_message_id = 1
+        await session.commit()
+
+        # 空批次整理只做清理：core 永不过期，过期 profile 被删除。
+        assert await memory.compact_group_memory(session, 100, now=NOW) == 0
+        core_row = await session.scalar(
+            select(models.AgentMemory).where(models.AgentMemory.memory_type == "core")
+        )
+        assert core_row is not None
+        assert core_row.content == "阿眠"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(models.AgentMemory)
+                .where(models.AgentMemory.memory_type == "profile")
+            )
+            == 0
+        )
+
+        # 预取包含 core：同 key 事实走更新而非插入，避免撞唯一约束。
+        profiles = await memory._prefetch_profiles(session, 100)
+        assert (1, "display_name") in profiles
+        fake_session = _FakeSession()
+        memory._store_model_facts(
+            fake_session,
+            100,
+            [
+                {
+                    "user_id": 1,
+                    "key": "display_name",
+                    "content": "阿眠",
+                    "evidence_message_ids": [1],
+                }
+            ],
+            {1},
+            {1},
+            {1: 1},
+            NOW,
+            profiles,
+        )
+        assert fake_session.added == []
+        assert core_row.confidence == pytest.approx(0.92)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_context_prioritizes_core_memory_for_speaker() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    tables = [
+        bot_group_models.BotGroup.__table__,
+        config_models.GroupAgentConfig.__table__,
+        message_models.GroupAgentMessage.__table__,
+        models.AgentMemory.__table__,
+        models.AgentRelation.__table__,
+        models.AgentPrivacy.__table__,
+        user_group_models.UserGroup.__table__,
+    ]
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: models.AgentMemory.metadata.create_all(
+                sync_connection, tables=tables
+            )
+        )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                bot_group_models.BotGroup(group_id=100, group_name="目标群"),
+                config_models.GroupAgentConfig(group_id=100),
+                message_models.GroupAgentMessage(
+                    bot_id=9,
+                    message_id=2,
+                    group_id=100,
+                    user_id=2,
+                    sender_name="另一成员",
+                    role="member",
+                    normalized_text="我也想继续聊测试策略",
+                    received_at=NOW - timedelta(seconds=1),
+                    expires_at=NOW + timedelta(days=7),
+                ),
+                message_models.GroupAgentMessage(
+                    bot_id=9,
+                    message_id=1,
+                    group_id=100,
+                    user_id=1,
+                    sender_name="当前成员",
+                    role="member",
+                    normalized_text="继续聊测试策略",
+                    received_at=NOW,
+                    expires_at=NOW + timedelta(days=7),
+                ),
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=1,
+                    memory_type="core",
+                    memory_key="preferred_address",
+                    content="叫他眠宝",
+                    evidence_message_ids=[1],
+                    source_kind="auto",
+                    related_user_ids=[1],
+                    salience=0.4,
+                    confidence=0.9,
+                    visibility="group",
+                    expires_at=None,
+                ),
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=1,
+                    memory_type="profile",
+                    memory_key="hobby",
+                    content="爬山、编程",
+                    evidence_message_ids=[1],
+                    source_kind="auto",
+                    related_user_ids=[1],
+                    salience=0.9,
+                    confidence=0.6,
+                    visibility="group",
+                    expires_at=NOW + timedelta(days=90),
+                ),
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=2,
+                    memory_type="profile",
+                    memory_key="skill",
+                    content="擅长测试设计",
+                    evidence_message_ids=[2],
+                    source_kind="auto",
+                    related_user_ids=[2],
+                    salience=0.8,
+                    confidence=0.8,
+                    visibility="group",
+                    expires_at=NOW + timedelta(days=90),
+                ),
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=0,
+                    memory_type="summary",
+                    memory_key="daily:2026-08-23",
+                    content="群里最近持续讨论 Agent 测试策略",
+                    evidence_message_ids=[1, 2],
+                    source_kind="auto",
+                    related_user_ids=[1, 2],
+                    salience=0.8,
+                    confidence=0.8,
+                    visibility="group",
+                    expires_at=NOW + timedelta(days=45),
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=2,
+                    relation_type="朋友",
+                    source_kind="auto",
+                    note="经常一起讨论测试",
+                    confidence=0.8,
+                    evidence_count=2,
+                    last_seen_at=NOW,
+                ),
+            ]
+        )
+        await session.commit()
+        target = await session.get(config_models.GroupAgentConfig, 100)
+        assert target is not None
+
+        context = await dialogue._load_context(session, 100, target)
+        speaker_items = [
+            item for item in context["memories"] if item["source_scope"] == "speaker"
+        ]
+        # 核心记忆不与 salience 竞争：发言者区首位始终是 core 行。
+        assert speaker_items
+        assert speaker_items[0]["type"] == "core"
+        assert speaker_items[0]["content"] == "叫他眠宝"
+
+        social_context = await dialogue._load_context(
+            session, 100, target, include_active_profiles=True
+        )
+        assert any(
+            item["source_scope"] == "participant"
+            and item["subject_user_id"] == 2
+            and item["content"] == "擅长测试设计"
+            for item in social_context["memories"]
+        )
+        assert any(
+            item["source_scope"] == "group_summary"
+            and "测试策略" in item["content"]
+            for item in social_context["memories"]
+        )
+        assert any("—朋友→" in line for line in social_context["relations"])
+    await engine.dispose()
+
+
+# ---------- 调度触发与关系衰减 ----------
+
+
+@pytest.mark.asyncio
+async def test_memory_due_uses_tuned_thresholds() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _setup_memory_tables(engine)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add_all(
+            [config_models.GroupAgentConfig(group_id=100)]
+            + [
+                _agent_message_row(index, "消息")
+                for index in range(1, 16)  # 15 条
+            ]
+        )
+        await session.commit()
+        # 15 条新消息：未达数量阈值。
+        assert not await proactive._memory_due(session, 100, NOW, force=False)
+
+        session.add(_agent_message_row(16, "消息"))
+        await session.commit()
+        assert await proactive._memory_due(session, 100, NOW, force=False)
+    await engine.dispose()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _setup_memory_tables(engine)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(config_models.GroupAgentConfig(group_id=100))
+        aged = _agent_message_row(1, "稀疏群的一条消息")
+        aged.received_at = NOW - timedelta(minutes=7)
+        session.add(aged)
+        await session.commit()
+        # 最老消息 7 分钟：未到年龄阈值。
+        assert not await proactive._memory_due(session, 100, NOW, force=False)
+
+        aged.received_at = NOW - timedelta(minutes=9)
+        await session.commit()
+        assert await proactive._memory_due(session, 100, NOW, force=False)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_decay_stale_relations_only_touches_stale_auto_edges() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _setup_memory_tables(engine)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=2,
+                    relation_type="好友",
+                    source_kind="auto",
+                    confidence=0.9,
+                    evidence_count=3,
+                    last_seen_at=NOW - timedelta(days=100),
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=3,
+                    relation_type="搭子",
+                    source_kind="auto",
+                    confidence=0.9,
+                    evidence_count=1,
+                    last_seen_at=NOW,
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=4,
+                    relation_type="情侣",
+                    source_kind="manual",
+                    confidence=0.9,
+                    evidence_count=1,
+                    last_seen_at=NOW - timedelta(days=100),
+                ),
+            ]
+        )
+        await session.commit()
+
+        assert await memory.decay_stale_relations(session, NOW) == 1
+        rows = {
+            int(row.object_user_id): row
+            for row in (
+                await session.execute(select(models.AgentRelation))
+            ).scalars()
+        }
+        # 沉寂 100 天的 auto 边按 0.85 衰减；近期边与手工边不受影响。
+        assert rows[2].confidence == pytest.approx(0.765)
+        assert rows[3].confidence == pytest.approx(0.9)
+        assert rows[4].confidence == pytest.approx(0.9)
     await engine.dispose()

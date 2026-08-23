@@ -9,6 +9,7 @@ import {
   ReadOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
+  SettingOutlined,
   TeamOutlined,
   UserOutlined,
   WarningOutlined,
@@ -42,6 +43,7 @@ import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, usePar
 import { AgentAuditTable, AgentDetailPage, AgentGroupsPage } from "./agent";
 import { api, ApiError, openStatusStream, setCsrfToken } from "./api";
 import { FanqiePage } from "./fanqie";
+import { EnvironmentPage } from "./environment";
 import { GamesPage } from "./games";
 import { ModulesPage } from "./modules";
 import { formatTime, PageHeader, QueryErrorAlert, TablePagination, useApiQuery } from "./shared";
@@ -89,6 +91,7 @@ function App(): React.JSX.Element {
           <Route path="fanqie" element={<FanqiePage />} />
           <Route path="agent" element={<AgentGroupsPage />} />
           <Route path="agent/:groupId" element={<AgentDetailPage />} />
+          <Route path="environment" element={<EnvironmentPage />} />
           <Route path="audits" element={<WebAuditsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/overview" replace />} />
@@ -167,6 +170,7 @@ function Shell({ onLogout }: { onLogout: () => void }): React.JSX.Element {
             { key: "/modules", icon: <BookOutlined />, label: "模组库" },
             { key: "/fanqie", icon: <ReadOutlined />, label: "番茄小说" },
             { key: "/agent", icon: <ApiOutlined />, label: "Agent 管理" },
+            { key: "/environment", icon: <SettingOutlined />, label: "环境配置" },
             { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
           ]}
         />

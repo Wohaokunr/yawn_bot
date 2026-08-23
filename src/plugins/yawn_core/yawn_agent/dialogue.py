@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -23,15 +24,15 @@ from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from ..llm import (
     LLMMultimodalUnsupportedError,
-    agent_multimodal_mode,
-    ai_config,
     complete,
     complete_with_tools,
-    get_agent_model,
+    resolve_llm_request,
+    vision_model_configured,
 )
 from .capabilities import probe_group_capabilities, user_can_manage_group
 from .collector import group_lock, is_pending_trigger_expired
 from .config_store import get_or_create_config
+from .conversation import mark_bot_reply
 from .context import ActivitySnapshot, build_context, now_beijing
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
@@ -49,7 +50,8 @@ _SEND_TIMEOUT = 15.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
-_MEMORY_CONTEXT_LIMIT = 20
+# 条目上限对齐各层最大配额（5+4+12+3），字符预算仍是实际约束。
+_MEMORY_CONTEXT_LIMIT = 24
 _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
@@ -227,6 +229,7 @@ async def _activity_window_counts(
     if bot_id is not None:
         clauses.append(GroupAgentMessage.bot_id == bot_id)
     in_window = GroupAgentMessage.received_at >= now - timedelta(hours=1)
+    in_5m = GroupAgentMessage.received_at >= now - timedelta(minutes=5)
     is_member = GroupAgentMessage.role != "bot"
     row = (
         await session.execute(
@@ -256,6 +259,12 @@ async def _activity_window_counts(
                 ),
                 func.sum(case((in_window, 1), else_=0)),
                 func.sum(case((in_window & is_member, 1), else_=0)),
+                func.sum(case((in_5m & is_member, 1), else_=0)),
+                func.count(
+                    func.distinct(
+                        case((in_5m & is_member, GroupAgentMessage.user_id))
+                    )
+                ),
                 func.count(func.distinct(case((in_window, GroupAgentMessage.user_id)))),
                 func.sum(
                     case(
@@ -289,9 +298,11 @@ async def _activity_window_counts(
         "messages_20m": int(row[3] or 0),
         "messages_60m": int(row[4] or 0),
         "member_messages_60m": int(row[5] or 0),
-        "participants_60m": int(row[6] or 0),
-        "mentions_60m": int(row[7] or 0),
-        "replies_60m": int(row[8] or 0),
+        "member_messages_5m": int(row[6] or 0),
+        "member_participants_5m": int(row[7] or 0),
+        "participants_60m": int(row[8] or 0),
+        "mentions_60m": int(row[9] or 0),
+        "replies_60m": int(row[10] or 0),
     }
 
 
@@ -302,6 +313,9 @@ async def _load_context(
     bot_id: int | None = None,
     *,
     include_message_age: bool = False,
+    focus_user_ids: Sequence[int] | None = None,
+    message_cutoff: datetime | None = None,
+    include_active_profiles: bool = False,
 ) -> dict[str, Any]:
     now = now_beijing()
     # 隐私退出是读路径级别的：历史消息同样不得进入提示词。
@@ -327,6 +341,10 @@ async def _load_context(
             | (GroupAgentMessage.expires_at >= now)
         ),
     )
+    if message_cutoff is not None:
+        message_stmt = message_stmt.where(
+            GroupAgentMessage.received_at <= message_cutoff
+        )
     if opted_out:
         message_stmt = message_stmt.where(GroupAgentMessage.user_id.not_in(opted_out))
     if bot_id is not None:
@@ -390,6 +408,29 @@ async def _load_context(
         ),
         None,
     )
+    recent_member_ids: list[int] = []
+    for item in reversed(messages):
+        if item.get("role") == "bot":
+            continue
+        member_id = int(item["user_id"])
+        if member_id not in recent_member_ids:
+            recent_member_ids.append(member_id)
+    requested_focus = [int(user_id) for user_id in (focus_user_ids or [])]
+    focus_ids: list[int] = []
+    focus_candidates = [
+        *requested_focus,
+        *(
+            recent_member_ids
+            if include_active_profiles or requested_focus
+            else ([speaker_id] if speaker_id is not None else [])
+        ),
+    ]
+    for member_id in focus_candidates:
+        if member_id in opted_out or member_id in focus_ids:
+            continue
+        focus_ids.append(member_id)
+        if len(focus_ids) >= 4:
+            break
     memory_clauses = [
         AgentMemory.group_id == group_id,
         AgentMemory.visibility.in_(("group", "public")),
@@ -401,7 +442,21 @@ async def _load_context(
                 select(AgentMemory)
                 .where(*memory_clauses)
                 .order_by(AgentMemory.salience.desc(), AgentMemory.updated_at.desc())
-                .limit(120)
+                .limit(160)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # 复现池捞回显著度榜外但近期被再确认的记忆：只按 salience 取候选会
+    # 让安静复述的旧知识结构性不可见。
+    recency_rows = (
+        (
+            await session.execute(
+                select(AgentMemory)
+                .where(*memory_clauses)
+                .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
+                .limit(60)
             )
         )
         .scalars()
@@ -419,31 +474,36 @@ async def _load_context(
         .scalars()
         .all()
     )
-    speaker_rows: list[AgentMemory] = []
-    if speaker_id is not None:
-        # 当前发言者画像独立查询，不能先和群级高显著记忆争抢 SQL LIMIT。
-        speaker_rows = list(
+    focus_rows: list[AgentMemory] = []
+    if focus_ids:
+        # 活跃成员画像独立查询，不能先和群级高显著记忆争抢 SQL LIMIT。
+        # core 行排最前；随后按成员轮转分配 12 条预算，避免一人占满。
+        focus_rows = list(
             (
                 await session.execute(
                     select(AgentMemory)
                     .where(
                         *memory_clauses,
-                        AgentMemory.subject_user_id == speaker_id,
-                        AgentMemory.memory_type.in_(("profile", "manual")),
+                        AgentMemory.subject_user_id.in_(focus_ids),
+                        AgentMemory.memory_type.in_(("core", "profile", "manual")),
                     )
                     .order_by(
-                        case((AgentMemory.memory_type == "profile", 0), else_=1),
+                        case(
+                            (AgentMemory.memory_type == "core", 0),
+                            (AgentMemory.memory_type == "profile", 1),
+                            else_=2,
+                        ),
                         AgentMemory.salience.desc(),
                         AgentMemory.updated_at.desc(),
                     )
-                    .limit(32)
+                    .limit(96)
                 )
             )
             .scalars()
             .all()
         )
 
-    memory_rows = [*speaker_rows, *summary_rows, *candidate_rows]
+    memory_rows = [*focus_rows, *summary_rows, *candidate_rows, *recency_rows]
     seen_local_ids: set[int] = set()
     local_rows: list[AgentMemory] = []
     for row in memory_rows:
@@ -458,15 +518,35 @@ async def _load_context(
         ):
             continue
         local_rows.append(row)
-    direct = [
-        row
-        for row in local_rows
-        if speaker_id is not None
-        and int(row.subject_user_id or 0) == speaker_id
-        and row.memory_type in {"profile", "manual"}
-    ]
+    focus_by_member: dict[int, list[AgentMemory]] = {user_id: [] for user_id in focus_ids}
+    for row in local_rows:
+        subject_id = int(row.subject_user_id or 0)
+        if (
+            subject_id in focus_by_member
+            and row.memory_type in {"core", "profile", "manual"}
+        ):
+            focus_by_member[subject_id].append(row)
+    focused_profiles: list[AgentMemory] = []
+    for position in range(32):
+        for member_id in focus_ids:
+            rows_for_member = focus_by_member[member_id]
+            if position < len(rows_for_member):
+                focused_profiles.append(rows_for_member[position])
+                if len(focused_profiles) >= 12:
+                    break
+        if len(focused_profiles) >= 12 or not any(
+            position + 1 < len(rows) for rows in focus_by_member.values()
+        ):
+            break
     summaries = [row for row in local_rows if row.memory_type == "summary"]
-    ranked_local = rank_memories(local_rows, recent_texts, speaker_id, now, limit=40)
+    ranked_local = rank_memories(
+        local_rows,
+        recent_texts,
+        speaker_id,
+        now,
+        limit=40,
+        topic_hint=str(config.active_topic or ""),
+    )
 
     shared_rows: list[AgentMemory] = []
     if config.cross_group_visibility == "public_summary":
@@ -523,11 +603,19 @@ async def _load_context(
     # 只随整理变化、可被前缀缓存命中）还是易变层（speaker/topic，随请求变化）。
     # 稳定来源排在前面：6000 字符预算从前往后消耗，稳定条目先入账，
     # 其截断点才不会随发言人画像的长短浮动。
+    # 活跃成员画像总预算 12 条，按成员轮转；话题记忆维持最多 3 条。
+    topic_rows = ranked_local[:3]
     for row, source in [
         *((row, "group_summary") for row in summaries[:5]),
         *((row, "shared_public") for row in shared_rows),
-        *((row, "speaker") for row in direct[:8]),
-        *((row, "topic") for row in ranked_local[:3]),
+        *((
+            row,
+            "speaker"
+            if speaker_id is not None
+            and int(row.subject_user_id or 0) == speaker_id
+            else "participant",
+        ) for row in focused_profiles),
+        *((row, "topic") for row in topic_rows),
     ]:
         row_id = int(row.id or 0)
         if row_id in seen_memory_ids:
@@ -653,11 +741,15 @@ async def _load_context(
         proactive_today=config.proactive_count,
         last_member_message_at=counts["last_member_message_at"],
         member_messages_60m=counts["member_messages_60m"],
+        member_messages_5m=counts["member_messages_5m"],
+        member_participants_5m=counts["member_participants_5m"],
     )
     dbg(
         f"群 {group_id} 活跃度快照: 5m={activity.messages_5m} 20m={activity.messages_20m} "
         f"60m={activity.messages_60m} 参与人数={activity.participants_60m} "
         f"回复数={activity.replies_60m} 提及数={activity.mentions_60m} "
+        f"5m真人={activity.member_messages_5m}/"
+        f"{activity.member_participants_5m}人 "
         f"今日主动发言={activity.proactive_today} 最后消息={activity.last_message_at} "
         f"最后发言={activity.last_agent_at}"
     )
@@ -690,8 +782,7 @@ async def _caption_single_image(
     ]
     result = await complete(  # pyright: ignore[reportArgumentType]
         messages,  # pyright: ignore[reportArgumentType]
-        model=get_agent_model("agent_vision"),
-        role="agent_vision",
+        task="agent_image",
         max_tokens=500,
         timeout=30,
     )  # pyright: ignore[reportArgumentType]
@@ -714,12 +805,10 @@ async def _describe_images(
     不可缓存，但仍参与转述；data: 前缀的 block 与 digests 按序对齐。
     """
 
-    vision_model_configured = bool(
-        str(getattr(ai_config, "agent_vision_model", "") or "").strip()
-    )
+    has_vision_model = vision_model_configured()
     if not blocks:
         dbg(f"群 {group_id} 跳过图片识别: 无可用图片 block")
-        return "[图片未识别：当前未配置 AGENT_VISION_MODEL]"
+        return "[图片未识别：没有可用的图片数据]"
     caption_by_digest = dict(cached)
     digest_iter = iter(digests)
     parts: list[str] = []
@@ -730,8 +819,8 @@ async def _describe_images(
         if caption:
             parts.append(f"[图片转述（缓存）] {caption}")
             continue
-        if not vision_model_configured:
-            parts.append("[图片未识别：当前未配置 AGENT_VISION_MODEL]")
+        if not has_vision_model:
+            parts.append("[图片未识别：当前未配置可用的识图模型]")
             continue
         caption = await _caption_single_image(group_id, normalized, block)
         if caption is None:
@@ -745,7 +834,7 @@ async def _describe_images(
                 group_id,
                 digest,
                 caption,
-                get_agent_model("agent_vision"),
+                resolve_llm_request("agent_image").model,
                 cache_enabled=bool(config.media_cache_enabled),
             )
         parts.append(f"[图片转述] {caption[:2000]}")
@@ -763,10 +852,10 @@ async def _prepare_media_prompt(
 ) -> tuple[str, list[dict[str, Any]]]:
     """多模态关闭时改为视觉转述注入 prompt；否则透传媒体 block。"""
 
-    mode = agent_multimodal_mode()
+    mode = resolve_llm_request("agent_dialogue").multimodal
     dbg(f"群 {group_id} 多模态模式={mode!r}")
     user_prompt = normalized.prompt_text()
-    if media_blocks and mode == "false":
+    if media_blocks and mode == "unsupported":
         dbg(f"群 {group_id} 多模态关闭,改走视觉转述注入 prompt")
         user_prompt = f"{user_prompt}\n{await _describe_images(group_id, normalized, media_blocks, session, config, cached_captions, media_digests)}"
         return user_prompt, []
@@ -842,6 +931,13 @@ async def _finalize_reply(
             f"群 {group_id} 话题切换: epoch={config.context_epoch} "
             f"topic={config.active_topic!r}"
         )
+    if config.trigger_mode == "mention_or_proactive":
+        mark_bot_reply(
+            int(bot.self_id),
+            group_id,
+            topic=str(config.active_topic or normalized.plain_text or ""),
+            source="dialogue",
+        )
     try:
         await session.commit()
     except SQLAlchemyError:
@@ -916,7 +1012,7 @@ async def process_group_message(
                 cached_captions,
                 media_digests,
             )
-            model = get_agent_model("agent_dialogue")
+            model = resolve_llm_request("agent_dialogue").model
             dbg(f"群 {group_id} 对话模型={model!r}")
             messages, _prefix_fingerprint = build_messages(
                 persona=resolve_persona(config),
@@ -924,7 +1020,8 @@ async def process_group_message(
                 context=context,
                 user_prompt=user_prompt,
                 media_inputs=media_blocks
-                if agent_multimodal_mode() != "false"
+                if resolve_llm_request("agent_dialogue").multimodal
+                != "unsupported"
                 else None,
             )
             cache_key = prompt_cache_key(
@@ -980,8 +1077,7 @@ async def process_group_message(
                     response = await complete_with_tools(  # pyright: ignore[reportArgumentType]
                         messages,  # pyright: ignore[reportArgumentType]
                         tools,  # pyright: ignore[reportArgumentType]
-                        model=model,
-                        role="agent_dialogue",
+                        task="agent_dialogue",
                         max_tokens=800,
                         timeout=30,
                         multimodal=bool(media_blocks),

@@ -149,6 +149,16 @@ export interface AgentMemoryStatus {
   inFlight: boolean;
 }
 
+// 有画像沉淀的成员概览（口径见后端 app.py get_memory_subjects）
+export interface MemorySubjectItem {
+  userId: string;
+  nickname: string;
+  groupNickname: string | null;
+  counts: { profile: number; core: number; manual: number };
+  total: number;
+  updatedAt: string;
+}
+
 export interface AgentRelationItem {
   id: string;
   groupId: string;
@@ -218,6 +228,38 @@ export interface WebAudit {
   result: string;
   detail: Record<string, unknown>;
   createdAt: string;
+}
+
+export type EnvironmentValueKind = "string" | "boolean" | "integer" | "number" | "json" | "enum";
+export type EnvironmentValueSource = "process" | "environment" | "env" | "default";
+
+export interface EnvironmentEntry {
+  key: string;
+  section: string;
+  description: string;
+  value: string | null;
+  defaultValue: string | null;
+  configured: boolean;
+  effectiveConfigured: boolean;
+  secret: boolean;
+  kind: EnvironmentValueKind;
+  options: string[];
+  source: EnvironmentValueSource;
+  overridden: boolean;
+}
+
+export interface EnvironmentSnapshot {
+  file: string;
+  version: string;
+  environment: string;
+  environmentFile: string | null;
+  entries: EnvironmentEntry[];
+}
+
+export interface EnvironmentPatchResult {
+  version: string;
+  restartRequired: boolean;
+  updatedKeys: string[];
 }
 
 // ── 对局中心:狼人杀 / 跑团(字段口径见后端 webui/games.py) ──

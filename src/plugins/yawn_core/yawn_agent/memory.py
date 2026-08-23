@@ -12,7 +12,7 @@ from itertools import pairwise
 from typing import Any
 
 from nonebot import logger
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -22,7 +22,7 @@ from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
-from ..llm import complete, get_agent_model, get_client
+from ..llm import complete, get_client
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .media import unlink_cache_file
@@ -101,6 +101,27 @@ _FACT_KEYS = frozenset(
         "recurring_topic",
     }
 )
+# 多值画像键：新值追加而非覆盖，避免"喜欢爬山"抹掉"会编程"。
+_LIST_FACT_KEYS = frozenset({"hobby", "preference", "skill", "recurring_topic"})
+_LIST_FACT_SEPARATOR = "、"
+_LIST_FACT_MAX = 5
+# 反复确认的高置信画像晋升为核心记忆：不过期、排序不衰减，防止称呼
+# 偏好这类稳定事实在数月无人复述后被 TTL 或时间衰减静默遗忘。
+_CORE_PROMOTE_CONFIDENCE = 0.85
+_CORE_PROMOTE_EVIDENCE = 3
+# 整批文本低于该字符数且最长一条不足 20 字时视为低信号闲聊（表情包/
+# 贴图刷屏），跳过模型调用只跑确定性提取，游标照常推进。只要有人写出
+# 成句内容就不跳过，避免误伤安静群的有效对话。
+_LOW_SIGNAL_BATCH_CHARS = 600
+_LOW_SIGNAL_MAX_MESSAGE_CHARS = 20
+# 排序用的时间衰减半衰期按类型对齐保留期：摘要可存 30 天，21 天半衰
+# 会让它临期只剩三成；core 永不衰减。画像维持默认 21 天——稳定事实
+# 依赖晋升 core 抗遗忘，放宽画像半衰期会让旧热点挤掉新话题记忆。
+_MEMORY_TYPE_HALF_LIFE_DAYS: dict[str, float | None] = {
+    "core": None,
+    "summary": 45.0,
+    "manual": 90.0,
+}
 # 只接受带边界的显式自称；裸"我是"极易把谓语陈述
 # （如"我是真的服了"）污染成昵称，因此完全不参与确定性提取。
 _DISPLAY_NAME_STRONG_RE = re.compile(
@@ -228,29 +249,55 @@ def rank_memories(
     now: datetime,
     *,
     limit: int = 30,
+    topic_hint: str = "",
 ) -> list[AgentMemory]:
     """按「话题相关性 + 显著度时间衰减 + 置信度 + 发言人加权」重排候选记忆。
 
-    相关性用记忆 key（双倍权重）与 content 同近期消息 bigram 的归一化重叠衡量；
-    显著度按 21 天半衰期衰减，避免旧热点长期霸占注入名额。
+    相关性用 IDF 加权的 token 覆盖衡量：在候选池中到处出现的常见 bigram
+    权重被压低，稀有 token 命中获得高权重，记忆 key 仍然双倍计入；
+    topic_hint（如当前活跃话题）并入查询集但不挤占近期消息窗口。
+    显著度按类型半衰期衰减（core 不衰减），避免旧热点长期霸占注入名额。
     """
 
     query_tokens = extract_bigrams(" ".join(recent_texts[-_RELEVANCE_TEXTS:]))
-    denom = max(1, len(query_tokens))
-    scored: list[tuple[float, int, AgentMemory]] = []
+    if topic_hint:
+        query_tokens |= extract_bigrams(topic_hint)
+    # 文档频率只统计 key 与 content 前缀：全文统计会让长摘要主导权重
+    # 并拖慢重排，召回判定也不需要尾部长文。
+    row_tokens: list[set[str]] = []
+    key_tokens: list[set[str]] = []
+    doc_freq: dict[str, int] = {}
     for row in rows:
+        keys = extract_bigrams(str(row.memory_key or ""))
+        tokens = keys | extract_bigrams(str(row.content or "")[:400])
+        key_tokens.append(keys)
+        row_tokens.append(tokens)
+        for token in tokens:
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+    total_rows = max(1, len(rows))
+    # 候选池中到处出现的 token 权重低、稀有命中权重高；从未出现（df=0）
+    # 的 token 不可能命中，按最稀有档计权，只用于归一化分母。
+    weights = {
+        token: math.log(1.0 + total_rows / max(1, doc_freq.get(token, 0)))
+        for token in query_tokens
+    }
+    weight_sum = sum(weights.values())
+    scored: list[tuple[float, int, AgentMemory]] = []
+    for row, keys, tokens in zip(rows, key_tokens, row_tokens, strict=True):
         age_days = max(0.0, (now - (row.updated_at or now)).total_seconds() / 86400.0)
-        key_overlap = len(extract_bigrams(str(row.memory_key or "")) & query_tokens)
-        content_overlap = len(extract_bigrams(str(row.content or "")) & query_tokens)
-        relevance = min(1.0, (2.0 * key_overlap + content_overlap) / denom)
+        hit_weight = sum(weights.get(token, 0.0) for token in tokens & query_tokens)
+        hit_weight += sum(weights.get(token, 0.0) for token in keys & query_tokens)
+        relevance = min(1.0, hit_weight / weight_sum) if weight_sum > 0 else 0.0
         speaker_bonus = (
             0.25
             if speaker_id is not None and int(row.subject_user_id or 0) == speaker_id
             else 0.0
         )
+        half_life = _MEMORY_TYPE_HALF_LIFE_DAYS.get(str(row.memory_type or ""), 21.0)
+        decay = 1.0 if half_life is None else 0.5 ** (age_days / half_life)
         base = (
             float(row.salience or 0.0)
-            * (0.5 ** (age_days / 21.0))
+            * decay
             * (0.6 + 0.4 * float(row.confidence or 0.0))
         )
         scored.append((base + relevance + speaker_bonus, int(row.id or 0), row))
@@ -312,14 +359,63 @@ def merge_profile_update(
     return old_content, old_confidence
 
 
+def merge_list_profile_update(
+    old_content: str, old_confidence: float, new_content: str, new_confidence: float
+) -> tuple[str, float]:
+    """多值画像合并：新值追加而非覆盖，超出上限时淘汰最旧值。
+
+    值以「、」连接存储；新旧互为子串视为同一事实的详略表述，保留更长
+    版本，避免"爬山"与"喜欢爬山"并存。
+    """
+
+    values = [
+        item.strip()
+        for item in (old_content or "").split(_LIST_FACT_SEPARATOR)
+        if item.strip()
+    ]
+    new = (new_content or "").strip()
+    confidence = max(old_confidence, new_confidence)
+    if not values:
+        return new, confidence
+    if not new:
+        return _LIST_FACT_SEPARATOR.join(values), confidence
+    for index, value in enumerate(values):
+        if new == value:
+            return _LIST_FACT_SEPARATOR.join(values), confidence
+        if new in value or value in new:
+            if len(new) > len(value):
+                values[index] = new
+            return _LIST_FACT_SEPARATOR.join(values), confidence
+    values.append(new)
+    del values[: max(0, len(values) - _LIST_FACT_MAX)]
+    return _LIST_FACT_SEPARATOR.join(values), confidence
+
+
+def _maybe_promote_core(row: AgentMemory) -> None:
+    """反复确认的高置信画像晋升为核心记忆：不过期、排序不衰减。
+
+    证据条数即不同消息数，加上置信度门槛，确保晋升代表跨批次复现而
+    非单批提取的侥幸命中。
+    """
+
+    if row.source_kind != "auto" or row.memory_type != "profile":
+        return
+    if (
+        float(row.confidence or 0.0) >= _CORE_PROMOTE_CONFIDENCE
+        and len(row.evidence_message_ids or []) >= _CORE_PROMOTE_EVIDENCE
+    ):
+        row.memory_type = "core"
+        row.expires_at = None
+
+
 async def _model_summary(
     payload: list[dict[str, Any]],
     *,
     prior_summary: str = "",
     prior_public_summary: str = "",
 ) -> dict[str, Any] | None:
-    # 角色模型解析器会在 AGENT_MEMORY_MODEL 为空时回退 AI_MODEL；这里不得
-    # 再额外要求显式配置，否则默认部署永远只会得到原文拼接伪摘要。
+    # 轻量档位未单独配置时会回退 AI_MODEL；这里不得再额外要求显式配置，
+    # 否则默认部署永远只会得到原文拼接伪摘要。
     if get_client() is None:
         dbg("记忆整理: LLM client 不可用,保留游标等待重试")
         return None
@@ -360,8 +456,7 @@ async def _model_summary(
     try:
         response = await complete(  # pyright: ignore[reportArgumentType]
             messages,  # pyright: ignore[reportArgumentType]
-            model=get_agent_model("agent_memory"),
-            role="agent_memory",
+            task="agent_memory",
             response_format={"type": "json_object"},
             max_tokens=1200,
             timeout=30,
@@ -425,14 +520,18 @@ def _safe_evidence(raw: object, valid_ids: set[int]) -> list[int]:
 async def _prefetch_profiles(
     session: Any, group_id: int
 ) -> dict[tuple[int, str], AgentMemory]:
-    """一次取回本群全部画像记忆，避免逐条标量查询。"""
+    """一次取回本群全部画像记忆，避免逐条标量查询。
+
+    必须包含已晋升的 core 行：若只查 profile，同 key 再提取会插入新行
+    撞唯一约束导致整批回滚。
+    """
 
     rows = (
         (
             await session.execute(
                 select(AgentMemory).where(
                     AgentMemory.group_id == group_id,
-                    AgentMemory.memory_type == "profile",
+                    AgentMemory.memory_type.in_(("profile", "core")),
                 )
             )
         )
@@ -524,14 +623,19 @@ def _store_model_facts(
             if existing.source_kind == "manual":
                 continue
             old_content = str(existing.content or "")
-            merged_content, merged_confidence = merge_profile_update(
-                old_content, float(existing.confidence or 0.0), content, confidence
-            )
+            if key in _LIST_FACT_KEYS:
+                merged_content, merged_confidence = merge_list_profile_update(
+                    old_content, float(existing.confidence or 0.0), content, confidence
+                )
+            else:
+                merged_content, merged_confidence = merge_profile_update(
+                    old_content, float(existing.confidence or 0.0), content, confidence
+                )
             existing.content = merged_content
-            # 相同内容反复确认才提升置信度；内容被覆盖时不额外加分。
+            # 合并后内容不变（同值复现）才提升置信度；覆盖或追加时不加分。
             existing.confidence = min(
                 1.0,
-                merged_confidence + (0.02 if content == old_content else 0.0),
+                merged_confidence + (0.02 if merged_content == old_content else 0.0),
             )
             merged_ids: list[int] = list(
                 dict.fromkeys([*(existing.evidence_message_ids or []), *evidence])
@@ -539,6 +643,7 @@ def _store_model_facts(
             existing.evidence_message_ids = merged_ids[-50:]
             existing.related_user_ids = [user_id]
             existing.expires_at = now + timedelta(days=PROFILE_TTL_DAYS)
+            _maybe_promote_core(existing)
 
 
 def _store_model_relations(
@@ -597,16 +702,16 @@ def _store_model_relations(
             # 管理员与对话工具的显式结论优先，整理任务只续期不覆盖。
             edge.last_seen_at = now
         else:
+            old_confidence = float(edge.confidence or 0.0)
+            new_confidence = _bounded_float(item.get("confidence"), 0.5)
             edge.evidence_count += len(evidence)
-            edge.confidence = min(
-                1.0,
-                max(
-                    edge.confidence,
-                    _bounded_float(item.get("confidence"), 0.5),
-                )
-                + 0.01,
-            )
-            if note and not str(edge.note or "").strip():
+            edge.confidence = min(1.0, max(old_confidence, new_confidence) + 0.01)
+            # 高置信新证据允许刷新背景描述；低置信只补空，避免弱观察
+            # 覆盖已有结论。
+            old_note = str(edge.note or "").strip()
+            if note and (
+                not old_note or new_confidence >= old_confidence + 0.15
+            ):
                 edge.note = note
             edge.last_seen_at = now
 
@@ -796,6 +901,28 @@ async def record_memory_failure(
         )
 
 
+async def decay_stale_relations(session: Any, now: datetime) -> int:
+    """每日一次批量衰减长期未再观察的自动派生关系边。
+
+    读取侧的分段降权只影响注入排序、不落库；这里把沉寂超过 90 天的
+    auto 边置信度同步乘性衰减（下限 0.3，防止僵尸边永不清零），让过期
+    前的陈旧边逐步让位于新证据。只在每日兜底任务调用，避免整理路径
+    的写放大。
+    """
+
+    result = await session.execute(
+        update(AgentRelation)
+        .where(
+            AgentRelation.last_seen_at < now - timedelta(days=90),
+            AgentRelation.source_kind == "auto",
+            # 只衰减下限之上的边：max() 钳制只向下，避免把低置信边抬高。
+            AgentRelation.confidence > 0.3,
+        )
+        .values(confidence=func.max(0.3, AgentRelation.confidence * 0.85))
+    )
+    return int(result.rowcount or 0)
+
+
 async def _compact_group_memory_locked(
     session: Any, group_id: int, *, now: datetime
 ) -> int:
@@ -859,53 +986,72 @@ async def _compact_group_memory_locked(
 
     generated: dict[str, Any] | None = None
     if fresh_rows:
-        payload = [_message_payload(row) for row in fresh_rows]
-        generated = await _model_summary(
-            payload,
-            prior_summary=str(existing.content or "") if existing else "",
-            prior_public_summary=(
-                str(existing_public.content or "") if existing_public else ""
-            ),
+        signal_chars = sum(
+            len(str(row.normalized_text or "").strip()) for row in fresh_rows
         )
-        if generated is None:
-            await _record_compaction_failure(
-                session, config, group_id, now, "记忆模型调用失败或返回无效摘要"
-            )
-            return 0
-
-        evidence_ids = [row.id for row in fresh_rows]
-        related_ids = sorted({int(row.user_id) for row in member_rows})
-        salience = score_topic([str(row.normalized_text or "") for row in fresh_rows])
-        _apply_summary(
-            session,
-            existing,
-            group_id=group_id,
-            key=daily_key,
-            content=str(generated["summary"]),
-            evidence_ids=evidence_ids,
-            related_user_ids=related_ids,
-            salience=salience,
-            visibility="group",
-            now=now,
+        longest_chars = max(
+            len(str(row.normalized_text or "").strip()) for row in fresh_rows
         )
-        public_text = str(generated.get("public_summary") or "")
         if (
-            member_rows
-            and config.cross_group_visibility == "public_summary"
-            and _public_summary_safe(public_text, fresh_rows)
+            signal_chars < _LOW_SIGNAL_BATCH_CHARS
+            and longest_chars < _LOW_SIGNAL_MAX_MESSAGE_CHARS
         ):
+            # 表情包/贴图刷屏这类低信号批次不值得一次模型调用；确定性
+            # 提取零成本照跑，游标照常推进，当天可能没有摘要属可接受取舍。
+            dbg(
+                f"群 {group_id} 记忆整理: 低信号批次 {signal_chars} 字/"
+                f"最长 {longest_chars} 字,跳过模型调用仅跑确定性提取"
+            )
+        else:
+            payload = [_message_payload(row) for row in fresh_rows]
+            generated = await _model_summary(
+                payload,
+                prior_summary=str(existing.content or "") if existing else "",
+                prior_public_summary=(
+                    str(existing_public.content or "") if existing_public else ""
+                ),
+            )
+            if generated is None:
+                await _record_compaction_failure(
+                    session, config, group_id, now, "记忆模型调用失败或返回无效摘要"
+                )
+                return 0
+
+            evidence_ids = [row.id for row in fresh_rows]
+            related_ids = sorted({int(row.user_id) for row in member_rows})
+            salience = score_topic(
+                [str(row.normalized_text or "") for row in fresh_rows]
+            )
             _apply_summary(
                 session,
-                existing_public,
+                existing,
                 group_id=group_id,
-                key=public_key,
-                content=public_text,
+                key=daily_key,
+                content=str(generated["summary"]),
                 evidence_ids=evidence_ids,
                 related_user_ids=related_ids,
                 salience=salience,
-                visibility="public",
+                visibility="group",
                 now=now,
             )
+            public_text = str(generated.get("public_summary") or "")
+            if (
+                member_rows
+                and config.cross_group_visibility == "public_summary"
+                and _public_summary_safe(public_text, fresh_rows)
+            ):
+                _apply_summary(
+                    session,
+                    existing_public,
+                    group_id=group_id,
+                    key=public_key,
+                    content=public_text,
+                    evidence_ids=evidence_ids,
+                    related_user_ids=related_ids,
+                    salience=salience,
+                    visibility="public",
+                    now=now,
+                )
 
         valid_ids = {int(row.id) for row in member_rows}
         valid_user_ids = {int(row.user_id) for row in member_rows}
@@ -923,27 +1069,28 @@ async def _compact_group_memory_locked(
         )
         profiles = await _prefetch_profiles(session, group_id)
         edges = await _prefetch_relations(session, group_id)
-        _store_model_facts(
-            session,
-            group_id,
-            generated.get("facts"),
-            valid_ids,
-            valid_user_ids,
-            evidence_user_by_id,
-            now,
-            profiles,
-        )
-        _store_model_relations(
-            session,
-            group_id,
-            generated.get("relations"),
-            valid_ids,
-            valid_user_ids,
-            valid_member_ids,
-            evidence_user_by_id,
-            now,
-            edges,
-        )
+        if generated is not None:
+            _store_model_facts(
+                session,
+                group_id,
+                generated.get("facts"),
+                valid_ids,
+                valid_user_ids,
+                evidence_user_by_id,
+                now,
+                profiles,
+            )
+            _store_model_relations(
+                session,
+                group_id,
+                generated.get("relations"),
+                valid_ids,
+                valid_user_ids,
+                valid_member_ids,
+                evidence_user_by_id,
+                now,
+                edges,
+            )
         _extract_structured_memories(
             session,
             group_id,
@@ -954,7 +1101,8 @@ async def _compact_group_memory_locked(
             valid_member_ids=valid_member_ids,
         )
 
-    # 无可用成员内容（全为隐私退出或 bot）仍安全消费；有成员内容仅在模型成功后到达这里。
+    # 无可用成员内容（全为隐私退出或 bot）与低信号跳过批次仍安全消费；
+    # 有成员内容仅在模型成功或显式跳过后到达这里。
     config.last_compacted_message_id = int(rows[-1].id)
     config.memory_last_success_at = now
     config.memory_last_error = None
@@ -1253,6 +1401,7 @@ def _extract_structured_memories(
                 existing.evidence_message_ids = merged_ids[-50:]
                 existing.related_user_ids = [int(row.user_id)]
                 existing.expires_at = now + timedelta(days=PROFILE_TTL_DAYS)
+                _maybe_promote_core(existing)
         mentions = set(re.findall(r"@([0-9]{5,12})", text))
         for mention in mentions:
             target = int(mention)
@@ -1288,6 +1437,7 @@ __all__ = [
     "build_summary",
     "compact_group_memory",
     "compacting_group_count",
+    "decay_stale_relations",
     "delete_group_memories",
     "delete_member_memories",
     "effective_relation_confidence",
@@ -1296,6 +1446,7 @@ __all__ = [
     "list_memories",
     "memory_retry_due",
     "merge_daily_summary",
+    "merge_list_profile_update",
     "merge_profile_update",
     "normalize_relation_type",
     "parse_json_reply",

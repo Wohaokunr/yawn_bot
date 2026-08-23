@@ -255,6 +255,12 @@ def test_memory_create_body_validates_type_and_expiry() -> None:
     assert body.subject_user_id == 123  # noqa: PLR2004
     assert body.expires_in_days is None
 
+    # core 为管理员手动钉住的核心记忆类型，同样允许创建。
+    core_body = app_module.MemoryCreateBody.model_validate(
+        {"type": "core", "key": "display_name", "content": "阿眠"}
+    )
+    assert core_body.type == "core"
+
     with pytest.raises(ValidationError):
         app_module.MemoryCreateBody.model_validate(
             {"type": "unknown", "key": "k", "content": "c"}
@@ -653,3 +659,130 @@ async def test_relation_graph_marks_truncation(
     assert len(data["edges"]) == service.RELATION_GRAPH_LIMIT
     assert data["meta"]["relationTruncated"] is True
     assert data["meta"]["memberTruncated"] is False
+
+
+class _FakeSubjectsSession:
+    """成员画像索引端点用到的 get/execute 路径，并在 Python 侧模拟 SQL 过滤。"""
+
+    def __init__(
+        self,
+        *,
+        opted_out: set[int] | None = None,
+        memories: list[Any] | None = None,
+        members: list[tuple[Any, Any]] | None = None,
+    ) -> None:
+        self.opted_out = opted_out or set()
+        self.memories = memories or []
+        self.members = members or []
+
+    async def get(self, model: Any, key: Any) -> Any:
+        if model.__name__ == "BotGroup" and key == 100:  # noqa: PLR2004
+            return app_module.BotGroup(group_id=key, group_name="测试群")
+        return None
+
+    async def execute(self, stmt: Any) -> _ScalarResult:
+        entity = stmt.column_descriptions[0]["entity"]
+        name = getattr(entity, "__name__", str(entity))
+        if name == "AgentPrivacy":
+            return _ScalarResult(list(self.opted_out))
+        if name == "UserGroup":
+            return _ScalarResult(list(self.members))
+        assert name == "AgentMemory"
+        # 模拟 SQL 过滤：群级/非画像类型/过期/隐私退出行不进入聚合，
+        # 并按 updated_at 降序返回（端点依赖该顺序得出"最近更新"）。
+        rows = [
+            row
+            for row in self.memories
+            if int(row.subject_user_id or 0) != 0
+            and row.memory_type in app_module._SUBJECT_MEMORY_TYPES
+            and not (
+                row.expires_at is not None
+                and row.expires_at < app_module.now_beijing()
+            )
+            and int(row.subject_user_id) not in self.opted_out
+            and not any(
+                int(value) in self.opted_out
+                for value in row.related_user_ids or []
+            )
+        ]
+        rows.sort(key=lambda row: row.updated_at, reverse=True)
+        return _ScalarResult(rows)
+
+
+def _subject_memory(
+    memory_id: int,
+    subject: int,
+    memory_type: str,
+    updated_at: datetime,
+    *,
+    expires_at: datetime | None = None,
+) -> Any:
+    return service.AgentMemory(
+        id=memory_id,
+        group_id=100,
+        subject_user_id=subject,
+        memory_type=memory_type,
+        memory_key="hobby",
+        content="爬山",
+        evidence_message_ids=[],
+        source_kind="auto",
+        related_user_ids=[subject],
+        salience=0.5,
+        confidence=0.5,
+        visibility="group",
+        updated_at=updated_at,
+        expires_at=expires_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_subjects_aggregates_counts_and_resolves_nicknames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memories = [
+        _subject_memory(1, 111, "core", datetime(2026, 8, 23, 10, 0, 0)),  # noqa: DTZ001
+        _subject_memory(2, 111, "profile", datetime(2026, 8, 22, 9, 0, 0)),  # noqa: DTZ001
+        _subject_memory(3, 222, "profile", datetime(2026, 8, 20, 9, 0, 0)),  # noqa: DTZ001
+        # 333 已退群但画像残留：仍应列出，昵称回退为空。
+        _subject_memory(4, 333, "manual", datetime(2026, 8, 21, 9, 0, 0)),  # noqa: DTZ001
+        # 群级摘要、过期画像、隐私退出成员的画像都不应计入。
+        _subject_memory(5, 0, "summary", datetime(2026, 8, 23, 11, 0, 0)),  # noqa: DTZ001
+        _subject_memory(
+            6,
+            222,
+            "profile",
+            datetime(2026, 8, 23, 12, 0, 0),  # noqa: DTZ001
+            expires_at=datetime(2026, 1, 1),  # noqa: DTZ001
+        ),
+        _subject_memory(7, 444, "profile", datetime(2026, 8, 23, 9, 0, 0)),  # noqa: DTZ001
+    ]
+    members = [
+        (
+            service.UserGroup(group_id=100, user_id=111, role="member"),
+            service.BotUser(user_id=111, nickname="小明"),
+        ),
+        (
+            service.UserGroup(group_id=100, user_id=222, role="admin"),
+            service.BotUser(user_id=222, nickname="小红"),
+        ),
+    ]
+    session = _FakeSubjectsSession(
+        opted_out={444}, memories=memories, members=members
+    )
+    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+
+    result = await app_module.get_memory_subjects(100, None)
+
+    data = result["data"]
+    assert [entry["userId"] for entry in data] == ["111", "333", "222"]
+    assert all(isinstance(entry["userId"], str) for entry in data)
+    first = data[0]
+    assert first["nickname"] == "小明"
+    assert first["counts"] == {"profile": 1, "core": 1, "manual": 0}
+    assert first["total"] == 2  # noqa: PLR2004
+    assert first["updatedAt"] == "2026-08-23T10:00:00+08:00"
+    assert data[1]["nickname"] == ""
+    assert data[1]["counts"]["manual"] == 1
+    assert data[2]["nickname"] == "小红"
+    assert data[2]["counts"] == {"profile": 1, "core": 0, "manual": 0}
+    assert data[2]["total"] == 1

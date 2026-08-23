@@ -486,7 +486,7 @@ async def execute_tool(
                     .where(
                         AgentMemory.group_id == group_id,
                         AgentMemory.subject_user_id == subject_id,
-                        AgentMemory.memory_type == "profile",
+                        AgentMemory.memory_type.in_(("core", "profile")),
                         AgentMemory.visibility.in_(("group", "public")),
                         (
                             AgentMemory.expires_at.is_(None)

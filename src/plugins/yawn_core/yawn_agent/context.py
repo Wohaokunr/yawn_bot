@@ -32,6 +32,8 @@ class ActivitySnapshot:
     # bot 发言落库后，"群里有人说话"要区分真人与 bot 自言。
     last_member_message_at: datetime | None = None
     member_messages_60m: int = 0
+    member_messages_5m: int = 0
+    member_participants_5m: int = 0
 
 
 def coldness_score(snapshot: ActivitySnapshot, now: datetime) -> float:
@@ -86,9 +88,12 @@ def build_context(
         ],
         key=lambda item: (int(item.get("user_id") or 0), str(item.get("name") or "")),
     )
+    # core（反复确认的稳定事实）不参与 salience 竞争，始终排在最前；
+    # 其余按显著度排序，保证同数据下顺序确定。
     stable_memories = sorted(
         memories[:30],
         key=lambda item: (
+            0 if str(item.get("type") or "") == "core" else 1,
             -float(item.get("salience") or 0),
             str(item.get("type") or ""),
             str(item.get("key") or ""),
@@ -112,6 +117,8 @@ def build_context(
             # request solely because wall-clock seconds advanced.
             "coldness_bucket": int(round(coldness * 10)),
             "messages_5m": activity.messages_5m,
+            "member_messages_5m": activity.member_messages_5m,
+            "member_participants_5m": activity.member_participants_5m,
             "messages_20m": activity.messages_20m,
             "participants_60m": activity.participants_60m,
             "replies_60m": activity.replies_60m,

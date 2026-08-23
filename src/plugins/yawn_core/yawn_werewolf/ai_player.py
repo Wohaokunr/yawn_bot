@@ -988,6 +988,7 @@ async def _llm_decide(  # noqa: PLR0911
             text = await asyncio.wait_for(
                 complete(
                     messages,
+                    task="ww_decision",
                     max_tokens=config.ww_ai_max_tokens,
                     timeout=remaining,
                     temperature=0.4,
@@ -1221,6 +1222,7 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        task="ww_speech",
         max_tokens=config.ww_ai_speech_max_tokens,
         timeout=speech_timeout,
         temperature=0.8,

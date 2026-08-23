@@ -45,6 +45,7 @@ from .data_models.chat_session import ChatSession
 from .llm import _COMPLETION_CONCURRENCY
 from .llm import ai_config as _ai_config
 from .llm import get_client as _get_client
+from .llm import resolve_llm_request as _resolve_llm_request
 from .permission import check_feature_permission, require_feature
 from .reply_chain import (
     format_chain_for_prompt,
@@ -356,11 +357,13 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
                 MessageSegment.text("抱歉，AI 服务尚未配置，请联系管理员~"),
             )
             return None
+        request_config = _resolve_llm_request("core_chat")
         stream = await llm_client.chat.completions.create(
-            model=_ai_config.ai_model,
+            model=request_config.model,
             messages=history,  # type: ignore[arg-type]
             stream=True,
             max_tokens=_ai_config.ai_max_tokens,
+            extra_body=request_config.extra_body,
         )
     except OpenAIError as e:
         _record_stream_metric("error", started)

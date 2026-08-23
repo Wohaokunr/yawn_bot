@@ -28,12 +28,42 @@ def test_config_allows_ai_api_key_to_be_omitted(llm_module: Any) -> None:
     config = llm_module.AIChatConfig()
 
     assert config.ai_api_key is None
+    assert config.ai_light_model is None
+    assert config.ai_vision_model is None
+    assert config.ai_default_thinking == "auto"
+    assert config.ai_light_thinking == "disabled"
+    assert config.agent_proactive_llm_profile == "light"
+    assert config.agent_proactive_thinking == "inherit"
 
 
-def test_config_repr_masks_api_key_and_resolves_role_defaults(llm_module: Any) -> None:
+def test_config_repr_masks_api_key_and_resolves_profile_defaults(
+    llm_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = llm_module.AIChatConfig(ai_api_key="secret", ai_model="fallback")
     assert "secret" not in repr(config)
-    assert llm_module.get_agent_model("agent_dialogue") == llm_module.ai_config.ai_model
+    monkeypatch.setattr(llm_module.ai_config, "ai_model", "fallback")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_model", None)
+    assert llm_module.resolve_llm_request("agent_dialogue").model == "fallback"
+    assert llm_module.resolve_llm_request("agent_memory").model == "fallback"
+
+
+def test_task_override_controls_profile_thinking_and_multimodal(
+    llm_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(llm_module.ai_config, "ai_model", "default-model")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_model", "light-model")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_thinking", "disabled")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_multimodal", "unsupported")
+    monkeypatch.setattr(llm_module.ai_config, "agent_dialogue_llm_profile", "light")
+    monkeypatch.setattr(llm_module.ai_config, "agent_dialogue_thinking", "enabled")
+
+    request = llm_module.resolve_llm_request("agent_dialogue")
+
+    assert request.profile == "light"
+    assert request.model == "light-model"
+    assert request.thinking == "enabled"
+    assert request.multimodal == "unsupported"
+    assert request.extra_body == {"thinking": {"type": "enabled"}}
 
 
 @pytest.mark.asyncio
@@ -85,7 +115,7 @@ def test_client_is_created_once_on_first_use(
 
 
 @pytest.mark.asyncio
-async def test_agent_roles_select_distinct_models(
+async def test_tasks_select_profiles_and_resolve_thinking(
     llm_module: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -103,14 +133,34 @@ async def test_agent_roles_select_distinct_models(
     )()
     monkeypatch.setattr(llm_module, "client", fake)
     monkeypatch.setattr(llm_module.ai_config, "ai_api_key", "fixture-key")
-    monkeypatch.setattr(llm_module.ai_config, "agent_dialogue_model", "advanced-agent")
-    monkeypatch.setattr(llm_module.ai_config, "agent_memory_model", "ordinary-memory")
+    monkeypatch.setattr(llm_module.ai_config, "ai_model", "advanced-model")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_model", "ordinary-light")
+    monkeypatch.setattr(llm_module.ai_config, "ai_vision_model", "vision-model")
+    monkeypatch.setattr(llm_module.ai_config, "ai_default_thinking", "auto")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_thinking", "disabled")
+    monkeypatch.setattr(llm_module.ai_config, "ai_vision_thinking", "enabled")
+    monkeypatch.setattr(llm_module.ai_config, "rpg_kp_thinking", "enabled")
 
     await llm_module.complete(
-        [{"role": "user", "content": "dialogue"}], role="agent_dialogue"
+        [{"role": "user", "content": "dialogue"}], task="agent_dialogue"
     )
     await llm_module.complete(
-        [{"role": "user", "content": "memory"}], role="agent_memory"
+        [{"role": "user", "content": "memory"}], task="agent_memory"
+    )
+    await llm_module.complete(
+        [{"role": "user", "content": "image"}], task="agent_image"
+    )
+    await llm_module.complete_with_tools(
+        [{"role": "user", "content": "kp"}], [], task="rpg_kp"
     )
 
-    assert [item["model"] for item in calls] == ["advanced-agent", "ordinary-memory"]
+    assert [item["model"] for item in calls] == [
+        "advanced-model",
+        "ordinary-light",
+        "vision-model",
+        "advanced-model",
+    ]
+    assert "extra_body" not in calls[0]
+    assert calls[1]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert calls[2]["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert calls[3]["extra_body"] == {"thinking": {"type": "enabled"}}

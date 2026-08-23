@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import nonebot
@@ -158,8 +159,11 @@ async def test_partial_delivery_only_persists_sent_segments(
         async def close(self) -> None:
             return None
 
+    create_kwargs: dict[str, object] = {}
+
     class Completions:
-        async def create(self, **_kwargs: object) -> Any:
+        async def create(self, **kwargs: object) -> Any:
+            create_kwargs.update(kwargs)
             return Stream()
 
     class Chat:
@@ -179,6 +183,15 @@ async def test_partial_delivery_only_persists_sent_segments(
             self.sent.append(text)
 
     monkeypatch.setattr(ai_chat_module, "_client", Client())
+    monkeypatch.setattr(
+        ai_chat_module,
+        "_resolve_llm_request",
+        lambda task: SimpleNamespace(
+            model="configured-default",
+            extra_body={"thinking": {"type": "disabled"}},
+            task=task,
+        ),
+    )
     bot = Bot()
     metrics = importlib.import_module("src.plugins.yawn_core.metrics")
     metrics.reset_metrics_for_tests()
@@ -187,6 +200,8 @@ async def test_partial_delivery_only_persists_sent_segments(
 
         assert bot.sent == [first]
         assert result == first
+        assert create_kwargs["model"] == "configured-default"
+        assert create_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
         assert any(
             item["name"] == "yawnbot_ai_requests_total"
             and item["labels"]

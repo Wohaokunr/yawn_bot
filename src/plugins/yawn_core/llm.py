@@ -1,8 +1,8 @@
 # ruff: noqa: E501,PLR0913
 """共享 LLM 客户端：OpenAI 兼容端点的配置、单例与非流式补全。
 
-ai_chat 的流式对话与 yawn_werewolf 的 AI 玩家共用同一客户端与
-配置（字段名沿用 ai_* 前缀，.env 无需改动）。非流式 complete()
+ai_chat 的流式对话与各 AI 子插件共用同一客户端、三级模型档位与
+任务路由配置。非流式 complete()
 面向"一次调用拿完整结果"的场景（如狼人杀 AI 决策），带总超时
 与并发上限：失败一律返回 None，由调用方决定降级策略。
 complete_with_tools() 面向 agentic 场景（如跑团 KP 经 tool_call
@@ -11,7 +11,8 @@ complete_with_tools() 面向 agentic 场景（如跑团 KP 经 tool_call
 
 import asyncio
 import time
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Literal, Optional
 
 from nonebot import get_plugin_config, logger
 from openai import AsyncOpenAI, OpenAIError
@@ -22,22 +23,62 @@ from openai.types.chat import (
 )
 from pydantic import BaseModel, Field, SecretStr
 
+LLMProfile = Literal["default", "light", "vision"]
+ThinkingMode = Literal["auto", "enabled", "disabled"]
+TaskThinkingMode = Literal["inherit", "auto", "enabled", "disabled"]
+MultimodalMode = Literal["auto", "supported", "unsupported"]
+LLMTask = Literal[
+    "core_chat",
+    "agent_dialogue",
+    "agent_proactive",
+    "agent_memory",
+    "agent_image",
+    "rpg_kp",
+    "rpg_npc_router",
+    "rpg_npc",
+    "ww_decision",
+    "ww_speech",
+]
 
-class AgentModelConfig(BaseModel):
-    """Global Agent role model and media settings."""
 
-    # Agent role models are intentionally global.  Empty values fall back to
-    # the legacy AI_MODEL so existing deployments keep working unchanged.
-    agent_dialogue_model: Optional[str] = None
-    agent_memory_model: Optional[str] = None
-    agent_vision_model: Optional[str] = None
-    agent_dialogue_multimodal: str = "auto"
+class LLMRoutingConfig(BaseModel):
+    """共享模型档位、能力以及各子插件任务的路由配置。"""
+
+    ai_light_model: Optional[str] = None
+    ai_vision_model: Optional[str] = None
+    ai_default_thinking: ThinkingMode = "auto"
+    ai_light_thinking: ThinkingMode = "disabled"
+    ai_vision_thinking: ThinkingMode = "disabled"
+    ai_default_multimodal: MultimodalMode = "auto"
+    ai_light_multimodal: MultimodalMode = "auto"
+
+    agent_dialogue_llm_profile: LLMProfile = "default"
+    agent_dialogue_thinking: TaskThinkingMode = "inherit"
+    agent_proactive_llm_profile: LLMProfile = "light"
+    agent_proactive_thinking: TaskThinkingMode = "inherit"
+    agent_memory_llm_profile: LLMProfile = "light"
+    agent_memory_thinking: TaskThinkingMode = "inherit"
+    agent_image_llm_profile: LLMProfile = "vision"
+    agent_image_thinking: TaskThinkingMode = "inherit"
+
+    rpg_kp_llm_profile: LLMProfile = "default"
+    rpg_kp_thinking: TaskThinkingMode = "inherit"
+    rpg_npc_router_llm_profile: LLMProfile = "light"
+    rpg_npc_router_thinking: TaskThinkingMode = "inherit"
+    rpg_npc_llm_profile: LLMProfile = "light"
+    rpg_npc_thinking: TaskThinkingMode = "inherit"
+
+    ww_decision_llm_profile: LLMProfile = "default"
+    ww_decision_thinking: TaskThinkingMode = "inherit"
+    ww_speech_llm_profile: LLMProfile = "light"
+    ww_speech_thinking: TaskThinkingMode = "inherit"
+
     agent_media_cache_ttl: int = 86400
     agent_media_cache_dir: str = "data/agent_media"
     agent_media_allowed_hosts: str = ""
 
 
-class AIChatConfig(AgentModelConfig):
+class AIChatConfig(LLMRoutingConfig):
     """AI 服务配置，字段从 .env / 环境变量读取。"""
 
     # AI 是可选能力，确定性 RPG 部署无需配置密钥也可启动。
@@ -83,29 +124,67 @@ def _secret_value(value: object) -> str | None:
     return text or None
 
 
-def get_agent_model(role: str | None = None) -> str:
-    """Resolve an Agent role model while preserving the old AI_MODEL default."""
+@dataclass(frozen=True, slots=True)
+class LLMRequestConfig:
+    """一次任务调用最终使用的模型档位和请求参数。"""
 
-    field_name = {
-        "agent_dialogue": "agent_dialogue_model",
-        "dialogue": "agent_dialogue_model",
-        "agent_memory": "agent_memory_model",
-        "memory": "agent_memory_model",
-        "agent_vision": "agent_vision_model",
-        "vision": "agent_vision_model",
-    }.get(role or "")
-    configured = getattr(ai_config, field_name, None) if field_name else None
-    text = str(configured or "").strip()
-    return text or ai_config.ai_model
+    task: LLMTask
+    profile: LLMProfile
+    model: str
+    thinking: ThinkingMode
+    multimodal: MultimodalMode
+
+    @property
+    def extra_body(self) -> dict[str, Any] | None:
+        if self.thinking == "auto":
+            return None
+        return {"thinking": {"type": self.thinking}}
 
 
-def agent_multimodal_mode() -> str:
-    mode = (
-        str(getattr(ai_config, "agent_dialogue_multimodal", "auto") or "auto")
-        .strip()
-        .lower()
+def _configured_text(field_name: str) -> str:
+    return str(getattr(ai_config, field_name, "") or "").strip()
+
+
+def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
+    """按任务解析模型档位、推理策略和多模态能力。"""
+
+    if task == "core_chat":
+        profile: LLMProfile = "default"
+        task_thinking: TaskThinkingMode = "inherit"
+    else:
+        profile = getattr(ai_config, f"{task}_llm_profile")
+        task_thinking = getattr(ai_config, f"{task}_thinking")
+
+    if profile == "light":
+        model = _configured_text("ai_light_model") or ai_config.ai_model
+        global_thinking = ai_config.ai_light_thinking
+        multimodal = ai_config.ai_light_multimodal
+    elif profile == "vision":
+        model = _configured_text("ai_vision_model") or ai_config.ai_model
+        global_thinking = ai_config.ai_vision_thinking
+        multimodal = "supported"
+    else:
+        model = ai_config.ai_model
+        global_thinking = ai_config.ai_default_thinking
+        multimodal = ai_config.ai_default_multimodal
+
+    thinking = global_thinking if task_thinking == "inherit" else task_thinking
+    return LLMRequestConfig(
+        task=task,
+        profile=profile,
+        model=model,
+        thinking=thinking,
+        multimodal=multimodal,
     )
-    return mode if mode in {"auto", "true", "false"} else "auto"
+
+
+def vision_model_configured() -> bool:
+    """识图任务所选档位是否有可用且未声明不支持图片的模型。"""
+
+    request = resolve_llm_request("agent_image")
+    if request.profile == "vision":
+        return bool(_configured_text("ai_vision_model"))
+    return request.multimodal != "unsupported" and bool(request.model.strip())
 
 
 def get_client(
@@ -142,13 +221,13 @@ async def complete(
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     timeout: float = 25.0,
-    model: Optional[str] = None,
-    role: Optional[str] = None,
+    task: LLMTask = "core_chat",
     response_format: dict[str, Any] | None = None,
     multimodal: bool = False,
 ) -> Optional[str]:
     """非流式补全：返回完整回复文本；失败/超时/空回复返回 None。"""
     _ = multimodal  # reserved for role-specific provider capability handling
+    request = resolve_llm_request(task)
     started = time.perf_counter()
     outcome = "error"
     result: Optional[str] = None
@@ -167,7 +246,7 @@ async def complete(
             try:
                 response = await asyncio.wait_for(
                     llm_client.chat.completions.create(
-                        model=model or get_agent_model(role),
+                        model=request.model,
                         messages=messages,
                         stream=False,
                         max_tokens=(
@@ -180,6 +259,11 @@ async def complete(
                             if response_format
                             else {}
                         ),
+                        **(
+                            {"extra_body": request.extra_body}
+                            if request.extra_body is not None
+                            else {}
+                        ),
                         **extra,
                     ),
                     timeout=timeout,
@@ -187,23 +271,21 @@ async def complete(
             except asyncio.TimeoutError:
                 outcome = "timeout"
                 logger.warning(
-                    f"LLM 非流式补全超时（model={model or get_agent_model(role)}, "
+                    f"LLM 非流式补全超时（task={task}, model={request.model}, "
                     f"timeout={timeout}s）",
                     exc_info=True,
                 )
                 return None
             except OpenAIError:
                 logger.warning(
-                    f"LLM 非流式补全失败（model={model or get_agent_model(role)}, "
+                    f"LLM 非流式补全失败（task={task}, model={request.model}, "
                     f"timeout={timeout}s）",
                     exc_info=True,
                 )
                 return None
         if not response.choices:
             outcome = "empty"
-            logger.warning(
-                f"LLM 未返回任何 choice（model={model or get_agent_model(role)}）"
-            )
+            logger.warning(f"LLM 未返回任何 choice（task={task}, model={request.model}）")
             return None
         choice = response.choices[0]
         content = (choice.message.content or "").strip()
@@ -213,19 +295,19 @@ async def complete(
             # 截断（finish_reason="length"）：留下诊断信息而不是静默 None
             logger.warning(
                 f"LLM 返回空内容"
-                f"（model={model or get_agent_model(role)}, finish_reason={choice.finish_reason}）"
+                f"（task={task}, model={request.model}, finish_reason={choice.finish_reason}）"
             )
             return None
         outcome = "success"
         logger.debug(
-            f"LLM 补全成功（model={model or get_agent_model(role)}, 长度={len(content)}）"
+            f"LLM 补全成功（task={task}, model={request.model}, 长度={len(content)}）"
         )
         result = content
     except asyncio.CancelledError:
         outcome = "cancelled"
         raise
     finally:
-        _record_ai_metric(role or "complete", outcome, started)
+        _record_ai_metric(task, outcome, started)
     return result
 
 
@@ -236,8 +318,7 @@ async def complete_with_tools(
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     timeout: float = 40.0,
-    model: Optional[str] = None,
-    role: Optional[str] = None,
+    task: LLMTask = "core_chat",
     response_format: dict[str, Any] | None = None,
     multimodal: bool = False,
     raise_on_unsupported: bool = False,
@@ -253,6 +334,7 @@ async def complete_with_tools(
     started = time.perf_counter()
     outcome = "error"
     result: Optional[ChatCompletionMessage] = None
+    request = resolve_llm_request(task)
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
@@ -266,7 +348,7 @@ async def complete_with_tools(
             try:
                 response = await asyncio.wait_for(
                     llm_client.chat.completions.create(
-                        model=model or get_agent_model(role),
+                        model=request.model,
                         messages=messages,
                         # OpenAI 官方及多数兼容端点对空 tools 数组直接 400；
                         # 无工具场景（如主动发言）不传该参数。
@@ -282,6 +364,11 @@ async def complete_with_tools(
                             if response_format
                             else {}
                         ),
+                        **(
+                            {"extra_body": request.extra_body}
+                            if request.extra_body is not None
+                            else {}
+                        ),
                         **extra,
                     ),
                     timeout=timeout,
@@ -289,7 +376,7 @@ async def complete_with_tools(
             except asyncio.TimeoutError:
                 outcome = "timeout"
                 logger.warning(
-                    f"LLM 工具补全超时（model={model or get_agent_model(role)}, "
+                    f"LLM 工具补全超时（task={task}, model={request.model}, "
                     f"timeout={timeout}s）",
                     exc_info=True,
                 )
@@ -300,16 +387,14 @@ async def complete_with_tools(
                     if raise_on_unsupported:
                         raise LLMMultimodalUnsupportedError(str(exc)) from exc
                 logger.warning(
-                    f"LLM 工具补全失败（model={model or get_agent_model(role)}, "
+                    f"LLM 工具补全失败（task={task}, model={request.model}, "
                     f"timeout={timeout}s）",
                     exc_info=True,
                 )
                 return None
         if not response.choices:
             outcome = "empty"
-            logger.warning(
-                f"LLM 未返回任何 choice（model={model or get_agent_model(role)}）"
-            )
+            logger.warning(f"LLM 未返回任何 choice（task={task}, model={request.model}）")
             return None
         choice = response.choices[0]
         message = choice.message
@@ -319,12 +404,12 @@ async def complete_with_tools(
             # 既无文本又无工具调用：推理截断或端点异常，留诊断信息
             logger.warning(
                 f"LLM 工具补全返回空内容"
-                f"（model={model or get_agent_model(role)}, finish_reason={choice.finish_reason}）"
+                f"（task={task}, model={request.model}, finish_reason={choice.finish_reason}）"
             )
             return None
         outcome = "success"
         logger.debug(
-            f"LLM 工具补全成功（model={model or get_agent_model(role)}, "
+            f"LLM 工具补全成功（task={task}, model={request.model}, "
             f"tool_calls={len(message.tool_calls or [])}, 文本长度={len(content)}）"
         )
         result = message
@@ -332,7 +417,7 @@ async def complete_with_tools(
         outcome = "cancelled"
         raise
     finally:
-        _record_ai_metric(role or "complete_with_tools", outcome, started)
+        _record_ai_metric(task, outcome, started)
     return result
 
 

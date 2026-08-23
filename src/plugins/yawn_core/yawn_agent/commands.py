@@ -238,7 +238,7 @@ async def handle_agent_profile(
         .where(
             AgentMemory.group_id == int(event.group_id),
             AgentMemory.subject_user_id == user_id,
-            AgentMemory.memory_type == "profile",
+            AgentMemory.memory_type.in_(("core", "profile")),
             AgentMemory.visibility.in_(("group", "public")),
             AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now),
         )

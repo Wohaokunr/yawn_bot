@@ -64,12 +64,19 @@ from .auth import (
 )
 from .config import API_PATH, BASE_PATH, COOKIE_NAME, DIST_DIR, config
 from .deps import ReadSession, WriteSession, ok, page_params
+from .environment import (
+    EnvironmentConflictError,
+    EnvironmentValidationError,
+    load_environment,
+    update_environment,
+)
 from .fanqie import router as fanqie_router
 from .games import router as games_router
 from .hub import hub
 from .rpg_modules import router as rpg_modules_router
 from .service import (
     BEIJING_TZ,
+    RELATION_GRAPH_LIMIT,
     agent_memory_status,
     delete_one_memory,
     get_group,
@@ -119,6 +126,16 @@ class LoginBody(BaseModel):
 
 class FeatureOverrideBody(BaseModel):
     override: bool | None
+
+
+class EnvironmentChange(BaseModel):
+    key: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$", max_length=128)
+    value: str | None = Field(default=None, max_length=16384)
+
+
+class EnvironmentPatch(BaseModel):
+    version: str = Field(min_length=64, max_length=64)
+    changes: list[EnvironmentChange] = Field(min_length=1, max_length=256)
 
 
 class AgentConfigPatch(BaseModel):
@@ -196,11 +213,11 @@ class PersonaPatch(BaseModel):
 
 
 class MemoryCreateBody(BaseModel):
-    """手动新增记忆；manual 类型是运维置顶事实，无整理任务回写。"""
+    """手动新增记忆；manual/core 是运维置顶事实，无整理任务回写。"""
 
     model_config = ConfigDict(populate_by_name=True)
 
-    type: Literal["summary", "profile", "manual"]
+    type: Literal["summary", "profile", "manual", "core"]
     key: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=2000)
     subject_user_id: Annotated[int, Field(gt=0)] | None = Field(
@@ -334,6 +351,30 @@ async def get_overview(_session: ReadSession) -> dict[str, Any]:
 async def get_plugins(_session: ReadSession) -> dict[str, Any]:
     snapshot = await overview()
     return ok(snapshot["plugins"])
+
+
+@router.get("/environment")
+async def get_environment(_session: ReadSession) -> dict[str, Any]:
+    return ok(await asyncio.to_thread(load_environment))
+
+
+@router.patch("/environment")
+async def patch_environment(
+    body: EnvironmentPatch, _session: WriteSession
+) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(
+            update_environment,
+            body.version,
+            [(item.key, item.value) for item in body.changes],
+        )
+    except EnvironmentConflictError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "环境配置已被其他操作修改，请刷新后重试"
+        ) from exc
+    except EnvironmentValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return ok(result)
 
 
 @router.get("/groups")
@@ -620,6 +661,93 @@ async def get_memories(
     return ok(
         [serialize_memory(row) for row in rows], page_meta(page, page_size, total)
     )
+
+
+# 成员画像面板的成员索引口径：profile/core/manual 都是按成员沉淀的可读事实
+# （对话注入同口径），群级行（subject=0）与 summary 不参与。
+_SUBJECT_MEMORY_TYPES = ("profile", "core", "manual")
+
+
+@router.get("/agent/groups/{group_id}/memories/subjects")
+async def get_memory_subjects(group_id: int, _session: ReadSession) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+        opted_out = set(
+            (
+                await db.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == group_id,
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        clauses = [
+            AgentMemory.group_id == group_id,
+            AgentMemory.subject_user_id != 0,
+            AgentMemory.memory_type.in_(_SUBJECT_MEMORY_TYPES),
+            AgentMemory.visibility.in_(("group", "public")),
+            (
+                AgentMemory.expires_at.is_(None)
+                | (AgentMemory.expires_at >= now_beijing())
+            ),
+        ]
+        if opted_out:
+            clauses.extend(_memory_privacy_clauses(opted_out))
+        rows = list(
+            (
+                await db.execute(
+                    select(AgentMemory)
+                    .where(*clauses)
+                    .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
+                    .limit(RELATION_GRAPH_LIMIT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # rows 按 updated_at 降序：首次见到某成员即其最新更新时间，dict 保持
+        # 插入序使结果天然按最近更新排列，与图谱端点的 Python 聚合模式一致。
+        subjects: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            user_id = int(row.subject_user_id)
+            entry = subjects.get(user_id)
+            if entry is None:
+                entry = {
+                    "userId": str(user_id),
+                    "counts": dict.fromkeys(_SUBJECT_MEMORY_TYPES, 0),
+                    "total": 0,
+                    "updatedAt": iso(row.updated_at),
+                }
+                subjects[user_id] = entry
+            entry["counts"][row.memory_type] += 1
+            entry["total"] += 1
+        # 昵称联接走全群成员表（同图谱端点），避免大 in_ 参数；退群残留回退空昵称。
+        member_rows = list(
+            (
+                await db.execute(
+                    select(UserGroup, BotUser)
+                    .join(BotUser, BotUser.user_id == UserGroup.user_id)
+                    .where(UserGroup.group_id == group_id)
+                    .order_by(UserGroup.user_id)
+                    .limit(RELATION_GRAPH_LIMIT)
+                )
+            )
+            .all()
+        )
+        member_names: dict[int, tuple[str, str | None]] = {
+            int(user.user_id): (user.nickname, membership.group_nickname)
+            for membership, user in member_rows
+        }
+        result = []
+        for user_id, entry in subjects.items():
+            nickname, group_nickname = member_names.get(user_id, ("", None))
+            result.append(
+                {**entry, "nickname": nickname, "groupNickname": group_nickname}
+            )
+    return ok(result)
 
 
 @router.get("/agent/groups/{group_id}/memories/export")
