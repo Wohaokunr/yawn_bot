@@ -65,6 +65,11 @@ class GroupAgentConfig(Model):
     last_compacted_message_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, nullable=True
     )
+    memory_rebuild_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    memory_last_attempt_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    memory_last_success_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    memory_last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    memory_consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     tool_day: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     admin_tool_count: Mapped[int] = mapped_column(Integer, default=0)
     admin_tool_daily_limit: Mapped[int] = mapped_column(Integer, default=30)

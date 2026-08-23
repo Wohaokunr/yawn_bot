@@ -14,8 +14,9 @@ import asyncio
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from nonebot import logger
+from nonebot import get_plugin_config, logger
 from nonebot_plugin_orm import get_session
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import String, func, or_, select
 
 from ..data_models.bot_group import BotGroup
@@ -23,6 +24,7 @@ from .config import API_PATH
 from .deps import ReadSession, WriteSession, ok, page_params
 from .hub import hub
 from .service import iso, page_meta
+from ..replay import load_replay  # noqa: TID252
 
 router = APIRouter(prefix=API_PATH)
 
@@ -32,6 +34,10 @@ _ww_game_log_module: Any = None
 _ww_game_log_resolved = False
 _rpg_state_module: Any = None
 _rpg_state_resolved = False
+_rpg_engine_module: Any = None
+_rpg_engine_resolved = False
+_rpg_config_instance: Any = None
+_rpg_config_resolved = False
 
 
 def _werewolf_game_log() -> Any | None:
@@ -84,6 +90,48 @@ def _rpg_state() -> Any | None:
         _rpg_state_module = module
         _rpg_state_resolved = True
     return _rpg_state_module
+
+
+def _rpg_engine() -> Any | None:
+    """延迟解析跑团引擎投影/行动模块，失败时保持 WebUI 可用。"""
+    global _rpg_engine_module, _rpg_engine_resolved
+    if not _rpg_engine_resolved:
+        try:
+            from ..yawn_rpg import engine as module  # pyright: ignore[reportMissingImports]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"跑团引擎不可用，对局详情降级：{exc}")
+            return None
+        _rpg_engine_module = module
+        _rpg_engine_resolved = True
+    return _rpg_engine_module
+
+
+def _rpg_config() -> Any | None:
+    """延迟读取跑团配置；子插件不可用时返回 None。"""
+    global _rpg_config_instance, _rpg_config_resolved
+    if not _rpg_config_resolved:
+        try:
+            from ..yawn_rpg.config import Config  # pyright: ignore[reportMissingImports]
+
+            _rpg_config_instance = get_plugin_config(Config)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"跑团子插件不可用，行动配置降级：{exc}")
+            return None
+        _rpg_config_resolved = True
+    return _rpg_config_instance
+
+
+class RpgActionSubmit(BaseModel):
+    """管理台投递到 RPG 单写引擎的最小行动载荷。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: int = Field(alias="userId", gt=0)
+    kind: str = Field(min_length=1, max_length=32)
+    text: str | None = Field(default=None, max_length=2_000)
+    minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    # 允许测试与未来客户端携带幂等 id；未提供时由 Action 自行生成。
+    action_id: str | None = Field(default=None, alias="actionId", max_length=64)
 
 
 # 与 yawn_werewolf/commands.py 的 _PHASE_CN 保持一致；不直接 import
@@ -231,6 +279,94 @@ def _rpg_live_game(state: Any, game: Any) -> dict[str, Any]:
     }
 
 
+def _rpg_action_snapshot(  # noqa: PLR0913
+    kind: Any,
+    user_id: int,
+    *,
+    game: Any,
+    value: int | None = None,
+    aux: str | None = None,
+    authority: str = "player",
+    action_id: str | None = None,
+) -> Any:
+    """构造与 ``yawn_rpg.commands._action`` 等价的逻辑快照。
+
+    WebUI 不能 import commands（会注册 NoneBot matcher），因此这里保留一份
+    模块级适配器。两处若新增阶段/轮次快照字段，必须同步维护。
+    """
+    state = _rpg_state()
+    if state is None:
+        return None
+    action_kind = kind
+    if isinstance(kind, str):
+        action_kind = state.ActionKind(kind.lower())
+    phase = state.Phase
+    scene = game.current_scene if game.phase is phase.PLAY else None
+    combat_active = bool(game.combat_order)
+    combat_actor = (
+        game.combat_order[game.combat_index]
+        if combat_active and 0 <= game.combat_index < len(game.combat_order)
+        else None
+    )
+    action = state.Action(
+        action_kind,
+        user_id,
+        value=value,
+        aux=aux,
+        expected_phase=game.phase,
+        expected_scene=scene,
+        expected_explore_round=game.explore_round if game.phase is phase.PLAY else None,
+        expected_combat_round=game.combat_round if combat_active else None,
+        expected_combat_actor=combat_actor,
+        authority=authority,
+    )
+    if action_id:
+        action.action_id = action_id
+    return action
+
+
+def _rpg_pending_deduction(game: Any) -> dict[str, Any] | None:
+    pending = game.pending_deduction
+    if pending is None:
+        return None
+    return {
+        "proposerUserId": pending.proposer_user_id,
+        "clueIds": list(pending.clue_ids),
+        "conclusion": pending.conclusion,
+        "confirmations": sorted(pending.confirmations),
+    }
+
+
+def _rpg_detail(state: Any, engine: Any, game: Any) -> dict[str, Any]:
+    """管理员完整视角；公共/私密文本仍明确分栏，避免前端误播。"""
+    players = [
+        {
+            "seat": player.seat,
+            "userId": player.user_id,
+            "charName": getattr(player.sheet, "name", None)
+            if player.sheet is not None
+            else None,
+            "confirmed": player.confirmed,
+            "incapped": player.incapped,
+            "hp": player.hp,
+            "san": player.san,
+            "rerollsLeft": player.rerolls_left,
+            "dmOk": player.dm_ok,
+        }
+        for player in sorted(game.players, key=lambda item: item.seat)
+    ]
+    return {
+        "game": _rpg_live_game(state, game),
+        "players": players,
+        "situationText": engine.public_situation_text(game),
+        "clueBoardText": engine.clue_board_text(game),
+        "groupLog": list(game.group_log)[-200:],
+        "signupUserIds": list(game.signup_user_ids),
+        "pendingDeduction": _rpg_pending_deduction(game),
+        "completedDeductions": sorted(game.completed_deductions),
+    }
+
+
 async def _group_names(group_ids: set[int]) -> dict[int, str | None]:
     """批量取群名；群不在 presence 表中时映射为 None。"""
     if not group_ids:
@@ -324,6 +460,130 @@ async def stop_rpg_game(group_id: int, _session: WriteSession) -> dict[str, Any]
     _spawn_background(state.stop_game(game))
     await hub.notify_change("rpg_game", str(group_id))
     return ok({"stopping": True})
+
+
+@router.get("/games/rpg/{group_id}/detail")
+async def get_rpg_detail(group_id: int, _session: ReadSession) -> dict[str, Any]:
+    state = _rpg_state()
+    engine = _rpg_engine()
+    if state is None or engine is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
+    game = _require_live_game(state, "跑团", group_id)
+    return ok(_rpg_detail(state, engine, game))
+
+
+@router.get("/games/rpg/{group_id}/players/{user_id}/private")
+async def get_rpg_player_private(
+    group_id: int,
+    user_id: int,
+    _session: ReadSession,
+) -> dict[str, Any]:
+    state = _rpg_state()
+    engine = _rpg_engine()
+    if state is None or engine is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
+    game = _require_live_game(state, "跑团", group_id)
+    player = game.player_by_user(user_id)
+    if player is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "该用户不在本局中")
+    return ok(
+        {
+            "userId": user_id,
+            "situationText": engine.private_situation_text(game, player),
+            "journalText": engine.private_journal_text(game, player),
+        }
+    )
+
+
+@router.post("/games/rpg/{group_id}/actions")
+async def submit_rpg_action(
+    group_id: int,
+    body: RpgActionSubmit,
+    _session: WriteSession,
+) -> dict[str, Any]:
+    state = _rpg_state()
+    config = _rpg_config()
+    if state is None or config is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
+    game = _require_live_game(state, "跑团", group_id)
+    kind_name = body.kind.strip().upper()
+    phase = _enum_value(game.phase)
+    play_kinds = {"SAY", "WAIT", "PASS_TURN"}
+    signup_kinds = {"MODULE_SELECT", "START_GAME"}
+    if phase == "PLAY":
+        if kind_name not in play_kinds:
+            raise HTTPException(status.HTTP_409_CONFLICT, "进行中阶段不支持该行动")
+        actor_user_id = body.user_id
+        player = game.player_by_user(actor_user_id)
+        if player is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "该用户不在本局中")
+        if player.incapped:
+            raise HTTPException(status.HTTP_409_CONFLICT, "该玩家当前无法行动")
+        value = None
+        aux = None
+        if kind_name == "SAY":
+            aux = (body.text or "").strip()
+            if not aux:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "SAY 行动需要文本")
+        elif kind_name == "WAIT":
+            value = max(
+                1,
+                min(
+                    body.minutes if body.minutes is not None else config.rpg_wait_default,
+                    config.rpg_wait_max,
+                ),
+            )
+        action = _rpg_action_snapshot(
+            kind_name,
+            actor_user_id,
+            game=game,
+            value=value,
+            aux=aux,
+            action_id=body.action_id,
+        )
+    elif phase == "SIGNUP":
+        if kind_name not in signup_kinds:
+            raise HTTPException(status.HTTP_409_CONFLICT, "报名阶段不支持该行动")
+        actor_user_id = game.host_user_id
+        aux = (body.text or "").strip() if kind_name == "MODULE_SELECT" else None
+        if kind_name == "MODULE_SELECT" and not aux:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "选择模组需要模组编号或 id")
+        action = _rpg_action_snapshot(
+            kind_name,
+            actor_user_id,
+            game=game,
+            aux=aux,
+            authority="admin",
+            action_id=body.action_id,
+        )
+    else:
+        raise HTTPException(status.HTTP_409_CONFLICT, "当前阶段不支持管理台行动")
+
+    if action is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
+    result = state.submit_action(
+        game,
+        action,
+        queue_max=config.rpg_action_queue_max,
+        user_pending_max=config.rpg_user_pending_max,
+        user_say_pending_max=config.rpg_user_say_pending_max,
+    )
+    result_value = str(getattr(result, "value", result))
+    if result_value == "accepted":
+        await hub.notify_change("rpg_game", str(group_id))
+        return ok({"accepted": True, "actionId": action.action_id})
+    if result_value == "stale":
+        raise HTTPException(status.HTTP_409_CONFLICT, "局面已经变化，请重新操作~")
+    if result_value == "duplicate":
+        raise HTTPException(status.HTTP_409_CONFLICT, "这条行动已经提交过了~")
+    if result_value in {"queue_full", "user_limit"}:
+        message = (
+            "当前行动过多，请稍后再试~"
+            if result_value == "queue_full"
+            else "你的待处理行动过多，请等待系统结算~"
+        )
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, message)
+    raise HTTPException(status.HTTP_409_CONFLICT, "行动未被接受")
 
 
 # ── 战绩查询（赛后总结表） ─────────────────────────────────
@@ -500,6 +760,7 @@ async def rpg_history(
             "hostUserId": row.host_user_id,
             "moduleId": row.module_id,
             "moduleName": row.module_name,
+            "eventLogId": getattr(row, "event_log_id", None),
             "playerCount": row.player_count,
             "startedAt": iso(row.started_at),
             "endedAt": iso(row.ended_at),
@@ -524,3 +785,23 @@ async def rpg_history(
         for row in rows
     ]
     return ok(data, page_meta(page, page_size, total))
+
+
+@router.get("/games/rpg/history/{row_id}/replay")
+async def get_rpg_history_replay(
+    row_id: int,
+    _session: ReadSession,
+) -> dict[str, Any]:
+    """按 ORM 对局行定位事件日志，并返回公开回放投影。"""
+    if _rpg_state() is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
+    from ..yawn_rpg.models import RPGGame  # pyright: ignore[reportMissingImports]
+
+    async with get_session() as db:
+        row = await db.get(RPGGame, row_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "没有找到这局跑团记录")
+    event_log_id = getattr(row, "event_log_id", None)
+    if not event_log_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "这局没有可用的事件日志回放")
+    return ok(load_replay(event_log_id, game_kind="rpg", view="public").as_dict())

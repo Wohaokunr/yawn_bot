@@ -5,6 +5,7 @@ import {
   CrownOutlined,
   DashboardOutlined,
   LogoutOutlined,
+  ReadOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
   TeamOutlined,
@@ -40,6 +41,7 @@ import { AgentAuditTable, AgentDetailPage, AgentGroupsPage } from "./agent";
 import { api, ApiError, openStatusStream, setCsrfToken } from "./api";
 import { FanqiePage } from "./fanqie";
 import { GamesPage } from "./games";
+import { ModulesPage } from "./modules";
 import { formatTime, PageHeader, QueryErrorAlert, TablePagination, useApiQuery } from "./shared";
 import type {
   FeatureState,
@@ -81,6 +83,7 @@ function App(): React.JSX.Element {
           <Route path="groups/:groupId" element={<GroupDetailPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="games" element={<GamesPage />} />
+          <Route path="modules" element={<ModulesPage />} />
           <Route path="fanqie" element={<FanqiePage />} />
           <Route path="agent" element={<AgentGroupsPage />} />
           <Route path="agent/:groupId" element={<AgentDetailPage />} />
@@ -159,7 +162,8 @@ function Shell({ onLogout }: { onLogout: () => void }): React.JSX.Element {
             { key: "/groups", icon: <TeamOutlined />, label: "群组与权限" },
             { key: "/users", icon: <UserOutlined />, label: "全局用户" },
             { key: "/games", icon: <CrownOutlined />, label: "对局中心" },
-            { key: "/fanqie", icon: <BookOutlined />, label: "番茄小说" },
+            { key: "/modules", icon: <BookOutlined />, label: "模组库" },
+            { key: "/fanqie", icon: <ReadOutlined />, label: "番茄小说" },
             { key: "/agent", icon: <ApiOutlined />, label: "Agent 管理" },
             { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
           ]}

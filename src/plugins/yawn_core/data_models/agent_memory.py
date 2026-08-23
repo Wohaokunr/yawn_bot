@@ -40,13 +40,19 @@ class AgentMemory(Model):
         nullable=True,
         index=True,
     )
-    subject_user_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, nullable=True, index=True
+    # 0 表示无特定成员主体。SQLite 的 UNIQUE 约束会把多个 NULL
+    # 视为互不相同，使用稳定哨兵才能真正保证每日摘要幂等。
+    subject_user_id: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False, index=True
     )
     memory_type: Mapped[str] = mapped_column(String(24), default="summary", index=True)
     memory_key: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text)
     evidence_message_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    # auto 由整理任务维护；manual 由管理员维护且自动重建不会覆盖。
+    source_kind: Mapped[str] = mapped_column(String(16), default="auto", index=True)
+    # 冗余涉及成员，保证原始证据过期后仍可完成隐私删除。
+    related_user_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     salience: Mapped[float] = mapped_column(Float, default=0.5)
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     visibility: Mapped[str] = mapped_column(String(24), default="group")
@@ -81,6 +87,10 @@ class AgentRelation(Model):
     subject_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     object_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     relation_type: Mapped[str] = mapped_column(String(32))
+    # auto 由整理任务维护；mention 来自 @提及正则；agent 来自对话工具；
+    # manual 由管理员维护且自动重建不会覆盖。
+    source_kind: Mapped[str] = mapped_column(String(16), default="auto", index=True)
+    note: Mapped[str] = mapped_column(String(200), default="")
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     evidence_count: Mapped[int] = mapped_column(Integer, default=1)
     last_seen_at: Mapped[datetime] = mapped_column(

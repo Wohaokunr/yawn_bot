@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from nonebot import get_driver, logger
 from nonebot_plugin_orm import get_session
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import BigInteger, cast, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from ..data_models.agent_audit import AgentAudit
@@ -47,6 +47,10 @@ from ..yawn_agent.memory import (
     compact_group_memory,
     delete_group_memories,
     delete_member_memories,
+    is_memory_compacting,
+    normalize_relation_type,
+    rebuild_group_memories,
+    record_memory_failure,
 )
 from ..yawn_agent.persona import MAX_FIELD_LENGTH, PERSONA_FIELDS
 from .auth import (
@@ -63,6 +67,7 @@ from .deps import ReadSession, WriteSession, ok, page_params
 from .fanqie import router as fanqie_router
 from .games import router as games_router
 from .hub import hub
+from .rpg_modules import router as rpg_modules_router
 from .service import (
     BEIJING_TZ,
     agent_memory_status,
@@ -73,6 +78,7 @@ from .service import (
     list_group_members,
     list_groups,
     list_users,
+    load_relation_graph,
     overview,
     page_meta,
     serialize_agent_audit,
@@ -89,6 +95,21 @@ from .service import (
 )
 
 router = APIRouter(prefix=API_PATH)
+
+
+def _memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:
+    if not user_ids:
+        return ()
+    related = func.json_each(AgentMemory.related_user_ids).table_valued("value")
+    has_related_optout = exists(
+        select(1)
+        .select_from(related)
+        .where(cast(related.c.value, BigInteger).in_(user_ids))
+    )
+    return (
+        AgentMemory.subject_user_id.not_in(user_ids),
+        ~has_related_optout,
+    )
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -136,6 +157,9 @@ class AgentConfigPatch(BaseModel):
     raw_retention_days: int | None = Field(
         default=None, ge=1, le=365, alias="rawRetentionDays"
     )
+    cross_group_visibility: Literal["isolated", "public_summary"] | None = Field(
+        default=None, alias="crossGroupVisibility"
+    )
     media_cache_enabled: bool | None = Field(default=None, alias="mediaCacheEnabled")
     admin_tool_daily_limit: int | None = Field(
         default=None, ge=1, le=1000, alias="adminToolDailyLimit"
@@ -179,7 +203,12 @@ class MemoryCreateBody(BaseModel):
     type: Literal["summary", "profile", "manual"]
     key: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=2000)
-    subject_user_id: int | None = Field(default=None, alias="subjectUserId")
+    subject_user_id: Annotated[int, Field(gt=0)] | None = Field(
+        default=None, alias="subjectUserId"
+    )
+    related_user_ids: list[Annotated[int, Field(gt=0)]] = Field(
+        default_factory=list, max_length=100, alias="relatedUserIds"
+    )
     salience: float = Field(default=0.7, ge=0, le=1)
     confidence: float = Field(default=0.9, ge=0, le=1)
     expires_in_days: int | None = Field(
@@ -203,6 +232,27 @@ class PrivacyPatchBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     opted_out: bool = Field(alias="optedOut")
+
+
+class RelationCreateBody(BaseModel):
+    """手动新增关系边；manual 来源的边不会被整理任务与重建覆盖。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    subject_user_id: Annotated[int, Field(gt=0)] = Field(alias="subjectUserId")
+    object_user_id: Annotated[int, Field(gt=0)] = Field(alias="objectUserId")
+    type: str = Field(min_length=1, max_length=32)
+    note: str = Field(default="", max_length=200)
+    confidence: float = Field(default=0.9, ge=0, le=1)
+
+
+class RelationPatchBody(BaseModel):
+    """只允许改备注与置信度；类型/两端属于边身份，改动请删除后重建。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    note: str | None = Field(default=None, max_length=200)
+    confidence: float | None = Field(default=None, ge=0, le=1)
 
 
 async def require_group(session: Any, group_id: int) -> BotGroup:
@@ -515,6 +565,10 @@ async def get_memories(
     clauses = [
         AgentMemory.group_id == group_id,
         AgentMemory.visibility.in_(("group", "public")),
+        (
+            AgentMemory.expires_at.is_(None)
+            | (AgentMemory.expires_at >= now_beijing())
+        ),
     ]
     if search:
         pattern = f"%{search}%"
@@ -530,6 +584,20 @@ async def get_memories(
         clauses.append(AgentMemory.subject_user_id == subject_user_id)
     async with get_session() as db:
         await require_group(db, group_id)
+        opted_out = set(
+            (
+                await db.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == group_id,
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if opted_out:
+            clauses.extend(_memory_privacy_clauses(opted_out))
         total = int(
             await db.scalar(
                 select(func.count()).select_from(AgentMemory).where(*clauses)
@@ -558,14 +626,32 @@ async def get_memories(
 async def export_memories(group_id: int, _session: ReadSession) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
+        opted_out = set(
+            (
+                await db.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == group_id,
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        clauses = [
+            AgentMemory.group_id == group_id,
+            AgentMemory.visibility.in_(("group", "public")),
+            (
+                AgentMemory.expires_at.is_(None)
+                | (AgentMemory.expires_at >= now_beijing())
+            ),
+            *_memory_privacy_clauses(opted_out),
+        ]
         rows = list(
             (
                 await db.execute(
                     select(AgentMemory)
-                    .where(
-                        AgentMemory.group_id == group_id,
-                        AgentMemory.visibility.in_(("group", "public")),
-                    )
+                    .where(*clauses)
                     .order_by(AgentMemory.id)
                     .limit(5000)
                 )
@@ -573,8 +659,32 @@ async def export_memories(group_id: int, _session: ReadSession) -> dict[str, Any
             .scalars()
             .all()
         )
+        relation_clauses = [AgentRelation.group_id == group_id]
+        if opted_out:
+            relation_clauses.extend(
+                (
+                    AgentRelation.subject_user_id.not_in(opted_out),
+                    AgentRelation.object_user_id.not_in(opted_out),
+                )
+            )
+        relation_rows = list(
+            (
+                await db.execute(
+                    select(AgentRelation)
+                    .where(*relation_clauses)
+                    .order_by(AgentRelation.id)
+                    .limit(5000)
+                )
+            )
+            .scalars()
+            .all()
+        )
     return ok(
-        {"groupId": str(group_id), "memories": [serialize_memory(row) for row in rows]}
+        {
+            "groupId": str(group_id),
+            "memories": [serialize_memory(row) for row in rows],
+            "relations": [serialize_relation(row) for row in relation_rows],
+        }
     )
 
 
@@ -594,8 +704,35 @@ async def _run_manual_compact(group_id: int) -> None:
     try:
         async with get_session() as db:
             await compact_group_memory(db, group_id)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.exception("WebUI 手动记忆整理失败: %s", group_id)
+        try:
+            async with get_session() as db:
+                await record_memory_failure(
+                    db, group_id, f"手动整理异常: {type(exc).__name__}"
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("WebUI 手动记忆失败状态写入失败: %s", group_id)
+    finally:
+        _compact_inflight.discard(group_id)
+        await hub.notify_change("agent_memory", str(group_id))
+
+
+async def _run_manual_rebuild(group_id: int) -> None:
+    try:
+        async with get_session() as db:
+            await rebuild_group_memories(db, group_id)
+        async with get_session() as db:
+            await compact_group_memory(db, group_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("WebUI 手动记忆重建失败: %s", group_id)
+        try:
+            async with get_session() as db:
+                await record_memory_failure(
+                    db, group_id, f"手动重建异常: {type(exc).__name__}"
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("WebUI 手动重建失败状态写入失败: %s", group_id)
     finally:
         _compact_inflight.discard(group_id)
         await hub.notify_change("agent_memory", str(group_id))
@@ -607,13 +744,28 @@ async def trigger_memory_compact(
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
-    if group_id in _compact_inflight:
+    if group_id in _compact_inflight or is_memory_compacting(group_id):
         raise HTTPException(status.HTTP_409_CONFLICT, "该群正在整理记忆，请稍后再试")
     _compact_inflight.add(group_id)
     task = asyncio.create_task(_run_manual_compact(group_id))
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
     return ok({"started": True})
+
+
+@router.post("/agent/groups/{group_id}/memories/rebuild")
+async def trigger_memory_rebuild(
+    group_id: int, _session: WriteSession
+) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+    if group_id in _compact_inflight or is_memory_compacting(group_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "该群正在整理记忆，请稍后再试")
+    _compact_inflight.add(group_id)
+    task = asyncio.create_task(_run_manual_rebuild(group_id))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return ok({"started": True, "rebuild": True})
 
 
 @router.post("/agent/groups/{group_id}/memories")
@@ -631,11 +783,18 @@ async def create_memory(
         row = AgentMemory(
             group_id=group_id,
             scope="group",
-            subject_user_id=body.subject_user_id,
+            subject_user_id=body.subject_user_id or 0,
             memory_type=body.type,
             memory_key=body.key.strip(),
             content=body.content.strip(),
             evidence_message_ids=[],
+            source_kind="manual",
+            related_user_ids=sorted(
+                {
+                    *body.related_user_ids,
+                    *([body.subject_user_id] if body.subject_user_id else []),
+                }
+            ),
             salience=body.salience,
             confidence=body.confidence,
             visibility="group",
@@ -795,6 +954,25 @@ async def get_relations(
         )
     async with get_session() as db:
         await require_group(db, group_id)
+        opted_out = set(
+            (
+                await db.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == group_id,
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if opted_out:
+            clauses.extend(
+                (
+                    AgentRelation.subject_user_id.not_in(opted_out),
+                    AgentRelation.object_user_id.not_in(opted_out),
+                )
+            )
         total = int(
             await db.scalar(
                 select(func.count()).select_from(AgentRelation).where(*clauses)
@@ -817,6 +995,115 @@ async def get_relations(
     return ok(
         [serialize_relation(row) for row in rows], page_meta(page, page_size, total)
     )
+
+
+@router.get("/agent/groups/{group_id}/relations/graph")
+async def get_relation_graph(group_id: int, _session: ReadSession) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+        return ok(await load_relation_graph(db, group_id))
+
+
+@router.get("/agent/groups/{group_id}/relations/types")
+async def get_relation_types(group_id: int, _session: ReadSession) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+        rows = (
+            (
+                await db.execute(
+                    select(AgentRelation.relation_type)
+                    .where(AgentRelation.group_id == group_id)
+                    .distinct()
+                    .order_by(AgentRelation.relation_type)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return ok([str(row) for row in rows])
+
+
+@router.post("/agent/groups/{group_id}/relations")
+async def create_relation(
+    group_id: int, body: RelationCreateBody, _session: WriteSession
+) -> dict[str, Any]:
+    relation_type = normalize_relation_type(body.type)
+    if not relation_type:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "关系类型不能为空")
+    if body.subject_user_id == body.object_user_id:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "关系两端不能是同一个人"
+        )
+    async with get_session() as db:
+        await require_group(db, group_id)
+        opted_out = set(
+            (
+                await db.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == group_id,
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if body.subject_user_id in opted_out or body.object_user_id in opted_out:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "关系一方已隐私退出，不得建立关系边",
+            )
+        row = AgentRelation(
+            group_id=group_id,
+            subject_user_id=body.subject_user_id,
+            object_user_id=body.object_user_id,
+            relation_type=relation_type,
+            source_kind="manual",
+            note=body.note.strip(),
+            confidence=body.confidence,
+            evidence_count=1,
+            last_seen_at=now_beijing(),
+        )
+        db.add(row)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "这两个成员的该类型关系边已存在"
+            ) from None
+        await db.refresh(row)
+        result = serialize_relation(row)
+    await hub.notify_change("agent_relation", str(row.id))
+    return ok(result)
+
+
+@router.put("/agent/groups/{group_id}/relations/{relation_id}")
+async def update_relation(
+    group_id: int, relation_id: int, body: RelationPatchBody, _session: WriteSession
+) -> dict[str, Any]:
+    updates = body.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "没有可更新的字段")
+    async with get_session() as db:
+        await require_group(db, group_id)
+        row = await db.scalar(
+            select(AgentRelation).where(
+                AgentRelation.group_id == group_id,
+                AgentRelation.id == relation_id,
+            )
+        )
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "关系不存在")
+        if "note" in updates:
+            row.note = str(updates["note"] or "").strip()
+        if updates.get("confidence") is not None:
+            row.confidence = float(updates["confidence"])
+        await db.commit()
+        await db.refresh(row)
+        result = serialize_relation(row)
+    await hub.notify_change("agent_relation", str(relation_id))
+    return ok(result)
 
 
 @router.delete("/agent/groups/{group_id}/relations/{relation_id}")
@@ -1078,6 +1365,7 @@ def register(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(games_router)
     app.include_router(fanqie_router)
+    app.include_router(rpg_modules_router)
 
     @app.middleware("http")
     async def webui_audit_middleware(request: Request, call_next: Any) -> Response:

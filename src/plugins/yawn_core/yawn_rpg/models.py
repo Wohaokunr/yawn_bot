@@ -41,6 +41,12 @@ class RPGGame(Model):
 
     player_count: Mapped[int]
 
+    # 事件日志稳定 id（state.Game.event_log_id）；赛后据此定位 JSONL 回放。
+    # 旧版本对局与写库失败的开局为 None，回放端点据此优雅降级。
+    event_log_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+
     started_at: Mapped[datetime] = mapped_column(default=_now_bj)
 
     # 对局未正常结束时为 None（如流局、强制解散不写终局字段）

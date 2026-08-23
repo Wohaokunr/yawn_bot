@@ -59,7 +59,7 @@ def build_context(
     messages: list[dict[str, Any]],
     members: list[dict[str, Any]],
     memories: list[dict[str, Any]],
-    relations: list[dict[str, Any]],
+    relations: list[str],
     activity: ActivitySnapshot,
     persona: dict[str, str] | str | None = None,
     active_topic: str | None = None,
@@ -85,14 +85,9 @@ def build_context(
             str(item.get("key") or ""),
         ),
     )
-    stable_relations = sorted(
-        relations[:50],
-        key=lambda item: (
-            int(item.get("subject_user_id") or 0),
-            int(item.get("object_user_id") or 0),
-            str(item.get("type") or ""),
-        ),
-    )
+    # 关系边由调用方渲染成可读文本行（如"小张(1) —情侣→ 小李(2)：官宣过"），
+    # 顺序即注入优先级；关系随每次请求变化，属于易变层而非稳定层。
+    relation_lines = list(relations[:50])
     clean_emotion = {
         str(key): value
         for key, value in (emotion_state or {}).items()
@@ -116,7 +111,7 @@ def build_context(
         "members": stable_members,
         "messages": messages[-40:],
         "memories": stable_memories,
-        "relations": stable_relations,
+        "relations": relation_lines,
     }
 
 

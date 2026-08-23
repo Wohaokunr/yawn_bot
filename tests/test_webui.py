@@ -76,6 +76,16 @@ def test_agent_config_and_persona_validation() -> None:
         }
     )
     assert body.tool_allowlist == ["mute_member"]
+    assert (
+        app_module.AgentConfigPatch.model_validate(
+            {"version": None, "crossGroupVisibility": "public_summary"}
+        ).cross_group_visibility
+        == "public_summary"
+    )
+    with pytest.raises(ValidationError):
+        app_module.AgentConfigPatch.model_validate(
+            {"version": None, "crossGroupVisibility": "all"}
+        )
 
     with pytest.raises(ValidationError):
         app_module.AgentConfigPatch.model_validate(
@@ -151,6 +161,8 @@ def test_big_integer_identifiers_are_serialized_as_strings() -> None:
         memory_key="key",
         content="content",
         evidence_message_ids=[],
+        source_kind="manual",
+        related_user_ids=[9_007_199_254_740_991],
         salience=0.5,
         confidence=0.5,
         visibility="group",
@@ -159,6 +171,11 @@ def test_big_integer_identifiers_are_serialized_as_strings() -> None:
     assert payload["id"] == "9007199254740993"
     assert payload["groupId"] == "9007199254740992"
     assert payload["subjectUserId"] == "9007199254740991"
+    assert payload["sourceKind"] == "manual"
+    assert payload["relatedUserIds"] == ["9007199254740991"]
+
+    row.subject_user_id = 0
+    assert service.serialize_memory(row)["subjectUserId"] is None
 
 
 def test_iso_serializes_naive_datetime_as_beijing_time() -> None:
@@ -273,6 +290,8 @@ def test_serialize_relation_and_agent_message_as_strings() -> None:
         subject_user_id=9_007_199_254_740_991,
         object_user_id=9_007_199_254_740_990,
         relation_type="mentions",
+        source_kind="manual",
+        note="管理员录入",
         confidence=0.55,
         evidence_count=3,
         last_seen_at=datetime(2026, 8, 21, 12, 0, 0),  # noqa: DTZ001
@@ -280,6 +299,8 @@ def test_serialize_relation_and_agent_message_as_strings() -> None:
     payload = service.serialize_relation(relation)
     assert payload["id"] == "9007199254740993"
     assert payload["subjectUserId"] == "9007199254740991"
+    assert payload["sourceKind"] == "manual"
+    assert payload["note"] == "管理员录入"
     assert payload["evidenceCount"] == 3  # noqa: PLR2004
 
     message = service.GroupAgentMessage(
@@ -297,3 +318,338 @@ def test_serialize_relation_and_agent_message_as_strings() -> None:
     message_payload = service.serialize_agent_message(message)
     assert message_payload["userId"] == "9007199254740991"
     assert message_payload["receivedAt"] == "2026-08-21T12:00:00+08:00"
+
+
+def test_relation_create_body_validates_fields() -> None:
+    body = app_module.RelationCreateBody.model_validate(
+        {
+            "subjectUserId": 111,
+            "objectUserId": 222,
+            "type": "朋友",
+            "note": "常一起开黑",
+        }
+    )
+    assert body.subject_user_id == 111  # noqa: PLR2004
+    assert body.confidence == 0.9  # noqa: PLR2004
+
+    with pytest.raises(ValidationError):
+        app_module.RelationCreateBody.model_validate(
+            {"subjectUserId": 0, "objectUserId": 222, "type": "好友"}
+        )
+    with pytest.raises(ValidationError):
+        app_module.RelationCreateBody.model_validate(
+            {
+                "subjectUserId": 111,
+                "objectUserId": 222,
+                "type": "好友",
+                "confidence": 1.5,
+            }
+        )
+    with pytest.raises(ValidationError):
+        app_module.RelationCreateBody.model_validate(
+            {"subjectUserId": 111, "objectUserId": 222, "type": ""}
+        )
+
+
+def test_relation_patch_body_requires_updatable_field() -> None:
+    updates = app_module.RelationPatchBody.model_validate(
+        {"note": "新备注", "confidence": 0.8}
+    ).model_dump(exclude_unset=True)
+    assert updates == {"note": "新备注", "confidence": 0.8}
+
+    empty = app_module.RelationPatchBody.model_validate({})
+    assert empty.model_dump(exclude_unset=True) == {}
+
+
+class _ScalarResult:
+    def __init__(self, values: list[Any]) -> None:
+        self._values = values
+
+    def scalars(self) -> "_ScalarResult":
+        return self
+
+    def all(self) -> list[Any]:
+        return self._values
+
+
+class _FakeRelationSession:
+    """覆盖关系边端点用到的 get/execute/scalar/add/commit/refresh 路径。"""
+
+    def __init__(
+        self,
+        *,
+        opted_out: set[int] | None = None,
+        conflict: bool = False,
+        existing: Any = None,
+    ) -> None:
+        self.opted_out = opted_out or set()
+        self.conflict = conflict
+        self.existing = existing
+        self.added: list[Any] = []
+        self.committed = False
+
+    async def get(self, model: Any, key: Any) -> Any:
+        if model.__name__ == "BotGroup" and key == 100:  # noqa: PLR2004
+            return app_module.BotGroup(group_id=key, group_name="测试群")
+        return None
+
+    async def execute(self, _stmt: Any) -> _ScalarResult:
+        return _ScalarResult(list(self.opted_out))
+
+    async def scalar(self, _stmt: Any) -> Any:
+        return self.existing
+
+    def add(self, row: Any) -> None:
+        self.added.append(row)
+
+    async def commit(self) -> None:
+        if self.conflict:
+            raise app_module.IntegrityError("insert", {}, Exception("dup"))
+
+    async def rollback(self) -> None:
+        return None
+
+    async def refresh(self, _row: Any) -> None:
+        return None
+
+
+class _FakeSessionFactory:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> Any:
+        return self._session
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_create_relation_normalizes_type_and_marks_manual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeRelationSession()
+    monkeypatch.setattr(
+        app_module, "get_session", lambda: _FakeSessionFactory(session)
+    )
+
+    create_body = app_module.RelationCreateBody.model_validate(
+        {
+            "subjectUserId": 111,
+            "objectUserId": 222,
+            "type": "对象",
+            "note": " 官宣过 ",
+        }
+    )
+    result = await app_module.create_relation(100, create_body, None)
+
+    assert len(session.added) == 1
+    edge = session.added[0]
+    assert edge.relation_type == "情侣"
+    assert edge.source_kind == "manual"
+    assert edge.note == "官宣过"
+    assert result["data"]["sourceKind"] == "manual"
+
+
+@pytest.mark.asyncio
+async def test_create_relation_rejects_same_endpoints_and_opted_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeRelationSession()
+    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+
+    with pytest.raises(HTTPException) as same:
+        await app_module.create_relation(
+            100,
+            app_module.RelationCreateBody.model_validate(
+                {"subjectUserId": 111, "objectUserId": 111, "type": "好友"}
+            ),
+            None,
+        )
+    assert same.value.status_code == 422  # noqa: PLR2004
+
+    privacy_session = _FakeRelationSession(opted_out={222})
+    monkeypatch.setattr(
+        app_module, "get_session", lambda: _FakeSessionFactory(privacy_session)
+    )
+    with pytest.raises(HTTPException) as opted_out:
+        await app_module.create_relation(
+            100,
+            app_module.RelationCreateBody.model_validate(
+                {"subjectUserId": 111, "objectUserId": 222, "type": "好友"}
+            ),
+            None,
+        )
+    assert opted_out.value.status_code == 422  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_create_relation_conflict_returns_409(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeRelationSession(conflict=True)
+    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+
+    with pytest.raises(HTTPException) as conflict:
+        await app_module.create_relation(
+            100,
+            app_module.RelationCreateBody.model_validate(
+                {"subjectUserId": 111, "objectUserId": 222, "type": "好友"}
+            ),
+            None,
+        )
+    assert conflict.value.status_code == 409  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_update_relation_only_touches_note_and_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = service.AgentRelation(
+        id=7,
+        group_id=100,
+        subject_user_id=111,
+        object_user_id=222,
+        relation_type="好友",
+        source_kind="auto",
+        note="",
+        confidence=0.5,
+        evidence_count=1,
+        last_seen_at=datetime(2026, 8, 21, 12, 0, 0),  # noqa: DTZ001
+    )
+    session = _FakeRelationSession(existing=existing)
+    monkeypatch.setattr(
+        app_module, "get_session", lambda: _FakeSessionFactory(session)
+    )
+
+    patch_body = app_module.RelationPatchBody.model_validate(
+        {"note": "常一起开黑", "confidence": 0.85}
+    )
+    result = await app_module.update_relation(100, 7, patch_body, None)
+
+    assert existing.relation_type == "好友"
+    assert existing.note == "常一起开黑"
+    assert existing.confidence == 0.85  # noqa: PLR2004
+    assert result["data"]["note"] == "常一起开黑"
+
+
+class _FakeGraphSession:
+    """图谱端点用到的 get/execute 路径：按查询目标模型分发结果。"""
+
+    def __init__(
+        self,
+        *,
+        opted_out: set[int] | None = None,
+        relations: list[Any] | None = None,
+        members: list[tuple[Any, Any]] | None = None,
+    ) -> None:
+        self.opted_out = opted_out or set()
+        self.relations = relations or []
+        self.members = members or []
+
+    async def get(self, model: Any, key: Any) -> Any:
+        if model.__name__ == "BotGroup" and key == 100:  # noqa: PLR2004
+            return app_module.BotGroup(group_id=key, group_name="测试群")
+        return None
+
+    async def execute(self, stmt: Any) -> _ScalarResult:
+        entity = stmt.column_descriptions[0]["entity"]
+        name = getattr(entity, "__name__", str(entity))
+        if name == "AgentPrivacy":
+            return _ScalarResult(list(self.opted_out))
+        if name == "AgentRelation":
+            # 模拟 SQL 的 not_in 过滤：隐私退出成员参与的边不出现在结果中。
+            rows = [
+                row
+                for row in self.relations
+                if row.subject_user_id not in self.opted_out
+                and row.object_user_id not in self.opted_out
+            ]
+            return _ScalarResult(rows)
+        return _ScalarResult(list(self.members))
+
+
+def _graph_relation(
+    relation_id: int, subject: int, target: int, relation_type: str = "好友"
+) -> Any:
+    return service.AgentRelation(
+        id=relation_id,
+        group_id=100,
+        subject_user_id=subject,
+        object_user_id=target,
+        relation_type=relation_type,
+        source_kind="auto",
+        note="",
+        confidence=0.8,
+        evidence_count=1,
+        last_seen_at=datetime(2026, 8, 21, 12, 0, 0),  # noqa: DTZ001
+    )
+
+
+@pytest.mark.asyncio
+async def test_relation_graph_merges_members_and_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relations = [
+        _graph_relation(1, 111, 222),
+        _graph_relation(2, 333, 111, "对立"),
+        # 444 已隐私退出，含其的边应被过滤。
+        _graph_relation(3, 111, 444),
+    ]
+    members = [
+        (
+            service.UserGroup(group_id=100, user_id=111, role="member"),
+            service.BotUser(user_id=111, nickname="小明"),
+        ),
+        (
+            service.UserGroup(group_id=100, user_id=222, role="admin"),
+            service.BotUser(user_id=222, nickname="小红"),
+        ),
+        # 555 是无边成员，应标记为未连接。
+        (
+            service.UserGroup(group_id=100, user_id=555, role="member"),
+            service.BotUser(user_id=555, nickname="小刚"),
+        ),
+        # 333 已不在成员表（退群残留），仍需补节点避免边悬空。
+    ]
+    session = _FakeGraphSession(
+        opted_out={444}, relations=relations, members=members
+    )
+    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+
+    result = await app_module.get_relation_graph(100, None)
+
+    data = result["data"]
+    assert [edge["id"] for edge in data["edges"]] == ["1", "2"]
+    assert all(isinstance(edge["subjectUserId"], str) for edge in data["edges"])
+    nodes = {node["userId"]: node for node in data["nodes"]}
+    assert set(nodes) == {"111", "222", "333", "555"}
+    assert nodes["111"]["nickname"] == "小明"
+    assert nodes["111"]["degree"] == 2  # noqa: PLR2004
+    assert nodes["111"]["linked"] is True
+    assert nodes["222"]["role"] == "admin"
+    assert nodes["333"]["nickname"] == ""
+    assert nodes["333"]["linked"] is True
+    assert nodes["333"]["degree"] == 1
+    assert nodes["555"]["linked"] is False
+    assert nodes["555"]["degree"] == 0
+    assert data["meta"] == {"relationTruncated": False, "memberTruncated": False}
+
+
+@pytest.mark.asyncio
+async def test_relation_graph_marks_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relations = [
+        _graph_relation(index, 1000 + index, 9000 + index)
+        for index in range(service.RELATION_GRAPH_LIMIT + 1)
+    ]
+    session = _FakeGraphSession(relations=relations)
+    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+
+    result = await app_module.get_relation_graph(100, None)
+
+    data = result["data"]
+    assert len(data["edges"]) == service.RELATION_GRAPH_LIMIT
+    assert data["meta"]["relationTruncated"] is True
+    assert data["meta"]["memberTruncated"] is False

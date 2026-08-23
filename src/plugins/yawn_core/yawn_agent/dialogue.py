@@ -13,7 +13,7 @@ from typing import Any
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
 from nonebot_plugin_orm import get_session
-from sqlalchemy import select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
@@ -35,10 +35,10 @@ from .config_store import get_or_create_config
 from .context import ActivitySnapshot, build_context, now_beijing
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
-from .memory import rank_memories, rank_relations
+from .memory import effective_relation_confidence, rank_memories
 from .message_parser import NormalizedMessage
 from .persona import resolve_persona
-from .prompt import build_messages, prompt_cache_key
+from .prompt import build_messages, prompt_cache_key, stable_context_key
 from .tools import MAX_TOOL_ROUNDS, build_tool_schemas, execute_tool
 
 _GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "在吗", "在不在")
@@ -48,6 +48,8 @@ _MAX_TURN_SECONDS = 120.0
 _SEND_TIMEOUT = 15.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
+_MEMORY_CONTEXT_CHAR_BUDGET = 6_000
+_MEMORY_CONTEXT_LIMIT = 20
 _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
@@ -190,6 +192,109 @@ async def persist_bot_reply(
     dbg(f"群 {group_id} bot 发言 {message_id} 已加入自言落库(role=bot)")
 
 
+async def _activity_window_counts(
+    session: Any,
+    group_id: int,
+    now: datetime,
+    *,
+    bot_id: int | None = None,
+    exclude_user_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    """60 分钟窗口活跃度的一条 SQL 聚合；对话与主动发言路径共用。
+
+    旧实现从"最新 40/60 条消息"在 Python 侧数窗口，活跃群覆盖不全会
+    低估 messages_60m/participants_60m/member_messages_60m；聚合查询不受
+    加载条数截断影响。隐私退出用户统一排除（原主动发言路径未排除，
+    与对话读路径口径不一致）。last_message_at 不限窗口，供冷场判定。
+    """
+
+    clauses: list[Any] = [
+        GroupAgentMessage.group_id == group_id,
+        (
+            GroupAgentMessage.expires_at.is_(None)
+            | (GroupAgentMessage.expires_at >= now)
+        ),
+    ]
+    if exclude_user_ids is not None and exclude_user_ids:
+        clauses.append(GroupAgentMessage.user_id.not_in(exclude_user_ids))
+    elif exclude_user_ids is None:
+        opted_out = select(AgentPrivacy.user_id).where(
+            AgentPrivacy.group_id == group_id,
+            AgentPrivacy.user_id == GroupAgentMessage.user_id,
+            AgentPrivacy.opted_out.is_(True),
+        )
+        clauses.append(~exists(opted_out))
+    if bot_id is not None:
+        clauses.append(GroupAgentMessage.bot_id == bot_id)
+    in_window = GroupAgentMessage.received_at >= now - timedelta(hours=1)
+    is_member = GroupAgentMessage.role != "bot"
+    row = (
+        await session.execute(
+            select(
+                func.max(GroupAgentMessage.received_at),
+                func.max(
+                    case((in_window & is_member, GroupAgentMessage.received_at))
+                ),
+                func.sum(
+                    case(
+                        (
+                            GroupAgentMessage.received_at >= now - timedelta(minutes=5),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            GroupAgentMessage.received_at
+                            >= now - timedelta(minutes=20),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(case((in_window, 1), else_=0)),
+                func.sum(case((in_window & is_member, 1), else_=0)),
+                func.count(func.distinct(case((in_window, GroupAgentMessage.user_id)))),
+                func.sum(
+                    case(
+                        (
+                            in_window & GroupAgentMessage.normalized_text.contains("@"),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            in_window
+                            & (
+                                func.json_array_length(GroupAgentMessage.reply_chain)
+                                > 0
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+            ).where(*clauses)
+        )
+    ).one()
+    return {
+        "last_message_at": row[0],
+        "last_member_message_at": row[1],
+        "messages_5m": int(row[2] or 0),
+        "messages_20m": int(row[3] or 0),
+        "messages_60m": int(row[4] or 0),
+        "member_messages_60m": int(row[5] or 0),
+        "participants_60m": int(row[6] or 0),
+        "mentions_60m": int(row[7] or 0),
+        "replies_60m": int(row[8] or 0),
+    }
+
+
 async def _load_context(
     session: Any,
     group_id: int,
@@ -255,7 +360,10 @@ async def _load_context(
     member_rows = (
         (
             await session.execute(
-                select(UserGroup).where(UserGroup.group_id == group_id).limit(100)
+                select(UserGroup)
+                .where(UserGroup.group_id == group_id)
+                .order_by(UserGroup.last_seen_at.desc())
+                .limit(100)
             )
         )
         .scalars()
@@ -287,7 +395,7 @@ async def _load_context(
         AgentMemory.visibility.in_(("group", "public")),
         (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
     ]
-    memory_rows = (
+    candidate_rows = (
         (
             await session.execute(
                 select(AgentMemory)
@@ -299,74 +407,252 @@ async def _load_context(
         .scalars()
         .all()
     )
-    # 候选取回后按当前话题相关性重排：换话题不再注入旧热点，发言人画像优先。
-    memory_rows = rank_memories(
-        list(memory_rows), recent_texts, speaker_id, now, limit=30
-    )
-    memories = [
-        {
-            "type": row.memory_type,
-            "subject_user_id": row.subject_user_id,
-            "key": row.memory_key,
-            "content": row.content,
-            "salience": row.salience,
-            "confidence": row.confidence,
-        }
-        for row in memory_rows
-    ]
-    dbg(
-        f"群 {group_id} 加载上下文: 记忆 {len(memories)} 条(候选 120 按相关性重排取 30,"
-        f"当前发言人={speaker_id})"
-    )
-    relation_rows = (
+    summary_rows = (
         (
             await session.execute(
-                select(AgentRelation)
-                .where(AgentRelation.group_id == group_id)
-                .order_by(AgentRelation.confidence.desc())
-                .limit(120)
+                select(AgentMemory)
+                .where(*memory_clauses, AgentMemory.memory_type == "summary")
+                .order_by(AgentMemory.updated_at.desc())
+                .limit(40)
             )
         )
         .scalars()
         .all()
     )
-    # 关系边优先保留近期发言者相关的高置信边，避免静默成员长期占用注入名额。
-    relation_rows = rank_relations(
-        list(relation_rows), {int(item["user_id"]) for item in messages}
-    )
-    relations = [
-        {
-            "subject_user_id": row.subject_user_id,
-            "object_user_id": row.object_user_id,
-            "type": row.relation_type,
-            "confidence": row.confidence,
-            "evidence_count": row.evidence_count,
-        }
-        for row in relation_rows
+    speaker_rows: list[AgentMemory] = []
+    if speaker_id is not None:
+        # 当前发言者画像独立查询，不能先和群级高显著记忆争抢 SQL LIMIT。
+        speaker_rows = list(
+            (
+                await session.execute(
+                    select(AgentMemory)
+                    .where(
+                        *memory_clauses,
+                        AgentMemory.subject_user_id == speaker_id,
+                        AgentMemory.memory_type.in_(("profile", "manual")),
+                    )
+                    .order_by(
+                        case((AgentMemory.memory_type == "profile", 0), else_=1),
+                        AgentMemory.salience.desc(),
+                        AgentMemory.updated_at.desc(),
+                    )
+                    .limit(32)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    memory_rows = [*speaker_rows, *summary_rows, *candidate_rows]
+    seen_local_ids: set[int] = set()
+    local_rows: list[AgentMemory] = []
+    for row in memory_rows:
+        row_id = int(row.id or 0)
+        if row_id in seen_local_ids:
+            continue
+        seen_local_ids.add(row_id)
+        if (
+            str(row.memory_key).startswith("public_daily:")
+            or int(row.subject_user_id or 0) in opted_out
+            or opted_out.intersection(set(row.related_user_ids or []))
+        ):
+            continue
+        local_rows.append(row)
+    direct = [
+        row
+        for row in local_rows
+        if speaker_id is not None
+        and int(row.subject_user_id or 0) == speaker_id
+        and row.memory_type in {"profile", "manual"}
     ]
-    dbg(f"群 {group_id} 加载上下文: 关系 {len(relations)} 条(上限 50)")
-    # 活跃度统计按 60 分钟时间窗过滤；rows 只是保留期内的最新 40 条。
-    window_start = now - timedelta(hours=1)
-    in_window = [row for row in rows if row.received_at >= window_start]
-    member_rows_in_window = [row for row in in_window if row.role != "bot"]
+    summaries = [row for row in local_rows if row.memory_type == "summary"]
+    ranked_local = rank_memories(local_rows, recent_texts, speaker_id, now, limit=40)
+
+    shared_rows: list[AgentMemory] = []
+    if config.cross_group_visibility == "public_summary":
+        shared_rows = list(
+            (
+                await session.execute(
+                    select(AgentMemory)
+                    .join(
+                        GroupAgentConfig,
+                        GroupAgentConfig.group_id == AgentMemory.group_id,
+                    )
+                    .where(
+                        AgentMemory.group_id != group_id,
+                        AgentMemory.memory_type == "summary",
+                        AgentMemory.visibility == "public",
+                        AgentMemory.memory_key.startswith("public_daily:"),
+                        AgentMemory.expires_at.is_not(None),
+                        AgentMemory.expires_at >= now,
+                        GroupAgentConfig.cross_group_visibility == "public_summary",
+                    )
+                    .order_by(AgentMemory.updated_at.desc())
+                    .limit(20)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        source_groups = {int(row.group_id or 0) for row in shared_rows}
+        shared_optouts = set(
+            (
+                await session.execute(
+                    select(AgentPrivacy.group_id, AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id.in_(source_groups),
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            ).all()
+        ) if source_groups else set()
+        shared_rows = [
+            row
+            for row in shared_rows
+            if not any(
+                (int(row.group_id or 0), int(user_id)) in shared_optouts
+                for user_id in row.related_user_ids or []
+            )
+        ]
+        # 跨群共享摘要按 updated_at 确定性取前 4：候选超过 4 条时若按
+        # 话题相关性重排，选择会随每条新消息翻转，击穿稳定层前缀缓存。
+        shared_rows = shared_rows[:4]
+
+    ordered: list[tuple[AgentMemory, str]] = []
+    seen_memory_ids: set[int] = set()
+    # source_scope 同时决定记忆进入提示词的稳定层（group_summary/shared_public，
+    # 只随整理变化、可被前缀缓存命中）还是易变层（speaker/topic，随请求变化）。
+    # 稳定来源排在前面：6000 字符预算从前往后消耗，稳定条目先入账，
+    # 其截断点才不会随发言人画像的长短浮动。
+    for row, source in [
+        *((row, "group_summary") for row in summaries[:5]),
+        *((row, "shared_public") for row in shared_rows),
+        *((row, "speaker") for row in direct[:8]),
+        *((row, "topic") for row in ranked_local[:3]),
+    ]:
+        row_id = int(row.id or 0)
+        if row_id in seen_memory_ids:
+            continue
+        seen_memory_ids.add(row_id)
+        ordered.append((row, source))
+
+    name_by_id = {
+        int(item["user_id"]): str(item.get("name") or item["user_id"])
+        for item in members
+    }
+    memories: list[dict[str, Any]] = []
+    # 以最终 JSON 数组的真实字符数计预算（含 [] 和条目间的 ", "）。
+    memory_chars = 2
+    for row, source in ordered:
+        content = str(row.content or "").strip()
+        if not content:
+            continue
+        if len(memories) >= _MEMORY_CONTEXT_LIMIT:
+            break
+        subject_id = int(row.subject_user_id or 0)
+        item: dict[str, Any] = {
+            "type": row.memory_type,
+            "subject_user_id": subject_id or None,
+            "subject_name": name_by_id.get(subject_id) if subject_id else None,
+            "key": row.memory_key,
+            "content": "",
+            "salience": row.salience,
+            "confidence": row.confidence,
+            "source": row.source_kind,
+            "source_scope": source,
+            "source_date": str(row.memory_key).rsplit(":", 1)[-1]
+            if "daily:" in str(row.memory_key)
+            else (row.updated_at or row.created_at or now).date().isoformat(),
+        }
+        overhead = len(json.dumps(item, ensure_ascii=False))
+        separator_chars = 2 if memories else 0
+        remaining = (
+            _MEMORY_CONTEXT_CHAR_BUDGET
+            - memory_chars
+            - separator_chars
+            - overhead
+        )
+        if remaining <= 0:
+            break
+        item["content"] = content[:remaining]
+        item_chars = len(json.dumps(item, ensure_ascii=False))
+        memories.append(item)
+        memory_chars += separator_chars + item_chars
+    dbg(
+        f"群 {group_id} 加载上下文: 记忆 {len(memories)} 条/"
+        f"{memory_chars} 字(预算 {_MEMORY_CONTEXT_CHAR_BUDGET},当前发言人={speaker_id})"
+    )
+    participant_ids = {
+        int(item["user_id"]) for item in messages if item.get("role") != "bot"
+    }
+    relation_rows: list[AgentRelation] = []
+    if participant_ids:
+        # 先在 SQL 层限定当前上下文参与者，再取候选池，避免无关高置信边
+        # 把低一些但当前真正相关的关系挤出候选集。
+        relation_rows = list(
+            (
+                await session.execute(
+                    select(AgentRelation)
+                    .where(
+                        AgentRelation.group_id == group_id,
+                        AgentRelation.subject_user_id.not_in(opted_out),
+                        AgentRelation.object_user_id.not_in(opted_out),
+                        or_(
+                            AgentRelation.subject_user_id.in_(participant_ids),
+                            AgentRelation.object_user_id.in_(participant_ids),
+                        ),
+                    )
+                    .order_by(AgentRelation.confidence.desc())
+                    .limit(60)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    def _relation_label(user_id: int) -> str:
+        # 成员名单只取活跃 top-100，解析不到名字时兜底 QQ 号，避免渲染成 null。
+        name = name_by_id.get(int(user_id))
+        return f"{name}({user_id})" if name else str(user_id)
+
+    # 生效置信度按"最后见到"分段降权：沉寂数月的老边让位给近期仍在互动的新边。
+    ranked_relations = sorted(
+        relation_rows,
+        key=lambda row: (
+            -effective_relation_confidence(
+                float(row.confidence or 0.0), row.last_seen_at, now
+            ),
+            -int(row.evidence_count or 0),
+            int(row.id or 0),
+        ),
+    )[:20]
+    relations: list[str] = []
+    for row in ranked_relations:
+        line = (
+            f"{_relation_label(int(row.subject_user_id))} "
+            f"—{row.relation_type}→ {_relation_label(int(row.object_user_id))}"
+        )
+        note = str(row.note or "").strip()
+        relations.append(f"{line}：{note}" if note else line)
+    dbg(
+        f"群 {group_id} 加载上下文: 关系 {len(relations)} 条"
+        f"(候选 {len(relation_rows)},上限 20)"
+    )
+    # 活跃度改用聚合查询精确统计 60 分钟窗口，不再受最新 40 条截断影响。
+    counts = await _activity_window_counts(
+        session, group_id, now, bot_id=bot_id, exclude_user_ids=opted_out
+    )
     activity = ActivitySnapshot(
-        rows[0].received_at if rows else None,
-        messages_5m=sum(
-            (now - row.received_at).total_seconds() < 300 for row in in_window
-        ),
-        messages_20m=sum(
-            (now - row.received_at).total_seconds() < 1200 for row in in_window
-        ),
-        messages_60m=len(in_window),
-        participants_60m=len({row.user_id for row in in_window}),
-        replies_60m=sum(bool(row.reply_chain) for row in in_window),
-        mentions_60m=sum("@" in row.normalized_text for row in in_window),
+        counts["last_message_at"],
+        messages_5m=counts["messages_5m"],
+        messages_20m=counts["messages_20m"],
+        messages_60m=counts["messages_60m"],
+        participants_60m=counts["participants_60m"],
+        replies_60m=counts["replies_60m"],
+        mentions_60m=counts["mentions_60m"],
         last_agent_at=config.last_agent_at,
         proactive_today=config.proactive_count,
-        last_member_message_at=(
-            member_rows_in_window[0].received_at if member_rows_in_window else None
-        ),
-        member_messages_60m=len(member_rows_in_window),
+        last_member_message_at=counts["last_member_message_at"],
+        member_messages_60m=counts["member_messages_60m"],
     )
     dbg(
         f"群 {group_id} 活跃度快照: 5m={activity.messages_5m} 20m={activity.messages_20m} "
@@ -647,10 +933,12 @@ async def process_group_message(
                 model=model,
                 persona_version=config.persona_version,
             )
+            stable_key = stable_context_key(context)
             dbg(
                 f"群 {group_id} 提示词构建完成: messages={len(messages)} 条 "
                 f"prompt 前缀指纹={_prefix_fingerprint[:12]}… "
                 f"cache_key={'命中' if cache_key in _PROMPT_CACHE_KEYS else '未命中'} "
+                f"stable_context={'命中' if stable_key in _PROMPT_CACHE_KEYS else '未命中'} "
                 f"用户 prompt={user_prompt!r}"
             )
             try:
@@ -659,10 +947,16 @@ async def process_group_message(
                 record_agent_cache(
                     "prompt", "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss"
                 )
+                # 稳定层指纹反映"记忆+群身份"这一实质缓存段的命中情况；
+                # 同一整理窗口内应保持命中，整理落库后转为未命中属预期。
+                record_agent_cache(
+                    "context", "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss"
+                )
             except Exception:  # noqa: BLE001
                 dbg_exc(f"群 {group_id} 上报 prompt 缓存指标失败(忽略)")
-            _PROMPT_CACHE_KEYS[cache_key] = None
-            _PROMPT_CACHE_KEYS.move_to_end(cache_key)
+            for key in (cache_key, stable_key):
+                _PROMPT_CACHE_KEYS[key] = None
+                _PROMPT_CACHE_KEYS.move_to_end(key)
             while len(_PROMPT_CACHE_KEYS) > _PROMPT_CACHE_LIMIT:
                 _PROMPT_CACHE_KEYS.popitem(last=False)
             fallback_attempted = False

@@ -54,6 +54,7 @@ export interface AgentConfig {
   cooldownMinutes: number;
   dailyLimit: number;
   rawRetentionDays: number;
+  crossGroupVisibility: "isolated" | "public_summary";
   mediaCacheEnabled: boolean;
   adminToolDailyLimit: number;
   toolAllowlist: string[];
@@ -79,6 +80,8 @@ export interface MemoryItem {
   type: string;
   key: string;
   content: string;
+  sourceKind: "auto" | "manual";
+  relatedUserIds: string[];
   salience: number;
   confidence: number;
   visibility: string;
@@ -97,6 +100,12 @@ export interface AgentMemoryStatus {
   total: number;
   oldestUpdatedAt: string | null;
   newestUpdatedAt: string | null;
+  rebuildRequired: boolean;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  inFlight: boolean;
 }
 
 export interface AgentRelationItem {
@@ -105,9 +114,27 @@ export interface AgentRelationItem {
   subjectUserId: string;
   objectUserId: string;
   type: string;
+  sourceKind: string;
+  note: string;
   confidence: number;
   evidenceCount: number;
   lastSeenAt: string | null;
+}
+
+// 关系图谱节点：linked 表示该成员出现在关系边中，degree 为相关边数。
+export interface AgentRelationGraphNode {
+  userId: string;
+  nickname: string;
+  groupNickname: string | null;
+  role: string;
+  linked: boolean;
+  degree: number;
+}
+
+export interface AgentRelationGraph {
+  nodes: AgentRelationGraphNode[];
+  edges: AgentRelationItem[];
+  meta: { relationTruncated: boolean; memberTruncated: boolean };
 }
 
 export interface AgentMessageItem {
@@ -249,6 +276,115 @@ export interface RpgLiveGame {
   players: RpgLivePlayer[];
 }
 
+export interface RpgDetailPlayer extends RpgLivePlayer {
+  hp: number;
+  san: number;
+  rerollsLeft: number;
+  dmOk: boolean;
+}
+
+export interface RpgPlayerPrivate {
+  userId: number;
+  situationText: string;
+  journalText: string;
+}
+
+export interface RpgPendingDeduction {
+  proposerUserId: number;
+  clueIds: string[];
+  conclusion: string;
+  confirmations: number[];
+}
+
+export interface RpgGameDetail {
+  game: RpgLiveGame;
+  players: RpgDetailPlayer[];
+  situationText: string;
+  clueBoardText: string;
+  groupLog: string[];
+  signupUserIds: number[];
+  pendingDeduction: RpgPendingDeduction | null;
+  completedDeductions: string[];
+}
+
+export type RpgActionKind = "SAY" | "WAIT" | "PASS_TURN" | "MODULE_SELECT" | "START_GAME";
+
+export interface RpgReplayEvent {
+  sequence: number;
+  occurred_at: string;
+  event_type: string;
+  phase: string | null;
+  round: number | null;
+  actor_seat: number | null;
+  detail: string;
+  audience: "public" | "personal";
+}
+
+export interface RpgReplay {
+  game_id: string;
+  game_kind: "rpg" | null;
+  view: "public" | "personal";
+  viewer_seat: number | null;
+  available: boolean;
+  reason: string | null;
+  title: string;
+  started_at: string | null;
+  ended_at: string | null;
+  summary: Record<string, string>;
+  events: RpgReplayEvent[];
+  warnings: string[];
+}
+
+export interface RpgModuleSummary {
+  id: string;
+  name: string;
+  description: string;
+  difficulty: string;
+  minPlayers: number;
+  maxPlayers: number;
+  startScene: string;
+  sceneCount: number;
+  npcCount: number;
+  monsterCount: number;
+  clueCount: number;
+  deductionCount: number;
+  endingCount: number;
+  eventCount: number;
+}
+
+export interface RpgModuleDetail extends RpgModuleSummary {
+  opening: string;
+  genericEndings: boolean;
+  time: { start: string; costs: Record<string, number> };
+  scenes: {
+    id: string;
+    name: string;
+    narration: string;
+    idleNarration: string | null;
+    npcs: string[];
+    monsters: string[];
+    checks: Record<string, unknown>[];
+    exits: Record<string, unknown>[];
+  }[];
+  npcs: {
+    id: string;
+    name: string;
+    publicDesc: string;
+    persona: string;
+    knows: string[];
+    secrets: string[];
+    facts: { id: string; name: string; text: string }[];
+    socialNodes: Record<string, unknown>[];
+    schedule: Record<string, unknown>[];
+    [key: string]: unknown;
+  }[];
+  monsters: Record<string, unknown>[];
+  clues: { id: string; name: string; text: string; category: string; sourceHint: string }[];
+  deductions: Record<string, unknown>[];
+  endings: Record<string, unknown>[];
+  events: Record<string, unknown>[];
+}
+
 export interface LiveGames {
   werewolf: { available: boolean; games: WerewolfLiveGame[] };
   rpg: { available: boolean; games: RpgLiveGame[] };
@@ -299,6 +435,7 @@ export interface RpgHistoryGame {
   hostUserId: number;
   moduleId: string;
   moduleName: string;
+  eventLogId: string | null;
   playerCount: number;
   startedAt: string | null;
   endedAt: string | null;
