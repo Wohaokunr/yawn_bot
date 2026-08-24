@@ -885,6 +885,22 @@ def test_conversation_turn_limit_closes_session() -> None:
     assert conversation.current_conversation(9, 100) is None
 
 
+def test_close_group_conversations_only_closes_target_group() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import conversation
+
+    conversation.reset_for_tests()
+    conversation.mark_bot_reply(9, 100, topic="测试", source="test")
+    conversation.mark_bot_reply(10, 100, topic="测试", source="test")
+    conversation.mark_bot_reply(9, 200, topic="其他群", source="test")
+
+    assert conversation.close_group_conversations(100, reason="关闭开关") == 2
+    assert conversation.current_conversation(9, 100) is None
+    assert conversation.current_conversation(10, 100) is None
+    assert conversation.current_conversation(9, 200) is not None
+    conversation.reset_for_tests()
+
+
 def test_conversation_evaluation_and_wait_limits() -> None:
     _load_agent_modules()
     from src.plugins.yawn_core.yawn_agent import conversation

@@ -346,5 +346,6 @@ async def test_agent_diagnostics_uses_runtime_defaults_without_persisted_config(
     assert result["effective"]["triggerMode"] == "mention_or_proactive"
     assert result["effective"]["dailyLimit"] == 30
     assert result["effective"]["cooldownMinutes"] == 8
+    assert result["effective"]["shortConversation"]["enabled"] is True
     assert result["effective"]["shortConversation"]["active"] is False
     assert result["blockers"] == []

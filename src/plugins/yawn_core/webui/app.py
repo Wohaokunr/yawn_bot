@@ -51,6 +51,7 @@ from ..data_models.web_admin_audit import WebAdminAudit
 from ..llm import LLMProviderConfig, test_llm_connection
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent.context import now_beijing
+from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.memory import (
     compact_group_memory,
     delete_group_memories,
@@ -201,6 +202,9 @@ class AgentConfigPatch(BaseModel):
     )
     proactive_active_enabled: bool | None = Field(
         default=None, alias="proactiveActiveEnabled"
+    )
+    short_conversation_enabled: bool | None = Field(
+        default=None, alias="shortConversationEnabled"
     )
     proactive_active_probability: float | None = Field(
         default=None, ge=0, le=1, alias="proactiveActiveProbability"
@@ -647,6 +651,8 @@ async def patch_agent_config(
         await db.commit()
         await db.refresh(row)
         result = serialize_agent_config(row, group_id)
+        if updates.get("short_conversation_enabled") is False:
+            close_group_conversations(group_id, reason="WebUI 关闭短会话续聊")
     await hub.notify_change("agent_config", str(group_id))
     return ok(result)
 

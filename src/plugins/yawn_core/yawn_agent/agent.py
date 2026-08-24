@@ -200,19 +200,21 @@ async def handle_group_agent_message(
         f"回复链={len(normalized.reply_chain)} 转发树={len(normalized.forward_tree)} "
         f"截断={normalized.truncated}"
     )
-    # _persist_message 提交后 config 属性会过期，先在提交前取出触发模式，
+    # _persist_message 提交后 config 属性会过期，先在提交前取出运行开关，
     # 避免异步引擎上触发同步惰性加载（MissingGreenlet）。
     trigger_mode = config.trigger_mode
+    short_conversation_enabled = bool(config.short_conversation_enabled)
     await _persist_message(bot, event, normalized, _session)
     respond = should_respond(event, bot, trigger_mode, normalized=normalized)
-    observe_member_message(
-        int(bot.self_id),
-        int(event.group_id),
-        user_id=int(event.get_user_id()),
-        message_id=int(getattr(event, "message_id", 0) or 0) or None,
-        explicit_trigger=respond,
-        observed_at=now_beijing(),
-    )
+    if short_conversation_enabled:
+        observe_member_message(
+            int(bot.self_id),
+            int(event.group_id),
+            user_id=int(event.get_user_id()),
+            message_id=int(getattr(event, "message_id", 0) or 0) or None,
+            explicit_trigger=respond,
+            observed_at=now_beijing(),
+        )
     if not respond:
         return
     if not enqueue(int(event.group_id), (bot, event, normalized), int(bot.self_id)):

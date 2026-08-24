@@ -93,6 +93,7 @@ export interface AgentConfig {
   triggerMode: string;
   proactiveProbability: number;
   proactiveActiveEnabled: boolean;
+  shortConversationEnabled: boolean;
   proactiveActiveProbability: number;
   proactiveActiveWindowMinutes: number;
   idleThresholdMinutes: number;
@@ -142,6 +143,7 @@ export interface AgentDiagnostics {
     activeTopic: string | null;
     mediaCacheEnabled: boolean;
     shortConversation: {
+      enabled: boolean;
       active: boolean;
       sessionId: number | null;
       topic: string | null;

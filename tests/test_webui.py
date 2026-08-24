@@ -99,11 +99,13 @@ def test_agent_config_and_persona_validation() -> None:
         {
             "version": None,
             "proactiveActiveEnabled": False,
+            "shortConversationEnabled": False,
             "proactiveActiveProbability": 0.1,
             "proactiveActiveWindowMinutes": 6,
         }
     )
     assert proactive_patch.proactive_active_enabled is False
+    assert proactive_patch.short_conversation_enabled is False
     assert proactive_patch.proactive_active_probability == 0.1  # noqa: PLR2004
     assert proactive_patch.proactive_active_window_minutes == 6  # noqa: PLR2004
 

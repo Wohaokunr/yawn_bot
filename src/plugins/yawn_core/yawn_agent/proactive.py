@@ -706,12 +706,13 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 reason=decision.reason,
                 session_turn=1,
             )
-            mark_bot_reply(
-                sent_bot_id,
-                group_id,
-                topic=decision.topic or str(config.active_topic or ""),
-                source=mode,
-            )
+            if config.short_conversation_enabled:
+                mark_bot_reply(
+                    sent_bot_id,
+                    group_id,
+                    topic=decision.topic or str(config.active_topic or ""),
+                    source=mode,
+                )
             try:
                 await session.commit()
             except SQLAlchemyError:
@@ -768,9 +769,9 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             if (
                 config is None
                 or not config.enabled
-                or config.trigger_mode != "mention_or_proactive"
+                or not config.short_conversation_enabled
             ):
-                close_conversation(bot_id, group_id, reason="配置关闭连续水群")
+                close_conversation(bot_id, group_id, reason="配置关闭短会话续聊")
                 return "close"
             now = now_beijing()
             day = now.strftime("%Y-%m-%d")
