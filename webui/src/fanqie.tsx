@@ -133,6 +133,31 @@ export function fanqieJobActions(job: FanqieJob): {
   };
 }
 
+type FanqieJobAction = "cancel" | "retry" | "send" | "delete";
+
+function JobActionButtons({
+  job,
+  acting,
+  onAct,
+  onDetail,
+}: {
+  job: FanqieJob;
+  acting: boolean;
+  onAct: (action: FanqieJobAction) => void;
+  onDetail?: () => void;
+}): React.JSX.Element {
+  const actions = fanqieJobActions(job);
+  return <Space size={0} wrap>
+    {onDetail && <Button type="link" size="small" icon={<FileTextOutlined />} onClick={onDetail}>详情</Button>}
+    {actions.cancel && <Popconfirm title="取消这个任务?" onConfirm={() => onAct("cancel")}><Button type="link" size="small" loading={acting}>取消</Button></Popconfirm>}
+    {actions.retry && <Button type="link" size="small" loading={acting} onClick={() => onAct("retry")}>重试</Button>}
+    {actions.send && <Button type="link" size="small" loading={acting} onClick={() => onAct("send")}>发送</Button>}
+    <Popconfirm title={`删除任务 #${job.id}?`} description="同时清理临时章节与成品文件,不可撤销。" onConfirm={() => onAct("delete")}>
+      <Button type="link" size="small" danger loading={acting}>删除</Button>
+    </Popconfirm>
+  </Space>;
+}
+
 function jobStatusTag(status: string): React.JSX.Element {
   const meta = FANQIE_JOB_STATUS_META[status];
   // 已知状态用专属胶囊(彩点+浅底);未知值回退默认 Tag。
@@ -545,7 +570,7 @@ function JobsTab(): React.JSX.Element {
   }, [reload]);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [actingId, setActingId] = useState(0);
-  const act = async (job: FanqieJob, action: "cancel" | "retry" | "send" | "delete") => {
+  const act = async (job: FanqieJob, action: FanqieJobAction) => {
     setActingId(job.id);
     try {
       if (action === "delete") {
@@ -585,6 +610,13 @@ function JobsTab(): React.JSX.Element {
     },
     { title: "发送", dataIndex: "sendStatus", width: 100, render: (value: string) => sendStatusTag(value) },
     {
+      title: "失败原因",
+      width: 220,
+      render: (_, row) => row.lastError || row.sendError
+        ? <Text type="danger" ellipsis={{ tooltip: row.lastError ?? row.sendError }}>{row.lastError ?? row.sendError}</Text>
+        : <Text type="secondary">—</Text>,
+    },
+    {
       title: "请求者 / 群",
       render: (_, row) => <><Text copyable>{row.requesterUserId}</Text><br /><Text type="secondary">{row.groupName || row.groupId || "私聊"}</Text></>,
     },
@@ -592,24 +624,13 @@ function JobsTab(): React.JSX.Element {
     {
       title: "操作",
       width: 260,
-      render: (_, row) => {
-        const actions = fanqieJobActions(row);
-        return <Space size={0} wrap>
-          <Button type="link" size="small" icon={<FileTextOutlined />} onClick={() => setDetailId(row.id)}>详情</Button>
-          {actions.cancel && <Popconfirm title="取消这个任务?" onConfirm={() => act(row, "cancel")}><Button type="link" size="small" loading={actingId === row.id}>取消</Button></Popconfirm>}
-          {actions.retry && <Button type="link" size="small" loading={actingId === row.id} onClick={() => act(row, "retry")}>重试</Button>}
-          {actions.send && <Button type="link" size="small" loading={actingId === row.id} onClick={() => act(row, "send")}>发送</Button>}
-          <Popconfirm title={`删除任务 #${row.id}?`} description="同时清理临时章节与成品文件,不可撤销。" onConfirm={() => act(row, "delete")}>
-            <Button type="link" size="small" danger>删除</Button>
-          </Popconfirm>
-        </Space>;
-      },
+      render: (_, row) => <JobActionButtons job={row} acting={actingId === row.id} onDetail={() => setDetailId(row.id)} onAct={(action) => { void act(row, action); }} />,
     },
   ];
-  return <Card extra={<Space>
+  return <Card title={<Space>下载任务 <Tag color="processing">5 秒自动刷新</Tag></Space>} extra={<Space>
     <Input.Search placeholder="搜索书名 / 作者 / QQ / 任务号" allowClear onSearch={(value) => { setSearch(value); setPage(1); }} />
     <Select value={status} onChange={(value) => { setStatus(value); setPage(1); }} options={FANQIE_JOB_STATUS_OPTIONS} style={{ width: 120 }} />
-    <Button icon={<ReloadOutlined />} onClick={reload} />
+    <Button icon={<ReloadOutlined />} loading={query.refreshing} onClick={reload}>刷新</Button>
   </Space>}>
     {query.error && !query.data
       ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
@@ -622,11 +643,29 @@ function JobsTab(): React.JSX.Element {
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无下载任务,先去「找书下载」挑一本吧 🍅" /> }}
           pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }}
         />}
-    <JobDetailDrawer jobId={detailId} onClose={() => setDetailId(null)} onChanged={reload} />
+    <JobDetailDrawer
+      jobId={detailId}
+      actingId={actingId}
+      onAct={act}
+      onClose={() => setDetailId(null)}
+      onChanged={reload}
+    />
   </Card>;
 }
 
-function JobDetailDrawer({ jobId, onClose, onChanged }: { jobId: number | null; onClose: () => void; onChanged: () => void }): React.JSX.Element {
+function JobDetailDrawer({
+  jobId,
+  actingId,
+  onAct,
+  onClose,
+  onChanged,
+}: {
+  jobId: number | null;
+  actingId: number;
+  onAct: (job: FanqieJob, action: FanqieJobAction) => Promise<void>;
+  onClose: () => void;
+  onChanged: () => void;
+}): React.JSX.Element {
   const [detail, setDetail] = useState<FanqieJobDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
@@ -656,6 +695,17 @@ function JobDetailDrawer({ jobId, onClose, onChanged }: { jobId: number | null; 
     };
   }, [load, jobId]);
   const job = detail?.job ?? null;
+  const progress = job && job.totalChapters > 0 ? Math.round((job.completedChapters / job.totalChapters) * 100) : 0;
+  const act = async (action: FanqieJobAction) => {
+    if (!job) return;
+    await onAct(job, action);
+    if (action === "delete") {
+      onClose();
+      return;
+    }
+    const data = await load().catch(() => null);
+    if (data) setDetail(data);
+  };
   return <Drawer
     open={jobId !== null}
     onClose={onClose}
@@ -666,6 +716,28 @@ function JobDetailDrawer({ jobId, onClose, onChanged }: { jobId: number | null; 
     {error && !job && <QueryErrorAlert error={error} onRetry={() => { void load().then((data) => { if (data) setDetail(data); }).catch(() => undefined); }} />}
     {!job && !error && <Spin />}
     {job && <>
+      <Card
+        size="small"
+        className="section-row"
+        title="任务进度与处置"
+        extra={<Tag color="processing">5 秒自动刷新</Tag>}
+      >
+        <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+          <Progress
+            percent={progress}
+            status={job.status === "failed" ? "exception" : job.status === "completed" ? "success" : "active"}
+            format={() => `${job.completedChapters}/${job.totalChapters}`}
+          />
+          <Flex gap={8} wrap align="center">
+            {jobStatusTag(job.status)}
+            {sendStatusTag(job.sendStatus)}
+            {job.cancelRequested && job.status !== "cancelled" && <Tag className="fq-status fq-status-cancelling">取消中</Tag>}
+          </Flex>
+          <JobActionButtons job={job} acting={actingId === job.id} onAct={(action) => { void act(action); }} />
+        </Space>
+      </Card>
+      {job.lastError && <Alert className="section-alert" type="error" showIcon message="任务失败原因" description={job.lastError} action={fanqieJobActions(job).retry ? <Button size="small" danger loading={actingId === job.id} onClick={() => { void act("retry"); }}>立即重试</Button> : undefined} />}
+      {job.sendError && <Alert className="section-alert" type="warning" showIcon message="发送失败原因" description={job.sendError} action={fanqieJobActions(job).send ? <Button size="small" loading={actingId === job.id} onClick={() => { void act("send"); }}>重新发送</Button> : undefined} />}
       <Descriptions className="section-row" size="small" column={2} items={[
         { key: "book", label: "书", span: 2, children: `${job.title ?? "未知书名"} · ${job.author ?? "未知作者"}` },
         { key: "range", label: "章节范围", children: `第 ${job.startChapter}-${job.endChapter} 章` },
@@ -677,8 +749,6 @@ function JobDetailDrawer({ jobId, onClose, onChanged }: { jobId: number | null; 
         { key: "created", label: "创建时间", children: formatTime(job.createdAt) },
         { key: "done", label: "完成时间", children: formatTime(job.completedAt) },
       ]} />
-      {job.lastError && <Alert className="section-alert" type="error" showIcon message="任务错误" description={job.lastError} />}
-      {job.sendError && <Alert className="section-alert" type="warning" showIcon message="发送错误" description={job.sendError} />}
       <Card size="small" title={`章节(${detail?.chapters.length ?? 0})`}>
         <Table
           rowKey={(row) => `${row.chapterIndex}-${row.itemId}`}

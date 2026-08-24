@@ -7,8 +7,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import APIRouter, HTTPException, status
 from nonebot import logger
 
@@ -37,6 +40,77 @@ def _rpg_module_schema() -> Any | None:
 
 def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
+
+
+def _module_source(module: Any) -> dict[str, Any] | None:
+    """Read the source YAML for optional editor linting without mutating runtime state."""
+    schema = _rpg_module_schema()
+    schema_file = getattr(schema, "__file__", None)
+    if not schema_file:
+        return None
+    directory = Path(schema_file).parent / "modules"
+    for path in sorted(directory.glob("*.yaml")):
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(raw, dict) and raw.get("id") == module.id:
+            return raw
+    return None
+
+
+def _static_health(module: Any, *, include_issues: bool = False) -> dict[str, Any]:
+    """Return read-only schema/lint health; editor tooling remains optional at runtime."""
+    base: dict[str, Any] = {
+        "status": "healthy",
+        "schemaValidated": True,
+        "lintAvailable": False,
+        "errorCount": 0,
+        "warningCount": 0,
+        "infoCount": 0,
+        "issues": [],
+    }
+    raw = _module_source(module)
+    if raw is None:
+        base["status"] = "schema-only"
+        return base
+    try:
+        from tools.rpg_module_editor.lint import run_lint
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"跑团模组编辑器 lint 不可用，WebUI 仅展示 schema 健康状态：{exc}")
+        base["status"] = "schema-only"
+        return base
+    try:
+        issues = run_lint(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"跑团模组 {module.id} 静态检查失败，WebUI 降级：{exc}")
+        base["status"] = "schema-only"
+        return base
+    counts = Counter(issue.severity for issue in issues)
+    base.update(
+        {
+            "lintAvailable": True,
+            "errorCount": counts.get("ERROR", 0),
+            "warningCount": counts.get("WARNING", 0),
+            "infoCount": counts.get("INFO", 0),
+        }
+    )
+    if base["errorCount"]:
+        base["status"] = "error"
+    elif base["warningCount"]:
+        base["status"] = "warning"
+    if include_issues:
+        base["issues"] = [
+            {
+                "severity": issue.severity,
+                "section": issue.section,
+                "path": issue.path_label,
+                "message": issue.message,
+                "hint": issue.hint,
+            }
+            for issue in issues
+        ]
+    return base
 
 
 def _check(module: Any) -> dict[str, Any]:
@@ -234,12 +308,14 @@ def _summary(module: Any) -> dict[str, Any]:
         "deductionCount": len(module.deductions),
         "endingCount": len(module.endings),
         "eventCount": len(module.events),
+        "health": _static_health(module),
     }
 
 
 def _detail(module: Any) -> dict[str, Any]:
     return {
         **_summary(module),
+        "health": _static_health(module, include_issues=True),
         "opening": module.opening,
         "genericEndings": module.generic_endings,
         "time": {"start": module.time.start, "costs": dict(module.time.costs)},

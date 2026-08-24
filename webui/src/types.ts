@@ -505,6 +505,25 @@ export interface RpgModuleSummary {
   deductionCount: number;
   endingCount: number;
   eventCount: number;
+  health: RpgModuleHealth;
+}
+
+export interface RpgModuleLintIssue {
+  severity: "ERROR" | "WARNING" | "INFO";
+  section: string;
+  path: string;
+  message: string;
+  hint: string;
+}
+
+export interface RpgModuleHealth {
+  status: "healthy" | "warning" | "error" | "schema-only";
+  schemaValidated: boolean;
+  lintAvailable: boolean;
+  errorCount: number;
+  warningCount: number;
+  infoCount: number;
+  issues: RpgModuleLintIssue[];
 }
 
 export interface RpgModuleDetail extends RpgModuleSummary {
