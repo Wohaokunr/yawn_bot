@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { aiOutcomeMeta, fanqieSummary, formatLatency, formatRate, formatUptime } from "./App";
+import { aiOutcomeMeta, buildOverviewIssues, fanqieSummary, formatLatency, formatRate, formatUptime } from "./overview";
+import type { Overview } from "./types";
 
 describe("formatUptime", () => {
   it("按秒/分/时/天分级展示", () => {
@@ -72,5 +73,74 @@ describe("fanqieSummary", () => {
 
   it("空任务显示占位符", () => {
     expect(fanqieSummary({})).toBe("暂无任务");
+  });
+});
+
+function makeOverviewForIssues(): Overview {
+  return {
+    bots: ["123"],
+    plugins: [{ name: "Core", state: "loaded", detail: null }],
+    counts: { groups: 1, users: 1, enabledAgents: 1 },
+    recentAgentActions: [],
+    metrics: { counters: [], histograms: [] },
+    generatedAt: "2026-08-24T17:00:00+08:00",
+    stats: {
+      ai: {
+        requestsTotal: 1,
+        success: 1,
+        failed: 0,
+        successRate: 1,
+        byOutcome: [{ outcome: "success", count: 1 }],
+        avgDurationMs: 10,
+        p95DurationMs: 10,
+        degradations: 0,
+      },
+      llm: { routes: [], unconfiguredProviders: [] },
+      memory: {
+        compactingGroups: 0,
+        rebuildRequired: 0,
+        failingGroups: 0,
+        recentError: null,
+      },
+      jobs: { fanqie: { available: true, byStatus: {} }, reminderErrors: 0 },
+      activity: {
+        messages24h: 0,
+        activeGroups24h: 0,
+        agentResponseGroups24h: 0,
+        proactiveToday: 0,
+        adminToolToday: 0,
+      },
+      games: {
+        live: { rpg: { available: true, count: 0 }, werewolf: { available: true, count: 0 } },
+        endedToday: { rpg: 0, werewolf: 0 },
+      },
+      uptime: { startedAt: "2026-08-24T16:00:00+08:00", uptimeSeconds: 3600 },
+    },
+  };
+}
+
+describe("buildOverviewIssues", () => {
+  it("健康快照不产生待处理项", () => {
+    expect(buildOverviewIssues(makeOverviewForIssues())).toEqual([]);
+  });
+
+  it("聚合 Bot、Provider、AI、记忆与提醒异常并提供处理入口", () => {
+    const overview = makeOverviewForIssues();
+    overview.bots = [];
+    overview.stats.ai.byOutcome = [{ outcome: "timeout", count: 2 }];
+    overview.stats.llm.unconfiguredProviders = ["default"];
+    overview.stats.memory.failingGroups = 1;
+    overview.stats.memory.recentError = { groupId: "100", error: "memory failed", at: null };
+    overview.stats.jobs.reminderErrors = 1;
+    const issues = buildOverviewIssues(overview);
+    expect(issues.map((item) => item.key)).toEqual([
+      "bot-offline",
+      "ai-failures",
+      "llm-provider",
+      "memory",
+      "reminders",
+    ]);
+    expect(issues.find((item) => item.key === "memory")?.to).toBe("/agent/100?tab=memories");
+    expect(issues.find((item) => item.key === "llm-provider")?.to).toBe("/environment");
   });
 });

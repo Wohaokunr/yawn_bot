@@ -26,7 +26,7 @@ import type { ColumnsType } from "antd/es/table";
 import type { CollapseProps } from "antd";
 import { useCallback, useMemo, useState } from "react";
 import { api, ApiError } from "./api";
-import { PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { PageHeader, QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "./shared";
 import type {
   EnvironmentEntry,
   EnvironmentPatchResult,
@@ -246,6 +246,7 @@ export function EnvironmentPage(): React.JSX.Element {
   );
   const providerDrafts = providerChanges ?? baseProviderDrafts;
   const totalChanges = changedKeys.length + (providerChanges === null ? 0 : 1);
+  useUnsavedChanges(totalChanges > 0);
 
   const countDirty = (keys: readonly string[]): number =>
     changedKeys.filter((key) => keys.includes(key)).length;
@@ -779,6 +780,7 @@ export function EnvironmentPage(): React.JSX.Element {
       <PageHeader
         title="环境配置"
         subtitle="集中修改根 .env；全部变更仅在重启 YawnBot 后生效"
+        status={<SaveStatus dirty={totalChanges > 0} saving={saving} />}
         extra={(
           <Button
             type="primary"

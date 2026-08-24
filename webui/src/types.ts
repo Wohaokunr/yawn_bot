@@ -19,6 +19,10 @@ export interface OverviewStats {
     p95DurationMs: number | null;
     degradations: number;
   };
+  llm: {
+    routes: LLMRouteStatus[];
+    unconfiguredProviders: string[];
+  };
   activity: {
     messages24h: number;
     activeGroups24h: number;
@@ -102,6 +106,57 @@ export interface AgentConfig {
   proactiveToday: number;
   adminToolsToday: number;
   version: string | null;
+}
+
+export interface LLMRouteStatus {
+  task: string;
+  profile: string;
+  provider: string;
+  model: string;
+  thinking: string;
+  multimodal: string;
+  configured: boolean;
+}
+
+export interface AgentDiagnosticBlocker {
+  code: string;
+  severity: "error" | "warning" | "info";
+  title: string;
+  detail: string;
+}
+
+export interface AgentDiagnostics {
+  groupId: string;
+  effective: {
+    enabled: boolean;
+    triggerMode: string;
+    proactiveEnabled: boolean;
+    proactiveActiveEnabled: boolean;
+    proactiveToday: number;
+    dailyLimit: number;
+    dailyRemaining: number;
+    cooldownMinutes: number;
+    cooldownRemainingMinutes: number;
+    lastAgentAt: string | null;
+    lastProactiveAt: string | null;
+    activeTopic: string | null;
+    mediaCacheEnabled: boolean;
+    shortConversation: {
+      active: boolean;
+      sessionId: number | null;
+      topic: string | null;
+      botTurns: number;
+      evaluations: number;
+      consecutiveWaits: number;
+    };
+  };
+  memory: AgentMemoryStatus;
+  llm: {
+    routes: LLMRouteStatus[];
+    unconfiguredProviders: string[];
+  };
+  blockers: AgentDiagnosticBlocker[];
+  generatedAt: string;
 }
 
 export interface Persona {

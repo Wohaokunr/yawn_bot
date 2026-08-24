@@ -1,4 +1,4 @@
-import { Alert, Button, Flex, Table, Typography } from "antd";
+import { Alert, Button, Empty, Flex, Space, Table, Tag, Typography } from "antd";
 import type { TablePaginationConfig } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -8,35 +8,57 @@ export function formatTime(value?: string | null): string {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
 }
 
-export function useEntityRefresh(callback: () => void): void {
+export interface EntityChangeDetail {
+  resource: string;
+  resourceId?: string | null;
+}
+
+export function useEntityRefresh(callback: () => void, resources: readonly string[] = []): void {
   useEffect(() => {
-    window.addEventListener("yawnbot-entity-changed", callback);
-    return () => window.removeEventListener("yawnbot-entity-changed", callback);
-  }, [callback]);
+    if (resources.length === 0) return undefined;
+    const listener = (event: Event) => {
+      const detail = (event as CustomEvent<EntityChangeDetail>).detail;
+      if (detail && resources.includes(detail.resource)) callback();
+    };
+    window.addEventListener("yawnbot-entity-changed", listener);
+    return () => window.removeEventListener("yawnbot-entity-changed", listener);
+  }, [callback, resources]);
 }
 
 export interface ApiQuery<T> {
   data: T | null;
   loading: boolean;
+  refreshing: boolean;
   error: string;
+  updatedAt: number | null;
   reload: () => void;
+}
+
+export interface ApiQueryOptions {
+  resources?: readonly string[];
 }
 
 // 统一取数 Hook:接管加载/错误状态,随 entity.changed 自动刷新;
 // 用代次号拦截乱序返回,避免快速翻页/搜索时旧响应覆盖新响应。
-export function useApiQuery<T>(load: () => Promise<T>): ApiQuery<T> {
+export function useApiQuery<T>(load: () => Promise<T>, options: ApiQueryOptions = {}): ApiQuery<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const generation = useRef(0);
+  const hasData = useRef(false);
   const run = useCallback(() => {
     const ticket = ++generation.current;
-    setLoading(true);
+    if (hasData.current) setRefreshing(true);
+    else setLoading(true);
     load()
       .then((value) => {
         if (ticket === generation.current) {
           setData(value);
+          hasData.current = true;
           setError("");
+          setUpdatedAt(Date.now());
         }
       })
       .catch((reason: unknown) => {
@@ -45,12 +67,15 @@ export function useApiQuery<T>(load: () => Promise<T>): ApiQuery<T> {
         }
       })
       .finally(() => {
-        if (ticket === generation.current) setLoading(false);
+        if (ticket === generation.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
   }, [load]);
   useEffect(() => { void run(); }, [run]);
-  useEntityRefresh(run);
-  return { data, loading, error, reload: run };
+  useEntityRefresh(run, options.resources ?? []);
+  return { data, loading, refreshing, error, updatedAt, reload: run };
 }
 
 export function QueryErrorAlert({ error, onRetry }: { error: string; onRetry: () => void }): React.JSX.Element {
@@ -65,8 +90,115 @@ export function QueryErrorAlert({ error, onRetry }: { error: string; onRetry: ()
   );
 }
 
-export function PageHeader({ title, subtitle, extra }: { title: string; subtitle: string; extra?: React.ReactNode }): React.JSX.Element {
-  return <Flex justify="space-between" align="center" gap={16} wrap className="page-heading"><div><Title level={2}>{title}</Title><Text type="secondary">{subtitle}</Text></div>{extra}</Flex>;
+export function PageHeader({
+  title,
+  subtitle,
+  extra,
+  onRefresh,
+  refreshing = false,
+  status,
+}: {
+  title: string;
+  subtitle: string;
+  extra?: React.ReactNode;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  status?: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <Flex justify="space-between" align="center" gap={16} wrap className="page-heading">
+      <div>
+        <Flex align="center" gap={10} wrap>
+          <Title level={2}>{title}</Title>
+          {status}
+        </Flex>
+        <Text type="secondary">{subtitle}</Text>
+      </div>
+      <Space wrap>
+        {onRefresh && <Button onClick={onRefresh} loading={refreshing}>刷新</Button>}
+        {extra}
+      </Space>
+    </Flex>
+  );
+}
+
+export function AdminEmpty({
+  description = "暂无数据",
+  action,
+}: {
+  description?: React.ReactNode;
+  action?: React.ReactNode;
+}): React.JSX.Element {
+  return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={description}>{action}</Empty>;
+}
+
+export function SaveStatus({ dirty, saving }: { dirty: boolean; saving: boolean }): React.JSX.Element | null {
+  if (saving) return <Tag color="processing">保存中</Tag>;
+  if (dirty) return <Tag color="gold">有未保存修改</Tag>;
+  return null;
+}
+
+export function DangerActionButton(props: React.ComponentProps<typeof Button>): React.JSX.Element {
+  return <Button {...props} danger className={`danger-action ${props.className ?? ""}`.trim()} />;
+}
+
+let unsavedScopeCount = 0;
+
+function publishUnsavedState(): void {
+  window.dispatchEvent(new CustomEvent("yawnbot-dirty-state", { detail: { count: unsavedScopeCount } }));
+}
+
+export function hasUnsavedChanges(): boolean {
+  return unsavedScopeCount > 0;
+}
+
+export function confirmDiscardChanges(): boolean {
+  return !hasUnsavedChanges() || window.confirm("当前页面有未保存修改，确定要离开吗？");
+}
+
+export function useUnsavedChanges(dirty: boolean): void {
+  const registered = useRef(false);
+  useEffect(() => {
+    if (dirty && !registered.current) {
+      registered.current = true;
+      unsavedScopeCount += 1;
+      publishUnsavedState();
+    } else if (!dirty && registered.current) {
+      registered.current = false;
+      unsavedScopeCount = Math.max(unsavedScopeCount - 1, 0);
+      publishUnsavedState();
+    }
+    return () => {
+      if (registered.current) {
+        registered.current = false;
+        unsavedScopeCount = Math.max(unsavedScopeCount - 1, 0);
+        publishUnsavedState();
+      }
+    };
+  }, [dirty]);
+
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const click = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      const anchor = target?.closest("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || anchor.target === "_blank" || event.defaultPrevented) return;
+      if (!confirmDiscardChanges()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    document.addEventListener("click", click, true);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      document.removeEventListener("click", click, true);
+    };
+  }, [dirty]);
 }
 
 // 少于等于一页时完全隐藏分页；否则只渲染分页条（配合服务端分页表格）。

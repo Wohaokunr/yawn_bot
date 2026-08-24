@@ -275,6 +275,13 @@ async def test_overview_payload_keeps_legacy_fields_and_adds_stats(
     stats = payload["stats"]
     assert stats["ai"]["requestsTotal"] == 1
     assert stats["ai"]["successRate"] == pytest.approx(1.0)
+    assert {route["task"] for route in stats["llm"]["routes"]} == {
+        "agent_dialogue",
+        "agent_proactive",
+        "agent_memory",
+        "agent_image",
+    }
+    assert all("apiKey" not in route for route in stats["llm"]["routes"])
     assert stats["activity"]["messages24h"] == 0
     assert stats["memory"]["compactingGroups"] == 0
     # 测试进程已加载跑团子插件，live 统计可用且无对局。
@@ -282,3 +289,62 @@ async def test_overview_payload_keeps_legacy_fields_and_adds_stats(
     assert stats["uptime"]["uptimeSeconds"] >= 0
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_diagnostics_uses_runtime_defaults_without_persisted_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        async def get(self, _model: object, _group_id: int) -> None:
+            return None
+
+    async def fake_memory_status(_session: object, group_id: int) -> dict[str, object]:
+        return {
+            "groupId": str(group_id),
+            "pendingMessages": 0,
+            "lastCompactedMessageId": None,
+            "lastCompactedAt": None,
+            "countsByType": {},
+            "total": 0,
+            "oldestUpdatedAt": None,
+            "newestUpdatedAt": None,
+            "rebuildRequired": False,
+            "lastAttemptAt": None,
+            "lastSuccessAt": None,
+            "lastError": None,
+            "consecutiveFailures": 0,
+            "inFlight": False,
+        }
+
+    routes = [
+        {
+            "task": task,
+            "profile": "default",
+            "provider": "default",
+            "model": "model",
+            "thinking": "auto",
+            "multimodal": "auto",
+            "configured": True,
+        }
+        for task in ("agent_dialogue", "agent_proactive", "agent_memory", "agent_image")
+    ]
+    monkeypatch.setattr(service, "agent_memory_status", fake_memory_status)
+    monkeypatch.setattr(
+        service,
+        "_llm_runtime_status",
+        lambda: {"routes": routes, "unconfiguredProviders": []},
+    )
+    monkeypatch.setattr(service, "get_bots", lambda: {"9": object()})
+    monkeypatch.setattr(
+        service, "current_conversation", lambda _bot_id, _group_id: None
+    )
+
+    result = await service.agent_diagnostics(FakeSession(), 100)
+
+    assert result["effective"]["enabled"] is True
+    assert result["effective"]["triggerMode"] == "mention_or_proactive"
+    assert result["effective"]["dailyLimit"] == 30
+    assert result["effective"]["cooldownMinutes"] == 8
+    assert result["effective"]["shortConversation"]["active"] is False
+    assert result["blockers"] == []

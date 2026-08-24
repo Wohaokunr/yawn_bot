@@ -86,6 +86,7 @@ from .rpg_modules import router as rpg_modules_router
 from .service import (
     BEIJING_TZ,
     RELATION_GRAPH_LIMIT,
+    agent_diagnostics,
     agent_memory_status,
     delete_one_memory,
     get_group,
@@ -616,6 +617,13 @@ async def get_agent_config(group_id: int, _session: ReadSession) -> dict[str, An
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
         return ok(serialize_agent_config(row, group_id))
+
+
+@router.get("/agent/groups/{group_id}/diagnostics")
+async def get_agent_diagnostics(group_id: int, _session: ReadSession) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+        return ok(await agent_diagnostics(db, group_id))
 
 
 @router.patch("/agent/groups/{group_id}/config")

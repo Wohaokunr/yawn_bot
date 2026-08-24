@@ -25,14 +25,27 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { AgentAuditTable } from "./agent-audit-table";
 import { api, ApiError } from "./api";
-import { formatTime, PageHeader, QueryErrorAlert, TablePagination, useApiQuery } from "./shared";
-import { nodeDisplayName, RelationGraphView, relationTypeColor } from "./relation-graph";
+import { nodeDisplayName, relationTypeColor } from "./relation-meta";
+import {
+  AdminEmpty,
+  confirmDiscardChanges,
+  DangerActionButton,
+  formatTime,
+  PageHeader,
+  QueryErrorAlert,
+  SaveStatus,
+  TablePagination,
+  useApiQuery,
+  useUnsavedChanges,
+} from "./shared";
 import type {
   AgentAudit,
   AgentConfig,
+  AgentDiagnostics,
   AgentMemoryStatus,
   AgentMessageItem,
   AgentRelationGraph,
@@ -45,6 +58,10 @@ import type {
 } from "./types";
 
 const { Text, Paragraph } = Typography;
+
+const LazyRelationGraphView = lazy(() =>
+  import("./relation-graph").then(({ RelationGraphView }) => ({ default: RelationGraphView })),
+);
 
 // 记忆类型标签：与后端 memory_type 口径对齐（summary/profile 为整理任务产出，core 为反复确认后晋升的不过期事实，manual 为运维手填）。
 export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> = {
@@ -102,19 +119,24 @@ const MEMORY_ROLE_OPTIONS = [
 export function AgentGroupsPage(): React.JSX.Element {
   const [page, setPage] = useState(1); const [search, setSearch] = useState("");
   const load = useCallback(() => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [page, search]);
-  const query = useApiQuery(load);
-  return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" extra={<Input.Search placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />} /><Card>{
+  const query = useApiQuery(load, { resources: ["agent_config"] });
+  return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" onRefresh={query.reload} refreshing={query.refreshing} extra={<Input.Search placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />} /><Card>{
     query.error && !query.data
       ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <Table rowKey="groupId" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} columns={[{ title: "群组", render: (_, row: GroupSummary) => <>{row.groupName || "未命名群"}<br /><Text type="secondary">{row.groupId}</Text></> }, { title: "成员", dataIndex: "memberCount" }, { title: "状态", render: (_, row: GroupSummary) => <Tag color={row.agentEnabled ? "green" : "default"}>{row.agentEnabled ? "开启" : "关闭"}</Tag> }, { title: "操作", render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link> }]} />
+      : <Table rowKey="groupId" loading={query.loading} dataSource={query.data?.rows ?? []} locale={{ emptyText: <AdminEmpty description="暂无可管理群组" /> }} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} columns={[{ title: "群组", render: (_, row: GroupSummary) => <>{row.groupName || "未命名群"}<br /><Text type="secondary">{row.groupId}</Text></> }, { title: "成员", dataIndex: "memberCount" }, { title: "状态", render: (_, row: GroupSummary) => <Tag color={row.agentEnabled ? "green" : "default"}>{row.agentEnabled ? "开启" : "关闭"}</Tag> }, { title: "操作", render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link> }]} />
   }</Card></>;
 }
 
 export function AgentDetailPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = searchParams.get("tab") ?? "config";
-  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级配置、人设、记忆与数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={(key) => setSearchParams(key === "config" ? {} : { tab: key }, { replace: true })} items={[
+  const tab = searchParams.get("tab") ?? "overview";
+  const changeTab = (key: string) => {
+    if (!confirmDiscardChanges()) return;
+    setSearchParams(key === "overview" ? {} : { tab: key }, { replace: true });
+  };
+  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={changeTab} items={[
+    { key: "overview", label: "运行诊断", children: <AgentOverviewPanel groupId={groupId} /> },
     { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
     { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
     { key: "memories", label: "记忆", children: <MemoriesPanel groupId={groupId} /> },
@@ -126,16 +148,129 @@ export function AgentDetailPage(): React.JSX.Element {
   ]} /></>;
 }
 
+const LLM_TASK_LABELS: Record<string, string> = {
+  agent_dialogue: "群聊对话",
+  agent_proactive: "主动发言",
+  agent_memory: "记忆整理",
+  agent_image: "图片理解",
+};
+
+export function triggerModeLabel(mode: string): string {
+  return ({
+    mention_only: "仅 @",
+    mention_or_reply: "@ 或回复",
+    explicit_wakeup: "@ 或显式唤醒",
+    mention_or_proactive: "@ / 回复 / 唤醒 / 主动",
+  } as Record<string, string>)[mode] ?? mode;
+}
+
+function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element {
+  const load = useCallback(
+    () => api<AgentDiagnostics>(`/agent/groups/${groupId}/diagnostics`).then((r) => r.data),
+    [groupId],
+  );
+  const query = useApiQuery(load, { resources: ["agent_config", "agent_memory", "agent_group_data"] });
+  const data = query.data;
+  if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
+  const effective = data.effective;
+  const memory = data.memory;
+  const conversation = effective.shortConversation;
+  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
+    <Card
+      title="实际生效配置"
+      extra={<Button onClick={query.reload} loading={query.refreshing}>刷新诊断</Button>}
+    >
+      <Row gutter={[16, 16]}>
+        <Col xs={12} md={6}><Statistic title="Agent" value={effective.enabled ? "开启" : "关闭"} /></Col>
+        <Col xs={12} md={6}><Statistic title="触发模式" value={triggerModeLabel(effective.triggerMode)} /></Col>
+        <Col xs={12} md={6}><Statistic title="今日主动额度" value={effective.dailyRemaining} suffix={`/ ${effective.dailyLimit}`} /></Col>
+        <Col xs={12} md={6}><Statistic title="主动冷却剩余" value={effective.cooldownRemainingMinutes} suffix="分钟" /></Col>
+      </Row>
+      <Row gutter={[16, 16]} className="section-row">
+        <Col xs={24} lg={8}>
+          <Card size="small" title="主动发言">
+            <Space orientation="vertical" size={6}>
+              <Text>模式：<Tag color={effective.proactiveEnabled ? "green" : "default"}>{effective.proactiveEnabled ? "允许主动" : "仅被动"}</Tag></Text>
+              <Text>热闹插话：{effective.proactiveActiveEnabled ? "开启" : "关闭"}</Text>
+              <Text>上次主动：{formatTime(effective.lastProactiveAt)}</Text>
+              <Text type="secondary">当前话题：{effective.activeTopic || "—"}</Text>
+            </Space>
+          </Card>
+        </Col>
+        <Col xs={24} lg={8}>
+          <Card size="small" title="短会话">
+            <Space orientation="vertical" size={6}>
+              <Text>状态：<Tag color={conversation.active ? "processing" : "default"}>{conversation.active ? "进行中" : "未开启"}</Tag></Text>
+              <Text>Bot 回合：{conversation.botTurns}</Text>
+              <Text>续聊评估：{conversation.evaluations}</Text>
+              <Text type="secondary">话题：{conversation.topic || "—"}</Text>
+            </Space>
+          </Card>
+        </Col>
+        <Col xs={24} lg={8}>
+          <Card size="small" title="记忆整理">
+            <Space orientation="vertical" size={6}>
+              <Text>待整理消息：{memory.pendingMessages} 条</Text>
+              <Text>连续失败：<Tag color={memory.consecutiveFailures > 0 ? "red" : "green"}>{memory.consecutiveFailures} 次</Tag></Text>
+              <Text>整理任务：{memory.inFlight ? "进行中" : "空闲"}</Text>
+              <Text type="secondary">最近成功：{formatTime(memory.lastSuccessAt)}</Text>
+            </Space>
+          </Card>
+        </Col>
+      </Row>
+    </Card>
+
+    <Card title="为什么 Agent 现在可能不回复 / 不主动说话">
+      {data.blockers.length === 0
+        ? <Alert type="success" showIcon message="当前没有发现硬性阻塞" description="触发条件、LLM 路由、主动额度和记忆治理状态均未发现明确异常。" />
+        : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+          {data.blockers.map((item) => (
+            <Alert
+              key={item.code}
+              type={item.severity}
+              showIcon
+              message={item.title}
+              description={item.detail}
+            />
+          ))}
+        </Space>}
+      <Space wrap className="section-row">
+        <Link to={`?tab=config`}>调整运行配置</Link>
+        <Link to={`?tab=memories`}>检查记忆治理</Link>
+        <Link to="/environment">检查 LLM Provider / 模型路由</Link>
+      </Space>
+    </Card>
+
+    <Card title="LLM 实际路由" extra={data.llm.unconfiguredProviders.length > 0 ? <Tag color="red">Provider 未配置</Tag> : <Tag color="green">路由可用</Tag>}>
+      <List
+        dataSource={data.llm.routes}
+        locale={{ emptyText: <AdminEmpty description="暂无 LLM 路由" /> }}
+        renderItem={(route) => (
+          <List.Item>
+            <List.Item.Meta
+              title={<Space><Text strong>{LLM_TASK_LABELS[route.task] ?? route.task}</Text><Tag>{route.profile}</Tag></Space>}
+              description={`${route.provider} · ${route.model || "未配置模型"} · thinking=${route.thinking}`}
+            />
+            <Tag color={route.configured ? "green" : "red"}>{route.configured ? "可用" : "不可用"}</Tag>
+          </List.Item>
+        )}
+      />
+    </Card>
+  </Space>;
+}
+
 function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false);
+  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
   const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load);
-  useEffect(() => { if (query.data) form.setFieldsValue(query.data); }, [form, query.data]);
+  const query = useApiQuery(load, { resources: ["agent_config"] });
+  useUnsavedChanges(dirty);
+  useEffect(() => { if (query.data) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data]);
   const save = async (values: Record<string, unknown>) => {
     setSaving(true);
     try {
       const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, { method: "PATCH", body: JSON.stringify({ ...values, version: query.data?.version }) });
       form.setFieldsValue(result.data);
+      setDirty(false);
       message.success("Agent 配置已保存");
       query.reload();
     } catch (error) {
@@ -144,18 +279,20 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
   };
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  return <Card><Alert type="info" showIcon message={`今日主动发言 ${data.proactiveToday} 次；管理工具 ${data.adminToolsToday} 次`} /><Form form={form} layout="vertical" onFinish={save} className="settings-form"><Row gutter={16}><Col xs={24} md={8}><Form.Item name="enabled" label="启用 Agent" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="mediaCacheEnabled" label="媒体缓存" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="triggerMode" label="触发模式" rules={[{ required: true }]}><Select options={[{ value: "mention_only", label: "仅 @" }, { value: "mention_or_reply", label: "@ 或回复" }, { value: "explicit_wakeup", label: "@ 或显式唤醒" }, { value: "mention_or_proactive", label: "@ / 回复 / 唤醒 / 主动" }]} /></Form.Item></Col></Row><Row gutter={16}><Col xs={24} md={8}><Form.Item name="proactiveProbability" label="冷场暖场概率"><InputNumber min={0} max={1} step={0.05} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveEnabled" label="热闹插话" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveProbability" label="插话概率"><InputNumber min={0} max={1} step={0.02} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveWindowMinutes" label="插话窗口（分钟）"><InputNumber min={1} max={1440} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="idleThresholdMinutes" label="冷场阈值（分钟）"><InputNumber min={1} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="cooldownMinutes" label="冷却时间（分钟）"><InputNumber min={0} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="dailyLimit" label="主动发言每日上限"><InputNumber min={0} max={1000} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="rawRetentionDays" label="原始消息保留天数"><InputNumber min={1} max={365} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="crossGroupVisibility" label="跨群记忆"><Select options={[{ value: "isolated", label: "群隔离" }, { value: "public_summary", label: "共享低风险公开摘要" }]} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="adminToolDailyLimit" label="管理工具每日上限"><InputNumber min={1} max={1000} /></Form.Item></Col></Row><Form.Item name="toolAllowlist" label="管理工具白名单"><Select mode="multiple" options={[{ value: "mute_member", label: "禁言成员" }, { value: "create_group_announcement", label: "发布群公告" }]} /></Form.Item><Button type="primary" htmlType="submit" loading={saving}>保存配置</Button></Form></Card>;
+  return <Card title="群级运行配置" extra={<SaveStatus dirty={dirty} saving={saving} />}><Alert type="info" showIcon message={`今日主动发言 ${data.proactiveToday} 次；管理工具 ${data.adminToolsToday} 次`} /><Form form={form} layout="vertical" onFinish={save} onValuesChange={() => setDirty(true)} className="settings-form"><Row gutter={16}><Col xs={24} md={8}><Form.Item name="enabled" label="启用 Agent" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="mediaCacheEnabled" label="媒体缓存" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="triggerMode" label="触发模式" rules={[{ required: true }]}><Select options={[{ value: "mention_only", label: "仅 @" }, { value: "mention_or_reply", label: "@ 或回复" }, { value: "explicit_wakeup", label: "@ 或显式唤醒" }, { value: "mention_or_proactive", label: "@ / 回复 / 唤醒 / 主动" }]} /></Form.Item></Col></Row><Row gutter={16}><Col xs={24} md={8}><Form.Item name="proactiveProbability" label="冷场暖场概率"><InputNumber min={0} max={1} step={0.05} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveEnabled" label="热闹插话" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveProbability" label="插话概率"><InputNumber min={0} max={1} step={0.02} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveWindowMinutes" label="插话窗口（分钟）"><InputNumber min={1} max={1440} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="idleThresholdMinutes" label="冷场阈值（分钟）"><InputNumber min={1} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="cooldownMinutes" label="冷却时间（分钟）"><InputNumber min={0} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="dailyLimit" label="主动发言每日上限"><InputNumber min={0} max={1000} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="rawRetentionDays" label="原始消息保留天数"><InputNumber min={1} max={365} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="crossGroupVisibility" label="跨群记忆"><Select options={[{ value: "isolated", label: "群隔离" }, { value: "public_summary", label: "共享低风险公开摘要" }]} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="adminToolDailyLimit" label="管理工具每日上限"><InputNumber min={1} max={1000} /></Form.Item></Col></Row><Form.Item name="toolAllowlist" label="管理工具白名单"><Select mode="multiple" options={[{ value: "mute_member", label: "禁言成员" }, { value: "create_group_announcement", label: "发布群公告" }]} /></Form.Item><Button type="primary" htmlType="submit" loading={saving} disabled={!dirty}>保存配置</Button></Form></Card>;
 }
 
 function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false);
+  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
   const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load);
-  useEffect(() => { if (query.data) form.setFieldsValue({ enabled: query.data.enabled, overrides: query.data.overrides }); }, [form, query.data]);
+  const query = useApiQuery(load, { resources: ["agent_persona"] });
+  useUnsavedChanges(dirty);
+  useEffect(() => { if (query.data) { form.setFieldsValue({ enabled: query.data.enabled, overrides: query.data.overrides }); setDirty(false); } }, [form, query.data]);
   const save = async (values: { enabled: boolean; overrides?: Record<string, string> }) => {
     setSaving(true);
     try {
       await api<Persona>(`/agent/groups/${groupId}/persona`, { method: "PUT", body: JSON.stringify({ version: query.data?.version, enabled: values.enabled, overrides: values.overrides ?? {} }) });
+      setDirty(false);
       message.success("群级人设已保存");
       query.reload();
     } catch (error) {
@@ -165,6 +302,7 @@ function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const reset = async () => {
     try {
       await api<Persona>(`/agent/groups/${groupId}/persona`, { method: "DELETE", headers: query.data?.version ? { "If-Match": query.data.version } : {} });
+      setDirty(false);
       message.success("已恢复全局默认人设");
       query.reload();
     } catch (error) {
@@ -173,7 +311,7 @@ function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
   };
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  return <Card><Form form={form} layout="vertical" onFinish={save}><Form.Item name="enabled" label="启用群级覆盖" valuePropName="checked"><Switch /></Form.Item><Row gutter={16}>{data.fields.map((field) => <Col xs={24} lg={12} key={field}><Form.Item name={["overrides", field]} label={field} extra={`全局值：${data.resolved[field]}`}><Input.TextArea maxLength={240} autoSize={{ minRows: 2, maxRows: 4 }} placeholder="留空则继承全局默认" showCount /></Form.Item></Col>)}</Row><Space><Button type="primary" htmlType="submit" loading={saving}>保存人设</Button><Popconfirm title="恢复全局默认人设？" onConfirm={reset}><Button>恢复默认</Button></Popconfirm></Space></Form></Card>;
+  return <Card title="群级人设覆盖" extra={<SaveStatus dirty={dirty} saving={saving} />}><Form form={form} layout="vertical" onFinish={save} onValuesChange={() => setDirty(true)}><Form.Item name="enabled" label="启用群级覆盖" valuePropName="checked"><Switch /></Form.Item><Row gutter={16}>{data.fields.map((field) => <Col xs={24} lg={12} key={field}><Form.Item name={["overrides", field]} label={field} extra={`全局值：${data.resolved[field]}`}><Input.TextArea maxLength={240} autoSize={{ minRows: 2, maxRows: 4 }} placeholder="留空则继承全局默认" showCount /></Form.Item></Col>)}</Row><Space><Button type="primary" htmlType="submit" loading={saving} disabled={!dirty}>保存人设</Button><Popconfirm title="恢复全局默认人设？" onConfirm={reset}><Button>恢复默认</Button></Popconfirm></Space></Form></Card>;
 }
 
 // 记忆表单的可编辑字段；expiresInDays 为空表示永久有效。
@@ -219,9 +357,9 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const [saving, setSaving] = useState(false);
   const [createForm] = Form.useForm();
   const load = useCallback(() => api<MemoryItem[]>(`/agent/groups/${groupId}/memories?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search]);
-  const query = useApiQuery(load);
+  const query = useApiQuery(load, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
   const statusLoad = useCallback(() => api<AgentMemoryStatus>(`/agent/groups/${groupId}/memories/status`).then((r) => r.data), [groupId]);
-  const statusQuery = useApiQuery(statusLoad);
+  const statusQuery = useApiQuery(statusLoad, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
   const status = statusQuery.data;
   const remove = async (id: string) => { await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" }); message.success("记忆已删除"); query.reload(); };
   const removeMember = async (userId: string) => { const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/members/${userId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条成员数据`); query.reload(); };
@@ -284,7 +422,7 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
     </Row>
     {status?.lastError && <Alert type="error" showIcon closable message={`最近整理失败（连续 ${status.consecutiveFailures} 次）`} description={status.lastError} className="section-alert" />}
     {status?.rebuildRequired && <Alert type="warning" showIcon message="派生记忆正在重建" description="系统会按连续批次处理保留期内原始消息；手工记忆不会被覆盖。" className="section-alert" />}
-    <Card title="公开/群级记忆" extra={<Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><Button danger>清理全群 Agent 数据</Button></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
+    <Card title="公开/群级记忆" extra={<Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.content}</Paragraph> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> }, { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
@@ -324,12 +462,12 @@ function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Elemen
     setSearchParams(next, { replace: true });
   };
   const subjectsLoad = useCallback(() => api<MemorySubjectItem[]>(`/agent/groups/${groupId}/memories/subjects`).then((r) => r.data), [groupId]);
-  const subjectsQuery = useApiQuery(subjectsLoad);
+  const subjectsQuery = useApiQuery(subjectsLoad, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
   const subjects = subjectsQuery.data ?? [];
   const memberLoad = useCallback(() => userId
     ? api<MemoryItem[]>(`/agent/groups/${groupId}/memories?subjectUserId=${userId}&pageSize=100`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 }))
     : Promise.resolve({ rows: [] as MemoryItem[], total: 0 }), [groupId, userId]);
-  const memberQuery = useApiQuery(memberLoad);
+  const memberQuery = useApiQuery(memberLoad, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
   const rows = memberQuery.data?.rows ?? [];
   const grouped = PROFILE_TYPE_ORDER
     .map((type) => ({ type, items: rows.filter((row) => row.type === type) }))
@@ -445,9 +583,9 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
     setSearchParams(next, { replace: true });
   };
   const load = useCallback(() => api<AgentRelationItem[]>(`/agent/groups/${groupId}/relations?page=${page}&pageSize=20&search=${encodeURIComponent(search)}${typeFilter ? `&type=${encodeURIComponent(typeFilter)}` : ""}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search, typeFilter]);
-  const query = useApiQuery(load);
+  const query = useApiQuery(load, { resources: ["agent_relation", "agent_member_data", "agent_group_data"] });
   const graphLoad = useCallback(() => api<AgentRelationGraph>(`/agent/groups/${groupId}/relations/graph`).then((r) => r.data), [groupId]);
-  const graphQuery = useApiQuery(graphLoad);
+  const graphQuery = useApiQuery(graphLoad, { resources: ["agent_relation", "agent_member_data", "agent_group_data"] });
   const graph = graphQuery.data;
   const nodeByUserId = useMemo(() => new Map((graph?.nodes ?? []).map((node) => [node.userId, node])), [graph]);
   const linkedMemberCount = useMemo(() => (graph?.nodes ?? []).filter((node) => node.linked).length, [graph]);
@@ -462,7 +600,7 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
     return latest;
   }, [graph]);
   const typesLoad = useCallback(() => api<string[]>(`/agent/groups/${groupId}/relations/types`).then((r) => r.data), [groupId]);
-  const typesQuery = useApiQuery(typesLoad);
+  const typesQuery = useApiQuery(typesLoad, { resources: ["agent_relation"] });
   const typeOptions = Array.from(new Set([...RELATION_TYPE_PRESETS, ...(typesQuery.data ?? [])])).map((value) => ({ value, label: value }));
   const remove = async (id: string) => { await api(`/agent/groups/${groupId}/relations/${id}`, { method: "DELETE" }); message.success("关系边已删除"); query.reload(); typesQuery.reload(); graphQuery.reload(); };
   const saveCreate = async (values: { subjectUserId: number; objectUserId: number; type: string; note: string; confidence: number }) => {
@@ -507,7 +645,7 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
         ? (graphQuery.error && !graph
           ? <QueryErrorAlert error={graphQuery.error} onRetry={graphQuery.reload} />
           : graph
-            ? <RelationGraphView graph={graph} typeFilter={typeFilter} onEditRelation={openEdit} onDeleteRelation={(edge) => remove(edge.id)} />
+            ? <Suspense fallback={<div className="rg-loading-wrap"><Spin /></div>}><LazyRelationGraphView graph={graph} typeFilter={typeFilter} onEditRelation={openEdit} onDeleteRelation={(edge) => remove(edge.id)} /></Suspense>
             : <div className="rg-loading-wrap"><Spin /></div>)
         : (query.error && !query.data
           ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
@@ -562,7 +700,7 @@ function AgentMessagesPanel({ groupId }: { groupId: string }): React.JSX.Element
 function PrivacyPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const load = useCallback(() => api<PrivacyItem[]>(`/agent/groups/${groupId}/privacy?pageSize=100`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load);
+  const query = useApiQuery(load, { resources: ["agent_privacy", "agent_group_data"] });
   const toggle = async (userId: string, optedOut: boolean) => {
     try {
       await api(`/agent/groups/${groupId}/privacy/${userId}`, { method: "PATCH", body: JSON.stringify({ optedOut }) });
@@ -584,10 +722,6 @@ const RESULT_OPTIONS = [
   { value: "success", label: "成功" },
   { value: "failed", label: "失败" },
 ];
-
-export function AgentAuditTable({ data }: { data: AgentAudit[] }): React.JSX.Element {
-  return <Table rowKey="id" size="small" pagination={false} dataSource={data} columns={[{ title: "时间", dataIndex: "createdAt", render: formatTime }, { title: "群", dataIndex: "groupId" }, { title: "工具", dataIndex: "toolName" }, { title: "结果", dataIndex: "result", render: (value: string) => <Tag color={value === "success" ? "green" : "red"}>{value}</Tag> }, { title: "详情", dataIndex: "detail", ellipsis: true }]} />;
-}
 
 function AgentAuditsPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const [page, setPage] = useState(1); const [result, setResult] = useState("");
