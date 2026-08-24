@@ -33,8 +33,20 @@ def env_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pa
         """# ── AI 配置 ──────────
 # 默认模型
 AI_MODEL=default-model
+# 默认提供商地址
+AI_BASE_URL=https://default.test/v1
 # API 密钥
 AI_API_KEY=
+# 自定义提供商
+# AI_PROVIDERS=[]
+# 自定义提供商密钥
+# AI_PROVIDER_API_KEYS={}
+# 默认档位提供商
+AI_DEFAULT_PROVIDER=default
+# 轻量档位提供商
+AI_LIGHT_PROVIDER=default
+# 识图档位提供商
+AI_VISION_PROVIDER=default
 # 轻量模型推理
 AI_LIGHT_THINKING=disabled
 # 默认模型图片能力
@@ -90,6 +102,19 @@ def test_environment_catalog_is_complete_and_secrets_are_masked(
     assert entries["AI_MODEL"]["value"] == "root-model"
     assert entries["AI_MODEL"]["source"] == "environment"
     assert entries["AI_MODEL"]["overridden"] is True
+    assert snapshot["llmProviders"] == [
+        {
+            "id": "default",
+            "baseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+            "builtIn": True,
+            "apiKeyConfigured": True,
+            "apiKeyRootConfigured": True,
+            "baseUrlSource": "default",
+            "apiKeySource": "env",
+            "overridden": False,
+        }
+    ]
+    assert "secret-value" not in str(snapshot["llmProviders"])
 
     monkeypatch.setenv("AI_MODEL", "process-model")
     overridden = environment.load_environment()
@@ -148,6 +173,56 @@ def test_environment_rejects_invalid_llm_enums(
         environment.update_environment(version, [(key, value)])
 
 
+def test_environment_round_trips_named_providers_without_exposing_keys(
+    env_files: tuple[Path, Path],
+) -> None:
+    env_path, _example_path = env_files
+    version = environment.load_environment()["version"]
+    result = environment.update_environment(
+        version,
+        [
+            ("AI_LIGHT_MODEL", "fast-model"),
+            ("AI_LIGHT_PROVIDER", "fast"),
+        ],
+        [
+            {"id": "default", "baseUrl": "https://default.test/v1"},
+            {
+                "id": "fast",
+                "baseUrl": "https://fast.test/v1/",
+                "apiKey": "fast-secret",
+            },
+        ],
+    )
+
+    content = env_path.read_text(encoding="utf-8")
+    assert "AI_PROVIDERS=" in content
+    assert "AI_PROVIDER_API_KEYS=" in content
+    snapshot = environment.load_environment()
+    assert [item["id"] for item in snapshot["llmProviders"]] == ["default", "fast"]
+    assert snapshot["llmProviders"][1]["baseUrl"] == "https://fast.test/v1"
+    assert snapshot["llmProviders"][1]["apiKeyConfigured"] is True
+    assert "fast-secret" not in str(snapshot)
+
+    preserved = environment.update_environment(
+        result["version"],
+        [],
+        [
+            {"id": "default", "baseUrl": "https://default.test/v1"},
+            {"id": "fast", "baseUrl": "https://fast-v2.test/v1"},
+        ],
+    )
+    assert "fast-secret" in env_path.read_text(encoding="utf-8")
+
+    with pytest.raises(
+        environment.EnvironmentValidationError, match="引用了未知提供商"
+    ):
+        environment.update_environment(
+            preserved["version"],
+            [],
+            [{"id": "default", "baseUrl": "https://default.test/v1"}],
+        )
+
+
 def test_environment_routes_require_csrf_and_report_conflicts(
     env_files: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -164,6 +239,45 @@ def test_environment_routes_require_csrf_and_report_conflicts(
     response = client.get("/webui/api/v1/environment")
     assert response.status_code == 200, response.text  # noqa: PLR2004
     snapshot = response.json()["data"]
+
+    tested: dict[str, object] = {}
+
+    async def fake_test_connection(**kwargs: object) -> float:
+        tested.update(kwargs)
+        return 12.5
+
+    monkeypatch.setattr(app_module, "test_llm_connection", fake_test_connection)
+    connection = client.post(
+        "/webui/api/v1/llm/test",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "providerId": "default",
+            "baseUrl": "https://draft.test/v1",
+            "model": "draft-model",
+        },
+    )
+    assert connection.status_code == 200, connection.text  # noqa: PLR2004
+    assert connection.json()["data"] == {"success": True, "latencyMs": 12.5}
+    assert tested == {
+        "base_url": "https://draft.test/v1",
+        "api_key": "secret-value",
+        "model": "draft-model",
+        "timeout": 10.0,
+    }
+    assert "secret-value" not in connection.text
+
+    async def failing_test_connection(**_kwargs: object) -> float:
+        raise RuntimeError("upstream rejected secret-value")  # noqa: TRY003
+
+    monkeypatch.setattr(app_module, "test_llm_connection", failing_test_connection)
+    failed_connection = client.post(
+        "/webui/api/v1/llm/test",
+        headers={"X-CSRF-Token": csrf},
+        json={"providerId": "default", "model": "draft-model"},
+    )
+    assert failed_connection.status_code == 502  # noqa: PLR2004
+    assert "secret-value" not in failed_connection.text
+    assert "[REDACTED]" in failed_connection.text
 
     rejected = client.patch(
         "/webui/api/v1/environment",

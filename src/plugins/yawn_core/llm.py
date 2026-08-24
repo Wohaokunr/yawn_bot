@@ -1,5 +1,5 @@
-# ruff: noqa: E501,PLR0913
-"""共享 LLM 客户端：OpenAI 兼容端点的配置、单例与非流式补全。
+# ruff: noqa: E501,PLR0913,TRY003
+"""共享 LLM 客户端：OpenAI 兼容端点的配置、路由与非流式补全。
 
 ai_chat 的流式对话与各 AI 子插件共用同一客户端、三级模型档位与
 任务路由配置。非流式 complete()
@@ -10,9 +10,12 @@ complete_with_tools() 面向 agentic 场景（如跑团 KP 经 tool_call
 """
 
 import asyncio
+import hashlib
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 
 from nonebot import get_plugin_config, logger
 from openai import AsyncOpenAI, OpenAIError
@@ -21,7 +24,7 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionToolParam,
 )
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 LLMProfile = Literal["default", "light", "vision"]
 ThinkingMode = Literal["auto", "enabled", "disabled"]
@@ -40,12 +43,38 @@ LLMTask = Literal[
     "ww_speech",
 ]
 
+_PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_MAX_CUSTOM_PROVIDERS = 16
+
+
+class LLMProviderConfig(BaseModel):
+    """一个命名 OpenAI-compatible 提供商的非敏感配置。"""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    base_url: str
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("base_url 必须是绝对 HTTP/HTTPS 地址")
+        return normalized
+
 
 class LLMRoutingConfig(BaseModel):
     """共享模型档位、能力以及各子插件任务的路由配置。"""
 
     ai_light_model: Optional[str] = None
     ai_vision_model: Optional[str] = None
+    ai_providers: list[LLMProviderConfig] = Field(default_factory=list)
+    ai_provider_api_keys: dict[str, SecretStr] = Field(
+        default_factory=dict, repr=False
+    )
+    ai_default_provider: str = "default"
+    ai_light_provider: str = "default"
+    ai_vision_provider: str = "default"
     ai_default_thinking: ThinkingMode = "auto"
     ai_light_thinking: ThinkingMode = "disabled"
     ai_vision_thinking: ThinkingMode = "disabled"
@@ -77,6 +106,32 @@ class LLMRoutingConfig(BaseModel):
     agent_media_cache_dir: str = "data/agent_media"
     agent_media_allowed_hosts: str = ""
 
+    @model_validator(mode="after")
+    def validate_providers(self) -> "LLMRoutingConfig":
+        if len(self.ai_providers) > _MAX_CUSTOM_PROVIDERS:
+            raise ValueError(f"AI_PROVIDERS 最多 {_MAX_CUSTOM_PROVIDERS} 个")
+        provider_ids = [item.id for item in self.ai_providers]
+        if "default" in provider_ids:
+            raise ValueError("default 是内置提供商 ID，不能在 AI_PROVIDERS 中重复定义")
+        if len(provider_ids) != len(set(provider_ids)):
+            raise ValueError("AI_PROVIDERS 中的提供商 ID 必须唯一")
+        unknown_keys = set(self.ai_provider_api_keys) - set(provider_ids)
+        if unknown_keys:
+            raise ValueError(
+                "AI_PROVIDER_API_KEYS 包含未定义的提供商："
+                + ", ".join(sorted(unknown_keys))
+            )
+        known = {"default", *provider_ids}
+        for field_name in (
+            "ai_default_provider",
+            "ai_light_provider",
+            "ai_vision_provider",
+        ):
+            provider_id = getattr(self, field_name)
+            if not _PROVIDER_ID_RE.fullmatch(provider_id) or provider_id not in known:
+                raise ValueError(f"{field_name.upper()} 引用了未知提供商：{provider_id}")
+        return self
+
 
 class AIChatConfig(LLMRoutingConfig):
     """AI 服务配置，字段从 .env / 环境变量读取。"""
@@ -93,9 +148,8 @@ class AIChatConfig(LLMRoutingConfig):
 
 ai_config = get_plugin_config(AIChatConfig)
 
-# 仅在实际发起 AI 请求时构造 SDK 客户端。
-client: Optional[AsyncOpenAI] = None
-_client_pool: dict[tuple[str, str], AsyncOpenAI] = {}
+# 仅在实际发起 AI 请求时构造 SDK 客户端。缓存键只保留密钥摘要。
+_client_pool: dict[tuple[str, str, str], AsyncOpenAI] = {}
 
 
 def _record_ai_metric(operation: str, outcome: str, started: float) -> None:
@@ -115,6 +169,36 @@ def _record_ai_metric(operation: str, outcome: str, started: float) -> None:
         logger.debug("AI 指标更新失败", exc_info=True)
 
 
+def _usage_value(value: object, name: str) -> object:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _record_ai_usage(operation: str, response: object) -> None:
+    """记录兼容端点可选的 usage；字段缺失时保持静默。"""
+
+    try:
+        from .metrics import record_ai_tokens
+
+        usage = _usage_value(response, "usage")
+        if usage is None:
+            return
+        prompt_tokens = _usage_value(usage, "prompt_tokens")
+        completion_tokens = _usage_value(usage, "completion_tokens")
+        details = _usage_value(usage, "prompt_tokens_details")
+        cached_tokens = _usage_value(details, "cached_tokens") if details else None
+        for source, value in (
+            ("input", prompt_tokens),
+            ("output", completion_tokens),
+            ("cached", cached_tokens),
+        ):
+            if isinstance(value, int) and value > 0:
+                record_ai_tokens(operation, source, value)
+    except Exception:  # noqa: BLE001
+        logger.debug("AI token 指标更新失败", exc_info=True)
+
+
 def _secret_value(value: object) -> str | None:
     if isinstance(value, SecretStr):
         return value.get_secret_value()
@@ -130,6 +214,7 @@ class LLMRequestConfig:
 
     task: LLMTask
     profile: LLMProfile
+    provider: str
     model: str
     thinking: ThinkingMode
     multimodal: MultimodalMode
@@ -156,15 +241,28 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
         task_thinking = getattr(ai_config, f"{task}_thinking")
 
     if profile == "light":
-        model = _configured_text("ai_light_model") or ai_config.ai_model
+        configured_model = _configured_text("ai_light_model")
+        model = configured_model or ai_config.ai_model
+        provider = (
+            ai_config.ai_light_provider
+            if configured_model
+            else ai_config.ai_default_provider
+        )
         global_thinking = ai_config.ai_light_thinking
         multimodal = ai_config.ai_light_multimodal
     elif profile == "vision":
-        model = _configured_text("ai_vision_model") or ai_config.ai_model
+        configured_model = _configured_text("ai_vision_model")
+        model = configured_model or ai_config.ai_model
+        provider = (
+            ai_config.ai_vision_provider
+            if configured_model
+            else ai_config.ai_default_provider
+        )
         global_thinking = ai_config.ai_vision_thinking
         multimodal = "supported"
     else:
         model = ai_config.ai_model
+        provider = ai_config.ai_default_provider
         global_thinking = ai_config.ai_default_thinking
         multimodal = ai_config.ai_default_multimodal
 
@@ -172,6 +270,7 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
     return LLMRequestConfig(
         task=task,
         profile=profile,
+        provider=provider,
         model=model,
         thinking=thinking,
         multimodal=multimodal,
@@ -183,32 +282,67 @@ def vision_model_configured() -> bool:
 
     request = resolve_llm_request("agent_image")
     if request.profile == "vision":
-        return bool(_configured_text("ai_vision_model"))
-    return request.multimodal != "unsupported" and bool(request.model.strip())
+        return bool(_configured_text("ai_vision_model")) and get_client(
+            request.provider
+        ) is not None
+    return (
+        request.multimodal != "unsupported"
+        and bool(request.model.strip())
+        and get_client(request.provider) is not None
+    )
 
 
-def get_client(
-    *, base_url: str | None = None, api_key: object | None = None
-) -> Optional[AsyncOpenAI]:
-    """返回按端点和密钥复用的共享客户端；未配置 AI 时返回 ``None``。"""
-    global client  # noqa: PLW0603
-    resolved_key = _secret_value(ai_config.ai_api_key if api_key is None else api_key)
+def resolve_provider(provider_id: str = "default") -> tuple[str, str | None]:
+    """解析提供商的 Base URL 和密钥；密钥缺失时返回 ``None``。"""
+
+    if provider_id == "default":
+        return ai_config.ai_base_url, _secret_value(ai_config.ai_api_key)
+    provider = next(
+        (item for item in ai_config.ai_providers if item.id == provider_id), None
+    )
+    if provider is None:
+        return "", None
+    return provider.base_url, _secret_value(
+        ai_config.ai_provider_api_keys.get(provider_id)
+    )
+
+
+def get_client(provider_id: str = "default") -> Optional[AsyncOpenAI]:
+    """返回指定提供商的共享客户端；未配置密钥时返回 ``None``。"""
+
+    resolved_base_url, resolved_key = resolve_provider(provider_id)
     if not resolved_key:
         return None
-    resolved_base_url = str(base_url or ai_config.ai_base_url)
-    pool_key = (resolved_base_url, resolved_key)
-    if base_url is None and api_key is None and client is not None:
-        return client
+    key_digest = hashlib.sha256(resolved_key.encode("utf-8")).hexdigest()
+    pool_key = (provider_id, resolved_base_url, key_digest)
     pooled = _client_pool.get(pool_key)
     if pooled is not None:
-        if base_url is None and api_key is None:
-            client = pooled
         return pooled
     created = AsyncOpenAI(api_key=resolved_key, base_url=resolved_base_url)
     _client_pool[pool_key] = created
-    if base_url is None and api_key is None:
-        client = created
     return created
+
+
+async def test_llm_connection(
+    *, base_url: str, api_key: str, model: str, timeout: float = 10.0
+) -> float:
+    """用极短补全验证一组草稿配置，返回毫秒耗时。"""
+
+    started = time.perf_counter()
+    temporary = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    try:
+        await asyncio.wait_for(
+            temporary.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with OK."}],
+                stream=False,
+                max_tokens=8,
+            ),
+            timeout=timeout,
+        )
+    finally:
+        await temporary.close()
+    return max(time.perf_counter() - started, 0.0) * 1000
 
 
 # 非流式补全的并发上限：防止满桌 AI 的并发决策饿死 /对话 等交互调用
@@ -237,10 +371,12 @@ async def complete(
     if temperature is not None:
         extra["temperature"] = temperature
     try:
-        llm_client = get_client()
+        llm_client = get_client(request.provider)
         if llm_client is None:
             outcome = "not_configured"
-            logger.warning("LLM 未配置 AI_API_KEY，跳过非流式补全")
+            logger.warning(
+                f"LLM 提供商未配置密钥（task={task}, provider={request.provider}）"
+            )
             return None
         async with _COMPLETION_CONCURRENCY:
             try:
@@ -268,6 +404,7 @@ async def complete(
                     ),
                     timeout=timeout,
                 )
+                _record_ai_usage(task, response)
             except asyncio.TimeoutError:
                 outcome = "timeout"
                 logger.warning(
@@ -339,10 +476,12 @@ async def complete_with_tools(
     if temperature is not None:
         extra["temperature"] = temperature
     try:
-        llm_client = get_client()
+        llm_client = get_client(request.provider)
         if llm_client is None:
             outcome = "not_configured"
-            logger.warning("LLM 未配置 AI_API_KEY，跳过工具补全")
+            logger.warning(
+                f"LLM 提供商未配置密钥（task={task}, provider={request.provider}）"
+            )
             return None
         async with _COMPLETION_CONCURRENCY:
             try:
@@ -373,6 +512,7 @@ async def complete_with_tools(
                     ),
                     timeout=timeout,
                 )
+                _record_ai_usage(task, response)
             except asyncio.TimeoutError:
                 outcome = "timeout"
                 logger.warning(

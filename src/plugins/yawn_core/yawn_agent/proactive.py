@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -26,8 +27,10 @@ from .config_store import list_agent_group_ids
 from .conversation import (
     CONVERSATION_MAX_BOT_TURNS,
     ConversationBatch,
+    begin_followup_evaluation,
     close_conversation,
     conversation_is_current,
+    finish_followup_evaluation,
     mark_bot_reply,
     prune_expired_conversations,
     set_followup_handler,
@@ -475,7 +478,7 @@ async def _apply_result(
                     "session_turn": session_turn,
                     "reason": reason[:240],
                 },
-                result="success",
+                result="speak",
                 detail=text[:500],
             )
         )
@@ -497,7 +500,7 @@ async def _apply_result(
         )
 
 
-async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None:
+async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) -> str:
     group_id = candidate["group_id"]
     mode = candidate["mode"]
     primary = bots[0]
@@ -513,7 +516,7 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                 or config.trigger_mode != "mention_or_proactive"
             ):
                 dbg(f"群 {group_id} 主动发言生成中止: 配置缺失/未启用/模式不含主动")
-                return
+                return "close"
             # 复用对话路径的完整上下文：40 条消息、成员、记忆与关系，
             # 让插话贴着群里的真实话题而不是只看 8 条消息的切片；
             # 消息附带 minutes_ago 便于模型判断话题的新旧与节奏。
@@ -551,8 +554,23 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     reason="LLM 返回空内容",
                     session_turn=1,
                 )
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": mode,
+                            "action": "error",
+                            "session_turn": 1,
+                            "reason": "LLM 返回空内容",
+                        },
+                        result="error",
+                        detail="LLM 返回空内容",
+                    )
+                )
                 await session.commit()
-                return
+                return "error"
             decision = _decide_proactive_reply(raw)
             if not decision.should_speak:
                 # 内容门拦截：模型读懂对话后判定此刻不适合开口。
@@ -573,7 +591,7 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                             "session_turn": 1,
                             "reason": decision.reason[:240],
                         },
-                        result="skip",
+                        result=decision.action,
                         detail=decision.reason[:500],
                     )
                 )
@@ -590,7 +608,7 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     session_turn=1,
                 )
                 await session.commit()
-                return
+                return decision.action
             text = decision.text
             dbg(f"群 {group_id} 主动发言生成结果: {text!r} reason={decision.reason!r}")
             if text.casefold() in {
@@ -599,6 +617,21 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                 if isinstance(item, dict)
             }:
                 dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {text!r}")
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": mode,
+                            "action": "wait",
+                            "session_turn": 1,
+                            "reason": "近期回复撞重",
+                        },
+                        result="wait",
+                        detail="近期回复撞重",
+                    )
+                )
                 await _apply_result(
                     session,
                     config,
@@ -612,7 +645,7 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                     session_turn=1,
                 )
                 await session.commit()
-                return
+                return "wait"
             # 多机器人部署下逐个尝试；通常只有一个连接，首个即成功。
             sent = False
             sent_message_id: int | None = None
@@ -640,7 +673,23 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
             if not sent:
                 logger.warning("群 %s 主动消息无可用机器人发送", group_id)
                 dbg(f"群 {group_id} 主动发言失败: {len(bots)} 个机器人均发送失败")
-                return
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": mode,
+                            "action": "send_failed",
+                            "session_turn": 1,
+                            "reason": "无可用机器人发送",
+                        },
+                        result="send_failed",
+                        detail="所有机器人发送失败",
+                    )
+                )
+                await session.commit()
+                return "send_failed"
             if decision.topic:
                 # 用模型提炼的真实话题更新 active_topic，让后续对话路径的
                 # 上下文不再停留在"上次触发消息的原文"。
@@ -669,9 +718,26 @@ async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None
                 logger.warning("群 %s 主动发言状态提交失败", group_id)
                 dbg_exc(f"群 {group_id} 主动发言状态提交失败,已回滚")
                 await session.rollback()
+            return "speak"
 
 
-async def _process_followup(batch: ConversationBatch) -> None:
+async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None:
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        outcome = await _process_candidate_impl(candidate, bots)
+    finally:
+        try:
+            from ..metrics import record_agent_turn
+
+            record_agent_turn(
+                "proactive", outcome, max(time.monotonic() - started, 0.0)
+            )
+        except Exception:  # noqa: BLE001
+            dbg_exc("Agent 主动发言回合指标上报失败(忽略)")
+
+
+async def _process_followup_impl(batch: ConversationBatch) -> str:
     """处理一个已经完成 20~45 秒合批的短会话续聊候选。"""
 
     bot_id, group_id = batch.key
@@ -679,7 +745,7 @@ async def _process_followup(batch: ConversationBatch) -> None:
         dbg(
             f"群 {group_id} 短会话候选已失效: session={batch.session_id}"
         )
-        return
+        return "close"
     bot = next(
         (
             item
@@ -690,11 +756,13 @@ async def _process_followup(batch: ConversationBatch) -> None:
     )
     if bot is None:
         close_conversation(bot_id, group_id, reason="会话机器人已离线")
-        return
+        return "close"
 
     async with group_lock(group_id, bot_id):
         if not conversation_is_current(batch):
-            return
+            return "close"
+        if not begin_followup_evaluation(batch):
+            return "close"
         async with get_session() as session:
             config = await session.get(GroupAgentConfig, group_id)
             if (
@@ -703,7 +771,7 @@ async def _process_followup(batch: ConversationBatch) -> None:
                 or config.trigger_mode != "mention_or_proactive"
             ):
                 close_conversation(bot_id, group_id, reason="配置关闭连续水群")
-                return
+                return "close"
             now = now_beijing()
             day = now.strftime("%Y-%m-%d")
             day_count = config.proactive_count if config.proactive_day == day else 0
@@ -713,7 +781,7 @@ async def _process_followup(batch: ConversationBatch) -> None:
                     f"({day_count}/{config.daily_limit})"
                 )
                 close_conversation(bot_id, group_id, reason="达到每日上限")
-                return
+                return "close"
             context = await _load_context(
                 session,
                 group_id,
@@ -737,10 +805,34 @@ async def _process_followup(batch: ConversationBatch) -> None:
                 f"turn={batch.bot_turns + 1} users={batch.user_ids}"
             )
             raw = await _generate_proactive_reply(prompt)
+            if raw is None:
+                reason = "LLM 返回空内容"
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": "followup",
+                            "action": "error",
+                            "session_turn": batch.bot_turns + 1,
+                            "session_id": batch.session_id,
+                            "reason": reason,
+                        },
+                        result="error",
+                        detail=reason,
+                    )
+                )
+                await session.commit()
+                finish_followup_evaluation(batch, "error")
+                return "error"
             decision = _decide_proactive_reply(raw or "")
             action = decision.action
             reason = decision.reason
             text = decision.text
+            if reason == "LLM 返回了无法解析的 JSON":
+                action = "error"
+                text = ""
             if action == "speak" and text.casefold() in {
                 str(item.get("text") or "").casefold()
                 for item in (config.recent_response_fingerprints or [])
@@ -772,9 +864,8 @@ async def _process_followup(batch: ConversationBatch) -> None:
                     f"群 {group_id} 短会话决策: session={batch.session_id} "
                     f"action={action} reason={reason!r}"
                 )
-                if action == "close":
-                    close_conversation(bot_id, group_id, reason=reason)
-                return
+                finish_followup_evaluation(batch, action)
+                return action
 
             try:
                 result = await bot.call_api(
@@ -787,7 +878,25 @@ async def _process_followup(batch: ConversationBatch) -> None:
                 dbg_exc(
                     f"群 {group_id} 短会话发送失败 session={batch.session_id}"
                 )
-                return
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": "followup",
+                            "action": "send_failed",
+                            "session_turn": batch.bot_turns + 1,
+                            "session_id": batch.session_id,
+                            "reason": "群消息发送失败",
+                        },
+                        result="send_failed",
+                        detail="群消息发送失败",
+                    )
+                )
+                await session.commit()
+                finish_followup_evaluation(batch, "send_failed")
+                return "send_failed"
             sent_message_id = _extract_message_id(result)
             if decision.topic:
                 config.active_topic = decision.topic[:240]
@@ -811,12 +920,35 @@ async def _process_followup(batch: ConversationBatch) -> None:
                 source="followup",
                 preserve_pending=True,
             )
+            finish_followup_evaluation(batch, "speak")
             try:
                 await session.commit()
             except SQLAlchemyError:
                 logger.warning("群 %s 短会话续聊状态提交失败", group_id)
                 dbg_exc(f"群 {group_id} 短会话状态提交失败,已回滚")
                 await session.rollback()
+            return "speak"
+
+
+async def _process_followup(batch: ConversationBatch) -> None:
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        outcome = await _process_followup_impl(batch)
+    finally:
+        try:
+            from ..metrics import record_agent_turn
+
+            record_agent_turn(
+                "followup",
+                outcome,
+                max(time.monotonic() - started, 0.0),
+                queue_wait_seconds=max(
+                    (now_beijing() - batch.cutoff_at).total_seconds(), 0.0
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            dbg_exc("Agent 短会话回合指标上报失败(忽略)")
 
 
 async def _tick() -> None:

@@ -9,6 +9,8 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOT_ID = 100
+MEMBER_RESULT_LIMIT = 100
+MEMBER_TOTAL = 125
 
 
 def _load_agent_modules() -> tuple[Any, Any, Any]:
@@ -48,6 +50,59 @@ def test_admin_tool_schemas_require_actor_management_permission() -> None:
     assert "mute_member" not in member_tools
     assert "create_group_announcement" not in member_tools
     assert {"mute_member", "create_group_announcement"} <= admin_tools
+
+
+def test_tool_registry_filters_removed_tools_and_forward_capability() -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    base = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset({"send_group_msg"}),
+    )
+    names = _tool_names(tools.build_tool_schemas(base))
+    assert {"send_text", "get_recent_messages", "get_group_activity"}.isdisjoint(names)
+    assert "send_forward" not in names
+
+    forward = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset({"send_group_forward_msg"}),
+    )
+    assert "send_forward" in _tool_names(tools.build_tool_schemas(forward))
+
+
+@pytest.mark.asyncio
+async def test_list_group_members_returns_bounded_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset({"get_group_member_list"}),
+    )
+
+    async def probe(*_args: object, **_kwargs: object) -> Any:
+        return current
+
+    class Bot:
+        async def call_api(self, action: str, **_params: Any) -> Any:
+            assert action == "get_group_member_list"
+            return [{"user_id": index} for index in range(MEMBER_TOTAL)]
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", probe)
+    result = await tools.execute_tool(
+        "list_group_members",
+        {},
+        bot=Bot(),
+        group_id=1,
+        capabilities=current,
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["total"] == MEMBER_TOTAL
+    assert result["result"]["truncated"] is True
+    assert len(result["result"]["items"]) == MEMBER_RESULT_LIMIT
 
 
 @pytest.mark.asyncio

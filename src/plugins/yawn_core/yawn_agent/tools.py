@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -21,7 +22,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
-from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from .capabilities import (
     BotGroupCapabilities,
@@ -45,195 +45,156 @@ _ALLOWED_FILE_HOSTS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolDefinition:
+    name: str
+    description: str
+    properties: dict[str, Any]
+    required: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
+    admin: bool = False
+
+
+_TOOL_DEFINITIONS = (
+    _ToolDefinition(
+        "get_group_info", "读取当前群信息", {}, actions=("get_group_info",)
+    ),
+    _ToolDefinition(
+        "get_group_member",
+        "读取群成员角色和头衔",
+        {"user_id": {"type": "integer"}},
+        required=("user_id",),
+        actions=("get_group_member_info",),
+    ),
+    _ToolDefinition(
+        "list_group_members",
+        "读取群成员列表（最多返回100人）",
+        {},
+        actions=("get_group_member_list",),
+    ),
+    _ToolDefinition(
+        "search_group_memory",
+        "搜索当前群已沉淀的记忆",
+        {"query": {"type": "string", "minLength": 1, "maxLength": 120}},
+        required=("query",),
+    ),
+    _ToolDefinition(
+        "get_person_profile",
+        "读取群内人物画像",
+        {"user_id": {"type": "integer"}},
+        required=("user_id",),
+    ),
+    _ToolDefinition(
+        "list_user_relations",
+        "查询群内某成员的全部已知关系",
+        {"user_id": {"type": "integer"}},
+        required=("user_id",),
+    ),
+    _ToolDefinition(
+        "record_user_relation",
+        "记录对话中明确观察到的两位成员之间的关系",
+        {
+            "subject_user_id": {"type": "integer"},
+            "object_user_id": {"type": "integer"},
+            "type": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "description": "优先使用：好友/死党/情侣/伴侣/亲属/师徒/同事/同学/搭子/对立",
+            },
+            "note": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "一句话关系背景，没有可省略",
+            },
+        },
+        required=("subject_user_id", "object_user_id", "type"),
+    ),
+    _ToolDefinition(
+        "send_image",
+        "发送群图片",
+        {"file": {"type": "string"}},
+        required=("file",),
+        actions=("send_group_msg",),
+    ),
+    _ToolDefinition(
+        "send_forward",
+        "发送合并转发消息",
+        {
+            "messages": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {"type": "object"},
+            }
+        },
+        required=("messages",),
+        actions=("send_group_forward_msg",),
+    ),
+    _ToolDefinition(
+        "mute_member",
+        "禁言群成员",
+        {
+            "user_id": {"type": "integer"},
+            "duration": {"type": "integer", "minimum": 1, "maximum": 2592000},
+        },
+        required=("user_id", "duration"),
+        actions=("set_group_ban",),
+        admin=True,
+    ),
+    _ToolDefinition(
+        "create_group_announcement",
+        "创建群公告",
+        {"content": {"type": "string", "maxLength": 1000}},
+        required=("content",),
+        actions=("send_group_notice", "_send_group_notice"),
+        admin=True,
+    ),
+    _ToolDefinition(
+        "send_file",
+        "发送群文件或文档",
+        {
+            "file": {"type": "string"},
+            "name": {"type": "string", "maxLength": 128},
+        },
+        required=("file", "name"),
+        actions=("upload_group_file",),
+    ),
+)
+_TOOL_BY_NAME = {item.name: item for item in _TOOL_DEFINITIONS}
+_ADMIN_TOOLS = frozenset(item.name for item in _TOOL_DEFINITIONS if item.admin)
+
+
 def build_tool_schemas(
     capabilities: BotGroupCapabilities, *, allow_admin_tools: bool = False
 ) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    definitions = [
-        ("get_group_info", "读取当前群信息", {}),
-        ("get_group_member", "读取群成员角色和头衔", {"user_id": {"type": "integer"}}),
-        ("list_group_members", "读取群成员列表", {}),
-        (
-            "search_group_memory",
-            "搜索当前群已沉淀的记忆",
-            {"query": {"type": "string", "minLength": 1, "maxLength": 120}},
-        ),
-        ("get_person_profile", "读取群内人物画像", {"user_id": {"type": "integer"}}),
-        (
-            "list_user_relations",
-            "查询群内某成员的全部已知关系",
-            {"user_id": {"type": "integer"}},
-        ),
-        (
-            "record_user_relation",
-            "记录对话中明确观察到的两位成员之间的关系",
-            {
-                "subject_user_id": {"type": "integer"},
-                "object_user_id": {"type": "integer"},
-                "type": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 32,
-                    "description": "优先使用：好友/死党/情侣/伴侣/亲属/师徒/同事/同学/搭子/对立",
-                },
-                "note": {
-                    "type": "string",
-                    "maxLength": 200,
-                    "description": "一句话关系背景，没有可省略",
-                },
-            },
-        ),
-        (
-            "get_recent_messages",
-            "读取最近群聊消息摘要",
-            {"limit": {"type": "integer", "minimum": 1, "maximum": 40}},
-        ),
-        ("get_group_activity", "读取群聊活跃度", {}),
-    ]
-    action_for_tool = {
-        "get_group_info": "get_group_info",
-        "get_group_member": "get_group_member_info",
-        "list_group_members": "get_group_member_list",
-    }
-    required_by_tool = {
-        "get_group_member": ["user_id"],
-        "search_group_memory": ["query"],
-        "get_person_profile": ["user_id"],
-        "list_user_relations": ["user_id"],
-        "record_user_relation": ["subject_user_id", "object_user_id", "type"],
-    }
-    for name, description, properties in definitions:
-        action = action_for_tool.get(name)
-        if action and not capabilities.has(action):
-            dbg(f"工具 schema: {name} 因 OneBot 不支持 {action} 而跳过")
-            continue
-        required = required_by_tool.get(name, [])
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        **({"required": required} if required else {}),
-                        "additionalProperties": False,
-                    },
-                },
-            }
-        )
-    if capabilities.has("send_group_msg"):
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "send_text",
-                    "description": "发送一条群文本消息",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string", "maxLength": 1500}},
-                        "required": ["text"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-        )
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "send_image",
-                    "description": "发送群图片",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"file": {"type": "string"}},
-                        "required": ["file"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-        )
-    if capabilities.has("send_group_forward_msg"):
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "send_forward",
-                    "description": "发送合并转发消息",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "messages": {
-                                "type": "array",
-                                "maxItems": 20,
-                                "items": {"type": "object"},
-                            }
-                        },
-                        "required": ["messages"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-        )
-    if capabilities.can_manage and allow_admin_tools:
-        if capabilities.has("set_group_ban"):
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "mute_member",
-                        "description": "禁言群成员",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "user_id": {"type": "integer"},
-                                "duration": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "maximum": 2592000,
-                                },
-                            },
-                            "required": ["user_id", "duration"],
-                            "additionalProperties": False,
-                        },
-                    },
-                }
-            )
-        if capabilities.has("send_group_notice") or capabilities.has(
-            "_send_group_notice"
+    for definition in _TOOL_DEFINITIONS:
+        if definition.actions and not any(
+            capabilities.has(action) for action in definition.actions
         ):
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "create_group_announcement",
-                        "description": "创建群公告",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "content": {"type": "string", "maxLength": 1000}
-                            },
-                            "required": ["content"],
-                            "additionalProperties": False,
-                        },
-                    },
-                }
+            dbg(
+                f"工具 schema: {definition.name} 因 OneBot 不支持 "
+                f"{definition.actions} 而跳过"
             )
-    if capabilities.has("upload_group_file"):
+            continue
+        if definition.admin and not (
+            capabilities.can_manage and allow_admin_tools
+        ):
+            continue
         tools.append(
             {
                 "type": "function",
                 "function": {
-                    "name": "send_file",
-                    "description": "发送群文件或文档",
+                    "name": definition.name,
+                    "description": definition.description,
                     "parameters": {
                         "type": "object",
-                        "properties": {
-                            "file": {"type": "string"},
-                            "name": {"type": "string", "maxLength": 128},
-                        },
-                        "required": ["file", "name"],
+                        "properties": definition.properties,
+                        **(
+                            {"required": list(definition.required)}
+                            if definition.required
+                            else {}
+                        ),
                         "additionalProperties": False,
                     },
                 },
@@ -285,14 +246,6 @@ async def _audit(
         dbg(f"群 {group_id} 工具审计已写入: tool={name} result={result}")
 
 
-_READ_ACTIONS = {
-    "get_group_info": "get_group_info",
-    "get_group_member": "get_group_member_info",
-    "list_group_members": "get_group_member_list",
-}
-_ADMIN_TOOLS = {"mute_member", "create_group_announcement"}
-
-
 async def _check_tool_policy(
     session: Any,
     group_id: int,
@@ -302,21 +255,17 @@ async def _check_tool_policy(
     bot: Any,
     actor_user_id: int | None,
 ) -> None:
-    required = _READ_ACTIONS.get(name)
-    if required and not capabilities.has(required):
-        dbg(f"群 {group_id} 工具策略拒绝 {name}: OneBot 不支持 {required}")
-        raise PermissionError("当前 OneBot 不支持该读取操作")
-    if name in {"send_text", "send_forward", "send_image"} and not capabilities.has(
-        "send_group_msg"
-    ):
-        dbg(f"群 {group_id} 工具策略拒绝 {name}: OneBot 不支持 send_group_msg")
-        raise PermissionError("当前 OneBot 不支持群消息发送")
-    if name == "send_file" and not capabilities.has("upload_group_file"):
-        dbg(f"群 {group_id} 工具策略拒绝 {name}: OneBot 不支持 upload_group_file")
-        raise PermissionError("当前 OneBot 不支持群文件上传")
-    if name in _ADMIN_TOOLS and not capabilities.can_manage:
+    definition = _TOOL_BY_NAME.get(name)
+    if definition is None:
+        raise ValueError(f"未知工具: {name}")
+    if definition.admin and not capabilities.can_manage:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 机器人没有群管理权限")
         raise PermissionError("机器人没有群管理权限")
+    if definition.actions and not any(
+        capabilities.has(action) for action in definition.actions
+    ):
+        dbg(f"群 {group_id} 工具策略拒绝 {name}: OneBot 不支持 {definition.actions}")
+        raise PermissionError("当前 OneBot 不支持该操作")
     if name in _ADMIN_TOOLS and (
         actor_user_id is None
         or not await user_can_manage_group(bot, group_id, actor_user_id)
@@ -466,7 +415,14 @@ async def execute_tool(
                 "get_group_member_info", group_id=group_id, user_id=int(args["user_id"])
             )
         elif name == "list_group_members":
-            result = await bot.call_api("get_group_member_list", group_id=group_id)
+            members = await bot.call_api("get_group_member_list", group_id=group_id)
+            if not isinstance(members, list):
+                raise ValueError("群成员列表响应格式错误")
+            result = {
+                "items": members[:100],
+                "total": len(members),
+                "truncated": len(members) > 100,
+            }
         elif name == "get_person_profile":
             subject_id = int(args["user_id"])
             privacy = (
@@ -508,95 +464,6 @@ async def execute_tool(
                 }
                 for row in rows
             ]
-        elif name == "get_recent_messages":
-            limit = max(1, min(int(args.get("limit", 20)), 40))
-            opted_out = (
-                set(
-                    (
-                        await session.execute(
-                            select(AgentPrivacy.user_id).where(
-                                AgentPrivacy.group_id == group_id,
-                                AgentPrivacy.opted_out.is_(True),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if session is not None
-                else set()
-            )
-            stmt = (
-                select(GroupAgentMessage)
-                .where(
-                    GroupAgentMessage.group_id == group_id,
-                    (
-                        GroupAgentMessage.expires_at.is_(None)
-                        | (GroupAgentMessage.expires_at >= now)
-                    ),
-                )
-                .order_by(GroupAgentMessage.id.desc())
-                .limit(limit)
-            )
-            if opted_out:
-                stmt = stmt.where(GroupAgentMessage.user_id.not_in(opted_out))
-            rows = (
-                (await session.execute(stmt)).scalars().all()
-                if session is not None
-                else []
-            )
-            dbg(
-                f"群 {group_id} get_recent_messages: limit={limit} "
-                f"隐私退出过滤={sorted(opted_out)} 返回 {len(rows)} 条"
-            )
-            result = [
-                {
-                    "user_id": row.user_id,
-                    "name": row.sender_name,
-                    "text": row.normalized_text,
-                }
-                for row in reversed(rows)
-            ]
-        elif name == "get_group_activity":
-            opted_out = (
-                set(
-                    (
-                        await session.execute(
-                            select(AgentPrivacy.user_id).where(
-                                AgentPrivacy.group_id == group_id,
-                                AgentPrivacy.opted_out.is_(True),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if session is not None
-                else set()
-            )
-            stmt = (
-                select(GroupAgentMessage)
-                .where(
-                    GroupAgentMessage.group_id == group_id,
-                    (
-                        GroupAgentMessage.expires_at.is_(None)
-                        | (GroupAgentMessage.expires_at >= now)
-                    ),
-                )
-                .order_by(GroupAgentMessage.id.desc())
-                .limit(60)
-            )
-            if opted_out:
-                stmt = stmt.where(GroupAgentMessage.user_id.not_in(opted_out))
-            rows = (
-                (await session.execute(stmt)).scalars().all()
-                if session is not None
-                else []
-            )
-            result = {
-                "messages_60": len(rows),
-                "participants_60": len({row.user_id for row in rows}),
-            }
         elif name == "search_group_memory":
             query = str(args.get("query", "")).strip()
             if not query:
@@ -806,14 +673,6 @@ async def execute_tool(
                 f"群 {group_id} record_user_relation: {subject} "
                 f"—{relation_type}→ {target} note={note!r}"
             )
-        elif name == "send_text":
-            text = str(args.get("text", "")).strip()
-            if not text or len(text) > 1500:
-                raise ValueError("文本不能为空且长度不得超过 1500")
-            await bot.call_api(
-                "send_group_msg", group_id=group_id, message=MessageSegment.text(text)
-            )
-            result = {"sent": True}
         elif name == "send_forward":
             messages = args.get("messages")
             if (

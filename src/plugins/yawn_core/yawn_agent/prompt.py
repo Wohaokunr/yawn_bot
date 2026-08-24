@@ -8,7 +8,7 @@ from typing import Any
 
 from .persona import canonical_persona
 
-PROMPT_VERSION = "yawn-agent-v5"
+PROMPT_VERSION = "yawn-agent-v6"
 
 _STATIC_RULES = (
     "你是 QQ 群里的自然群友。保持简洁、口语化和尊重上下文。"
@@ -33,19 +33,17 @@ def canonical_json(value: Any) -> str:
 
 
 def build_static_prefix(persona: dict[str, str], tools: list[dict[str, Any]]) -> str:
-    tool_payload = sorted(
-        [
-            {"type": item.get("type"), "function": item.get("function", {})}
-            for item in tools
-        ],
-        key=lambda item: str(item.get("function", {}).get("name", "")),
+    tool_names = sorted(
+        str(item.get("function", {}).get("name", ""))
+        for item in tools
+        if str(item.get("function", {}).get("name", ""))
     )
     return "\n".join(
         (
             f"提示词版本：{PROMPT_VERSION}",
             _STATIC_RULES,
             f"人格：{canonical_persona(persona)}",
-            f"工具：{canonical_json(tool_payload)}",
+            f"可用工具名称：{canonical_json(tool_names)}",
         )
     )
 

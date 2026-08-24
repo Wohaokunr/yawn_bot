@@ -248,18 +248,35 @@ export interface EnvironmentEntry {
   overridden: boolean;
 }
 
+export interface LLMProviderSnapshot {
+  id: string;
+  baseUrl: string;
+  builtIn: boolean;
+  apiKeyConfigured: boolean;
+  apiKeyRootConfigured: boolean;
+  baseUrlSource: EnvironmentValueSource;
+  apiKeySource: EnvironmentValueSource;
+  overridden: boolean;
+}
+
 export interface EnvironmentSnapshot {
   file: string;
   version: string;
   environment: string;
   environmentFile: string | null;
   entries: EnvironmentEntry[];
+  llmProviders: LLMProviderSnapshot[];
 }
 
 export interface EnvironmentPatchResult {
   version: string;
   restartRequired: boolean;
   updatedKeys: string[];
+}
+
+export interface LLMConnectionTestResult {
+  success: true;
+  latencyMs: number;
 }
 
 // ── 对局中心:狼人杀 / 跑团(字段口径见后端 webui/games.py) ──

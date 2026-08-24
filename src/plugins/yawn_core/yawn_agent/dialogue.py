@@ -33,7 +33,7 @@ from .capabilities import probe_group_capabilities, user_can_manage_group
 from .collector import group_lock, is_pending_trigger_expired
 from .config_store import get_or_create_config
 from .conversation import mark_bot_reply
-from .context import ActivitySnapshot, build_context, now_beijing
+from .context import ActivitySnapshot, build_context, now_beijing, trim_context_messages
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
 from .memory import effective_relation_confidence, rank_memories
@@ -316,6 +316,7 @@ async def _load_context(
     focus_user_ids: Sequence[int] | None = None,
     message_cutoff: datetime | None = None,
     include_active_profiles: bool = False,
+    exclude_message_id: int | None = None,
 ) -> dict[str, Any]:
     now = now_beijing()
     # 隐私退出是读路径级别的：历史消息同样不得进入提示词。
@@ -349,6 +350,10 @@ async def _load_context(
         message_stmt = message_stmt.where(GroupAgentMessage.user_id.not_in(opted_out))
     if bot_id is not None:
         message_stmt = message_stmt.where(GroupAgentMessage.bot_id == bot_id)
+    if exclude_message_id is not None:
+        message_stmt = message_stmt.where(
+            GroupAgentMessage.message_id != int(exclude_message_id)
+        )
     rows = (
         (
             await session.execute(
@@ -358,7 +363,7 @@ async def _load_context(
         .scalars()
         .all()
     )
-    messages = [
+    messages = trim_context_messages([
         {
             "user_id": row.user_id,
             "name": row.sender_name,
@@ -373,31 +378,8 @@ async def _load_context(
             ),
         }
         for row in reversed(rows)
-    ]
+    ])
     dbg(f"群 {group_id} 加载上下文: 历史消息 {len(messages)} 条(上限 40)")
-    member_rows = (
-        (
-            await session.execute(
-                select(UserGroup)
-                .where(UserGroup.group_id == group_id)
-                .order_by(UserGroup.last_seen_at.desc())
-                .limit(100)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    members = [
-        {
-            "user_id": row.user_id,
-            "name": row.group_nickname,
-            "role": row.role,
-            "title": row.title,
-            "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
-        }
-        for row in member_rows
-    ]
-    dbg(f"群 {group_id} 加载上下文: 成员 {len(members)} 人(上限 100)")
     # 相关性信号取自刚加载的消息：近 10 条文本与最后一位发言成员。
     recent_texts = [str(item["text"] or "") for item in messages[-10:]]
     speaker_id = next(
@@ -431,6 +413,42 @@ async def _load_context(
         focus_ids.append(member_id)
         if len(focus_ids) >= 4:
             break
+    relevant_member_ids = {
+        int(item["user_id"])
+        for item in messages
+        if item.get("role") != "bot"
+    }
+    relevant_member_ids.update(focus_ids)
+    member_rows = (
+        (
+            await session.execute(
+                select(UserGroup)
+                .where(
+                    UserGroup.group_id == group_id,
+                    UserGroup.user_id.in_(relevant_member_ids),
+                )
+                .order_by(UserGroup.last_seen_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+        if relevant_member_ids
+        else []
+    )
+    members = [
+        {
+            "user_id": row.user_id,
+            "name": row.group_nickname,
+            "role": row.role,
+            "title": row.title,
+            "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+        }
+        for row in member_rows
+    ]
+    dbg(
+        f"群 {group_id} 加载上下文: 近期相关成员 {len(members)} 人"
+        f"(候选 {len(relevant_member_ids)})"
+    )
     memory_clauses = [
         AgentMemory.group_id == group_id,
         AgentMemory.visibility.in_(("group", "public")),
@@ -627,6 +645,10 @@ async def _load_context(
         int(item["user_id"]): str(item.get("name") or item["user_id"])
         for item in members
     }
+    for item in messages:
+        user_id = int(item["user_id"])
+        if item.get("name") and user_id not in name_by_id:
+            name_by_id[user_id] = str(item["name"])
     memories: list[dict[str, Any]] = []
     # 以最终 JSON 数组的真实字符数计预算（含 [] 和条目间的 ", "）。
     memory_chars = 2
@@ -685,6 +707,10 @@ async def _load_context(
                         AgentRelation.subject_user_id.not_in(opted_out),
                         AgentRelation.object_user_id.not_in(opted_out),
                         or_(
+                            AgentRelation.source_kind != "mention",
+                            AgentRelation.evidence_count >= 2,
+                        ),
+                        or_(
                             AgentRelation.subject_user_id.in_(participant_ids),
                             AgentRelation.object_user_id.in_(participant_ids),
                         ),
@@ -698,7 +724,7 @@ async def _load_context(
         )
 
     def _relation_label(user_id: int) -> str:
-        # 成员名单只取活跃 top-100，解析不到名字时兜底 QQ 号，避免渲染成 null。
+        # 只加载近期相关成员；解析不到名字时兜底 QQ 号，避免渲染成 null。
         name = name_by_id.get(int(user_id))
         return f"{name}({user_id})" if name else str(user_id)
 
@@ -948,7 +974,7 @@ async def _finalize_reply(
         dbg(f"群 {group_id} 回复后状态已提交(指纹记录 {len(recent[-8:])} 条)")
 
 
-async def process_group_message(
+async def _process_group_message(
     bot: Bot,
     event: GroupMessageEvent,
     normalized: NormalizedMessage,
@@ -977,7 +1003,13 @@ async def process_group_message(
                     f"群 {group_id} 处理中止: config={'缺失' if config is None else '未启用'}"
                 )
                 return
-            context = await _load_context(session, group_id, config, bot_id)
+            context = await _load_context(
+                session,
+                group_id,
+                config,
+                bot_id,
+                exclude_message_id=int(message_id) if message_id is not None else None,
+            )
             capabilities = await probe_group_capabilities(bot, group_id)
             actor_user_id = int(event.get_user_id())
             allow_admin_tools = await user_can_manage_group(
@@ -1034,8 +1066,8 @@ async def process_group_message(
             dbg(
                 f"群 {group_id} 提示词构建完成: messages={len(messages)} 条 "
                 f"prompt 前缀指纹={_prefix_fingerprint[:12]}… "
-                f"cache_key={'命中' if cache_key in _PROMPT_CACHE_KEYS else '未命中'} "
-                f"stable_context={'命中' if stable_key in _PROMPT_CACHE_KEYS else '未命中'} "
+                f"前缀稳定性={'复用' if cache_key in _PROMPT_CACHE_KEYS else '变化'} "
+                f"稳定上下文={'复用' if stable_key in _PROMPT_CACHE_KEYS else '变化'} "
                 f"用户 prompt={user_prompt!r}"
             )
             try:
@@ -1044,8 +1076,7 @@ async def process_group_message(
                 record_agent_cache(
                     "prompt", "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss"
                 )
-                # 稳定层指纹反映"记忆+群身份"这一实质缓存段的命中情况；
-                # 同一整理窗口内应保持命中，整理落库后转为未命中属预期。
+                # 只观测本地前缀是否稳定；服务商实际缓存 token 由 usage 指标记录。
                 record_agent_cache(
                     "context", "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss"
                 )
@@ -1215,3 +1246,42 @@ async def process_group_message(
                 label="工具收尾",
                 message_id=message_id,
             )
+
+
+async def process_group_message(
+    bot: Bot,
+    event: GroupMessageEvent,
+    normalized: NormalizedMessage,
+    *,
+    enqueued_at: float | None = None,
+) -> None:
+    """处理明确触发并记录低基数的端到端回合指标。"""
+
+    started = time.monotonic()
+    outcome = "completed"
+    try:
+        await _process_group_message(
+            bot,
+            event,
+            normalized,
+            enqueued_at=enqueued_at,
+        )
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        try:
+            from ..metrics import record_agent_turn
+
+            record_agent_turn(
+                "dialogue",
+                outcome,
+                max(time.monotonic() - started, 0.0),
+                queue_wait_seconds=(
+                    max(started - enqueued_at, 0.0)
+                    if enqueued_at is not None
+                    else None
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            dbg_exc("Agent 对话回合指标上报失败(忽略)")
