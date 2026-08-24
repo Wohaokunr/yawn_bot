@@ -957,7 +957,7 @@ async def _finalize_reply(
             f"群 {group_id} 话题切换: epoch={config.context_epoch} "
             f"topic={config.active_topic!r}"
         )
-    if config.trigger_mode == "mention_or_proactive":
+    if config.short_conversation_enabled:
         mark_bot_reply(
             int(bot.self_id),
             group_id,

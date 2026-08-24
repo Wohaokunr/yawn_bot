@@ -37,6 +37,9 @@ class GroupAgentConfig(Model):
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=8)
     # 热闹插话：话题间隙内像真人群友一样插嘴，与冷场暖场分开配置。
     proactive_active_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 短会话续聊独立于主动插话开关：默认开启；迁移会按旧 trigger_mode
+    # 回填存量配置，避免 mention_only 等模式升级后意外获得连续续聊。
+    short_conversation_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     proactive_active_probability: Mapped[float] = mapped_column(Float, default=0.25)
     proactive_active_window_minutes: Mapped[int] = mapped_column(Integer, default=12)
     daily_limit: Mapped[int] = mapped_column(Integer, default=30)

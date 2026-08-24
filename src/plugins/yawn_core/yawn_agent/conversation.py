@@ -342,6 +342,16 @@ def current_conversation(bot_id: int, group_id: int) -> ConversationSession | No
     return _sessions.get((int(bot_id), int(group_id)))
 
 
+def close_group_conversations(group_id: int, *, reason: str) -> int:
+    """关闭指定群当前进程内的全部短会话（可能对应多个 Bot）。"""
+
+    target_group_id = int(group_id)
+    keys = [key for key in _sessions if key[1] == target_group_id]
+    for bot_id, current_group_id in keys:
+        close_conversation(bot_id, current_group_id, reason=reason)
+    return len(keys)
+
+
 def prune_expired_conversations(*, now: float | None = None) -> int:
     current = float(time.monotonic() if now is None else now)
     expired = [key for key, session in _sessions.items() if _expired(session, current)]
@@ -379,6 +389,7 @@ __all__ = [
     "batch_due_at",
     "begin_followup_evaluation",
     "close_conversation",
+    "close_group_conversations",
     "conversation_is_current",
     "current_conversation",
     "finish_followup_evaluation",

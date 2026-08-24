@@ -721,6 +721,7 @@ def serialize_agent_config(
         "triggerMode": row.trigger_mode,
         "proactiveProbability": row.proactive_probability,
         "proactiveActiveEnabled": row.proactive_active_enabled,
+        "shortConversationEnabled": row.short_conversation_enabled,
         "proactiveActiveProbability": row.proactive_active_probability,
         "proactiveActiveWindowMinutes": row.proactive_active_window_minutes,
         "idleThresholdMinutes": row.idle_threshold_minutes,
@@ -972,6 +973,9 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
     enabled = bool(config.enabled) if config else True
     trigger_mode = config.trigger_mode if config else "mention_or_proactive"
     proactive_active_enabled = bool(config.proactive_active_enabled) if config else True
+    short_conversation_enabled = (
+        bool(config.short_conversation_enabled) if config else True
+    )
     daily_limit = int(config.daily_limit) if config else 30
     cooldown_minutes = int(config.cooldown_minutes) if config else 8
     last_agent_at = config.last_agent_at if config else None
@@ -998,6 +1002,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
             current = None
         if current is not None:
             conversation = {
+                "enabled": short_conversation_enabled,
                 "active": True,
                 "sessionId": current.session_id,
                 "topic": current.topic,
@@ -1008,6 +1013,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
             break
     if conversation is None:
         conversation = {
+            "enabled": short_conversation_enabled,
             "active": False,
             "sessionId": None,
             "topic": None,
@@ -1075,13 +1081,15 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": f"预计还需约 {cooldown_remaining} 分钟才满足主动冷却门槛。",
             }
         )
-    if proactive_enabled and not route_by_task["agent_proactive"]["configured"]:
+    if (
+        proactive_enabled or short_conversation_enabled
+    ) and not route_by_task["agent_proactive"]["configured"]:
         blockers.append(
             {
                 "code": "proactive_llm_unconfigured",
                 "severity": "error",
-                "title": "主动发言 LLM 路由不可用",
-                "detail": "主动发言任务所选 Provider 缺少可用密钥或模型。",
+                "title": "主动/短会话 LLM 路由不可用",
+                "detail": "主动发言与短会话续聊任务所选 Provider 缺少可用密钥或模型。",
             }
         )
     if memory["rebuildRequired"]:
