@@ -66,6 +66,7 @@ _HISTOGRAM_BUCKETS = (
 
 _METRIC_HELP = {
     "yawnbot_ai_degradations_total": "AI fallback or degradation decisions.",
+    "yawnbot_ai_tokens_total": "AI tokens reported by the configured endpoint.",
     "yawnbot_ai_request_duration_seconds": "AI request latency in seconds.",
     "yawnbot_ai_requests_total": "AI requests grouped by operation and outcome.",
     "yawnbot_event_log_write_failures_total": "Event log writes that failed.",
@@ -77,7 +78,10 @@ _METRIC_HELP = {
     ),
     "yawnbot_rpg_deductions_total": "RPG deduction outcomes.",
     "yawnbot_rpg_terminations_total": "RPG non-story termination reasons.",
-    "yawnbot_agent_cache_total": "Agent prompt or media cache outcomes.",
+    "yawnbot_agent_cache_total": "Agent stable-prefix reuse and media cache signals.",
+    "yawnbot_agent_turns_total": "Agent turns grouped by operation and outcome.",
+    "yawnbot_agent_turn_duration_seconds": "Agent turn duration in seconds.",
+    "yawnbot_agent_queue_wait_seconds": "Agent queue wait duration in seconds.",
 }
 
 _Labels = tuple[tuple[str, str], ...]
@@ -252,6 +256,42 @@ def record_ai_request(operation: str, outcome: str, elapsed_seconds: float) -> N
     )
 
 
+def record_ai_tokens(operation: str, source: str, value: int) -> None:
+    """记录端点实际返回的 token 用量；缺失或非正数时忽略。"""
+
+    increment_counter(
+        "yawnbot_ai_tokens_total",
+        labels={"operation": operation, "source": source},
+        value=value,
+    )
+
+
+def record_agent_turn(
+    operation: str,
+    outcome: str,
+    elapsed_seconds: float,
+    *,
+    queue_wait_seconds: float | None = None,
+) -> None:
+    """记录 Agent 一次处理回合及可选的队列等待时间。"""
+
+    increment_counter(
+        "yawnbot_agent_turns_total",
+        labels={"operation": operation, "outcome": outcome},
+    )
+    observe_histogram(
+        "yawnbot_agent_turn_duration_seconds",
+        elapsed_seconds,
+        labels={"operation": operation},
+    )
+    if queue_wait_seconds is not None:
+        observe_histogram(
+            "yawnbot_agent_queue_wait_seconds",
+            queue_wait_seconds,
+            labels={"operation": operation},
+        )
+
+
 def record_ai_degradation(component: str, reason: str) -> None:
     """记录调用方采用固定兜底或降级路径。
 
@@ -266,7 +306,7 @@ def record_ai_degradation(component: str, reason: str) -> None:
 
 
 def record_agent_cache(kind: str, outcome: str) -> None:
-    """Record low-cardinality Agent cache hits and misses."""
+    """记录本地可观测的前缀稳定性复用或媒体缓存，不代表服务商缓存。"""
 
     increment_counter(
         "yawnbot_agent_cache_total",
@@ -570,8 +610,10 @@ __all__ = [
     "finish_game_phase",
     "increment_counter",
     "observe_histogram",
+    "record_agent_turn",
     "record_ai_degradation",
     "record_ai_request",
+    "record_ai_tokens",
     "record_event_log_write_failure",
     "record_game_ending",
     "record_phase_change",

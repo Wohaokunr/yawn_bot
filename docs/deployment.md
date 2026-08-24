@@ -207,6 +207,9 @@ Core、Agent、RPG 与狼人杀共用默认、轻量、识图三个模型档位�
 AI_MODEL=高级默认模型
 AI_LIGHT_MODEL=轻量模型
 AI_VISION_MODEL=图片识别模型
+AI_DEFAULT_PROVIDER=default
+AI_LIGHT_PROVIDER=default
+AI_VISION_PROVIDER=default
 AI_DEFAULT_THINKING=auto
 AI_LIGHT_THINKING=disabled
 AI_VISION_THINKING=disabled
@@ -219,8 +222,22 @@ AGENT_MEDIA_CACHE_DIR=data/agent_media
 AGENT_MEDIA_ALLOWED_HOSTS=图片来源域名
 ```
 
-模型、推理策略和 Agent/RPG/狼人杀任务路由可在 WebUI 的“环境配置”页面统一修改，
-保存后重启生效。图片能力设为 `auto` 时会先尝试任务模型；端点明确拒绝图片后，
+`default` 提供商继续读取 `AI_BASE_URL` 和 `AI_API_KEY`。需要把不同模型档位
+路由到不同 OpenAI-compatible 端点时，可增加命名提供商：
+
+```text
+AI_PROVIDERS=[{"id":"fast","base_url":"https://fast.example.com/v1"}]
+AI_PROVIDER_API_KEYS={"fast":"对应的 API Key"}
+AI_LIGHT_PROVIDER=fast
+```
+
+提供商 ID 只能包含小写字母、数字、下划线和连字符，`default` 为保留名称。
+请求只使用模型档位绑定的提供商，不会在失败后切换到其他端点。轻量模型留空时
+完整继承默认档位的提供商和模型；识图模型留空时不启用独立识图降级。
+
+提供商、模型、推理策略和 Agent/RPG/狼人杀任务路由可在 WebUI 的“环境配置”页面
+统一修改，API Key 只显示是否已配置且不会回显；“测试此档位”可在保存前验证草稿
+Base URL、密钥和模型。保存后重启生效。图片能力设为 `auto` 时会先尝试任务模型；端点明确拒绝图片后，
 调用识图任务生成带来源标记的文本转述。群管理员可使用 `/Agent设置 媒体缓存 开|关` 控制短期缓存。
 缓存按群和媒体内容哈希隔离，过期任务会清理原图与识别记录。启动调试日志会对
 API key 等凭据脱敏。

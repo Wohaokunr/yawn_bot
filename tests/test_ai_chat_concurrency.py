@@ -187,6 +187,7 @@ async def test_partial_delivery_only_persists_sent_segments(
         ai_chat_module,
         "_resolve_llm_request",
         lambda task: SimpleNamespace(
+            provider="default",
             model="configured-default",
             extra_body={"thinking": {"type": "disabled"}},
             task=task,

@@ -24,6 +24,8 @@ CONVERSATION_QUIET_SECONDS = 20.0
 CONVERSATION_MAX_BATCH_SECONDS = 45.0
 CONVERSATION_MAX_SECONDS = 12 * 60.0
 CONVERSATION_MAX_BOT_TURNS = 4
+CONVERSATION_MAX_EVALUATIONS = 6
+CONVERSATION_MAX_CONSECUTIVE_WAITS = 3
 
 ConversationKey = tuple[int, int]
 
@@ -46,6 +48,8 @@ class ConversationSession:
     last_bot_at: float
     bot_turns: int
     topic: str | None
+    evaluation_count: int = 0
+    consecutive_waits: int = 0
     batch_first_at: float | None = None
     batch_last_at: float | None = None
     batch_cutoff_at: datetime | None = None
@@ -294,6 +298,46 @@ def conversation_is_current(batch: ConversationBatch) -> bool:
     )
 
 
+def begin_followup_evaluation(batch: ConversationBatch) -> bool:
+    """占用一次续聊评估配额；配额耗尽时关闭会话。"""
+
+    session = _sessions.get(batch.key)
+    if (
+        session is None
+        or session.session_id != batch.session_id
+        or _expired(session, time.monotonic())
+    ):
+        return False
+    if session.evaluation_count >= CONVERSATION_MAX_EVALUATIONS:
+        close_conversation(*batch.key, reason="达到续聊评估上限")
+        return False
+    session.evaluation_count += 1
+    dbg(
+        f"群 {batch.key[1]} 短会话评估: session={batch.session_id} "
+        f"evaluation={session.evaluation_count}/{CONVERSATION_MAX_EVALUATIONS}"
+    )
+    return True
+
+
+def finish_followup_evaluation(batch: ConversationBatch, action: str) -> None:
+    """记录续聊决策，并在连续等待或总评估到限时结束会话。"""
+
+    session = _sessions.get(batch.key)
+    if session is None or session.session_id != batch.session_id:
+        return
+    if action == "speak":
+        session.consecutive_waits = 0
+    elif action == "wait":
+        session.consecutive_waits += 1
+    else:
+        close_conversation(*batch.key, reason=f"续聊决策 {action}")
+        return
+    if session.consecutive_waits >= CONVERSATION_MAX_CONSECUTIVE_WAITS:
+        close_conversation(*batch.key, reason="连续等待达到上限")
+    elif session.evaluation_count >= CONVERSATION_MAX_EVALUATIONS:
+        close_conversation(*batch.key, reason="达到续聊评估上限")
+
+
 def current_conversation(bot_id: int, group_id: int) -> ConversationSession | None:
     return _sessions.get((int(bot_id), int(group_id)))
 
@@ -326,14 +370,18 @@ def reset_for_tests() -> None:
 __all__ = [
     "CONVERSATION_MAX_BATCH_SECONDS",
     "CONVERSATION_MAX_BOT_TURNS",
+    "CONVERSATION_MAX_CONSECUTIVE_WAITS",
+    "CONVERSATION_MAX_EVALUATIONS",
     "CONVERSATION_MAX_SECONDS",
     "CONVERSATION_QUIET_SECONDS",
     "ConversationBatch",
     "ConversationSession",
     "batch_due_at",
+    "begin_followup_evaluation",
     "close_conversation",
     "conversation_is_current",
     "current_conversation",
+    "finish_followup_evaluation",
     "mark_bot_reply",
     "observe_member_message",
     "prune_expired_conversations",

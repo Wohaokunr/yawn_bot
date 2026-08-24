@@ -16,7 +16,11 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLAY_PHASE_SECONDS = 3.0
 EXPECTED_EVENT_LOG_REJECTIONS = 2
-EXPECTED_COMPLETE_REQUESTS = 3
+EXPECTED_COMPLETE_REQUESTS = 4
+EXPECTED_SUCCESS_REQUESTS = 2
+EXPECTED_INPUT_TOKENS = 240
+EXPECTED_OUTPUT_TOKENS = 40
+EXPECTED_CACHED_TOKENS = 160
 
 
 @pytest.fixture(scope="module")
@@ -48,6 +52,32 @@ def reset_metrics(runtime_modules: dict[str, Any]) -> Any:
     metrics = runtime_modules["metrics"]
     metrics.reset_metrics_for_tests()
     yield
+
+
+def test_agent_turn_metrics_are_low_cardinality(
+    runtime_modules: dict[str, Any],
+) -> None:
+    metrics = runtime_modules["metrics"]
+    metrics.record_agent_turn(
+        "followup", "wait", 0.25, queue_wait_seconds=1.5
+    )
+    snapshot = metrics.snapshot_metrics()
+
+    assert _counter(
+        snapshot,
+        "yawnbot_agent_turns_total",
+        {"operation": "followup", "outcome": "wait"},
+    ) == 1
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_turn_duration_seconds",
+        {"operation": "followup"},
+    )["count"] == 1
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_queue_wait_seconds",
+        {"operation": "followup"},
+    )["count"] == 1
     metrics.reset_metrics_for_tests()
 
 
@@ -345,12 +375,16 @@ async def test_llm_latency_timeout_and_degradation_metrics(
                 raise asyncio.TimeoutError
             message = SimpleNamespace(content="ok", tool_calls=[])
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=message, finish_reason="stop")]
+                choices=[SimpleNamespace(message=message, finish_reason="stop")],
+                usage=SimpleNamespace(
+                    prompt_tokens=120,
+                    completion_tokens=20,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+                ),
             )
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
-    monkeypatch.setattr(llm, "client", client)
-    monkeypatch.setattr(llm.ai_config, "ai_api_key", "fixture-key")
+    monkeypatch.setattr(llm, "get_client", lambda _provider="default": client)
 
     messages = [{"role": "user", "content": "hello"}]
     assert await llm.complete(messages) == "ok"
@@ -358,30 +392,24 @@ async def test_llm_latency_timeout_and_degradation_metrics(
     client.chat.completions.mode = "timeout"
     assert await llm.complete(messages, timeout=0.01) is None
 
-    monkeypatch.setattr(llm, "client", None)
-    monkeypatch.setattr(llm.ai_config, "ai_api_key", None)
+    monkeypatch.setattr(llm, "get_client", lambda _provider="default": None)
     assert await llm.complete(messages) is None
 
     snapshot = metrics.snapshot_metrics()
     assert _counter(
         snapshot,
         "yawnbot_ai_requests_total",
-        {"operation": "complete", "outcome": "success"},
+        {"operation": "core_chat", "outcome": "success"},
+    ) == EXPECTED_SUCCESS_REQUESTS
+    assert _counter(
+        snapshot,
+        "yawnbot_ai_requests_total",
+        {"operation": "core_chat", "outcome": "timeout"},
     ) == 1
     assert _counter(
         snapshot,
         "yawnbot_ai_requests_total",
-        {"operation": "complete_with_tools", "outcome": "success"},
-    ) == 1
-    assert _counter(
-        snapshot,
-        "yawnbot_ai_requests_total",
-        {"operation": "complete", "outcome": "timeout"},
-    ) == 1
-    assert _counter(
-        snapshot,
-        "yawnbot_ai_requests_total",
-        {"operation": "complete", "outcome": "not_configured"},
+        {"operation": "core_chat", "outcome": "not_configured"},
     ) == 1
     assert _counter(
         snapshot,
@@ -396,6 +424,21 @@ async def test_llm_latency_timeout_and_degradation_metrics(
     latency = _histogram(
         snapshot,
         "yawnbot_ai_request_duration_seconds",
-        {"operation": "complete"},
+        {"operation": "core_chat"},
     )
     assert latency["count"] == EXPECTED_COMPLETE_REQUESTS
+    assert _counter(
+        snapshot,
+        "yawnbot_ai_tokens_total",
+        {"operation": "core_chat", "source": "input"},
+    ) == EXPECTED_INPUT_TOKENS
+    assert _counter(
+        snapshot,
+        "yawnbot_ai_tokens_total",
+        {"operation": "core_chat", "source": "output"},
+    ) == EXPECTED_OUTPUT_TOKENS
+    assert _counter(
+        snapshot,
+        "yawnbot_ai_tokens_total",
+        {"operation": "core_chat", "source": "cached"},
+    ) == EXPECTED_CACHED_TOKENS

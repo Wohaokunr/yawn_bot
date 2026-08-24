@@ -22,7 +22,7 @@ from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
-from ..llm import complete, get_client
+from ..llm import complete, get_client, resolve_llm_request
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .media import unlink_cache_file
@@ -105,6 +105,8 @@ _FACT_KEYS = frozenset(
 _LIST_FACT_KEYS = frozenset({"hobby", "preference", "skill", "recurring_topic"})
 _LIST_FACT_SEPARATOR = "、"
 _LIST_FACT_MAX = 5
+_RECURRING_TOPIC_MAX = 3
+_CORE_FACT_KEYS = frozenset({"display_name", "preferred_address"})
 # 反复确认的高置信画像晋升为核心记忆：不过期、排序不衰减，防止称呼
 # 偏好这类稳定事实在数月无人复述后被 TTL 或时间衰减静默遗忘。
 _CORE_PROMOTE_CONFIDENCE = 0.85
@@ -139,7 +141,7 @@ class _FactCandidate(BaseModel):
 
     user_id: int
     key: str = Field(min_length=1, max_length=128)
-    content: str = Field(min_length=1, max_length=1000)
+    content: str = Field(min_length=1, max_length=200)
     evidence_message_ids: list[int] = Field(default_factory=list, max_length=50)
     confidence: float = Field(default=0.5, ge=0, le=1)
     salience: float = Field(default=0.6, ge=0, le=1)
@@ -360,7 +362,12 @@ def merge_profile_update(
 
 
 def merge_list_profile_update(
-    old_content: str, old_confidence: float, new_content: str, new_confidence: float
+    old_content: str,
+    old_confidence: float,
+    new_content: str,
+    new_confidence: float,
+    *,
+    max_items: int = _LIST_FACT_MAX,
 ) -> tuple[str, float]:
     """多值画像合并：新值追加而非覆盖，超出上限时淘汰最旧值。
 
@@ -387,7 +394,7 @@ def merge_list_profile_update(
                 values[index] = new
             return _LIST_FACT_SEPARATOR.join(values), confidence
     values.append(new)
-    del values[: max(0, len(values) - _LIST_FACT_MAX)]
+    del values[: max(0, len(values) - max(int(max_items), 1))]
     return _LIST_FACT_SEPARATOR.join(values), confidence
 
 
@@ -398,7 +405,11 @@ def _maybe_promote_core(row: AgentMemory) -> None:
     非单批提取的侥幸命中。
     """
 
-    if row.source_kind != "auto" or row.memory_type != "profile":
+    if (
+        row.source_kind != "auto"
+        or row.memory_type != "profile"
+        or row.memory_key not in _CORE_FACT_KEYS
+    ):
         return
     if (
         float(row.confidence or 0.0) >= _CORE_PROMOTE_CONFIDENCE
@@ -416,7 +427,7 @@ async def _model_summary(
 ) -> dict[str, Any] | None:
     # 轻量档位未单独配置时会回退 AI_MODEL；这里不得再额外要求显式配置，
     # 否则默认部署永远只会得到原文拼接伪摘要。
-    if get_client() is None:
+    if get_client(resolve_llm_request("agent_memory").provider) is None:
         dbg("记忆整理: LLM client 不可用,保留游标等待重试")
         return None
     messages = [
@@ -435,7 +446,8 @@ async def _model_summary(
                 "只返回 JSON 对象，结构严格为："
                 '{"summary":"...","public_summary":"...","facts":['
                 '{"user_id":1,"key":"display_name|preferred_address|hobby|preference|skill|recurring_topic",'
-                '"content":"...","evidence_message_ids":[1],"confidence":0.8,"salience":0.7}],'
+                '"content":"单一、简短、最多200字的事实","evidence_message_ids":[1],'
+                '"confidence":0.8,"salience":0.7}],'
                 '"relations":[{"subject_user_id":1,"object_user_id":2,"type":"...",'
                 '"note":"...","evidence_message_ids":[1],"confidence":0.7}]}。'
             ),
@@ -590,7 +602,7 @@ def _store_model_facts(
         if user_id not in valid_user_ids:
             continue
         key = str(item.get("key") or "").strip()[:128]
-        content = str(item.get("content") or "").strip()[:1000]
+        content = str(item.get("content") or "").strip()[:200]
         evidence = [
             evidence_id
             for evidence_id in _safe_evidence(
@@ -625,7 +637,15 @@ def _store_model_facts(
             old_content = str(existing.content or "")
             if key in _LIST_FACT_KEYS:
                 merged_content, merged_confidence = merge_list_profile_update(
-                    old_content, float(existing.confidence or 0.0), content, confidence
+                    old_content,
+                    float(existing.confidence or 0.0),
+                    content,
+                    confidence,
+                    max_items=(
+                        _RECURRING_TOPIC_MAX
+                        if key == "recurring_topic"
+                        else _LIST_FACT_MAX
+                    ),
                 )
             else:
                 merged_content, merged_confidence = merge_profile_update(
@@ -754,7 +774,20 @@ async def _purge_expired(
     await session.execute(
         delete(AgentRelation).where(
             AgentRelation.group_id == group_id,
-            AgentRelation.last_seen_at < now - timedelta(days=RELATION_TTL_DAYS),
+            or_(
+                (
+                    (AgentRelation.source_kind == "mention")
+                    & (AgentRelation.evidence_count < 2)
+                    & (AgentRelation.last_seen_at < now - timedelta(days=30))
+                ),
+                (
+                    (AgentRelation.source_kind != "manual")
+                    & (
+                        AgentRelation.last_seen_at
+                        < now - timedelta(days=RELATION_TTL_DAYS)
+                    )
+                ),
+            ),
         )
     )
     return int(deleted.rowcount or 0)

@@ -349,7 +349,8 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
     stream_error = False
 
     try:
-        llm_client = _client or _get_client()
+        request_config = _resolve_llm_request("core_chat")
+        llm_client = _client or _get_client(request_config.provider)
         if llm_client is None:
             _record_stream_metric("not_configured", started)
             await bot.send(
@@ -357,7 +358,6 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
                 MessageSegment.text("抱歉，AI 服务尚未配置，请联系管理员~"),
             )
             return None
-        request_config = _resolve_llm_request("core_chat")
         stream = await llm_client.chat.completions.create(
             model=request_config.model,
             messages=history,  # type: ignore[arg-type]

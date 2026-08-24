@@ -62,6 +62,50 @@ def test_prompt_prefix_is_stable_when_only_context_changes() -> None:
     assert first[2] != second[2]
 
 
+def test_prompt_lists_tool_names_without_repeating_schema() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import prompt
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_group_memory",
+                "description": "SHOULD_NOT_BE_IN_SYSTEM_PROMPT",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    messages, _ = prompt.build_messages(
+        persona={"name": "Yawn"},
+        tools=tools,
+        context={},
+        user_prompt="你好",
+    )
+
+    assert prompt.PROMPT_VERSION == "yawn-agent-v6"
+    assert "search_group_memory" in str(messages[0]["content"])
+    assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
+    assert '"properties"' not in str(messages[0]["content"])
+
+
+def test_context_message_budget_keeps_newest_content() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context import trim_context_messages
+
+    messages = [{"user_id": index, "text": str(index) * 900} for index in range(50)]
+    trimmed = trim_context_messages(messages)
+
+    assert len(trimmed) <= 40
+    assert trimmed[-1]["user_id"] == 49
+    assert all(len(str(item["text"])) <= 800 for item in trimmed)
+    assert sum(len(str(item["text"])) for item in trimmed) == 6000
+    assert trim_context_messages(messages, max_messages=0) == []
+
+
 def _build_messages_layered(
     context: dict, tools: list
 ) -> tuple[list[dict], str]:
@@ -841,6 +885,51 @@ def test_conversation_turn_limit_closes_session() -> None:
     assert conversation.current_conversation(9, 100) is None
 
 
+def test_conversation_evaluation_and_wait_limits() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import conversation
+    from src.plugins.yawn_core.yawn_agent.context import now_beijing
+
+    def batch() -> Any:
+        current = conversation.current_conversation(9, 100)
+        assert current is not None
+        return conversation.ConversationBatch(
+            key=(9, 100),
+            session_id=current.session_id,
+            topic=current.topic,
+            bot_turns=current.bot_turns,
+            user_ids=(1,),
+            message_ids=(1,),
+            cutoff_at=now_beijing(),
+        )
+
+    conversation.reset_for_tests()
+    conversation.mark_bot_reply(9, 100, topic="测试", source="test")
+    for _ in range(2):
+        current_batch = batch()
+        assert conversation.begin_followup_evaluation(current_batch)
+        conversation.finish_followup_evaluation(current_batch, "wait")
+    current = conversation.current_conversation(9, 100)
+    assert current is not None and current.consecutive_waits == 2
+    current_batch = batch()
+    assert conversation.begin_followup_evaluation(current_batch)
+    conversation.finish_followup_evaluation(current_batch, "speak")
+    current = conversation.current_conversation(9, 100)
+    assert current is not None and current.consecutive_waits == 0
+    for action in ("wait", "speak", "wait"):
+        current_batch = batch()
+        assert conversation.begin_followup_evaluation(current_batch)
+        conversation.finish_followup_evaluation(current_batch, action)
+    assert conversation.current_conversation(9, 100) is None
+
+    conversation.mark_bot_reply(9, 100, topic="测试", source="test")
+    for _ in range(3):
+        current_batch = batch()
+        assert conversation.begin_followup_evaluation(current_batch)
+        conversation.finish_followup_evaluation(current_batch, "wait")
+    assert conversation.current_conversation(9, 100) is None
+
+
 async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 0.5) -> None:
     import asyncio
     import time
@@ -974,7 +1063,7 @@ def test_complete_with_tools_omits_empty_tools_param() -> None:
 
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
     original = llm_module.get_client
-    llm_module.get_client = lambda: fake_client
+    llm_module.get_client = lambda _provider="default": fake_client
     try:
         empty = asyncio.run(
             llm_module.complete_with_tools(

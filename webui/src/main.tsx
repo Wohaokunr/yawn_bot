@@ -5,7 +5,10 @@ import zhCN from "antd/locale/zh_CN";
 import { BrowserRouter } from "react-router-dom";
 import "@fontsource/zcool-kuaile/400.css";
 import App from "./App";
+import { installGlassGlow } from "./glass";
 import "./styles.css";
+
+installGlassGlow();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -28,7 +31,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             '-apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
         },
         components: {
-          Layout: { siderBg: "#fff7fa", headerBg: "rgba(255, 252, 254, 0.82)", bodyBg: "transparent" },
+          Layout: { siderBg: "#fff7fa", headerBg: "rgba(255, 252, 254, 0.62)", bodyBg: "transparent" },
           Menu: {
             itemBg: "transparent",
             itemColor: "#8a6b78",

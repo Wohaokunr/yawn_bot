@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001,ANN003,DTZ001,PLR0913,PLR2004,PLW0108,TRY003
+# ruff: noqa: ANN001,ANN003,DTZ001,PLR0913,PLR2004,TRY003
 """yawn_agent 记忆系统纯函数单测：相关性重排、增量合并与画像冲突。"""
 
 from __future__ import annotations
@@ -542,7 +542,7 @@ async def test_model_summary_uses_memory_task_route(monkeypatch) -> None:
         captured.update(kwargs)
         return '{"summary":"摘要","public_summary":"","facts":[],"relations":[]}'
 
-    monkeypatch.setattr(memory, "get_client", lambda: object())
+    monkeypatch.setattr(memory, "get_client", lambda _provider="default": object())
     monkeypatch.setattr(memory, "complete", fake_complete)
     result = await memory._model_summary(
         [{"id": 1, "user_id": 1, "name": "甲", "role": "member", "text": "内容"}]
@@ -556,7 +556,7 @@ async def test_model_summary_rejects_invalid_top_level_summary(monkeypatch) -> N
     async def fake_complete(_messages, **_kwargs):
         return '{"summary":123,"public_summary":"","facts":[],"relations":[]}'
 
-    monkeypatch.setattr(memory, "get_client", lambda: object())
+    monkeypatch.setattr(memory, "get_client", lambda _provider="default": object())
     monkeypatch.setattr(memory, "complete", fake_complete)
     assert await memory._model_summary([]) is None
 
@@ -1135,6 +1135,51 @@ async def test_purge_keeps_uncompacted_messages_until_hard_cap() -> None:
                     received_at=NOW - timedelta(days=60),
                     expires_at=NOW - timedelta(days=40),
                 ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=2,
+                    relation_type="mentions",
+                    source_kind="mention",
+                    evidence_count=1,
+                    last_seen_at=NOW - timedelta(days=31),
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=3,
+                    relation_type="mentions",
+                    source_kind="mention",
+                    evidence_count=1,
+                    last_seen_at=NOW - timedelta(days=29),
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=4,
+                    relation_type="好友",
+                    source_kind="auto",
+                    evidence_count=3,
+                    last_seen_at=NOW - timedelta(days=181),
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=5,
+                    relation_type="好友",
+                    source_kind="manual",
+                    evidence_count=1,
+                    last_seen_at=NOW - timedelta(days=365),
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=6,
+                    relation_type="同事",
+                    source_kind="agent",
+                    evidence_count=2,
+                    last_seen_at=NOW - timedelta(days=181),
+                ),
             ]
         )
         await session.commit()
@@ -1152,6 +1197,14 @@ async def test_purge_keeps_uncompacted_messages_until_hard_cap() -> None:
             .all()
         )
         assert remaining_ids == [2]
+        relation_targets = set(
+            (
+                await session.execute(select(models.AgentRelation.object_user_id))
+            )
+            .scalars()
+            .all()
+        )
+        assert relation_targets == {3, 5}
     await engine.dispose()
 
 
@@ -1571,6 +1624,10 @@ def test_merge_list_profile_update_appends_and_dedupes() -> None:
         "一、二、三、四、五", 0.9, "六", 0.5
     )
     assert merged == "二、三、四、五、六"
+    recurring, _confidence = memory.merge_list_profile_update(
+        "话题一、话题二、话题三", 0.8, "话题四", 0.7, max_items=3
+    )
+    assert recurring == "话题二、话题三、话题四"
 
 
 def test_store_model_facts_appends_list_key_values() -> None:
@@ -1653,6 +1710,18 @@ def test_maybe_promote_core_requires_repeated_confirmation() -> None:
     manual.evidence_message_ids = [1, 2, 3]
     memory._maybe_promote_core(manual)
     assert manual.memory_type == "profile"
+
+    dynamic = _memory(
+        memory_id=5,
+        key="recurring_topic",
+        content="常聊测试策略",
+        subject_user_id=111,
+        confidence=0.95,
+    )
+    dynamic.source_kind = "auto"
+    dynamic.evidence_message_ids = [1, 2, 3, 4]
+    memory._maybe_promote_core(dynamic)
+    assert dynamic.memory_type == "profile"
 
 
 # ---------- 检索排序：IDF、按类型半衰期、话题提示 ----------
@@ -1992,6 +2061,30 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
                     received_at=NOW,
                     expires_at=NOW + timedelta(days=7),
                 ),
+                user_group_models.UserGroup(
+                    group_id=100,
+                    user_id=1,
+                    group_nickname="当前成员",
+                    last_seen_at=NOW,
+                ),
+                user_group_models.UserGroup(
+                    group_id=100,
+                    user_id=2,
+                    group_nickname="另一成员",
+                    last_seen_at=NOW,
+                ),
+                user_group_models.UserGroup(
+                    group_id=100,
+                    user_id=3,
+                    group_nickname="明确关注成员",
+                    last_seen_at=NOW,
+                ),
+                user_group_models.UserGroup(
+                    group_id=100,
+                    user_id=99,
+                    group_nickname="无关成员",
+                    last_seen_at=NOW,
+                ),
                 models.AgentMemory(
                     group_id=100,
                     subject_user_id=1,
@@ -2059,11 +2152,44 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
                     evidence_count=2,
                     last_seen_at=NOW,
                 ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=1,
+                    object_user_id=2,
+                    relation_type="mentions",
+                    source_kind="mention",
+                    confidence=0.4,
+                    evidence_count=1,
+                    last_seen_at=NOW,
+                ),
+                models.AgentRelation(
+                    group_id=100,
+                    subject_user_id=2,
+                    object_user_id=1,
+                    relation_type="mentions",
+                    source_kind="mention",
+                    confidence=0.5,
+                    evidence_count=2,
+                    last_seen_at=NOW,
+                ),
             ]
         )
         await session.commit()
         target = await session.get(config_models.GroupAgentConfig, 100)
         assert target is not None
+
+        bounded = await dialogue._load_context(
+            session,
+            100,
+            target,
+            exclude_message_id=2,
+            focus_user_ids=[3],
+        )
+        assert all(
+            item["text"] != "我也想继续聊测试策略"
+            for item in bounded["messages"]
+        )
+        assert {item["user_id"] for item in bounded["members"]} == {1, 3}
 
         context = await dialogue._load_context(session, 100, target)
         speaker_items = [
@@ -2089,6 +2215,14 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
             for item in social_context["memories"]
         )
         assert any("—朋友→" in line for line in social_context["relations"])
+        assert not any(
+            line.startswith("当前成员(1) —mentions→")
+            for line in social_context["relations"]
+        )
+        assert any(
+            line.startswith("另一成员(2) —mentions→")
+            for line in social_context["relations"]
+        )
     await engine.dispose()
 
 

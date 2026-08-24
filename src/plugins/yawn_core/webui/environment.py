@@ -1,4 +1,4 @@
-# ruff: noqa: TRY003
+# ruff: noqa: C901,TRY003
 """根 ``.env`` 的脱敏读取与原子更新。"""
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import tempfile
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
@@ -73,6 +74,19 @@ _ENUM_OPTIONS: dict[str, list[str]] = {
     },
 }
 _MAX_VALUE_LENGTH = 16384
+_PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_MAX_CUSTOM_PROVIDERS = 16
+_PROVIDER_STORAGE_KEYS = {
+    "AI_BASE_URL",
+    "AI_API_KEY",
+    "AI_PROVIDERS",
+    "AI_PROVIDER_API_KEYS",
+}
+_PROFILE_PROVIDER_KEYS = {
+    "AI_DEFAULT_PROVIDER",
+    "AI_LIGHT_PROVIDER",
+    "AI_VISION_PROVIDER",
+}
 
 
 class EnvironmentConflictError(RuntimeError):
@@ -99,6 +113,131 @@ def _parsed_values(path: Path) -> dict[str, str | None]:
     if not path.is_file():
         return {}
     return dict(dotenv_values(path))
+
+
+def _effective_value(
+    key: str,
+    root_values: dict[str, str | None],
+    environment_values: dict[str, str | None],
+    default: str | None = None,
+) -> tuple[str | None, str]:
+    if key in os.environ:
+        return os.environ[key], "process"
+    if key in environment_values:
+        return environment_values[key], "environment"
+    if key in root_values:
+        return root_values[key], "env"
+    return default, "default"
+
+
+def _json_list(value: str | None, key: str) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise EnvironmentValidationError(f"{key} 不是有效 JSON") from exc
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, dict) for item in parsed
+    ):
+        raise EnvironmentValidationError(f"{key} 必须是 JSON 对象数组")
+    return parsed
+
+
+def _json_string_map(value: str | None, key: str) -> dict[str, str]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise EnvironmentValidationError(f"{key} 不是有效 JSON") from exc
+    if not isinstance(parsed, dict) or not all(
+        isinstance(item_key, str) and isinstance(item_value, str)
+        for item_key, item_value in parsed.items()
+    ):
+        raise EnvironmentValidationError(f"{key} 必须是字符串到字符串的 JSON 对象")
+    return parsed
+
+
+def _valid_base_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _provider_state(
+    root_values: dict[str, str | None],
+    environment_values: dict[str, str | None],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    base_url, base_source = _effective_value(
+        "AI_BASE_URL",
+        root_values,
+        environment_values,
+        "https://token-plan-cn.xiaomimimo.com/v1",
+    )
+    default_key, default_key_source = _effective_value(
+        "AI_API_KEY", root_values, environment_values
+    )
+    metadata_raw, metadata_source = _effective_value(
+        "AI_PROVIDERS", root_values, environment_values, "[]"
+    )
+    keys_raw, keys_source = _effective_value(
+        "AI_PROVIDER_API_KEYS", root_values, environment_values, "{}"
+    )
+    metadata = _json_list(metadata_raw, "AI_PROVIDERS")
+    provider_keys = _json_string_map(keys_raw, "AI_PROVIDER_API_KEYS")
+    providers: list[dict[str, Any]] = [
+        {
+            "id": "default",
+            "baseUrl": str(base_url or ""),
+            "builtIn": True,
+            "apiKeyConfigured": bool(default_key),
+            "apiKeyRootConfigured": bool(root_values.get("AI_API_KEY")),
+            "baseUrlSource": base_source,
+            "apiKeySource": default_key_source,
+            "overridden": base_source in {"process", "environment"}
+            or default_key_source in {"process", "environment"},
+        }
+    ]
+    secrets = {"default": str(default_key or "")}
+    for item in metadata:
+        provider_id = str(item.get("id", ""))
+        provider_base_url = str(item.get("base_url", ""))
+        provider_key = provider_keys.get(provider_id, "")
+        providers.append(
+            {
+                "id": provider_id,
+                "baseUrl": provider_base_url,
+                "builtIn": False,
+                "apiKeyConfigured": bool(provider_key),
+                "apiKeyRootConfigured": bool(
+                    _json_string_map(
+                        root_values.get("AI_PROVIDER_API_KEYS"),
+                        "AI_PROVIDER_API_KEYS",
+                    ).get(provider_id)
+                ),
+                "baseUrlSource": metadata_source,
+                "apiKeySource": keys_source,
+                "overridden": metadata_source in {"process", "environment"}
+                or keys_source in {"process", "environment"},
+            }
+        )
+        secrets[provider_id] = provider_key
+    return providers, secrets
+
+
+def resolve_llm_provider(provider_id: str) -> tuple[str, str | None]:
+    """读取当前有效提供商配置，供连接测试复用且不向响应暴露密钥。"""
+
+    root_values = _parsed_values(ENV_PATH)
+    environment_name = (
+        os.environ.get("ENVIRONMENT") or root_values.get("ENVIRONMENT") or "prod"
+    )
+    environment_values = _parsed_values(PROJECT_ROOT / f".env.{environment_name}")
+    providers, secrets = _provider_state(root_values, environment_values)
+    provider = next((item for item in providers if item["id"] == provider_id), None)
+    if provider is None:
+        raise EnvironmentValidationError(f"未知 LLM 提供商：{provider_id}")
+    return str(provider["baseUrl"]), secrets.get(provider_id) or None
 
 
 def _parse_sample(raw: str) -> str | None:
@@ -213,6 +352,7 @@ def load_environment() -> dict[str, Any]:
                 "overridden": source in {"process", "environment"},
             }
         )
+    providers, _secrets = _provider_state(root_values, environment_values)
     return {
         "file": ".env",
         "version": _file_version(),
@@ -221,6 +361,7 @@ def load_environment() -> dict[str, Any]:
             environment_path.name if environment_path.is_file() else None
         ),
         "entries": entries,
+        "llmProviders": providers,
     }
 
 
@@ -283,19 +424,120 @@ def _updated_text(original: str, changes: list[tuple[str, str | None]]) -> str:
     return newline.join(output) + (newline if output else "")
 
 
+def _provider_changes(
+    providers: list[dict[str, Any]], root_values: dict[str, str | None]
+) -> list[tuple[str, str | None]]:
+    if not providers or providers[0].get("id") != "default":
+        raise EnvironmentValidationError("提供商列表必须以不可删除的 default 开头")
+    if len(providers) > _MAX_CUSTOM_PROVIDERS + 1:
+        raise EnvironmentValidationError(
+            f"自定义提供商最多 {_MAX_CUSTOM_PROVIDERS} 个"
+        )
+    root_keys = _json_string_map(
+        root_values.get("AI_PROVIDER_API_KEYS"), "AI_PROVIDER_API_KEYS"
+    )
+    seen: set[str] = set()
+    metadata: list[dict[str, str]] = []
+    next_keys: dict[str, str] = {}
+    result: list[tuple[str, str | None]] = []
+    for index, provider in enumerate(providers):
+        provider_id = str(provider.get("id", "")).strip()
+        base_url = str(provider.get("baseUrl", "")).strip().rstrip("/")
+        if not _PROVIDER_ID_RE.fullmatch(provider_id):
+            raise EnvironmentValidationError(f"提供商 ID 格式不正确：{provider_id}")
+        if provider_id in seen:
+            raise EnvironmentValidationError(f"提供商 ID 重复：{provider_id}")
+        if (index == 0) != (provider_id == "default"):
+            raise EnvironmentValidationError("default 是保留提供商且必须位于首项")
+        if not _valid_base_url(base_url):
+            raise EnvironmentValidationError(
+                f"提供商 {provider_id} 的 Base URL 必须是绝对 HTTP/HTTPS 地址"
+            )
+        seen.add(provider_id)
+        api_key_supplied = "apiKey" in provider
+        api_key = provider.get("apiKey")
+        if api_key_supplied and api_key is not None:
+            api_key = str(api_key).strip()
+            if not api_key:
+                raise EnvironmentValidationError(
+                    f"提供商 {provider_id} 的新密钥不能为空；删除请提交 null"
+                )
+        if provider_id == "default":
+            result.append(("AI_BASE_URL", base_url))
+            if api_key_supplied:
+                result.append(("AI_API_KEY", api_key))
+            continue
+        metadata.append({"id": provider_id, "base_url": base_url})
+        existing_key = root_keys.get(provider_id)
+        resolved_key = api_key if api_key_supplied else existing_key
+        if resolved_key:
+            next_keys[provider_id] = str(resolved_key)
+    result.extend(
+        [
+            (
+                "AI_PROVIDERS",
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+                if metadata
+                else None,
+            ),
+            (
+                "AI_PROVIDER_API_KEYS",
+                json.dumps(next_keys, ensure_ascii=False, separators=(",", ":"))
+                if next_keys
+                else None,
+            ),
+        ]
+    )
+    return result
+
+
+def _validate_llm_candidate(candidate: str) -> None:
+    root_values = dict(dotenv_values(stream=StringIO(candidate)))
+    environment_name = (
+        os.environ.get("ENVIRONMENT") or root_values.get("ENVIRONMENT") or "prod"
+    )
+    environment_values = _parsed_values(PROJECT_ROOT / f".env.{environment_name}")
+    providers, secrets = _provider_state(root_values, environment_values)
+    ids = {str(item["id"]) for item in providers}
+    if len(ids) != len(providers):
+        raise EnvironmentValidationError("AI_PROVIDERS 中的提供商 ID 必须唯一")
+    for item in providers:
+        provider_id = str(item["id"])
+        if provider_id != "default" and not secrets.get(provider_id):
+            raise EnvironmentValidationError(f"提供商 {provider_id} 尚未配置 API Key")
+    for key in _PROFILE_PROVIDER_KEYS:
+        provider_id, _source = _effective_value(
+            key, root_values, environment_values, "default"
+        )
+        if provider_id not in ids:
+            raise EnvironmentValidationError(f"{key} 引用了未知提供商：{provider_id}")
+
+
 def update_environment(
-    expected_version: str, changes: list[tuple[str, str | None]]
+    expected_version: str,
+    changes: list[tuple[str, str | None]],
+    providers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """按版本更新根 .env；只重写目标键并以原子替换提交。"""
 
-    if not changes:
+    if not changes and providers is None:
         raise EnvironmentValidationError("至少提交一个配置变更")
+    if providers is not None and any(
+        key in _PROVIDER_STORAGE_KEYS for key, _ in changes
+    ):
+        raise EnvironmentValidationError("提供商配置不能同时通过普通字段和专用表单提交")
+    if providers is not None:
+        changes = [*changes, *_provider_changes(providers, _parsed_values(ENV_PATH))]
     _validate_changes(changes)
     if _file_version() != expected_version:
         raise EnvironmentConflictError
 
     original = _read_text(ENV_PATH)
     candidate = _updated_text(original, changes)
+    if providers is not None or any(
+        key in _PROFILE_PROVIDER_KEYS for key, _ in changes
+    ):
+        _validate_llm_candidate(candidate)
     parsed = dict(dotenv_values(stream=StringIO(candidate)))
     for key, value in changes:
         if value is None:

@@ -29,7 +29,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nonebot import get_driver, logger
 from nonebot_plugin_orm import get_session
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import BigInteger, cast, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -41,6 +48,7 @@ from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from ..data_models.web_admin_audit import WebAdminAudit
+from ..llm import LLMProviderConfig, test_llm_connection
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent.context import now_beijing
 from ..yawn_agent.memory import (
@@ -68,6 +76,7 @@ from .environment import (
     EnvironmentConflictError,
     EnvironmentValidationError,
     load_environment,
+    resolve_llm_provider,
     update_environment,
 )
 from .fanqie import router as fanqie_router
@@ -102,6 +111,7 @@ from .service import (
 )
 
 router = APIRouter(prefix=API_PATH)
+_LLM_TEST_CONCURRENCY = asyncio.Semaphore(2)
 
 
 def _memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:
@@ -133,9 +143,42 @@ class EnvironmentChange(BaseModel):
     value: str | None = Field(default=None, max_length=16384)
 
 
+class EnvironmentProviderPatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    base_url: str = Field(min_length=1, max_length=2048, alias="baseUrl")
+    api_key: str | None = Field(
+        default=None, min_length=1, max_length=4096, alias="apiKey"
+    )
+
+
 class EnvironmentPatch(BaseModel):
     version: str = Field(min_length=64, max_length=64)
-    changes: list[EnvironmentChange] = Field(min_length=1, max_length=256)
+    changes: list[EnvironmentChange] = Field(default_factory=list, max_length=256)
+    providers: list[EnvironmentProviderPatch] | None = Field(
+        default=None, min_length=1, max_length=17
+    )
+
+    @model_validator(mode="after")
+    def require_changes(self) -> "EnvironmentPatch":
+        if not self.changes and self.providers is None:
+            raise ValueError("至少提交一个配置变更")
+        return self
+
+
+class LLMConnectionTestBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider_id: str = Field(
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$", alias="providerId"
+    )
+    base_url: str | None = Field(default=None, max_length=2048, alias="baseUrl")
+    api_key: str | None = Field(
+        default=None, min_length=1, max_length=4096, alias="apiKey"
+    )
+    model: str = Field(min_length=1, max_length=256)
+
 
 
 class AgentConfigPatch(BaseModel):
@@ -367,6 +410,14 @@ async def patch_environment(
             update_environment,
             body.version,
             [(item.key, item.value) for item in body.changes],
+            (
+                [
+                    item.model_dump(by_alias=True, exclude_unset=True)
+                    for item in body.providers
+                ]
+                if body.providers is not None
+                else None
+            ),
         )
     except EnvironmentConflictError as exc:
         raise HTTPException(
@@ -375,6 +426,59 @@ async def patch_environment(
     except EnvironmentValidationError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return ok(result)
+
+
+@router.post("/llm/test")
+async def test_llm(
+    body: LLMConnectionTestBody, _session: WriteSession
+) -> dict[str, Any]:
+    stored_base_url = ""
+    stored_api_key: str | None = None
+    try:
+        stored_base_url, stored_api_key = await asyncio.to_thread(
+            resolve_llm_provider, body.provider_id
+        )
+    except EnvironmentValidationError:
+        if body.base_url is None or "api_key" not in body.model_fields_set:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "新提供商测试必须填写 Base URL 和 API Key",
+            ) from None
+
+    base_url = (body.base_url or stored_base_url).strip().rstrip("/")
+    api_key = (
+        body.api_key
+        if "api_key" in body.model_fields_set
+        else stored_api_key
+    )
+    if not api_key:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "该提供商尚未配置 API Key"
+        )
+    try:
+        validated = LLMProviderConfig(id=body.provider_id, base_url=base_url)
+        async with _LLM_TEST_CONCURRENCY:
+            elapsed_ms = await test_llm_connection(
+                base_url=validated.base_url,
+                api_key=api_key,
+                model=body.model.strip(),
+                timeout=10.0,
+            )
+    except ValidationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Base URL 格式不正确"
+        ) from exc
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status.HTTP_504_GATEWAY_TIMEOUT, "连接测试超时（10 秒）"
+        ) from exc
+    except Exception as exc:
+        message = str(exc).replace(api_key, "[REDACTED]")[:500]
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"连接测试失败：{message or type(exc).__name__}",
+        ) from exc
+    return ok({"success": True, "latencyMs": round(elapsed_ms, 1)})
 
 
 @router.get("/groups")

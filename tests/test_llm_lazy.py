@@ -28,6 +28,8 @@ def test_config_allows_ai_api_key_to_be_omitted(llm_module: Any) -> None:
     config = llm_module.AIChatConfig()
 
     assert config.ai_api_key is None
+    assert config.ai_providers == []
+    assert config.ai_default_provider == "default"
     assert config.ai_light_model is None
     assert config.ai_vision_model is None
     assert config.ai_default_thinking == "auto"
@@ -39,8 +41,14 @@ def test_config_allows_ai_api_key_to_be_omitted(llm_module: Any) -> None:
 def test_config_repr_masks_api_key_and_resolves_profile_defaults(
     llm_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = llm_module.AIChatConfig(ai_api_key="secret", ai_model="fallback")
+    config = llm_module.AIChatConfig(
+        ai_api_key="secret",
+        ai_model="fallback",
+        ai_providers=[{"id": "fast", "base_url": "https://fast.test/v1"}],
+        ai_provider_api_keys={"fast": "named-secret"},
+    )
     assert "secret" not in repr(config)
+    assert "named-secret" not in repr(config)
     monkeypatch.setattr(llm_module.ai_config, "ai_model", "fallback")
     monkeypatch.setattr(llm_module.ai_config, "ai_light_model", None)
     assert llm_module.resolve_llm_request("agent_dialogue").model == "fallback"
@@ -74,7 +82,7 @@ async def test_missing_key_degrades_all_completions_without_client(
     def fail_constructor(**_kwargs: object) -> None:
         pytest.fail("AsyncOpenAI must not be created without an API key")
 
-    monkeypatch.setattr(llm_module, "client", None)
+    llm_module._client_pool.clear()
     monkeypatch.setattr(llm_module.ai_config, "ai_api_key", None)
     monkeypatch.setattr(llm_module, "AsyncOpenAI", fail_constructor)
 
@@ -99,7 +107,7 @@ def test_client_is_created_once_on_first_use(
         created.append(kwargs)
         return sentinel
 
-    monkeypatch.setattr(llm_module, "client", None)
+    llm_module._client_pool.clear()
     monkeypatch.setattr(llm_module.ai_config, "ai_api_key", "test-key")
     monkeypatch.setattr(llm_module.ai_config, "ai_base_url", "https://example.test/v1")
     monkeypatch.setattr(llm_module, "AsyncOpenAI", constructor)
@@ -131,7 +139,7 @@ async def test_tasks_select_profiles_and_resolve_thinking(
     fake = type(
         "Client", (), {"chat": type("Chat", (), {"completions": Completions()})()}
     )()
-    monkeypatch.setattr(llm_module, "client", fake)
+    monkeypatch.setattr(llm_module, "get_client", lambda _provider="default": fake)
     monkeypatch.setattr(llm_module.ai_config, "ai_api_key", "fixture-key")
     monkeypatch.setattr(llm_module.ai_config, "ai_model", "advanced-model")
     monkeypatch.setattr(llm_module.ai_config, "ai_light_model", "ordinary-light")
@@ -164,3 +172,55 @@ async def test_tasks_select_profiles_and_resolve_thinking(
     assert calls[1]["extra_body"] == {"thinking": {"type": "disabled"}}
     assert calls[2]["extra_body"] == {"thinking": {"type": "enabled"}}
     assert calls[3]["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_named_provider_is_selected_and_reused_without_fallback(
+    llm_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, object]] = []
+
+    def constructor(**kwargs: object) -> object:
+        created.append(kwargs)
+        return object()
+
+    llm_module._client_pool.clear()
+    monkeypatch.setattr(
+        llm_module.ai_config,
+        "ai_providers",
+        [llm_module.LLMProviderConfig(id="fast", base_url="https://fast.test/v1")],
+    )
+    monkeypatch.setattr(
+        llm_module.ai_config,
+        "ai_provider_api_keys",
+        {"fast": llm_module.SecretStr("fast-secret")},
+    )
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_provider", "fast")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_model", "fast-model")
+    monkeypatch.setattr(llm_module.ai_config, "agent_memory_llm_profile", "light")
+    monkeypatch.setattr(llm_module, "AsyncOpenAI", constructor)
+
+    request = llm_module.resolve_llm_request("agent_memory")
+
+    assert request.provider == "fast"
+    assert request.model == "fast-model"
+    assert llm_module.get_client(request.provider) is llm_module.get_client("fast")
+    assert created == [
+        {"api_key": "fast-secret", "base_url": "https://fast.test/v1"}
+    ]
+
+
+def test_empty_light_model_inherits_default_provider_and_model(
+    llm_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llm_module.ai_config, "ai_model", "default-model")
+    monkeypatch.setattr(llm_module.ai_config, "ai_default_provider", "default")
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_model", None)
+    monkeypatch.setattr(llm_module.ai_config, "ai_light_provider", "fast")
+    monkeypatch.setattr(llm_module.ai_config, "agent_memory_llm_profile", "light")
+
+    request = llm_module.resolve_llm_request("agent_memory")
+
+    assert request.provider == "default"
+    assert request.model == "default-model"

@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 _CST = timezone(timedelta(hours=8))
+_MESSAGE_CHAR_LIMIT = 800
+_MESSAGE_CONTEXT_CHAR_BUDGET = 6_000
 
 
 def now_beijing() -> datetime:
@@ -61,6 +63,30 @@ def is_cooldown_active(
     snapshot: ActivitySnapshot, now: datetime, cooldown_minutes: int
 ) -> bool:
     return is_recent(snapshot.last_agent_at, now, cooldown_minutes)
+
+
+def trim_context_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_messages: int = 40,
+    max_message_chars: int = _MESSAGE_CHAR_LIMIT,
+    char_budget: int = _MESSAGE_CONTEXT_CHAR_BUDGET,
+) -> list[dict[str, Any]]:
+    """从最新消息向前保留有界历史，并截断单条超长文本。"""
+
+    if max_messages <= 0 or max_message_chars <= 0 or char_budget <= 0:
+        return []
+    kept: list[dict[str, Any]] = []
+    remaining = max(int(char_budget), 0)
+    for item in reversed(messages[-max(int(max_messages), 0) :]):
+        if remaining <= 0:
+            break
+        text = str(item.get("text") or "")
+        bounded = text[: min(max(int(max_message_chars), 0), remaining)]
+        kept.append({**item, "text": bounded})
+        remaining -= len(bounded)
+    kept.reverse()
+    return kept
 
 
 def build_context(
@@ -125,7 +151,7 @@ def build_context(
             "mentions_60m": activity.mentions_60m,
         },
         "members": stable_members,
-        "messages": messages[-40:],
+        "messages": trim_context_messages(messages),
         "memories": stable_memories,
         "relations": relation_lines,
     }
@@ -138,4 +164,5 @@ __all__ = [
     "is_cooldown_active",
     "is_recent",
     "now_beijing",
+    "trim_context_messages",
 ]
