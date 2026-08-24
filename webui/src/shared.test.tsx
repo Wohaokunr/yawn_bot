@@ -41,14 +41,25 @@ describe("useApiQuery", () => {
     expect(result.current.error).toBe("");
   });
 
-  it("reloads on demand and on entity.changed events", async () => {
+  it("reloads on demand and only for subscribed entity.changed resources", async () => {
     let calls = 0;
     const load = () => { calls += 1; return Promise.resolve(calls); };
-    const { result } = renderHook(() => useApiQuery(load));
+    const { result } = renderHook(() => useApiQuery(load, { resources: ["agent_config"] }));
     await waitFor(() => expect(result.current.data).toBe(1));
     await act(async () => { result.current.reload(); });
     await waitFor(() => expect(result.current.data).toBe(2));
-    act(() => { window.dispatchEvent(new Event("yawnbot-entity-changed")); });
+    act(() => {
+      window.dispatchEvent(new CustomEvent("yawnbot-entity-changed", {
+        detail: { resource: "agent_memory", resourceId: "100" },
+      }));
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(result.current.data).toBe(2);
+    act(() => {
+      window.dispatchEvent(new CustomEvent("yawnbot-entity-changed", {
+        detail: { resource: "agent_config", resourceId: "100" },
+      }));
+    });
     await waitFor(() => expect(result.current.data).toBe(3));
   });
 });

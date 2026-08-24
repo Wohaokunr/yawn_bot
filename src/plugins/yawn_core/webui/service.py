@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -25,8 +26,10 @@ from ..data_models.scheduled_reminder import ScheduledReminder
 from ..data_models.user_feature import UserFeature
 from ..data_models.user_group import UserGroup
 from ..data_models.web_admin_audit import WebAdminAudit
+from ..llm import resolve_llm_request, resolve_provider
 from ..metrics import snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
+from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
 from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
 
@@ -67,6 +70,32 @@ _stats_state: dict[str, Any] = {"cache": None, "expires_at": 0.0, "lock": None}
 # 子插件状态模块的懒解析结果；只在解析成功后缓存，失败下次重试
 # （与 webui/games.py 同模式；此处不能 import games.py，会形成循环导入）。
 _live_state_modules: dict[str, Any] = {}
+
+
+def _llm_runtime_status() -> dict[str, Any]:
+    """返回 WebUI 可展示的 LLM 路由状态；绝不暴露 API Key。"""
+
+    tasks = ("agent_dialogue", "agent_proactive", "agent_memory", "agent_image")
+    routes: list[dict[str, Any]] = []
+    missing: set[str] = set()
+    for task in tasks:
+        request = resolve_llm_request(task)
+        base_url, api_key = resolve_provider(request.provider)
+        configured = bool(base_url.strip() and api_key and request.model.strip())
+        if not configured:
+            missing.add(request.provider)
+        routes.append(
+            {
+                "task": task,
+                "profile": request.profile,
+                "provider": request.provider,
+                "model": request.model,
+                "thinking": request.thinking,
+                "multimodal": request.multimodal,
+                "configured": configured,
+            }
+        )
+    return {"routes": routes, "unconfiguredProviders": sorted(missing)}
 
 
 def _import_rpg_state() -> Any | None:
@@ -346,6 +375,7 @@ async def overview() -> dict[str, Any]:
     metrics_snapshot = snapshot_metrics()
     memory_stats = dict(db_stats["memory"])
     memory_stats["compactingGroups"] = compacting_group_count()
+    llm_stats = _llm_runtime_status()
     return {
         "bots": [str(bot_id) for bot_id in sorted(get_bots())],
         "plugins": plugins,
@@ -358,6 +388,7 @@ async def overview() -> dict[str, Any]:
         "metrics": metrics_snapshot,
         "stats": {
             "ai": summarize_ai_metrics(metrics_snapshot),
+            "llm": llm_stats,
             "activity": db_stats["activity"],
             "memory": memory_stats,
             "games": db_stats["games"],
@@ -929,6 +960,173 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
             config.memory_consecutive_failures if config else 0
         ),
         "inFlight": is_memory_compacting(group_id),
+    }
+
+
+async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
+    session: AsyncSession, group_id: int
+) -> dict[str, Any]:
+    """聚合群 Agent 当前运行门槛、LLM 路由和记忆治理状态。"""
+
+    config = await session.get(GroupAgentConfig, group_id)
+    enabled = bool(config.enabled) if config else True
+    trigger_mode = config.trigger_mode if config else "mention_or_proactive"
+    proactive_active_enabled = bool(config.proactive_active_enabled) if config else True
+    daily_limit = int(config.daily_limit) if config else 30
+    cooldown_minutes = int(config.cooldown_minutes) if config else 8
+    last_agent_at = config.last_agent_at if config else None
+    last_proactive_at = config.last_proactive_at if config else None
+    active_topic = config.active_topic if config else None
+    media_cache_enabled = bool(config.media_cache_enabled) if config else False
+    now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
+    today = now.strftime("%Y-%m-%d")
+    proactive_today = (
+        int(config.proactive_count)
+        if config is not None and config.proactive_day == today
+        else 0
+    )
+    cooldown_remaining = 0
+    if last_proactive_at is not None and cooldown_minutes > 0:
+        elapsed = max((now - last_proactive_at).total_seconds() / 60.0, 0.0)
+        cooldown_remaining = max(0, math.ceil(float(cooldown_minutes) - elapsed))
+
+    conversation = None
+    for bot_id in sorted(get_bots()):
+        try:
+            current = current_conversation(int(bot_id), group_id)
+        except (TypeError, ValueError):
+            current = None
+        if current is not None:
+            conversation = {
+                "active": True,
+                "sessionId": current.session_id,
+                "topic": current.topic,
+                "botTurns": current.bot_turns,
+                "evaluations": current.evaluation_count,
+                "consecutiveWaits": current.consecutive_waits,
+            }
+            break
+    if conversation is None:
+        conversation = {
+            "active": False,
+            "sessionId": None,
+            "topic": None,
+            "botTurns": 0,
+            "evaluations": 0,
+            "consecutiveWaits": 0,
+        }
+
+    memory = await agent_memory_status(session, group_id)
+    llm = _llm_runtime_status()
+    route_by_task = {item["task"]: item for item in llm["routes"]}
+    blockers: list[dict[str, str]] = []
+    if not enabled:
+        blockers.append(
+            {
+                "code": "agent_disabled",
+                "severity": "error",
+                "title": "Agent 已关闭",
+                "detail": "群级总开关关闭时不会响应，也不会主动发言。",
+            }
+        )
+    if not get_bots():
+        blockers.append(
+            {
+                "code": "bot_offline",
+                "severity": "error",
+                "title": "Bot 当前离线",
+                "detail": "没有已连接的 Bot 账号，群 Agent 无法收发消息。",
+            }
+        )
+    if not route_by_task["agent_dialogue"]["configured"]:
+        blockers.append(
+            {
+                "code": "dialogue_llm_unconfigured",
+                "severity": "error",
+                "title": "对话 LLM 路由不可用",
+                "detail": "Agent 对话任务所选 Provider 缺少可用密钥或模型。",
+            }
+        )
+    proactive_enabled = trigger_mode == "mention_or_proactive"
+    if not proactive_enabled:
+        blockers.append(
+            {
+                "code": "proactive_mode_disabled",
+                "severity": "info",
+                "title": "当前触发模式不包含主动发言",
+                "detail": "被动回复仍按当前触发规则工作，但定时暖场/插话不会运行。",
+            }
+        )
+    if proactive_today >= daily_limit:
+        blockers.append(
+            {
+                "code": "proactive_daily_limit",
+                "severity": "warning",
+                "title": "今日主动发言额度已用尽",
+                "detail": f"今日已用 {proactive_today}/{daily_limit} 次。",
+            }
+        )
+    elif cooldown_remaining > 0:
+        blockers.append(
+            {
+                "code": "proactive_cooldown",
+                "severity": "info",
+                "title": "主动发言仍在冷却",
+                "detail": f"预计还需约 {cooldown_remaining} 分钟才满足主动冷却门槛。",
+            }
+        )
+    if proactive_enabled and not route_by_task["agent_proactive"]["configured"]:
+        blockers.append(
+            {
+                "code": "proactive_llm_unconfigured",
+                "severity": "error",
+                "title": "主动发言 LLM 路由不可用",
+                "detail": "主动发言任务所选 Provider 缺少可用密钥或模型。",
+            }
+        )
+    if memory["rebuildRequired"]:
+        blockers.append(
+            {
+                "code": "memory_rebuild_required",
+                "severity": "warning",
+                "title": "记忆需要重建",
+                "detail": (
+                    "当前记忆状态被标记为需要重建，建议先完成重建再观察对话质量。"
+                ),
+            }
+        )
+    if int(memory["consecutiveFailures"]) > 0:
+        blockers.append(
+            {
+                "code": "memory_failures",
+                "severity": "warning",
+                "title": "记忆整理最近连续失败",
+                "detail": str(memory["lastError"] or "记忆整理失败，未记录具体错误。"),
+            }
+        )
+
+    return {
+        "groupId": str(group_id),
+        "effective": {
+            "enabled": enabled,
+            "triggerMode": trigger_mode,
+            "proactiveEnabled": proactive_enabled,
+            "proactiveActiveEnabled": proactive_active_enabled,
+            "proactiveToday": proactive_today,
+            "dailyLimit": daily_limit,
+            "dailyRemaining": max(daily_limit - proactive_today, 0),
+            "cooldownMinutes": cooldown_minutes,
+            "cooldownRemainingMinutes": cooldown_remaining,
+            "lastAgentAt": iso(last_agent_at),
+            "lastProactiveAt": iso(last_proactive_at),
+            "activeTopic": active_topic,
+            "mediaCacheEnabled": media_cache_enabled,
+            "shortConversation": conversation,
+        },
+        "memory": memory,
+        "llm": llm,
+        "blockers": blockers,
+        "generatedAt": datetime.now(BEIJING_TZ).isoformat(),
     }
 
 

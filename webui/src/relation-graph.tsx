@@ -21,34 +21,15 @@ import {
 import type { Simulation } from "d3-force";
 import type { AgentRelationGraph, AgentRelationGraphNode, AgentRelationItem } from "./types";
 import { formatTime } from "./shared";
+import { isDashedRelationType, nodeDisplayName, relationTypeColor } from "./relation-meta";
+export {
+  RELATION_TYPE_GRAPH_COLORS,
+  isDashedRelationType,
+  nodeDisplayName,
+  relationTypeColor,
+} from "./relation-meta";
 
 const { Text } = Typography;
-
-// 关系类型配色：与后端 memory.py 枚举对齐，自定义类型回退灰。
-export const RELATION_TYPE_GRAPH_COLORS: Record<string, string> = {
-  好友: "#4caf7d",
-  死党: "#2fa2a0",
-  情侣: "#f2608d",
-  伴侣: "#d94f9e",
-  亲属: "#8f63d2",
-  师徒: "#e8873a",
-  同事: "#4b7fd1",
-  同学: "#55a3d9",
-  搭子: "#b98cd6",
-  对立: "#e0524f",
-  mentions: "#b3a4ad",
-};
-
-const RELATION_FALLBACK_COLOR = "#9c8f96";
-
-export function relationTypeColor(type: string): string {
-  return RELATION_TYPE_GRAPH_COLORS[type] ?? RELATION_FALLBACK_COLOR;
-}
-
-// @提及边语义最弱，渲染为虚线。
-export function isDashedRelationType(type: string): boolean {
-  return type === "mentions";
-}
 
 export interface LayoutPosition {
   x: number;
@@ -279,14 +260,6 @@ export function filterGraphData(
     linked.add(edge.objectUserId);
   }
   return { nodes: graph.nodes.filter((node) => linked.has(node.userId)), edges };
-}
-
-export function nodeDisplayName(
-  node: AgentRelationGraphNode | undefined,
-  userId: string,
-): string {
-  if (!node) return userId;
-  return (node.groupNickname || node.nickname || "").trim() || userId;
 }
 
 export interface ViewTransform {

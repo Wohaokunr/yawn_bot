@@ -169,7 +169,7 @@ const WW_PETALS: { x: number; delay: number; duration: number }[] = [
 
 export function GamesPage(): React.JSX.Element {
   const load = useCallback(() => api<LiveGames>("/games/live").then((r) => r.data), []);
-  const query = useApiQuery(load);
+  const query = useApiQuery(load, { resources: ["werewolf_game", "rpg_game"] });
   // 实时对局只有强停会推送 entity.changed,阶段流转靠轮询兜底;
   // 页面隐藏时暂停轮询,回到前台立即补一次。
   const reload = query.reload;

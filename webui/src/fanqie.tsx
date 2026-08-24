@@ -146,7 +146,7 @@ function sendStatusTag(sendStatus: string): React.JSX.Element {
 
 export function FanqiePage(): React.JSX.Element {
   const statusLoad = useCallback(() => api<FanqieStatus>("/fanqie/status").then((r) => r.data), []);
-  const statusQuery = useApiQuery(statusLoad);
+  const statusQuery = useApiQuery(statusLoad, { resources: ["fanqie_job"] });
   // Tab 写入 URL,刷新或分享链接时保持找书/任务上下文。
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = searchParams.get("tab") === "jobs" ? "jobs" : "discover";
@@ -530,7 +530,7 @@ function JobsTab(): React.JSX.Element {
     () => api<FanqieJob[]>(`/fanqie/jobs?page=${page}&pageSize=20&search=${encodeURIComponent(search)}&status=${status}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })),
     [page, search, status],
   );
-  const query = useApiQuery(load);
+  const query = useApiQuery(load, { resources: ["fanqie_job"] });
   // 任务进度靠轮询兜底(entity.changed 只覆盖 WebUI 发起的写操作);
   // 页面隐藏时暂停,回到前台立即补一次。
   const reload = query.reload;
