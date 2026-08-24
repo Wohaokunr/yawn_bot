@@ -178,7 +178,16 @@ async def test_rpg_action_submit_duplicate_stale_and_cleanup(
 async def test_rpg_modules_list_and_missing_detail() -> None:
     payload = (await modules_api.list_rpg_modules(None))["data"]
     assert payload
-    assert {"id", "sceneCount", "endingCount"} <= payload[0].keys()
+    assert {"id", "sceneCount", "endingCount", "health"} <= payload[0].keys()
+    assert payload[0]["health"]["schemaValidated"] is True
+    assert payload[0]["health"]["status"] in {
+        "healthy",
+        "warning",
+        "error",
+        "schema-only",
+    }
+    detail = (await modules_api.get_rpg_module(payload[0]["id"], None))["data"]
+    assert "issues" in detail["health"]
     with pytest.raises(HTTPException) as exc_info:
         await modules_api.get_rpg_module("missing-module", None)
     assert exc_info.value.status_code == 404  # noqa: PLR2004

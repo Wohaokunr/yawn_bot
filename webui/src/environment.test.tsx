@@ -153,6 +153,10 @@ it("页面隐藏敏感值并且只提交发生变化的配置项", async () => {
   fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
   expect(await screen.findByPlaceholderText("已配置，输入新值以替换")).toHaveValue("");
   fireEvent.click(screen.getByRole("button", { name: /保存 1 项/ }));
+  expect(await screen.findByText("保存前差异预览")).toBeInTheDocument();
+  expect(screen.getByText("old-model")).toBeInTheDocument();
+  expect(screen.getByText("new-model")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
 
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
   const patchCall = fetchMock.mock.calls.find((call) => call[1]?.method === "PATCH");
@@ -215,7 +219,7 @@ it("浮动保存条支持撤销全部与保存全部修改", async () => {
   expect(await screen.findByText("LLM 模型档位")).toBeInTheDocument();
 
   fireEvent.change(screen.getByDisplayValue("old-model"), { target: { value: "new-model" } });
-  const bar = screen.getByText("未保存修改 1 项").closest(".env-save-bar");
+  const bar = screen.getByText(/未保存修改 1 项/).closest(".env-save-bar");
   expect(bar).not.toBeNull();
 
   fireEvent.click(within(bar as HTMLElement).getByRole("button", { name: /撤销全部/ }));
@@ -223,7 +227,9 @@ it("浮动保存条支持撤销全部与保存全部修改", async () => {
   expect(screen.getByDisplayValue("old-model")).toBeInTheDocument();
 
   fireEvent.change(screen.getByDisplayValue("old-model"), { target: { value: "newer-model" } });
-  fireEvent.click(screen.getByRole("button", { name: /保存全部修改/ }));
+  fireEvent.click(screen.getByRole("button", { name: /预览并保存/ }));
+  expect(await screen.findByText("保存前差异预览")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
 
   await waitFor(() => {
     const patchCall = fetchMock.mock.calls.find((call) => call[1]?.method === "PATCH");
@@ -260,6 +266,9 @@ it("新增命名提供商时统一保存脱敏密钥配置", async () => {
     target: { value: "draft-secret" },
   });
   fireEvent.click(screen.getByRole("button", { name: /保存 1 项/ }));
+  expect(await screen.findByText("保存前差异预览")).toBeInTheDocument();
+  expect(screen.queryByText("draft-secret")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
 
   await waitFor(() => {
     const patchCall = fetchMock.mock.calls.find((call) => call[1]?.method === "PATCH");
@@ -293,4 +302,6 @@ it("模型档位连接测试使用当前草稿路由且不回填已有密钥", a
       model: "default-model",
     });
   });
+  expect(await screen.findByText(/最近测试成功/)).toBeInTheDocument();
+  expect(screen.getAllByText(/default \/ default-model/).length).toBeGreaterThan(0);
 });

@@ -26,6 +26,7 @@ import {
   Select,
   Space,
   Spin,
+  Steps,
   Switch,
   Table,
   Tabs,
@@ -55,6 +56,22 @@ import type {
 } from "./types";
 
 const { Text } = Typography;
+
+function GameOpsFlow({ current }: { current: 0 | 1 | 2 | 3 }): React.JSX.Element {
+  return <Card size="small" className="section-row">
+    <Steps
+      size="small"
+      current={current}
+      responsive
+      items={[
+        { title: "实时对局", description: "发现与进入" },
+        { title: "对局详情", description: "局面与管理员视角" },
+        { title: "事件时间线", description: "过程与异常定位" },
+        { title: "历史回放", description: "终局复盘" },
+      ]}
+    />
+  </Card>;
+}
 
 // 与后端 / yawn_werewolf 保持一致的不良死因文案;未知值原样展示。
 const WW_DEATH_CAUSE: Record<string, string> = {
@@ -188,7 +205,7 @@ export function GamesPage(): React.JSX.Element {
   const live = query.data;
   if (!live) return query.error ? <Alert className="section-alert" type="error" showIcon message={query.error} /> : <Spin />;
   return <>
-    <PageHeader title="对局中心" subtitle="狼人杀与跑团的实时监控与战绩(只读口径,强停走子插件状态机)" />
+    <PageHeader title="对局中心" subtitle="实时对局 → 对局详情 → 事件时间线 → 历史回放；强停仍走子插件状态机" onRefresh={query.reload} refreshing={query.refreshing} />
     <Tabs activeKey={tab} onChange={(key) => setSearchParams(key === "werewolf" ? {} : { tab: key }, { replace: true })} items={[
       { key: "werewolf", label: <span><MoonOutlined /> 狼人杀</span>, children: <WerewolfTab live={live.werewolf} onChanged={reload} /> },
       { key: "rpg", label: <span><PlayCircleOutlined /> 跑团</span>, children: <RpgTab live={live.rpg} onChanged={reload} /> },
@@ -241,6 +258,7 @@ function WerewolfTab({ live, onChanged }: { live: LiveGames["werewolf"]; onChang
     { title: "结束时间", dataIndex: "endedAt", render: formatTime },
   ];
   return <>
+    <GameOpsFlow current={0} />
     <Flex justify="space-between" align="center" className="live-heading">
       <Text strong>实时对局({live.games.length} 局)</Text>
       <Space>
@@ -254,7 +272,7 @@ function WerewolfTab({ live, onChanged }: { live: LiveGames["werewolf"]; onChang
       </Row>
     )}
     <WerewolfGameDrawer groupId={viewGroupId} reveal={showRoles} onClose={() => setViewGroupId(null)} />
-    <Card className="section-row" title="对局战绩" extra={<Space>
+    <Card className="section-row" title="历史对局" extra={<Space>
       <Input.Search placeholder="搜索群号或房主" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />
       <Select value={status} onChange={(v) => { setStatus(v); setPage(1); }} options={STATUS_OPTIONS} />
     </Space>}>
@@ -363,6 +381,7 @@ function WerewolfGameDrawer({ groupId, reveal, onClose }: { groupId: number | nu
     {error && !game && <QueryErrorAlert error={error} onRetry={() => { void load().then((data) => { if (data) setDetail(data); }).catch(() => undefined); }} />}
     {!game && !error && <Spin />}
     {game && <>
+      <GameOpsFlow current={2} />
       <WerewolfTable game={game} reveal={reveal} />
       <WerewolfTimeline events={detail?.events ?? []} />
     </>}
@@ -531,6 +550,7 @@ function RpgTab({ live, onChanged }: { live: LiveGames["rpg"]; onChanged: () => 
       : <Text type="secondary">—</Text> },
   ];
   return <>
+    <GameOpsFlow current={0} />
     <Flex justify="space-between" align="center" className="live-heading">
       <Text strong>实时对局({live.games.length} 局)</Text>
       <Space>
@@ -544,7 +564,7 @@ function RpgTab({ live, onChanged }: { live: LiveGames["rpg"]; onChanged: () => 
       </Row>
     )}
     <RpgGameDrawer groupId={viewGroupId} reveal={showPrivate} onClose={() => setViewGroupId(null)} />
-    <Card className="section-row" title="对局战绩" extra={<Space>
+    <Card className="section-row" title="历史对局与回放" extra={<Space>
       <Input.Search placeholder="搜索群号或房主" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />
       <Select value={status} onChange={(v) => { setStatus(v); setPage(1); }} options={STATUS_OPTIONS} />
     </Space>}>
@@ -665,6 +685,7 @@ function RpgGameDrawer({ groupId, reveal, onClose }: { groupId: number | null; r
     {error && !game && <QueryErrorAlert error={error} onRetry={() => { void load().then((data) => { if (data) setDetail(data); }).catch(() => undefined); }} />}
     {!game && !error && <Spin />}
     {game && detail && <>
+      <GameOpsFlow current={2} />
       <Descriptions className="section-row" size="small" column={3} items={[
         { key: "module", label: "模组", children: game.moduleName ?? "—" },
         { key: "scene", label: "场景", children: game.sceneId ?? "—" },
@@ -727,7 +748,7 @@ function RpgGameDrawer({ groupId, reveal, onClose }: { groupId: number | null; r
           <Button type="primary" icon={<SendOutlined />} onClick={() => { void submit(); }}>投递</Button>
         </Space>}
       </Card>
-      <Card size="small" className="section-row" title="行动日志">
+      <Card size="small" className="section-row" title="事件时间线" extra={<Tag color="processing">2.5 秒实时刷新</Tag>}>
         {detail.groupLog.length === 0 ? <Empty description="暂无日志" /> : <Timeline items={detail.groupLog.slice().reverse().map((line, index) => ({ key: index, children: <pre>{line}</pre> }))} />}
       </Card>
     </>}
@@ -752,6 +773,7 @@ function RpgReplayDrawer({ rowId, onClose }: { rowId: number | null; onClose: ()
     {!replay && !error && <Spin />}
     {replay && !replay.available && <Alert type="warning" showIcon message="本局不可回放" description={replay.reason ?? "事件日志不完整"} />}
     {replay && replay.available && <>
+      <GameOpsFlow current={3} />
       {replay.warnings.map((warning) => <Alert key={warning} className="section-alert" type="warning" showIcon message={warning} />)}
       <Descriptions className="section-row" size="small" column={2} items={[
         { key: "id", label: "回放编号", children: replay.game_id },
