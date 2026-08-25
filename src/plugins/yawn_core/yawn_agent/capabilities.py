@@ -64,6 +64,7 @@ _SEGMENT_DEGRADE_PRIORITY = (
 _SEGMENT_UNSUPPORTED_TTL = 10 * 60.0
 _MAX_SEGMENT_CACHE_ENTRIES = 512
 _segment_unsupported_cache: dict[tuple[int, int, str], float] = {}
+_segment_failure_status: dict[tuple[int, int, str], dict[str, Any]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +95,7 @@ _CAPABILITY_TTL = 60.0
 _DEGRADED_TTL = 5.0
 _MAX_CACHE_ENTRIES = 256
 _capability_cache: dict[tuple[int, int], tuple[float, BotGroupCapabilities, float]] = {}
+_capability_probe_status: dict[tuple[int, int], dict[str, Any]] = {}
 
 
 async def probe_group_capabilities(
@@ -119,7 +121,10 @@ async def probe_group_capabilities(
             role = str(info.get("role") or "member")
     except Exception:  # noqa: BLE001
         degraded = True
+        error_class = "probe_failed"
         dbg_exc(f"群 {group_id} 能力探测失败,按普通成员降级(短 TTL {_DEGRADED_TTL}s)")
+    else:
+        error_class = None
     actions = {
         "send_group_msg",
         "get_group_info",
@@ -146,6 +151,12 @@ async def probe_group_capabilities(
         result,
         _DEGRADED_TTL if degraded else _CAPABILITY_TTL,
     )
+    _capability_probe_status[key] = {
+        "degraded": degraded,
+        "last_error": error_class,
+        "probed_at": time.time(),
+        "ttl": _DEGRADED_TTL if degraded else _CAPABILITY_TTL,
+    }
     dbg(
         f"群 {group_id} 能力探测完成: role={result.role!r} can_manage={result.can_manage} "
         f"actions={sorted(result.actions)} degraded={degraded}"
@@ -198,6 +209,7 @@ def get_segment_capabilities(bot: Any, group_id: int) -> MessageSegmentCapabilit
             runtime_unsupported.add(segment_type)
     for key in expired:
         _segment_unsupported_cache.pop(key, None)
+        _segment_failure_status.pop(key, None)
     return MessageSegmentCapabilities(
         allowed=frozenset(allowed),
         supported=frozenset(supported),
@@ -205,7 +217,13 @@ def get_segment_capabilities(bot: Any, group_id: int) -> MessageSegmentCapabilit
     )
 
 
-def mark_segment_unsupported(bot: Any, group_id: int, segment_type: str) -> None:
+def mark_segment_unsupported(
+    bot: Any,
+    group_id: int,
+    segment_type: str,
+    *,
+    reason: str = "runtime_unsupported",
+) -> None:
     """把一次确定/推断的协议不兼容短期记住，后续直接走降级。"""
 
     normalized = str(segment_type).strip().lower()
@@ -219,8 +237,101 @@ def mark_segment_unsupported(bot: Any, group_id: int, segment_type: str) -> None
         int(group_id),
         normalized,
     )
-    _segment_unsupported_cache[key] = time.monotonic() + _SEGMENT_UNSUPPORTED_TTL
+    expires_at = time.monotonic() + _SEGMENT_UNSUPPORTED_TTL
+    _segment_unsupported_cache[key] = expires_at
+    _segment_failure_status[key] = {
+        "reason": str(reason or "runtime_unsupported")[:160],
+        "marked_at": time.time(),
+        "expires_at_monotonic": expires_at,
+    }
     dbg(f"群 {group_id} segment 能力降级缓存: {normalized}")
+
+
+def clear_group_capability_cache(
+    bot: Any,
+    group_id: int,
+    *,
+    segment_type: str | None = None,
+) -> None:
+    """只清当前 bot/group 的能力缓存，供运维重探测而不影响其他群。"""
+
+    bot_id = int(getattr(bot, "self_id", 0) or 0)
+    group = int(group_id)
+    if segment_type is None:
+        key = (bot_id, group)
+        _capability_cache.pop(key, None)
+        _capability_probe_status.pop(key, None)
+    normalized = str(segment_type or "").strip().lower()
+    for key in list(_segment_unsupported_cache):
+        key_bot_id, key_group_id, key_segment = key
+        if key_bot_id != bot_id or key_group_id != group:
+            continue
+        if normalized and key_segment != normalized:
+            continue
+        _segment_unsupported_cache.pop(key, None)
+        _segment_failure_status.pop(key, None)
+
+
+def capability_runtime_snapshot(bot: Any, group_id: int) -> dict[str, Any]:
+    """返回可直接给 WebUI 的 action/segment 运行时能力快照。"""
+
+    bot_id = int(getattr(bot, "self_id", 0) or 0)
+    group = int(group_id)
+    key = (bot_id, group)
+    now_mono = time.monotonic()
+    cached = _capability_cache.get(key)
+    probe = dict(_capability_probe_status.get(key) or {})
+    action_caps = cached[1] if cached is not None else None
+    if cached is not None:
+        probe["cache_remaining_seconds"] = max(
+            0.0, cached[2] - (now_mono - cached[0])
+        )
+    segments = get_segment_capabilities(bot, group)
+    segment_rows: list[dict[str, Any]] = []
+    for segment_type in sorted(
+        COMMON_MESSAGE_SEGMENTS | OPTIONAL_MESSAGE_SEGMENTS | FORBIDDEN_MESSAGE_SEGMENTS
+    ):
+        failure_key = (bot_id, group, segment_type)
+        failure = _segment_failure_status.get(failure_key)
+        retry_after = None
+        if failure is not None:
+            retry_after = max(
+                0.0,
+                float(failure.get("expires_at_monotonic") or 0.0) - now_mono,
+            )
+        segment_rows.append(
+            {
+                "type": segment_type,
+                "allowed": segment_type in segments.allowed,
+                "supported": segment_type in segments.supported,
+                "exposed": segment_type in segments.exposed_types,
+                "forbidden": segment_type in segments.forbidden,
+                "runtimeUnsupported": segment_type in segments.runtime_unsupported,
+                "lastFailureReason": (
+                    str(failure.get("reason")) if failure is not None else None
+                ),
+                "retryAfterSeconds": (
+                    round(retry_after, 1) if retry_after is not None else None
+                ),
+            }
+        )
+    return {
+        "botId": str(bot_id),
+        "groupId": str(group),
+        "action": {
+            "cached": action_caps is not None,
+            "role": action_caps.role if action_caps is not None else None,
+            "canManage": action_caps.can_manage if action_caps is not None else False,
+            "actions": sorted(action_caps.actions) if action_caps is not None else [],
+            "degraded": bool(probe.get("degraded")),
+            "lastError": probe.get("last_error"),
+            "probedAt": probe.get("probed_at"),
+            "cacheRemainingSeconds": round(
+                float(probe.get("cache_remaining_seconds") or 0.0), 1
+            ),
+        },
+        "segments": segment_rows,
+    }
 
 
 def infer_unsupported_segment(
@@ -246,6 +357,8 @@ def infer_unsupported_segment(
 def reset_capability_cache() -> None:
     _capability_cache.clear()
     _segment_unsupported_cache.clear()
+    _capability_probe_status.clear()
+    _segment_failure_status.clear()
 
 
 async def user_can_manage_group(bot: Any, group_id: int, user_id: int) -> bool:
@@ -296,6 +409,8 @@ __all__ = [
     "OPTIONAL_MESSAGE_SEGMENTS",
     "BotGroupCapabilities",
     "MessageSegmentCapabilities",
+    "capability_runtime_snapshot",
+    "clear_group_capability_cache",
     "default_allowed_segment_types",
     "get_segment_capabilities",
     "infer_unsupported_segment",

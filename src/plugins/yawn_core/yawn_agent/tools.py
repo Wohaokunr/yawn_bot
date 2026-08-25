@@ -103,6 +103,19 @@ class _ToolDefinition:
     required: tuple[str, ...] = ()
     actions: tuple[str, ...] = ()
     admin: bool = False
+    permission_level: str = "read"
+
+
+TOOL_PERMISSION_READ = "read"
+TOOL_PERMISSION_STATE_WRITE = "state_write"
+TOOL_PERMISSION_MESSAGE_SEND = "message_send"
+TOOL_PERMISSION_PRIVILEGED = "privileged"
+_TOOL_PERMISSION_RANK = {
+    TOOL_PERMISSION_READ: 0,
+    TOOL_PERMISSION_STATE_WRITE: 1,
+    TOOL_PERMISSION_MESSAGE_SEND: 2,
+    TOOL_PERMISSION_PRIVILEGED: 3,
+}
 
 
 _TOOL_DEFINITIONS = (
@@ -159,6 +172,7 @@ _TOOL_DEFINITIONS = (
             },
         },
         required=("subject_user_id", "object_user_id", "type"),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
     ),
     _ToolDefinition(
         "search_reactions",
@@ -190,6 +204,7 @@ _TOOL_DEFINITIONS = (
         },
         required=("segments",),
         actions=("send_group_msg",),
+        permission_level=TOOL_PERMISSION_MESSAGE_SEND,
     ),
     _ToolDefinition(
         "send_forward",
@@ -217,6 +232,7 @@ _TOOL_DEFINITIONS = (
         },
         required=("nodes",),
         actions=("send_group_forward_msg",),
+        permission_level=TOOL_PERMISSION_MESSAGE_SEND,
     ),
     _ToolDefinition(
         "mute_member",
@@ -228,6 +244,7 @@ _TOOL_DEFINITIONS = (
         required=("user_id", "duration"),
         actions=("set_group_ban",),
         admin=True,
+        permission_level=TOOL_PERMISSION_PRIVILEGED,
     ),
     _ToolDefinition(
         "create_group_announcement",
@@ -236,6 +253,7 @@ _TOOL_DEFINITIONS = (
         required=("content",),
         actions=("send_group_notice", "_send_group_notice"),
         admin=True,
+        permission_level=TOOL_PERMISSION_PRIVILEGED,
     ),
     _ToolDefinition(
         "send_file",
@@ -246,11 +264,61 @@ _TOOL_DEFINITIONS = (
         },
         required=("file", "name"),
         actions=("upload_group_file",),
+        permission_level=TOOL_PERMISSION_PRIVILEGED,
     ),
 )
 _TOOL_BY_NAME = {item.name: item for item in _TOOL_DEFINITIONS}
 _ADMIN_TOOLS = frozenset(item.name for item in _TOOL_DEFINITIONS if item.admin)
+_PRIVILEGED_TOOLS = frozenset(
+    item.name
+    for item in _TOOL_DEFINITIONS
+    if item.permission_level == TOOL_PERMISSION_PRIVILEGED
+)
 _MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
+
+
+def _max_tool_permission_level(
+    *, allow_admin_tools: bool, max_permission_level: str | None
+) -> str:
+    if max_permission_level is None:
+        return (
+            TOOL_PERMISSION_PRIVILEGED
+            if allow_admin_tools
+            else TOOL_PERMISSION_MESSAGE_SEND
+        )
+    normalized = str(max_permission_level).strip().lower()
+    if normalized not in _TOOL_PERMISSION_RANK:
+        raise ValueError(f"未知工具权限等级: {max_permission_level}")
+    return normalized
+
+
+def _tool_exposure_reason(
+    definition: _ToolDefinition,
+    capabilities: BotGroupCapabilities,
+    *,
+    allow_admin_tools: bool,
+    max_permission_level: str,
+    privileged_allowlist: set[str] | None,
+) -> tuple[bool, str]:
+    if _TOOL_PERMISSION_RANK[definition.permission_level] > _TOOL_PERMISSION_RANK[
+        max_permission_level
+    ]:
+        return False, "permission_level"
+    if definition.actions and not any(
+        capabilities.has(action) for action in definition.actions
+    ):
+        return False, "onebot_action"
+    if definition.admin and not capabilities.can_manage:
+        return False, "bot_not_admin"
+    if definition.permission_level == TOOL_PERMISSION_PRIVILEGED and not allow_admin_tools:
+        return False, "actor_not_admin"
+    if (
+        definition.permission_level == TOOL_PERMISSION_PRIVILEGED
+        and privileged_allowlist is not None
+        and definition.name not in privileged_allowlist
+    ):
+        return False, "not_allowlisted"
+    return True, "exposed"
 
 
 def build_tool_schemas(
@@ -258,20 +326,24 @@ def build_tool_schemas(
     *,
     allow_admin_tools: bool = False,
     segment_capabilities: MessageSegmentCapabilities | None = None,
+    max_permission_level: str | None = None,
+    privileged_allowlist: set[str] | None = None,
 ) -> list[dict[str, Any]]:
+    resolved_level = _max_tool_permission_level(
+        allow_admin_tools=allow_admin_tools,
+        max_permission_level=max_permission_level,
+    )
     tools: list[dict[str, Any]] = []
     for definition in _TOOL_DEFINITIONS:
-        if definition.actions and not any(
-            capabilities.has(action) for action in definition.actions
-        ):
-            dbg(
-                f"工具 schema: {definition.name} 因 OneBot 不支持 "
-                f"{definition.actions} 而跳过"
-            )
-            continue
-        if definition.admin and not (
-            capabilities.can_manage and allow_admin_tools
-        ):
+        exposed, reason = _tool_exposure_reason(
+            definition,
+            capabilities,
+            allow_admin_tools=allow_admin_tools,
+            max_permission_level=resolved_level,
+            privileged_allowlist=privileged_allowlist,
+        )
+        if not exposed:
+            dbg(f"工具 schema: {definition.name} 未暴露 reason={reason}")
             continue
         properties = definition.properties
         if definition.name == "send_message":
@@ -306,6 +378,40 @@ def build_tool_schemas(
             }
         )
     return tools
+
+
+def tool_permission_snapshot(
+    capabilities: BotGroupCapabilities,
+    *,
+    allow_admin_tools: bool = False,
+    max_permission_level: str | None = None,
+    privileged_allowlist: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """返回不含 schema 参数的最小权限矩阵，供调试/WebUI 使用。"""
+
+    resolved_level = _max_tool_permission_level(
+        allow_admin_tools=allow_admin_tools,
+        max_permission_level=max_permission_level,
+    )
+    rows: list[dict[str, Any]] = []
+    for definition in _TOOL_DEFINITIONS:
+        exposed, reason = _tool_exposure_reason(
+            definition,
+            capabilities,
+            allow_admin_tools=allow_admin_tools,
+            max_permission_level=resolved_level,
+            privileged_allowlist=privileged_allowlist,
+        )
+        rows.append(
+            {
+                "name": definition.name,
+                "permissionLevel": definition.permission_level,
+                "exposed": exposed,
+                "reason": reason,
+                "actions": list(definition.actions),
+            }
+        )
+    return rows
 
 
 def _jsonable(value: object) -> object:
@@ -371,27 +477,52 @@ async def _check_tool_policy(
     ):
         dbg(f"群 {group_id} 工具策略拒绝 {name}: OneBot 不支持 {definition.actions}")
         raise PermissionError("当前 OneBot 不支持该操作")
-    if name in _ADMIN_TOOLS and (
+    if (
+        definition.permission_level == TOOL_PERMISSION_STATE_WRITE
+        and actor_user_id is None
+    ):
+        dbg(f"群 {group_id} 工具策略拒绝 {name}: 状态写入缺少真实调用者")
+        raise PermissionError("状态写入工具需要明确的群成员调用者")
+    if definition.permission_level == TOOL_PERMISSION_STATE_WRITE:
+        if session is None:
+            raise PermissionError("状态写入工具需要数据库会话")
+        if actor_user_id is None:
+            raise PermissionError("状态写入工具需要明确的群成员调用者")
+        actor_member = await session.scalar(
+            select(UserGroup.user_id).where(
+                UserGroup.group_id == group_id,
+                UserGroup.user_id == actor_user_id,
+            )
+        )
+        if actor_member is None:
+            dbg(f"群 {group_id} 工具策略拒绝 {name}: 调用者 {actor_user_id} 不是已知群成员")
+            raise PermissionError("状态写入工具仅允许当前群成员触发")
+    if name in _PRIVILEGED_TOOLS and (
         actor_user_id is None
         or not await user_can_manage_group(bot, group_id, actor_user_id)
     ):
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 调用者 {actor_user_id} 没有群管理权限")
-        raise PermissionError("调用者没有群管理权限")
-    if name not in _ADMIN_TOOLS:
+        raise PermissionError(
+            "调用者没有群管理权限"
+            if name in _ADMIN_TOOLS
+            else "特权工具仅允许群主或管理员触发"
+        )
+    if name not in _PRIVILEGED_TOOLS:
         return
     if session is None:
-        # 没有会话就无法校验白名单和配额，管理工具必须拒绝。
+        # 没有会话就无法校验白名单和配额，特权工具必须拒绝。
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 缺少数据库会话")
-        raise PermissionError("管理工具需要数据库会话")
+        raise PermissionError("特权工具需要数据库会话")
     config = await session.get(GroupAgentConfig, group_id)
     if config is None:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: Agent 配置不存在")
         raise PermissionError("群聊 Agent 配置不存在")
-    # 空白名单即全部禁用；列默认值已是全量管理工具。
+    # 空白名单即全部禁用。send_file 在 P5 后也属于显式特权工具，默认配置
+    # 不包含它，因此升级不会自动获得群文件发送能力。
     allowlist = set(config.tool_allowlist or [])
     if name not in allowlist:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 不在白名单 {sorted(allowlist)}")
-        raise PermissionError("该管理工具未加入 Agent 白名单")
+        raise PermissionError("该特权工具未加入 Agent 白名单")
     today = now_beijing().strftime("%Y-%m-%d")
     if config.tool_day != today:
         config.tool_day = today
@@ -402,14 +533,14 @@ async def _check_tool_policy(
             f"群 {group_id} 工具策略拒绝 {name}: 今日配额已用尽"
             f"({config.admin_tool_count}/{config.admin_tool_daily_limit})"
         )
-        raise PermissionError("Agent 今日管理操作配额已用尽")
+        raise PermissionError("Agent 今日特权操作配额已用尽")
     dbg(f"群 {group_id} 工具策略通过: {name}")
 
 
 async def _consume_admin_quota(session: Any, group_id: int, name: str) -> None:
-    """配额只在工具成功后消耗，失败的尝试不计入。"""
+    """特权工具配额只在成功后消耗，失败尝试不计入。"""
 
-    if name not in _ADMIN_TOOLS or session is None:
+    if name not in _PRIVILEGED_TOOLS or session is None:
         return
     config = await session.get(GroupAgentConfig, group_id)
     if config is None:
@@ -420,7 +551,7 @@ async def _consume_admin_quota(session: Any, group_id: int, name: str) -> None:
         config.admin_tool_count = 0
     config.admin_tool_count += 1
     dbg(
-        f"群 {group_id} 消耗管理工具配额: {name} "
+        f"群 {group_id} 消耗特权工具配额: {name} "
         f"(今日已用 {config.admin_tool_count}/{config.admin_tool_daily_limit})"
     )
     await session.flush()
@@ -793,10 +924,12 @@ async def execute_tool(
                 source="tool",
             )
             result = {
+                "sent": sent.sent,
                 "message_id": sent.message_id,
                 "segment_types": list(sent.segment_types),
                 "message_type": sent.message_type,
                 "outcome": sent.outcome,
+                "delivery_state": sent.delivery_state,
                 "degraded_from": sent.degraded_from,
                 "text": sent.normalized_text[:500],
                 "outbound": sent.storage_payload(),
@@ -811,10 +944,12 @@ async def execute_tool(
                 source="tool",
             )
             result = {
+                "sent": sent.sent,
                 "message_id": sent.message_id,
                 "segment_types": list(sent.segment_types),
                 "message_type": sent.message_type,
                 "outcome": sent.outcome,
+                "delivery_state": sent.delivery_state,
                 "degraded_from": sent.degraded_from,
                 "text": sent.normalized_text[:500],
                 "outbound": sent.storage_payload(),
@@ -871,7 +1006,12 @@ async def execute_tool(
         dbg(f"群 {group_id} 工具 {name} 执行成功")
         response = {"ok": True, "result": result}
         if name in _MESSAGE_SEND_TOOLS:
-            response["sent"] = True
+            # unknown 也必须终止本轮：OneBot 可能已执行发送，只是回执超时。
+            response["sent"] = bool(
+                isinstance(result, dict)
+                and result.get("delivery_state")
+                in {"confirmed_success", "degraded_success", "unknown"}
+            )
         return response
     except Exception as exc:  # noqa: BLE001
         # 工具失败（含 DB 错误）先回滚，避免待回滚事务毒化后续 flush。
@@ -883,4 +1023,14 @@ async def execute_tool(
         return {"ok": False, "error": str(exc)}
 
 
-__all__ = ["MAX_FORWARD_NODES", "MAX_TOOL_ROUNDS", "build_tool_schemas", "execute_tool"]
+__all__ = [
+    "MAX_FORWARD_NODES",
+    "MAX_TOOL_ROUNDS",
+    "TOOL_PERMISSION_MESSAGE_SEND",
+    "TOOL_PERMISSION_PRIVILEGED",
+    "TOOL_PERMISSION_READ",
+    "TOOL_PERMISSION_STATE_WRITE",
+    "build_tool_schemas",
+    "execute_tool",
+    "tool_permission_snapshot",
+]

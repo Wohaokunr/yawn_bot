@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import Any
 
 from nonebot import get_bots, get_driver, logger
 from nonebot_plugin_apscheduler import scheduler
@@ -19,8 +17,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
-from ..llm import ai_config, complete
-from .context import ActivitySnapshot, is_recent, now_beijing
+from ..llm import ai_config, complete, resolve_llm_request
+from .context import ActivitySnapshot, now_beijing
 from .collector import group_lock
 from .config_store import agent_runtime_enabled, list_agent_group_ids
 from .conversation import (
@@ -40,91 +38,49 @@ from .dialogue import (
     _load_context,
     persist_bot_reply,
 )
+from .execution_trace import (
+    begin_execution_trace,
+    bind_execution_trace,
+    finish_execution_trace,
+    reset_execution_trace,
+    trace_event,
+)
 from .log import dbg, dbg_exc
 from .memory import (
     compact_group_memory,
     decay_stale_relations,
     memory_retry_due,
-    parse_json_reply,
     record_memory_failure,
 )
 from .media import cleanup_media_cache
 from .persona import resolve_persona
 from .prompt import build_messages
 from .outbound import (
-    MAX_OUTBOUND_SEGMENTS,
     PreparedOutboundMessage,
     SendResult,
     prepare_outbound_message,
     prepare_text_message,
     send_prepared_outbound,
 )
+from .proactive_policy import (
+    ProactiveDecision as _ProactiveDecision,
+    _ACTIVE_INTERJECT_PROMPT,
+    _FOLLOWUP_PROMPT,
+    _JSON_PROTOCOL,
+    _MEMORY_USE_PROMPT,
+    _PROACTIVE_SEGMENT_TYPES,
+    _WARMUP_PROMPT,
+    build_user_prompt as _build_user_prompt,
+    clamp_probability as _clamp_probability,
+    decide_proactive_reply as _decide_proactive_reply,
+    recent_proactive_lines as _recent_proactive_lines,
+    should_proactively_speak,
+    skip_backoff_timestamp as _skip_backoff_timestamp,
+    warmup_probability as _warmup_probability,
+)
 
-# 普通活跃场景等 30 秒把零散消息合起来；持续刷屏由高活跃通道直接候选，
-# 不再依赖群聊出现 90 秒空隙。
-_ACTIVE_MIN_GAP_SECONDS = 30.0
-# 60 分钟内真人消息不足此数说明群里并没有在聊，不插话。
-_ACTIVE_MIN_MEMBER_MESSAGES = 2
-_BUSY_MEMBER_MESSAGES_5M = 6
-_BUSY_MEMBER_PARTICIPANTS_5M = 2
-# 被动回复（被@答话）后的短守卫：刚答完话立刻主动插话显得话痨，
-# 但只挡这几分钟，不再封锁整个主动冷却期。
-_POST_REPLY_GUARD_MINUTES = 5.0
-# 暖场概率封顶：冷得再久也别超过这个值，防止死群被高频轰炸。
-_WARMUP_PROBABILITY_CAP = 0.6
-# 主动回复可能启用任务级推理且要输出 JSON；384 tokens 会让推理模型在正文前
-# 触发 finish_reason="length"，因此至少给 2048，并保留部署方更高的全局预算。
 _PROACTIVE_MIN_MAX_TOKENS = 2048
 _PROACTIVE_TIMEOUT_SECONDS = 25.0
-_PROACTIVE_SEGMENT_TYPES = frozenset({"text", "reply", "at", "face", "reaction"})
-
-_ACTIVE_INTERJECT_PROMPT = (
-    "群里正在聊天。先读懂最近的消息：现在在聊什么话题、谁在积极参与、"
-    "聊到哪一步了、气氛如何，注意消息里的 minutes_ago 是几分钟前发的。\n"
-    "只有能回应具体问题、补充新信息或接住一个明确的梗时才开口。"
-    "群友彼此聊得顺畅、内容只是在重复改写、或你只能泛泛附和时保持沉默(speak=false)。\n"
-    "插话时顺着话题对某条具体消息或具体观点做出反应，"
-    "像随手打的一条消息：1~2 句、口语化，可以带点情绪或吐槽；"
-    "不要开场白和客套，不要总结聊天记录，不要只回“哈哈”“确实”这类泛泛附和，"
-    "不要自称 AI 或助手。"
-)
-
-_WARMUP_PROMPT = (
-    "群里冷场有一会儿了。先回想冷场前群里最后在聊什么。\n"
-    "只有存在自然切入点时才开口——"
-    "接上没聊完的话题、分享一个贴合群成员兴趣的小见闻、"
-    "或抛一个轻松的新话题都可以。只有确实找不到任何不突兀的开口方式时"
-    "才保持沉默(speak=false)。\n"
-    "开口时 1~2 句、口语化、自然随意；"
-    "不要问“大家在吗”“在干什么”，不要自称 AI 或助手。"
-)
-
-_FOLLOWUP_PROMPT = (
-    "你刚刚已经参与了这个话题，群友随后又发来一批消息。判断他们是否在延续、"
-    "回应或自然关联到当前话题。不要因为每条新消息都抢着回答：群友彼此聊得顺畅时"
-    "可以 wait；话题已结束、明显转移或不适合继续时 close；只有确实能推动对话、"
-    "回应群友或自然接梗时才 speak。连续同义复述、互相总结、没有新增事实或问题时"
-    "直接 close，不要再换一种说法总结，也不要靠结尾反问延长对话。\n"
-    "续聊必须承接当前批次，1~2 句、口语化，不重新打招呼，不另起无关话题。"
-)
-
-_MEMORY_USE_PROMPT = (
-    "结合上下文中的长期记忆，但要自然隐式使用：群总结用于判断群里常聊什么和"
-    "未完话题；人物画像用于称呼、兴趣切入点和表达分寸；人物关系只用于调整互动"
-    "语气。当前消息永远优先于旧记忆；只在高度相关时体现，不复述记忆清单、"
-    "source_scope 或关系清单，也不要声称自己在读取记忆。"
-)
-
-_JSON_PROTOCOL = (
-    "只返回 JSON，不要输出其他任何内容："
-    '{"action": "speak、wait 或 close", "speak": true或false, '
-    '"topic": "当前话题的简短概括", '
-    '"reason": "一句话说明为何开口或沉默", '
-    '"message": {"segments": [{"type": "text/reply/at/face/reaction", "...": "对应字段"}]}, '
-    '"text": "兼容旧模型的纯文本；使用 message 时可省略，保持沉默时为空字符串"}。'
-    "主动消息只允许 text/reply/at/face/reaction；reply.message_id 与 at.user_id 必须来自上下文，"
-    "reaction_id 必须是系统表情包索引中的真实 ID；不确定时不要使用 reaction，禁止猜图片路径。"
-)
 
 
 async def _generate_proactive_reply(messages: list[Any]) -> str | None:
@@ -136,278 +92,6 @@ async def _generate_proactive_reply(messages: list[Any]) -> str | None:
         max_tokens=max(_PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)),
         timeout=_PROACTIVE_TIMEOUT_SECONDS,
     )
-
-
-def _clamp_probability(value: Any) -> float:
-    try:
-        return max(0.0, min(float(value), 1.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _warmup_probability(config: GroupAgentConfig, idle_seconds: float) -> float:
-    """冷得越久越可能开口：阈值时为基准值，两倍阈值后翻倍，封顶 0.6。"""
-
-    base = _clamp_probability(config.proactive_probability)
-    threshold = max(int(config.idle_threshold_minutes), 1) * 60
-    scale = 1.0 + min(max(idle_seconds / threshold - 1.0, 0.0), 1.0)
-    return min(base * scale, _WARMUP_PROBABILITY_CAP)
-
-
-def _skip_backoff_timestamp(now: datetime, cooldown_minutes: int) -> datetime:
-    """内容门跳过/生成失败后的退避时间戳：让剩余冷却只剩半个冷却期
-    （至少 2 分钟），而不是整个冷却期；未发言也绝不刷新 last_agent_at。"""
-
-    cooldown = max(int(cooldown_minutes), 0)
-    backoff = max(2, cooldown // 2)
-    # 冷却比退避短时时间戳会略微落在未来，效果等同于把剩余冷却拉到退避值。
-    return now - timedelta(minutes=cooldown - backoff)
-
-
-@dataclass(frozen=True, slots=True)
-class _ProactiveDecision:
-    action: str
-    text: str
-    topic: str | None
-    reason: str
-    segments: tuple[dict[str, Any], ...] = ()
-
-    @property
-    def should_speak(self) -> bool:
-        return self.action == "speak" and (bool(self.text) or bool(self.segments))
-
-    @property
-    def history_text(self) -> str:
-        if self.text:
-            return self.text
-        labels = [str(item.get("type") or "") for item in self.segments]
-        return f"[结构化消息: {','.join(item for item in labels if item)}]"
-
-
-class _RandomSource(Protocol):
-    def random(self) -> float: ...
-
-
-def _decide_proactive_reply(raw: str) -> _ProactiveDecision:
-    """解析模型的结构化决策；不合法 JSON 的纯文本回退为直接发言。"""
-
-    cleaned = raw.strip()
-    if not cleaned:
-        return _ProactiveDecision(
-            action="wait", text="", topic=None, reason="LLM 返回空内容"
-        )
-    parsed = parse_json_reply(cleaned)
-    if parsed is not None:
-        text = str(parsed.get("text") or "").strip()
-        segments: tuple[dict[str, Any], ...] = ()
-        raw_message = parsed.get("message")
-        if isinstance(raw_message, dict):
-            raw_segments = raw_message.get("segments")
-            if isinstance(raw_segments, list) and 0 < len(raw_segments) <= MAX_OUTBOUND_SEGMENTS:
-                if all(
-                    isinstance(item, dict)
-                    and str(item.get("type") or "").strip().lower()
-                    in _PROACTIVE_SEGMENT_TYPES
-                    for item in raw_segments
-                ):
-                    segments = tuple(dict(item) for item in raw_segments)
-                else:
-                    return _ProactiveDecision(
-                        action="wait",
-                        text="",
-                        topic=None,
-                        reason="主动消息包含不允许的消息段",
-                    )
-        if segments:
-            text = "".join(
-                str(item.get("text") or "")
-                for item in segments
-                if str(item.get("type") or "").strip().lower() == "text"
-            ).strip()
-        raw_action = str(parsed.get("action") or "").strip().lower()
-        if raw_action not in {"speak", "wait", "close"}:
-            raw_action = (
-                "speak" if bool(parsed.get("speak")) and (text or segments) else "wait"
-            )
-        if raw_action == "speak" and not text and not segments:
-            raw_action = "wait"
-        topic = str(parsed.get("topic") or "").strip() or None
-        reason = str(parsed.get("reason") or "").strip() or (
-            "模型未说明理由"
-            if raw_action == "speak"
-            else "模型判定此刻不适合发言"
-        )
-        return _ProactiveDecision(
-            action=raw_action,
-            text=text if raw_action == "speak" else "",
-            topic=topic,
-            reason=reason,
-            segments=segments if raw_action == "speak" else (),
-        )
-    # 疑似 JSON 的碎片不可直接发到群里；纯文本说明模型没走 JSON 协议，
-    # 按旧行为整段当发言发出去，保持对不吐 JSON 模型的兼容。
-    if cleaned.startswith(("{", "```")):
-        return _ProactiveDecision(
-            action="wait",
-            text="",
-            topic=None,
-            reason="LLM 返回了无法解析的 JSON",
-        )
-    return _ProactiveDecision(
-        action="speak",
-        text=cleaned,
-        topic=None,
-        reason="模型按纯文本回复,回退为直接发言",
-    )
-
-
-def _recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
-    """最近主动发言原文；注入提示词让模型不重复相近说法。"""
-
-    lines = [
-        str(item.get("text") or "").strip()
-        for item in (config.recent_response_fingerprints or [])
-        if isinstance(item, dict) and item.get("input") == "proactive"
-    ]
-    return [line for line in lines if line][-4:]
-
-
-def _build_user_prompt(
-    mode: str, config: GroupAgentConfig, *, turn: int | None = None
-) -> str:
-    if mode == "active":
-        base = _ACTIVE_INTERJECT_PROMPT
-    elif mode == "followup":
-        base = _FOLLOWUP_PROMPT
-    else:
-        base = _WARMUP_PROMPT
-    parts = [base, _MEMORY_USE_PROMPT]
-    if turn is not None:
-        parts.append(
-            f"这是本话题中 Bot 的第 {turn} 条候选发言，最多 "
-            f"{CONVERSATION_MAX_BOT_TURNS} 条。"
-        )
-    parts.append(_JSON_PROTOCOL)
-    recent = _recent_proactive_lines(config)
-    if recent:
-        parts.append(
-            "你最近主动发言过：\n"
-            + "\n".join(f"- {line}" for line in recent)
-            + "\n不要重复相近的说法或同一话题的同类反应。"
-        )
-    return "\n".join(parts)
-
-
-def should_proactively_speak(
-    config: GroupAgentConfig,
-    snapshot: ActivitySnapshot,
-    now: datetime,
-    *,
-    rng: _RandomSource | None = None,
-) -> str | None:
-    """返回本次主动发言模式："active"（热闹插话）、"warmup"（冷场暖场）或 None。
-
-    两模式天然互斥：暖场要求全部消息冷场超阈值，插话要求真人消息
-    落在窗口内，因此同一时刻至多一个分支可用。
-
-    冷却基准与被动回复解耦：主动→主动的冷却看 last_proactive_at；
-    被@答话只触发 _POST_REPLY_GUARD_MINUTES 的短守卫，不再封锁
-    整个主动冷却期。
-    """
-
-    group_id = getattr(config, "group_id", None)
-    if not config.enabled:
-        dbg(f"群 {group_id} 主动发言拒绝: Agent 未启用")
-        return None
-    if snapshot.proactive_today >= config.daily_limit:
-        dbg(
-            f"群 {group_id} 主动发言拒绝: 今日已达上限"
-            f"({snapshot.proactive_today}/{config.daily_limit})"
-        )
-        return None
-    if is_recent(snapshot.last_proactive_at, now, int(config.cooldown_minutes)):
-        dbg(
-            f"群 {group_id} 主动发言拒绝: 主动冷却中"
-            f"(上次主动 {snapshot.last_proactive_at},"
-            f"冷却 {config.cooldown_minutes} 分钟)"
-        )
-        return None
-    if is_recent(snapshot.last_agent_at, now, _POST_REPLY_GUARD_MINUTES):
-        dbg(
-            f"群 {group_id} 主动发言拒绝: 刚回复过消息,短守卫期内"
-            f"(最后发言 {snapshot.last_agent_at},"
-            f"守卫 {_POST_REPLY_GUARD_MINUTES:.0f} 分钟)"
-        )
-        return None
-    roll = (rng or random).random()
-
-    # 暖场模式：idle 含 bot 自己的发言——bot 刚说完话不会立刻再暖场。
-    if snapshot.last_message_at is not None:
-        idle_seconds = (now - snapshot.last_message_at).total_seconds()
-        if idle_seconds >= config.idle_threshold_minutes * 60:
-            probability = _warmup_probability(config, idle_seconds)
-            if roll < probability:
-                dbg(
-                    f"群 {group_id} 暖场模式触发: 已冷场 {idle_seconds:.0f}s "
-                    f"roll={roll:.3f} probability={probability:.2f}"
-                )
-                return "warmup"
-            dbg(
-                f"群 {group_id} 暖场模式骰子未中: roll={roll:.3f} "
-                f"probability={probability:.2f}"
-            )
-            return None
-    else:
-        dbg(f"群 {group_id} 主动发言拒绝: 保留期内没有任何消息")
-        return None
-
-    # 插话模式：普通群先等 30 秒合批；持续刷屏群允许在消息流中候选，
-    # 否则它们永远等不到自然间隙，反而比安静群更难触发。
-    if not config.proactive_active_enabled:
-        dbg(f"群 {group_id} 主动发言拒绝: 热闹插话未开启")
-        return None
-    if snapshot.last_member_message_at is None:
-        dbg(f"群 {group_id} 主动发言拒绝: 60 分钟内没有真人消息")
-        return None
-    member_idle = (now - snapshot.last_member_message_at).total_seconds()
-    window_seconds = max(int(config.proactive_active_window_minutes), 1) * 60
-    busy_flow = (
-        snapshot.member_messages_5m >= _BUSY_MEMBER_MESSAGES_5M
-        and snapshot.member_participants_5m >= _BUSY_MEMBER_PARTICIPANTS_5M
-    )
-    if not busy_flow and member_idle < _ACTIVE_MIN_GAP_SECONDS:
-        dbg(
-            f"群 {group_id} 主动发言拒绝: 真人消息刚发 {member_idle:.0f}s, "
-            f"不抢话(最小间隔 {_ACTIVE_MIN_GAP_SECONDS:.0f}s)"
-        )
-        return None
-    if member_idle >= window_seconds:
-        dbg(
-            f"群 {group_id} 主动发言拒绝: 话题间隙已过 "
-            f"(真人消息 {member_idle:.0f}s 前,窗口 {window_seconds:.0f}s)"
-        )
-        return None
-    if snapshot.member_messages_60m < _ACTIVE_MIN_MEMBER_MESSAGES:
-        dbg(
-            f"群 {group_id} 主动发言拒绝: 60 分钟内真人消息仅 "
-            f"{snapshot.member_messages_60m} 条,群里没在聊"
-        )
-        return None
-    probability = _clamp_probability(config.proactive_active_probability)
-    if roll < probability:
-        dbg(
-            f"群 {group_id} 插话模式触发: {'持续刷屏' if busy_flow else '自然间隙'} "
-            f"真人消息 {member_idle:.0f}s 前 "
-            f"roll={roll:.3f} probability={probability:.2f} "
-            f"5m 真人={snapshot.member_messages_5m}/"
-            f"{snapshot.member_participants_5m}人 "
-            f"60m 真人消息={snapshot.member_messages_60m}"
-        )
-        return "active"
-    dbg(
-        f"群 {group_id} 插话模式骰子未中: roll={roll:.3f} probability={probability:.2f}"
-    )
-    return None
 
 
 async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any]]:
@@ -499,12 +183,14 @@ async def _apply_result(
     mode: str,
     reason: str,
     session_turn: int,
+    target_user_id: int | None = None,
+    confidence: float | None = None,
 ) -> None:
     """在调用方事务内落库：成功推进 last_proactive_at/last_agent_at；
     未发出（内容门拦截、生成失败、撞重）只把 last_proactive_at 回拨到
     剩余半个冷却期，既防下分钟反复抽卡，也不让一次跳过封锁太久。"""
 
-    if send_result is not None and send_result.sent:
+    if send_result is not None and send_result.ends_turn:
         audit_text = str(history_text or send_result.normalized_text or "[结构化消息]")
         config.last_proactive_at = now
         config.last_agent_at = now
@@ -529,23 +215,33 @@ async def _apply_result(
                     "action": "speak",
                     "session_turn": session_turn,
                     "reason": reason[:240],
+                    "delivery_state": send_result.delivery_state,
+                    "target_user_id": target_user_id,
+                    "confidence": confidence,
                 },
-                result="speak",
+                result=(
+                    "speak" if send_result.sent else "delivery_unknown"
+                ),
                 detail=audit_text[:500],
             )
         )
-        await persist_bot_reply(
-            session,
-            int(bot_id or 0),
-            int(config.group_id),
-            send_result.message_id,
-            send_result.normalized_text,
-            int(config.raw_retention_days),
-            segments=send_result.segments,
-            reply_chain=send_result.reply_chain,
-            forward_tree=send_result.forward_tree,
-            media_refs=send_result.media_refs,
-        )
+        if send_result.sent:
+            await persist_bot_reply(
+                session,
+                int(bot_id or 0),
+                int(config.group_id),
+                send_result.message_id,
+                send_result.normalized_text,
+                int(config.raw_retention_days),
+                segments=send_result.segments,
+                reply_chain=send_result.reply_chain,
+                forward_tree=send_result.forward_tree,
+                media_refs=send_result.media_refs,
+            )
+        else:
+            dbg(
+                f"群 {config.group_id} 主动消息投递未知,按可能已送达消耗配额但不写消息历史"
+            )
         dbg(f"群 {config.group_id} 主动发言计数推进: 今日已用 {day_count + 1} 条")
     else:
         backoff_at = _skip_backoff_timestamp(now, int(config.cooldown_minutes))
@@ -594,23 +290,55 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             # 复用对话路径的相关上下文：先读有限候选池，再保留最后一个
             # 活跃对话簇，避免主动插话把整小时旧聊天与默认空元数据全量注入。
             # 消息仍附带 minutes_ago，便于模型判断话题的新旧与节奏。
+            context_started = time.monotonic()
             context = await _load_context(
                 session,
                 group_id,
                 config,
                 compact_history=True,
                 include_active_profiles=True,
+                context_model=resolve_llm_request("agent_proactive").model,
+                completion_reserve=max(
+                    _PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)
+                ),
             )
+            trace_event(
+                "context",
+                "主动发言上下文装箱",
+                output={
+                    "messages": len(list(context.get("messages") or [])),
+                    "members": len(list(context.get("members") or [])),
+                    "memories": len(list(context.get("memories") or [])),
+                    "relations": len(list(context.get("relations") or [])),
+                },
+                duration_ms=(time.monotonic() - context_started) * 1000,
+            )
+            prompt_started = time.monotonic()
             prompt, _fingerprint = build_messages(
                 persona=resolve_persona(config),
                 tools=[],
                 context=context,
                 user_prompt=_build_user_prompt(mode, config, turn=1),
             )
+            trace_event(
+                "prompt",
+                "主动发言 Prompt 构建",
+                output={"message_count": len(prompt), "mode": mode},
+                duration_ms=(time.monotonic() - prompt_started) * 1000,
+            )
             dbg(f"群 {group_id} 主动发言生成: 模式={mode}, 请求 LLM")
+            llm_started = time.monotonic()
             raw = await _generate_proactive_reply(prompt)
             now = now_beijing()
             if raw is None:
+                trace_event(
+                    "llm",
+                    "主动发言决策",
+                    status="failed",
+                    output={"response": "none"},
+                    detail="LLM 返回空内容",
+                    duration_ms=(time.monotonic() - llm_started) * 1000,
+                )
                 # 持续失败只留 warning 会被淹没；同时推进 last_agent_at
                 # 退避一个冷却期，避免每分钟反复抽卡反复失败。
                 logger.warning(
@@ -646,6 +374,20 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 await session.commit()
                 return "error"
             decision = _decide_proactive_reply(raw)
+            trace_event(
+                "llm",
+                "主动发言决策",
+                status="success" if decision.should_speak else "skipped",
+                output={
+                    "action": decision.action,
+                    "target_user_id": decision.target_user_id,
+                    "topic": decision.topic,
+                    "reason": decision.reason,
+                    "confidence": decision.confidence,
+                    "segment_count": len(decision.segments),
+                },
+                duration_ms=(time.monotonic() - llm_started) * 1000,
+            )
             if not decision.should_speak:
                 # 内容门拦截：模型读懂对话后判定此刻不适合开口。
                 # 记录 skip 审计便于观察决策质量，并推进 last_agent_at
@@ -664,6 +406,8 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                             "action": decision.action,
                             "session_turn": 1,
                             "reason": decision.reason[:240],
+                            "target_user_id": decision.target_user_id,
+                            "confidence": decision.confidence,
                         },
                         result=decision.action,
                         detail=decision.reason[:500],
@@ -680,6 +424,8 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     mode=mode,
                     reason=decision.reason,
                     session_turn=1,
+                    target_user_id=decision.target_user_id,
+                    confidence=decision.confidence,
                 )
                 await session.commit()
                 return decision.action
@@ -819,6 +565,8 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 mode=mode,
                 reason=decision.reason,
                 session_turn=1,
+                target_user_id=decision.target_user_id,
+                confidence=decision.confidence,
             )
             if config.short_conversation_enabled:
                 mark_bot_reply(
@@ -839,9 +587,35 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
 async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None:
     started = time.monotonic()
     outcome = "error"
+    trace = begin_execution_trace(
+        int(candidate["group_id"]),
+        mode=str(candidate.get("mode") or "proactive"),
+        source="runtime",
+    )
+    token = bind_execution_trace(trace)
+    trace_event(
+        "intake",
+        "主动发言候选进入执行",
+        output={
+            "mode": candidate.get("mode"),
+            "day_count": candidate.get("day_count"),
+        },
+    )
     try:
         outcome = await _process_candidate_impl(candidate, bots)
+    except BaseException:
+        trace_event("turn", "主动发言执行异常", status="failed")
+        raise
     finally:
+        trace_event(
+            "turn",
+            "主动发言回合结束",
+            status="failed" if outcome == "error" else "success",
+            output={"outcome": outcome},
+            duration_ms=max(time.monotonic() - started, 0.0) * 1000,
+        )
+        finish_execution_trace(trace, outcome=outcome)
+        reset_execution_trace(token)
         try:
             from ..metrics import record_agent_turn
 
@@ -897,6 +671,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 )
                 close_conversation(bot_id, group_id, reason="达到每日上限")
                 return "close"
+            context_started = time.monotonic()
             context = await _load_context(
                 session,
                 group_id,
@@ -907,7 +682,24 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 message_cutoff=batch.cutoff_at,
                 include_active_profiles=True,
                 reference_at=batch.cutoff_at,
+                context_model=resolve_llm_request("agent_proactive").model,
+                completion_reserve=max(
+                    _PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)
+                ),
             )
+            trace_event(
+                "context",
+                "短会话上下文装箱",
+                input={"focus_user_ids": batch.user_ids},
+                output={
+                    "messages": len(list(context.get("messages") or [])),
+                    "members": len(list(context.get("members") or [])),
+                    "memories": len(list(context.get("memories") or [])),
+                    "relations": len(list(context.get("relations") or [])),
+                },
+                duration_ms=(time.monotonic() - context_started) * 1000,
+            )
+            prompt_started = time.monotonic()
             prompt, _fingerprint = build_messages(
                 persona=resolve_persona(config),
                 tools=[],
@@ -916,12 +708,30 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                     "followup", config, turn=batch.bot_turns + 1
                 ),
             )
+            trace_event(
+                "prompt",
+                "短会话 Prompt 构建",
+                output={
+                    "message_count": len(prompt),
+                    "session_turn": batch.bot_turns + 1,
+                },
+                duration_ms=(time.monotonic() - prompt_started) * 1000,
+            )
             dbg(
                 f"群 {group_id} 短会话续聊生成: session={batch.session_id} "
                 f"turn={batch.bot_turns + 1} users={batch.user_ids}"
             )
+            llm_started = time.monotonic()
             raw = await _generate_proactive_reply(prompt)
             if raw is None:
+                trace_event(
+                    "llm",
+                    "短会话决策",
+                    status="failed",
+                    output={"response": "none"},
+                    detail="LLM 返回空内容",
+                    duration_ms=(time.monotonic() - llm_started) * 1000,
+                )
                 reason = "LLM 返回空内容"
                 session.add(
                     AgentAudit(
@@ -943,6 +753,20 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 finish_followup_evaluation(batch, "error")
                 return "error"
             decision = _decide_proactive_reply(raw or "")
+            trace_event(
+                "llm",
+                "短会话决策",
+                status="success" if decision.should_speak else "skipped",
+                output={
+                    "action": decision.action,
+                    "target_user_id": decision.target_user_id,
+                    "topic": decision.topic,
+                    "reason": decision.reason,
+                    "confidence": decision.confidence,
+                    "segment_count": len(decision.segments),
+                },
+                duration_ms=(time.monotonic() - llm_started) * 1000,
+            )
             action = decision.action
             reason = decision.reason
             history_text = decision.history_text
@@ -970,6 +794,8 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                             "session_turn": batch.bot_turns + 1,
                             "session_id": batch.session_id,
                             "reason": reason[:240],
+                            "target_user_id": decision.target_user_id,
+                            "confidence": decision.confidence,
                         },
                         result=action,
                         detail=reason[:500],
@@ -1033,6 +859,8 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 mode="followup",
                 reason=reason,
                 session_turn=batch.bot_turns + 1,
+                target_user_id=decision.target_user_id,
+                confidence=decision.confidence,
             )
             mark_bot_reply(
                 bot_id,
@@ -1054,9 +882,39 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
 async def _process_followup(batch: ConversationBatch) -> None:
     started = time.monotonic()
     outcome = "error"
+    bot_id, group_id = batch.key
+    trace = begin_execution_trace(
+        group_id,
+        mode="followup",
+        source="runtime",
+        message_id=batch.message_ids[-1] if batch.message_ids else None,
+    )
+    token = bind_execution_trace(trace)
+    trace_event(
+        "intake",
+        "短会话合批进入执行",
+        output={
+            "session_id": batch.session_id,
+            "message_count": len(batch.message_ids),
+            "bot_turns": batch.bot_turns,
+            "bot_id": bot_id,
+        },
+    )
     try:
         outcome = await _process_followup_impl(batch)
+    except BaseException:
+        trace_event("turn", "短会话执行异常", status="failed")
+        raise
     finally:
+        trace_event(
+            "turn",
+            "短会话回合结束",
+            status="failed" if outcome == "error" else "success",
+            output={"outcome": outcome},
+            duration_ms=max(time.monotonic() - started, 0.0) * 1000,
+        )
+        finish_execution_trace(trace, outcome=outcome)
+        reset_execution_trace(token)
         try:
             from ..metrics import record_agent_turn
 

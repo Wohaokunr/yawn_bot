@@ -116,6 +116,7 @@ def test_split_route_modules_are_all_registered() -> None:
         ("GET", "/webui/api/v1/groups"),
         ("GET", "/webui/api/v1/users"),
         ("GET", "/webui/api/v1/agent/groups/{group_id}/diagnostics"),
+        ("GET", "/webui/api/v1/agent/groups/{group_id}/execution-traces"),
         ("POST", "/webui/api/v1/agent/groups/{group_id}/debug/run"),
         ("GET", "/webui/api/v1/web-audits"),
         ("PATCH", "/webui/api/v1/environment"),
@@ -135,6 +136,10 @@ def test_agent_config_and_persona_validation() -> None:
         }
     )
     assert body.tool_allowlist == ["mute_member"]
+    privileged = route_models.AgentConfigPatch.model_validate(
+        {"version": None, "toolAllowlist": ["send_file"]}
+    )
+    assert privileged.tool_allowlist == ["send_file"]
     assert (
         route_models.AgentConfigPatch.model_validate(
             {"version": None, "crossGroupVisibility": "public_summary"}
@@ -604,6 +609,11 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
     )
     assert preview["data"]["currentTurn"]["user_id"] == 123  # noqa: PLR2004
     assert preview["data"]["result"] is None
+    assert preview["data"]["executionTrace"]["source"] == "debug"
+    assert any(
+        event["phase"] == "llm" and event["status"] == "skipped"
+        for event in preview["data"]["executionTrace"]["events"]
+    )
     assert model_calls == []
 
     trial = await agent_routes.run_agent_debug(
@@ -631,6 +641,19 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
     ]
     assert trial["data"]["result"]["finishReason"] == "tool_calls"
     assert trial["data"]["result"]["usage"]["cachedTokens"] == 40  # noqa: PLR2004
+    trace_events = trial["data"]["executionTrace"]["events"]
+    phases = [event["phase"] for event in trace_events]
+    assert phases[:4] == ["intake", "context", "capability", "prompt"]
+    assert any(
+        event["phase"] == "tool"
+        and event["status"] == "planned"
+        and event["output"]["executed"] is False
+        for event in trace_events
+    )
+    assert any(
+        event["phase"] == "state" and event["status"] == "skipped"
+        for event in trace_events
+    )
 
     active = 0
     max_active = 0

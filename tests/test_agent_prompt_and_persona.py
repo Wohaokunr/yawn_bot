@@ -267,6 +267,60 @@ def test_history_selector_does_not_drag_unrelated_old_cluster_into_new_turn() ->
     ) == []
 
 
+def test_history_selection_trace_explains_keep_and_drop_without_polluting_prompt(
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_history import select_context_messages
+
+    messages = [
+        {
+            "message_id": 1,
+            "user_id": 10,
+            "text": "嗯",
+            "minutes_ago": 1,
+        },
+        {
+            "message_id": 2,
+            "user_id": 20,
+            "name": "测试群友",
+            "text": "祖国人模组刚更新了新版本",
+            "minutes_ago": 2,
+        },
+        {
+            "message_id": 3,
+            "user_id": 30,
+            "text": "昨天完全无关的旧话题",
+            "minutes_ago": 70,
+        },
+    ]
+
+    selection = select_context_messages(
+        messages,
+        focus_user_ids=[20],
+        query_text="祖国人模组更新了吗",
+    )
+
+    assert [item["message_id"] for item in selection.messages] == [2]
+    trace = {item["message_id"]: item for item in selection.trace}
+    assert trace[1]["selected"] is False
+    assert trace[1]["reason"] == "low_information"
+    assert trace[2]["selected"] is True
+    assert trace[2]["reason"] in {"recent_cluster", "query_overlap"}
+    assert trace[2]["name"] == "测试群友"
+    assert trace[2]["text"] == "祖国人模组刚更新了新版本"
+    assert trace[2]["role"] == "member"
+    assert trace[2]["text_truncated"] is False
+    assert trace[3]["message_id"] == 3
+    assert trace[3]["text"] == "昨天完全无关的旧话题"
+    assert trace[3]["minutes_ago"] == 70
+    assert trace[3]["selected"] is False
+    assert trace[3]["reason"] == "stale"
+    assert all(
+        "reason" not in item and "selected" not in item
+        for item in selection.messages
+    )
+
+
 def _build_messages_layered(
     context: dict, tools: list
 ) -> tuple[list[dict], str]:

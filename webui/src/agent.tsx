@@ -24,6 +24,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Timeline,
   Typography,
 } from "antd";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
@@ -45,10 +46,12 @@ import {
 } from "./shared";
 import type {
   AgentAudit,
+  AgentCapabilities,
   AgentConfig,
   AgentDebugMode,
   AgentDebugResponse,
   AgentDiagnostics,
+  AgentExecutionTrace,
   AgentMemoryStatus,
   AgentMessageItem,
   AgentRelationGraph,
@@ -198,12 +201,28 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
     () => api<AgentDiagnostics>(`/agent/groups/${groupId}/diagnostics`).then((r) => r.data),
     [groupId],
   );
+  const loadCapabilities = useCallback(
+    () => api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities`).then((r) => r.data),
+    [groupId],
+  );
   const query = useApiQuery(load, { resources: ["agent_config", "agent_memory", "agent_group_data"] });
+  const capabilityQuery = useApiQuery(loadCapabilities, { resources: ["agent_config"] });
+  const [capabilityRefreshing, setCapabilityRefreshing] = useState(false);
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
   const effective = data.effective;
   const memory = data.memory;
   const conversation = effective.shortConversation;
+  const capabilities = capabilityQuery.data;
+  const refreshCapabilities = async (): Promise<void> => {
+    setCapabilityRefreshing(true);
+    try {
+      await api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities/refresh`, { method: "POST" });
+      await capabilityQuery.reload();
+    } finally {
+      setCapabilityRefreshing(false);
+    }
+  };
   return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
     <Card
       title="实际生效配置"
@@ -269,6 +288,47 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
         <Link to={`?tab=memories`}>检查记忆治理</Link>
         <Link to="/environment">检查 LLM Provider / 模型路由</Link>
       </Space>
+    </Card>
+
+    <Card
+      title="OneBot 协议能力"
+      extra={<Button onClick={() => void refreshCapabilities()} loading={capabilityRefreshing}>清缓存并重新探测</Button>}
+    >
+      {capabilityQuery.error
+        ? <QueryErrorAlert error={capabilityQuery.error} onRetry={capabilityQuery.reload} />
+        : !capabilities
+          ? <Spin />
+          : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+            <Space wrap>
+              <Tag color={capabilities.offline ? "default" : capabilities.action.degraded ? "orange" : "green"}>
+                {capabilities.offline ? "Bot 离线" : capabilities.action.degraded ? "探测降级" : `角色 ${capabilities.action.role || "unknown"}`}
+              </Tag>
+              <Text>Actions：{capabilities.action.actions.length}</Text>
+              <Text>Segments：{capabilities.segments.filter((item) => item.exposed).length} 可暴露</Text>
+              {capabilities.action.lastError && <Text type="danger">最近探测：{capabilities.action.lastError}</Text>}
+            </Space>
+            <Space wrap>
+              {capabilities.segments.map((item) => (
+                <Tag
+                  key={item.type}
+                  color={item.forbidden ? "red" : item.runtimeUnsupported ? "orange" : item.exposed ? "green" : "default"}
+                >
+                  {item.type}{item.runtimeUnsupported ? ` · 降级 ${Math.ceil(item.retryAfterSeconds ?? 0)}s` : ""}
+                </Tag>
+              ))}
+            </Space>
+            {capabilities.segments.some((item) => item.runtimeUnsupported) && (
+              <Alert
+                type="warning"
+                showIcon
+                message="存在运行时降级能力"
+                description={capabilities.segments
+                  .filter((item) => item.runtimeUnsupported)
+                  .map((item) => `${item.type}: ${item.lastFailureReason || "后端不兼容"}`)
+                  .join("；")}
+              />
+            )}
+          </Space>}
     </Card>
 
     <Card title="LLM 实际路由" extra={data.llm.unconfiguredProviders.length > 0 ? <Tag color="red">Provider 未配置</Tag> : <Tag color="green">路由可用</Tag>}>
@@ -466,21 +526,22 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
               <div className="agent-config-section-head">
                 <div>
                   <div className="agent-config-section-kicker">TOOLS</div>
-                  <h3>管理工具权限</h3>
-                  <p>限制 Agent 可以调用的群管理能力，以及每天的调用额度。</p>
+                  <h3>特权工具权限</h3>
+                  <p>限制 Agent 可以调用的高副作用能力，以及每天的调用额度。读取、记忆写入和普通消息发送不占此额度。</p>
                 </div>
               </div>
               <div className="agent-config-grid agent-config-grid-2">
-                <Form.Item name="adminToolDailyLimit" label="每日管理工具上限" extra="所有允许的管理工具共用此额度">
+                <Form.Item name="adminToolDailyLimit" label="每日特权工具上限" extra="群管理操作和群文件发送共用此额度">
                   <InputNumber min={1} max={1000} />
                 </Form.Item>
-                <Form.Item name="toolAllowlist" label="允许的管理工具">
+                <Form.Item name="toolAllowlist" label="允许的特权工具">
                   <Select
                     mode="multiple"
-                    placeholder="未选择时不允许调用管理工具"
+                    placeholder="未选择时不允许调用特权工具"
                     options={[
                       { value: "mute_member", label: "禁言成员" },
                       { value: "create_group_announcement", label: "发布群公告" },
+                      { value: "send_file", label: "发送群文件" },
                     ]}
                   />
                 </Form.Item>
@@ -860,7 +921,7 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
     <Card title="公开/群级记忆" extra={<Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.content}</Paragraph> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> }, { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
+        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row: MemoryItem) => <Space orientation="vertical" size={6}><Paragraph copyable style={{ marginBottom: 0 }}>{row.content}</Paragraph><Text type="secondary">证据 {row.provenance.evidenceCount} 条 · 首次观察 {formatTime(row.provenance.firstObservedAt)} · 最近确认 {formatTime(row.provenance.lastConfirmedAt)}</Text>{row.evidenceMessageIds.length > 0 && <Text type="secondary" copyable={{ text: row.evidenceMessageIds.join(",") }}>证据消息：{row.evidenceMessageIds.join(", ")}</Text>}</Space> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> }, { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
     }</Card>
     <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />
     <Drawer open={creating} width={520} title="新增记忆" onClose={() => setCreating(false)}>
@@ -1175,6 +1236,7 @@ function DebugContextBudget({ stats }: { stats: Record<string, unknown> }): Reac
 function DebugCurrentTurn({ value }: { value: Record<string, unknown> }): React.JSX.Element {
   const mentions = Array.isArray(value.mentions) ? value.mentions : [];
   const replyTo = debugRecord(value.reply_to);
+  const media = Array.isArray(value.media) ? value.media.map(debugRecord) : [];
   return <Card size="small" title="当前消息">
     <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} items={[
       { key: "actor", label: "发言人", children: debugDisplay(value.name || value.user_id) },
@@ -1183,12 +1245,30 @@ function DebugCurrentTurn({ value }: { value: Record<string, unknown> }): React.
       { key: "role", label: "角色", children: debugDisplay(value.role) },
       { key: "mentions", label: "@ 成员", children: mentions.length ? mentions.map(String).join("、") : "—" },
       { key: "reply", label: "回复对象", children: debugDisplay(replyTo.name || replyTo.user_id) },
+      { key: "forward", label: "转发节点", children: debugDisplay(value.forward_nodes, "0") },
     ]} />
     <Paragraph className="agent-debug-message-content">{debugDisplay(value.content, "[空消息]")}</Paragraph>
+    {media.length > 0 && <Space wrap>
+      {media.map((item, index) => <Tag key={`${debugDisplay(item.type)}-${index}`} color={item.source === "reply" ? "blue" : item.source === "forward" ? "purple" : "green"}>
+        {debugDisplay(item.source, "current")} · {debugDisplay(item.type, "media")}{item.name ? ` · ${debugDisplay(item.name)}` : ""}
+      </Tag>)}
+    </Space>}
   </Card>;
 }
 
-function DebugContextView({ context }: { context: AgentDebugResponse["context"] }): React.JSX.Element {
+const CONTEXT_SELECTION_REASON: Record<string, string> = {
+  recent_cluster: "近期话题簇",
+  focus_relation: "直接涉及当前成员",
+  query_overlap: "与当前消息相关",
+  relevant_neighbor: "相关消息的相邻上下文",
+  proactive_recent_cluster: "主动会话近期话题簇",
+  low_information: "低信息消息",
+  stale: "超过相关性时间窗",
+  not_relevant: "与当前回合无明显关联",
+  context_budget: "超过上下文预算",
+};
+
+function DebugContextView({ context, selection }: { context: AgentDebugResponse["context"]; selection: AgentDebugResponse["contextSelection"] }): React.JSX.Element {
   const messages = context.messages ?? [];
   const members = context.members ?? [];
   const memories = context.memories ?? [];
@@ -1213,6 +1293,35 @@ function DebugContextView({ context }: { context: AgentDebugResponse["context"] 
             </div>
           </List.Item>;
         }}
+      />,
+    },
+    {
+      key: "selection",
+      label: `筛选轨迹 ${selection.length}`,
+      children: selection.length === 0 ? <AdminEmpty description="本轮没有历史筛选轨迹" /> : <List
+        className="agent-debug-list"
+        dataSource={selection}
+        renderItem={(item, index) => <List.Item key={`${String(item.message_id ?? "none")}-${index}`}>
+          <div className="agent-debug-list-item">
+            <Space wrap size={6}>
+              <Tag color={item.selected ? "green" : undefined}>{item.selected ? "保留" : "丢弃"}</Tag>
+              <Text strong>{item.name?.trim() || String(item.user_id ?? "未知成员")}</Text>
+              <Tag>{item.role || "member"}</Tag>
+              {item.title ? <Tag>{item.title}</Tag> : null}
+              <Text type="secondary">{item.minutes_ago} 分钟前</Text>
+            </Space>
+            <Paragraph className="agent-debug-message-content" type={item.selected ? undefined : "secondary"}>
+              {item.text || "[媒体消息/空文本]"}{item.text_truncated ? " …（调试预览已截断）" : ""}
+            </Paragraph>
+            <Space wrap size={8}>
+              <Text type={item.selected ? "success" : "secondary"}>
+                筛选原因：{CONTEXT_SELECTION_REASON[item.reason] ?? item.reason}
+              </Text>
+              <Text type="secondary">消息 ID {String(item.message_id ?? "—")}</Text>
+              {typeof item.score === "number" && <Text type="secondary">相关分 {item.score.toFixed(2)}</Text>}
+            </Space>
+          </div>
+        </List.Item>}
       />,
     },
     {
@@ -1270,23 +1379,118 @@ function DebugPromptView({ messages }: { messages: AgentDebugResponse["promptMes
   />;
 }
 
-function DebugToolsView({ tools }: { tools: AgentDebugResponse["tools"] }): React.JSX.Element {
-  if (tools.length === 0) return <AdminEmpty description="当前模式没有向模型暴露工具" />;
+const TOOL_PERMISSION_LABELS: Record<string, string> = {
+  read: "只读",
+  state_write: "状态写入",
+  message_send: "消息发送",
+  privileged: "特权",
+};
+
+const TOOL_PERMISSION_REASON_LABELS: Record<string, string> = {
+  exposed: "已暴露",
+  permission_level: "超过本轮权限等级",
+  onebot_action: "OneBot Action 不可用",
+  bot_not_admin: "机器人不是群管理",
+  actor_not_admin: "调用者不是群管理",
+  not_allowlisted: "未加入群级白名单",
+};
+
+function DebugToolsView({ tools, permissions }: { tools: AgentDebugResponse["tools"]; permissions: AgentDebugResponse["toolPermissions"] }): React.JSX.Element {
+  if (permissions.length === 0) return <AdminEmpty description="当前模式不使用工具权限矩阵" />;
+  const schemas = new Map<string, Record<string, unknown>>();
+  tools.forEach((tool) => {
+    const row = debugRecord(tool);
+    const fn = debugRecord(row.function);
+    const name = String(fn.name || row.name || "");
+    if (name) schemas.set(name, tool);
+  });
   return <List
     className="agent-debug-list"
-    dataSource={tools}
-    renderItem={(tool, index) => {
-      const row = debugRecord(tool);
+    dataSource={permissions}
+    renderItem={(permission) => {
+      const tool = schemas.get(permission.name);
+      const row = tool ? debugRecord(tool) : {};
       const fn = debugRecord(row.function);
-      return <List.Item key={String(fn.name || row.name || index)}>
+      return <List.Item key={permission.name}>
         <div className="agent-debug-list-item">
-          <Space wrap><Text strong>{debugDisplay(fn.name || row.name, "未命名工具")}</Text><Tag>模型可见</Tag></Space>
+          <Space wrap>
+            <Text strong>{permission.name}</Text>
+            <Tag color={permission.permissionLevel === "privileged" ? "red" : permission.permissionLevel === "message_send" ? "blue" : permission.permissionLevel === "state_write" ? "orange" : "default"}>{TOOL_PERMISSION_LABELS[permission.permissionLevel] ?? permission.permissionLevel}</Tag>
+            <Tag color={permission.exposed ? "green" : "default"}>{TOOL_PERMISSION_REASON_LABELS[permission.reason] ?? permission.reason}</Tag>
+          </Space>
           {(fn.description || row.description) ? <Text type="secondary">{debugDisplay(fn.description || row.description)}</Text> : null}
-          <details className="agent-debug-details"><summary>查看 Schema</summary><DebugRawBlock value={tool} /></details>
+          {permission.actions.length > 0 && <Text type="secondary">OneBot：{permission.actions.join(" / ")}</Text>}
+          {tool && <details className="agent-debug-details"><summary>查看 Schema</summary><DebugRawBlock value={tool} /></details>}
         </div>
       </List.Item>;
     }}
   />;
+}
+
+const TRACE_PHASE_LABELS: Record<string, string> = {
+  parse: "解析",
+  intake: "输入",
+  context: "上下文",
+  capability: "能力",
+  media: "媒体",
+  prompt: "Prompt",
+  llm: "模型",
+  tool: "工具",
+  outbound: "发送",
+  state: "状态",
+  turn: "回合",
+};
+
+const TRACE_STATUS_META: Record<string, { label: string; color: string }> = {
+  running: { label: "执行中", color: "processing" },
+  completed: { label: "完成", color: "green" },
+  planned: { label: "计划", color: "blue" },
+  success: { label: "成功", color: "green" },
+  failed: { label: "失败", color: "red" },
+  degraded: { label: "降级", color: "orange" },
+  unknown: { label: "未知", color: "gold" },
+  skipped: { label: "跳过", color: "default" },
+};
+
+function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionTrace; compact?: boolean }): React.JSX.Element {
+  const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
+  const visibleEvents = compact ? trace.events.slice(-12) : trace.events;
+  return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 5 }} items={[
+      { key: "source", label: "来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
+      { key: "status", label: "状态", children: <Tag color={status.color}>{status.label}</Tag> },
+      { key: "outcome", label: "结果", children: trace.outcome || "—" },
+      { key: "duration", label: "总耗时", children: trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(1)} ms` },
+      { key: "trace", label: "Trace", children: <Text code>{trace.traceId.slice(0, 12)}</Text> },
+    ]} />
+    {compact && trace.events.length > visibleEvents.length && <Alert type="info" showIcon message={`仅显示最后 ${visibleEvents.length} / ${trace.events.length} 个事件`} />}
+    <Timeline
+      items={visibleEvents.map((event) => {
+        const eventMeta = TRACE_STATUS_META[event.status] ?? { label: event.status, color: "default" };
+        const hasInput = Object.keys(event.input ?? {}).length > 0;
+        const hasOutput = Object.keys(event.output ?? {}).length > 0;
+        return {
+          color: event.status === "failed" ? "red" : event.status === "degraded" || event.status === "unknown" ? "orange" : event.status === "success" ? "green" : "blue",
+          children: <div className="agent-debug-list-item">
+            <Space wrap>
+              <Tag>{TRACE_PHASE_LABELS[event.phase] ?? event.phase}</Tag>
+              <Text strong>{event.label}</Text>
+              <Tag color={eventMeta.color}>{eventMeta.label}</Tag>
+              {event.round != null && <Tag>第 {event.round} 轮</Tag>}
+              <Text type="secondary">+{event.offsetMs.toFixed(1)} ms</Text>
+              {event.durationMs != null && <Text type="secondary">耗时 {event.durationMs.toFixed(1)} ms</Text>}
+            </Space>
+            {event.detail && <Text type={event.status === "failed" ? "danger" : "secondary"}>{event.detail}</Text>}
+            {(hasInput || hasOutput) && <details className="agent-debug-details">
+              <summary>输入 / 输出摘要</summary>
+              {hasInput && <><Text type="secondary">输入</Text><DebugRawBlock value={event.input} /></>}
+              {hasOutput && <><Text type="secondary">输出</Text><DebugRawBlock value={event.output} /></>}
+            </details>}
+          </div>,
+        };
+      })}
+    />
+  </Space>;
 }
 
 function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): React.JSX.Element {
@@ -1301,8 +1505,10 @@ function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): R
     ]} />
     {decision && <Card size="small" title="主动发言决策"><Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
       { key: "action", label: "动作", children: debugDisplay(decision.action) },
+      { key: "target", label: "目标成员", children: debugDisplay(decision.targetUserId) },
       { key: "topic", label: "话题", children: debugDisplay(decision.topic) },
       { key: "reason", label: "原因", children: debugDisplay(decision.reason) },
+      { key: "confidence", label: "决策置信度", children: debugDisplay(decision.confidence) },
       { key: "segments", label: "消息段", children: debugDisplay(decision.segments) },
     ]} /></Card>}
     <Card size="small" title="模型文本"><Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{result.text || "（无文本输出）"}</Paragraph></Card>
@@ -1328,6 +1534,16 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
     [groupId],
   );
   const messagesQuery = useApiQuery(loadMessages, { resources: ["agent_group_data", "agent_privacy"] });
+  const [runtimeTraceId, setRuntimeTraceId] = useState("");
+  const loadRuntimeTraces = useCallback(
+    () => api<AgentExecutionTrace[]>(`/agent/groups/${groupId}/execution-traces`).then((r) => r.data),
+    [groupId],
+  );
+  const runtimeTraceQuery = useApiQuery(loadRuntimeTraces);
+  const runtimeTrace = useMemo(
+    () => (runtimeTraceQuery.data ?? []).find((item) => item.traceId === runtimeTraceId) ?? runtimeTraceQuery.data?.[0] ?? null,
+    [runtimeTraceId, runtimeTraceQuery.data],
+  );
   useEffect(() => {
     if (linkedMessageId) {
       setSource("history");
@@ -1369,9 +1585,32 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
       type="info"
       showIcon
       className="section-alert"
-      message="无副作用调试"
-      description="真实试跑只请求当前固定路由的模型，不发送群消息、不执行工具、不修改 Agent 状态。媒体与合并转发仅使用安全摘要。"
+      message="执行追踪器"
+      description="这里同时提供无副作用调试 Trace 和当前进程最近的真实 Agent Trace。真实试跑只请求模型，不执行工具、不发送消息、不修改状态；真实运行时间线则会记录实际工具、发送降级与 delivery_state。"
     />
+
+    <Card
+      title="最近真实执行"
+      extra={<Button onClick={() => runtimeTraceQuery.reload()} loading={runtimeTraceQuery.loading}>刷新 Trace</Button>}
+    >
+      <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空；所有 URL、本机路径、file 字段与原始 OneBot payload 都会在 Trace 层脱敏。" />
+      {runtimeTraceQuery.error && !runtimeTraceQuery.data
+        ? <QueryErrorAlert error={runtimeTraceQuery.error} onRetry={runtimeTraceQuery.reload} />
+        : (runtimeTraceQuery.data?.length ?? 0) === 0
+          ? <AdminEmpty description="暂无真实执行 Trace；让 Agent 实际处理一条触发消息后刷新这里" />
+          : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+              <Select
+                value={runtimeTrace?.traceId}
+                onChange={setRuntimeTraceId}
+                style={{ width: "100%" }}
+                options={(runtimeTraceQuery.data ?? []).map((trace) => ({
+                  value: trace.traceId,
+                  label: `${formatTime(trace.startedAt)} · ${trace.mode} · ${trace.outcome ?? trace.status} · ${trace.events.length} events`,
+                }))}
+              />
+              {runtimeTrace && <ExecutionTraceView trace={runtimeTrace} />}
+            </Space>}
+    </Card>
 
     <Card
       title="调试场景"
@@ -1456,6 +1695,7 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
 
       <Card title="调试详情" className="agent-debug-detail-card">
         <Tabs items={[
+          { key: "trace", label: `执行轨迹 ${result.executionTrace.events.length}`, children: <ExecutionTraceView trace={result.executionTrace} /> },
           {
             key: "overview",
             label: "概览",
@@ -1464,9 +1704,9 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
               <Col xs={24} xl={10}><DebugContextBudget stats={result.stats} /></Col>
             </Row>,
           },
-          { key: "context", label: "上下文", children: <DebugContextView context={result.context} /> },
+          { key: "context", label: "上下文", children: <DebugContextView context={result.context} selection={result.contextSelection} /> },
           { key: "prompt", label: `Prompt ${result.promptMessages.length}`, children: <DebugPromptView messages={result.promptMessages} /> },
-          { key: "tools", label: `工具 ${result.tools.length}`, children: <DebugToolsView tools={result.tools} /> },
+          { key: "tools", label: `工具 ${result.tools.length}`, children: <DebugToolsView tools={result.tools} permissions={result.toolPermissions} /> },
           { key: "model", label: "模型结果", children: <DebugModelView result={result.result} /> },
           { key: "raw", label: "原始数据", children: <DebugRawBlock value={result} /> },
         ]} />

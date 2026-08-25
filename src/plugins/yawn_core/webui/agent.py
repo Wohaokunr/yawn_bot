@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import timedelta
 from typing import Annotated, Any
 
@@ -27,6 +28,8 @@ from ..llm import (
 )
 from ..yawn_agent.capabilities import (
     BotGroupCapabilities,
+    capability_runtime_snapshot,
+    clear_group_capability_cache,
     get_segment_capabilities,
     probe_group_capabilities,
     user_can_manage_group,
@@ -35,6 +38,12 @@ from ..yawn_agent.config_store import agent_runtime_enabled, set_agent_runtime_e
 from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
 from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.dialogue import _history_message_meta, _load_context
+from ..yawn_agent.execution_trace import (
+    begin_execution_trace,
+    finish_execution_trace,
+    recent_execution_traces,
+    trace_event,
+)
 from ..yawn_agent.memory import (
     compact_group_memory,
     delete_group_memories,
@@ -47,7 +56,7 @@ from ..yawn_agent.memory import (
 from ..yawn_agent.persona import resolve_persona
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
-from ..yawn_agent.tools import build_tool_schemas
+from ..yawn_agent.tools import build_tool_schemas, tool_permission_snapshot
 from .config import API_PATH
 from .deps import ReadSession, WriteSession, ok, page_params
 from .hub import hub
@@ -126,6 +135,67 @@ async def get_agent_diagnostics(group_id: int, _session: ReadSession) -> dict[st
     async with get_session() as db:
         await require_group(db, group_id)
         return ok(await agent_diagnostics(db, group_id))
+
+
+@router.get("/agent/groups/{group_id}/capabilities")
+async def get_agent_capabilities(
+    group_id: int, _session: ReadSession
+) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+    bots = _debug_bots()
+    if not bots:
+        return ok(
+            {
+                "botId": None,
+                "groupId": str(group_id),
+                "offline": True,
+                "action": {
+                    "cached": False,
+                    "role": "offline",
+                    "canManage": False,
+                    "actions": [],
+                    "degraded": True,
+                    "lastError": "bot_offline",
+                    "probedAt": None,
+                    "cacheRemainingSeconds": 0,
+                },
+                "segments": [],
+            }
+        )
+    bot = bots[0]
+    await probe_group_capabilities(bot, group_id)
+    return ok({"offline": False, **capability_runtime_snapshot(bot, group_id)})
+
+
+@router.get("/agent/groups/{group_id}/execution-traces")
+async def get_agent_execution_traces(
+    group_id: int, _session: ReadSession
+) -> dict[str, Any]:
+    """返回当前进程内最近的真实 Agent 执行时间线。
+
+    Trace 是短生命周期诊断缓冲，不从数据库重建，也不携带原始媒体 URL、
+    本机路径或裸 OneBot payload。
+    """
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+    return ok(recent_execution_traces(group_id))
+
+
+@router.post("/agent/groups/{group_id}/capabilities/refresh")
+async def refresh_agent_capabilities(
+    group_id: int, _session: WriteSession
+) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+    bots = _debug_bots()
+    if not bots:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Bot 当前离线，无法重新探测能力")
+    bot = bots[0]
+    clear_group_capability_cache(bot, group_id)
+    await probe_group_capabilities(bot, group_id, refresh=True)
+    return ok({"offline": False, **capability_runtime_snapshot(bot, group_id)})
 
 
 @router.patch("/agent/groups/{group_id}/config")
@@ -1021,9 +1091,15 @@ def _debug_model_payload(result: Any, mode: str) -> dict[str, Any]:
         decision = _decide_proactive_reply(content)
         payload["decision"] = {
             "action": decision.action,
+            "targetUserId": (
+                str(decision.target_user_id)
+                if decision.target_user_id is not None
+                else None
+            ),
             "text": decision.text,
             "topic": decision.topic,
             "reason": decision.reason,
+            "confidence": decision.confidence,
             "segments": list(decision.segments),
         }
     return payload
@@ -1190,6 +1266,26 @@ async def run_agent_debug(
                 received_at=received_at,
             )
 
+        debug_trace = begin_execution_trace(
+            group_id,
+            mode=body.mode,
+            source="debug",
+            actor_user_id=actor_user_id,
+            message_id=current_turn.message_id,
+        )
+        trace_event(
+            "intake",
+            "载入调试场景",
+            output={
+                "trigger": current_turn.trigger,
+                "text_chars": len(current_turn.content),
+                "media": list(current_turn.media),
+                "reply_to": current_turn.reply_to,
+                "forward_nodes": current_turn.forward_nodes,
+            },
+            trace=debug_trace,
+        )
+
         focus_ids = [
             current_turn.user_id,
             *(user_id for user_id in current_turn.mentions if user_id != bot_id),
@@ -1200,6 +1296,11 @@ async def run_agent_debug(
             and int(str(current_turn.reply_to["user_id"])) != bot_id
         ):
             focus_ids.append(int(str(current_turn.reply_to["user_id"])))
+        task = "agent_dialogue" if body.mode == "dialogue" else "agent_proactive"
+        route = resolve_llm_request(task)
+        context_selection: list[dict[str, Any]] = []
+        context_budget: list[dict[str, Any]] = []
+        context_started = time.monotonic()
         context = await _load_context(
             db,
             group_id,
@@ -1216,6 +1317,29 @@ async def run_agent_debug(
                 else None
             ),
             reference_at=received_at,
+            selection_trace=context_selection,
+            budget_trace=context_budget,
+            context_model=route.model,
+            completion_reserve=(
+                800
+                if body.mode == "dialogue"
+                else max(2048, int(ai_config.ai_max_tokens))
+            ),
+        )
+        trace_event(
+            "context",
+            "上下文筛选与 Token 装箱",
+            input={"focus_user_ids": focus_ids, "model": route.model},
+            output={
+                "messages": len(list(context.get("messages") or [])),
+                "members": len(list(context.get("members") or [])),
+                "memories": len(list(context.get("memories") or [])),
+                "relations": len(list(context.get("relations") or [])),
+                "selection_candidates": len(context_selection),
+                "budget_components": len(context_budget),
+            },
+            duration_ms=(time.monotonic() - context_started) * 1000,
+            trace=debug_trace,
         )
         if source is None and body.mode != "dialogue":
             context["messages"] = trim_context_messages(
@@ -1239,23 +1363,64 @@ async def run_agent_debug(
             )
 
         tools: list[dict[str, Any]] = []
+        tool_permissions: list[dict[str, Any]] = []
+        capability_started = time.monotonic()
         if body.mode == "dialogue":
+            privileged_allowlist = set(config.tool_allowlist or [])
             if bot is None:
                 capabilities = BotGroupCapabilities(
                     role="offline", can_manage=False, actions=frozenset()
                 )
-                tools = build_tool_schemas(capabilities)
-            else:
-                capabilities = await probe_group_capabilities(bot, group_id)
                 tools = build_tool_schemas(
                     capabilities,
-                    allow_admin_tools=await user_can_manage_group(
-                        bot, group_id, actor_user_id
-                    ),
-                    segment_capabilities=get_segment_capabilities(bot, group_id),
+                    privileged_allowlist=privileged_allowlist,
                 )
+                tool_permissions = tool_permission_snapshot(
+                    capabilities,
+                    privileged_allowlist=privileged_allowlist,
+                )
+            else:
+                capabilities = await probe_group_capabilities(bot, group_id)
+                allow_privileged_tools = await user_can_manage_group(
+                    bot, group_id, actor_user_id
+                )
+                tools = build_tool_schemas(
+                    capabilities,
+                    allow_admin_tools=allow_privileged_tools,
+                    segment_capabilities=get_segment_capabilities(bot, group_id),
+                    privileged_allowlist=privileged_allowlist,
+                )
+                tool_permissions = tool_permission_snapshot(
+                    capabilities,
+                    allow_admin_tools=allow_privileged_tools,
+                    privileged_allowlist=privileged_allowlist,
+                )
+            trace_event(
+                "capability",
+                "协议能力与工具权限计算",
+                output={
+                    "tool_count": len(tools),
+                    "exposed_tools": [
+                        item["name"] for item in tool_permissions if item.get("exposed")
+                    ],
+                    "blocked_tools": [
+                        {"name": item["name"], "reason": item["reason"]}
+                        for item in tool_permissions
+                        if not item.get("exposed")
+                    ],
+                },
+                duration_ms=(time.monotonic() - capability_started) * 1000,
+                trace=debug_trace,
+            )
+        else:
+            trace_event(
+                "capability",
+                "工具权限计算",
+                status="skipped",
+                detail="主动/暖场调试不向模型暴露对话工具",
+                trace=debug_trace,
+            )
 
-        task = "agent_dialogue" if body.mode == "dialogue" else "agent_proactive"
         user_prompt = (
             current_turn.content
             if body.mode == "dialogue"
@@ -1265,6 +1430,7 @@ async def run_agent_debug(
                 turn=2 if body.mode == "followup" else 1,
             )
         )
+        prompt_started = time.monotonic()
         prompt_messages, _fingerprint = build_messages(
             persona=resolve_persona(config),
             tools=tools,
@@ -1272,10 +1438,22 @@ async def run_agent_debug(
             user_prompt=user_prompt,
             current_turn=current_turn if body.mode == "dialogue" else None,
         )
-        route = resolve_llm_request(task)
+        trace_event(
+            "prompt",
+            "Prompt 构建",
+            input={"tool_count": len(tools), "mode": body.mode},
+            output={
+                "message_count": len(prompt_messages),
+                "prompt_version": PROMPT_VERSION,
+                "fingerprint": _fingerprint[:12],
+            },
+            duration_ms=(time.monotonic() - prompt_started) * 1000,
+            trace=debug_trace,
+        )
         base_url, api_key = resolve_provider(route.provider)
         result_payload: dict[str, Any] | None = None
         if body.run_model:
+            model_started = time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     _run_debug_completion(
@@ -1291,6 +1469,49 @@ async def run_agent_debug(
                     timeout=_DEBUG_TIMEOUT_SECONDS,
                 )
                 result_payload = _debug_model_payload(result, body.mode)
+                trace_event(
+                    "llm",
+                    "真实模型试跑",
+                    status=(
+                        "success"
+                        if result_payload.get("outcome") == "success"
+                        else "degraded"
+                    ),
+                    output={
+                        "outcome": result_payload.get("outcome"),
+                        "finish_reason": result_payload.get("finishReason"),
+                        "content_chars": len(str(result_payload.get("text") or "")),
+                        "tool_calls": [
+                            item.get("name")
+                            for item in list(result_payload.get("toolCalls") or [])
+                            if isinstance(item, dict)
+                        ],
+                        "usage": result_payload.get("usage"),
+                    },
+                    duration_ms=(time.monotonic() - model_started) * 1000,
+                    trace=debug_trace,
+                )
+                for tool_call in list(result_payload.get("toolCalls") or []):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    trace_event(
+                        "tool",
+                        f"工具意图 {tool_call.get('name') or '[unknown]'}",
+                        status="planned",
+                        input={"arguments": tool_call.get("arguments")},
+                        output={"executed": False},
+                        detail="调试模式禁止执行工具副作用",
+                        trace=debug_trace,
+                    )
+                if result_payload.get("toolCalls"):
+                    trace_event(
+                        "outbound",
+                        "发送阶段",
+                        status="skipped",
+                        output={"sent": False},
+                        detail="调试模式不发送群消息，也不执行工具内发送",
+                        trace=debug_trace,
+                    )
             except TimeoutError:
                 result_payload = {
                     "outcome": "timeout",
@@ -1304,6 +1525,33 @@ async def run_agent_debug(
                     },
                     "durationMs": _DEBUG_TIMEOUT_SECONDS * 1000,
                 }
+                trace_event(
+                    "llm",
+                    "真实模型试跑",
+                    status="failed",
+                    output={"outcome": "timeout"},
+                    detail="超过调试请求时限",
+                    duration_ms=(time.monotonic() - model_started) * 1000,
+                    trace=debug_trace,
+                )
+        else:
+            trace_event(
+                "llm",
+                "模型调用",
+                status="skipped",
+                output={"run_model": False},
+                detail="本次仅生成执行快照，未请求模型",
+                trace=debug_trace,
+            )
+
+        trace_event(
+            "state",
+            "状态写入",
+            status="skipped",
+            output={"database_mutated": False},
+            detail="调试执行全程只读，不修改 Agent 状态",
+            trace=debug_trace,
+        )
 
         stats = _debug_context_stats(context)
         warnings: list[str] = []
@@ -1315,13 +1563,33 @@ async def run_agent_debug(
             warnings.append("媒体和合并转发仅以安全摘要展示，未参与模型重放")
         if bot is None:
             warnings.append("当前没有在线 Bot，工具列表按离线能力收敛")
+        trace_outcome = (
+            str(result_payload.get("outcome"))
+            if result_payload is not None
+            else "snapshot"
+        )
+        trace_event(
+            "turn",
+            "调试执行结束",
+            output={"outcome": trace_outcome, "warnings": len(warnings)},
+            trace=debug_trace,
+        )
+        finish_execution_trace(
+            debug_trace,
+            outcome=trace_outcome,
+            status=("failed" if trace_outcome == "timeout" else "completed"),
+            store=False,
+        )
         payload = {
             "promptVersion": PROMPT_VERSION,
             "mode": body.mode,
             "currentTurn": current_turn.as_dict(),
             "context": context,
+            "contextSelection": context_selection,
+            "contextBudget": context_budget,
             "promptMessages": prompt_messages,
             "tools": tools,
+            "toolPermissions": tool_permissions,
             "route": {
                 "task": task,
                 "profile": route.profile,
@@ -1336,6 +1604,7 @@ async def run_agent_debug(
             "stats": stats,
             "warnings": warnings,
             "result": result_payload,
+            "executionTrace": debug_trace.as_dict(),
         }
     return ok(payload)
 

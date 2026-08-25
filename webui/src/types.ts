@@ -166,6 +166,32 @@ export interface AgentDiagnostics {
   generatedAt: string;
 }
 
+export interface AgentCapabilities {
+  botId: string | null;
+  groupId: string;
+  offline: boolean;
+  action: {
+    cached: boolean;
+    role: string | null;
+    canManage: boolean;
+    actions: string[];
+    degraded: boolean;
+    lastError: string | null;
+    probedAt: number | null;
+    cacheRemainingSeconds: number;
+  };
+  segments: Array<{
+    type: string;
+    allowed: boolean;
+    supported: boolean;
+    exposed: boolean;
+    forbidden: boolean;
+    runtimeUnsupported: boolean;
+    lastFailureReason: string | null;
+    retryAfterSeconds: number | null;
+  }>;
+}
+
 export interface Persona {
   groupId: string;
   enabled: boolean;
@@ -184,6 +210,13 @@ export interface MemoryItem {
   key: string;
   content: string;
   sourceKind: "auto" | "manual";
+  evidenceMessageIds: string[];
+  provenance: {
+    kind: string;
+    evidenceCount: number;
+    firstObservedAt: string | null;
+    lastConfirmedAt: string | null;
+  };
   relatedUserIds: string[];
   salience: number;
   confidence: number;
@@ -266,6 +299,33 @@ export interface AgentMessageItem {
 
 export type AgentDebugMode = "dialogue" | "active" | "warmup" | "followup";
 
+export interface AgentExecutionTraceEvent {
+  id: string;
+  phase: string;
+  label: string;
+  status: "planned" | "success" | "failed" | "degraded" | "unknown" | "skipped" | string;
+  offsetMs: number;
+  durationMs: number | null;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  detail: string | null;
+  round: number | null;
+}
+
+export interface AgentExecutionTrace {
+  traceId: string;
+  groupId: string;
+  mode: string;
+  source: "debug" | "runtime" | string;
+  actorUserId: string | null;
+  messageId: string | null;
+  startedAt: string;
+  status: string;
+  outcome: string | null;
+  durationMs: number | null;
+  events: AgentExecutionTraceEvent[];
+}
+
 export interface AgentDebugResponse {
   promptVersion: string;
   mode: AgentDebugMode;
@@ -277,8 +337,29 @@ export interface AgentDebugResponse {
     relations?: string[];
     [key: string]: unknown;
   };
+  contextSelection: Array<{
+    message_id: string | number | null;
+    user_id: string | number | null;
+    name: string | null;
+    role: string;
+    title: string | null;
+    text: string;
+    text_truncated: boolean;
+    minutes_ago: number;
+    selected: boolean;
+    reason: string;
+    score?: number;
+  }>;
+  contextBudget: Array<Record<string, unknown>>;
   promptMessages: Array<{ role: string; content: unknown }>;
   tools: Array<Record<string, unknown>>;
+  toolPermissions: Array<{
+    name: string;
+    permissionLevel: "read" | "state_write" | "message_send" | "privileged";
+    exposed: boolean;
+    reason: string;
+    actions: string[];
+  }>;
   route: {
     task: string;
     profile: string;
@@ -290,6 +371,7 @@ export interface AgentDebugResponse {
   };
   stats: Record<string, unknown>;
   warnings: string[];
+  executionTrace: AgentExecutionTrace;
   result: null | {
     outcome: string;
     text: string;
