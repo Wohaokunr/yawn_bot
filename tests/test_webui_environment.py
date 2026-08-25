@@ -22,6 +22,9 @@ if nonebot.get_plugin("yawn_core") is None:
 
 auth = importlib.import_module("src.plugins.yawn_core.webui.auth")
 app_module = importlib.import_module("src.plugins.yawn_core.webui.app")
+environment_routes = importlib.import_module(
+    "src.plugins.yawn_core.webui.environment_routes"
+)
 environment = importlib.import_module("src.plugins.yawn_core.webui.environment")
 
 
@@ -246,7 +249,7 @@ def test_environment_routes_require_csrf_and_report_conflicts(
         tested.update(kwargs)
         return 12.5
 
-    monkeypatch.setattr(app_module, "test_llm_connection", fake_test_connection)
+    monkeypatch.setattr(environment_routes, "test_llm_connection", fake_test_connection)
     connection = client.post(
         "/webui/api/v1/llm/test",
         headers={"X-CSRF-Token": csrf},
@@ -269,7 +272,9 @@ def test_environment_routes_require_csrf_and_report_conflicts(
     async def failing_test_connection(**_kwargs: object) -> float:
         raise RuntimeError("upstream rejected secret-value")  # noqa: TRY003
 
-    monkeypatch.setattr(app_module, "test_llm_connection", failing_test_connection)
+    monkeypatch.setattr(
+        environment_routes, "test_llm_connection", failing_test_connection
+    )
     failed_connection = client.post(
         "/webui/api/v1/llm/test",
         headers={"X-CSRF-Token": csrf},

@@ -37,6 +37,9 @@ audit_models = importlib.import_module(
 config_models = importlib.import_module(
     "src.plugins.yawn_core.data_models.group_agent_config"
 )
+group_feature_models = importlib.import_module(
+    "src.plugins.yawn_core.data_models.group_feature"
+)
 message_models = importlib.import_module(
     "src.plugins.yawn_core.data_models.group_agent_message"
 )
@@ -250,6 +253,7 @@ async def test_overview_payload_keeps_legacy_fields_and_adds_stats(
         bot_user_models.BotUser.__table__,
         audit_models.AgentAudit.__table__,
         config_models.GroupAgentConfig.__table__,
+        group_feature_models.GroupFeature.__table__,
         message_models.GroupAgentMessage.__table__,
         reminder_models.ScheduledReminder.__table__,
     ]
@@ -349,3 +353,66 @@ async def test_agent_diagnostics_uses_runtime_defaults_without_persisted_config(
     assert result["effective"]["shortConversation"]["enabled"] is True
     assert result["effective"]["shortConversation"]["active"] is False
     assert result["blockers"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_diagnostics_master_switch_suppresses_secondary_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        async def get(self, _model: object, _group_id: int) -> None:
+            return None
+
+    async def fake_runtime_enabled(
+        _session: object, _group_id: int, *, config: object | None = None
+    ) -> bool:
+        _ = config
+        return False
+
+    async def fake_memory_status(_session: object, group_id: int) -> dict[str, object]:
+        return {
+            "groupId": str(group_id),
+            "runtimeEnabled": False,
+            "pendingMessages": 0,
+            "lastCompactedMessageId": None,
+            "lastCompactedAt": None,
+            "countsByType": {},
+            "total": 0,
+            "oldestUpdatedAt": None,
+            "newestUpdatedAt": None,
+            "rebuildRequired": False,
+            "lastAttemptAt": None,
+            "lastSuccessAt": None,
+            "lastError": None,
+            "consecutiveFailures": 0,
+            "inFlight": False,
+        }
+
+    routes = [
+        {
+            "task": task,
+            "profile": "default",
+            "provider": "default",
+            "model": "",
+            "thinking": "auto",
+            "multimodal": "auto",
+            "configured": False,
+        }
+        for task in ("agent_dialogue", "agent_proactive", "agent_memory", "agent_image")
+    ]
+    monkeypatch.setattr(service, "agent_runtime_enabled", fake_runtime_enabled)
+    monkeypatch.setattr(service, "agent_memory_status", fake_memory_status)
+    monkeypatch.setattr(
+        service,
+        "_llm_runtime_status",
+        lambda: {"routes": routes, "unconfiguredProviders": ["default"]},
+    )
+    monkeypatch.setattr(service, "get_bots", dict)
+
+    result = await service.agent_diagnostics(FakeSession(), 100)
+
+    assert result["effective"]["enabled"] is False
+    assert result["effective"]["proactiveEnabled"] is False
+    assert result["effective"]["proactiveActiveEnabled"] is False
+    assert result["effective"]["shortConversation"]["enabled"] is False
+    assert [item["code"] for item in result["blockers"]] == ["agent_disabled"]

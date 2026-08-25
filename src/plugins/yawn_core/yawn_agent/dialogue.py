@@ -31,7 +31,7 @@ from ..llm import (
 )
 from .capabilities import probe_group_capabilities, user_can_manage_group
 from .collector import group_lock, is_pending_trigger_expired
-from .config_store import get_or_create_config
+from .config_store import agent_runtime_enabled, get_or_create_config
 from .conversation import mark_bot_reply
 from .context import ActivitySnapshot, build_context, now_beijing, trim_context_messages
 from .log import dbg, dbg_exc
@@ -998,9 +998,12 @@ async def _process_group_message(
         dbg(f"群 {group_id} 已取得群锁,开始处理")
         async with get_session() as session:
             config = await get_or_create_config(session, group_id)
-            if config is None or not config.enabled:
+            if config is None or not await agent_runtime_enabled(
+                session, group_id, config=config
+            ):
                 dbg(
-                    f"群 {group_id} 处理中止: config={'缺失' if config is None else '未启用'}"
+                    f"群 {group_id} 处理中止: Agent 总开关"
+                    f"{'配置缺失' if config is None else '已关闭'}"
                 )
                 return
             context = await _load_context(

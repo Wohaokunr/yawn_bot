@@ -440,6 +440,1160 @@ h1, h2, h3, h4, h5,
 .signup-line { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .settings-form { margin-top: 22px; }
 .settings-form .ant-input-number { width: 100%; }
+
+/* ── Agent 群级运行配置：分区式管理台 ───────────────────── */
+.agent-config-form { width: 100%; }
+.agent-config-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.agent-config-floating {
+  transition:
+    transform var(--dur-fast) var(--ease-spring),
+    box-shadow var(--dur-med) var(--ease-soft),
+    border-color var(--dur-med) var(--ease-soft);
+  will-change: transform;
+}
+.agent-config-floating:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.72);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25),
+    0 18px 44px rgba(242, 96, 141, 0.18);
+}
+.agent-config-hero {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.75fr);
+  gap: 18px;
+  padding: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 24px;
+  background:
+    radial-gradient(90% 130% at 0% 0%, rgba(255, 227, 236, 0.92), transparent 62%),
+    radial-gradient(80% 110% at 100% 20%, rgba(227, 242, 255, 0.88), transparent 62%),
+    rgba(255, 255, 255, 0.72);
+  box-shadow: 0 16px 44px rgba(124, 78, 101, 0.09);
+  backdrop-filter: blur(18px) saturate(155%);
+}
+.agent-config-hero-copy,
+.agent-master-card { position: relative; z-index: 1; }
+.agent-config-eyebrow,
+.agent-config-section-kicker {
+  margin-bottom: 8px;
+  color: var(--sakura-600);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+.agent-config-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.agent-config-title-row h2 {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: clamp(24px, 2.6vw, 34px);
+  font-weight: 400;
+  line-height: 1.15;
+}
+.agent-config-title-row p,
+.agent-config-section-head p {
+  margin: 0;
+  color: var(--ink-secondary);
+  line-height: 1.7;
+}
+.agent-config-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
+}
+.agent-config-metric {
+  min-width: 122px;
+  padding: 11px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.6);
+}
+.agent-config-metric span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+.agent-config-metric strong {
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 650;
+}
+.agent-config-metric-wide { min-width: 148px; }
+.agent-master-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 100%;
+  padding: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.94);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 8px 28px rgba(91, 72, 82, 0.06);
+}
+.agent-master-copy { max-width: 330px; }
+.agent-master-label {
+  margin-bottom: 8px;
+  color: var(--sakura-600);
+  font-size: 12px;
+  font-weight: 700;
+}
+.agent-master-title {
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 650;
+}
+.agent-master-description {
+  color: var(--ink-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.agent-master-card .ant-switch {
+  flex: 0 0 auto;
+  transform: scale(1.1);
+}
+.agent-config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 18px;
+  align-items: start;
+}
+.agent-config-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.agent-config-section {
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 8px 28px rgba(95, 69, 83, 0.055);
+}
+.agent-config-section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.agent-config-section-head h3 {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+}
+.agent-config-grid {
+  display: grid;
+  gap: 14px 16px;
+  align-items: start;
+}
+.agent-config-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.agent-config-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.agent-config-section .ant-form-item { margin-bottom: 8px; }
+.agent-config-section .ant-form-item-label { padding-bottom: 6px; }
+.agent-config-section .ant-form-item-label > label {
+  color: var(--ink);
+  font-weight: 600;
+}
+.agent-config-section .ant-form-item-extra {
+  min-height: 0;
+  margin-top: 5px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.agent-config-section .ant-input-number,
+.agent-config-section .ant-select { width: 100%; }
+.agent-config-section .ant-input-number,
+.agent-config-section .ant-select-selector {
+  min-height: 40px;
+  border-radius: 11px !important;
+}
+.agent-config-toggle-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 74px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 249, 251, 0.68);
+}
+.agent-config-toggle-card-featured {
+  margin-bottom: 18px;
+  background: linear-gradient(135deg, rgba(255, 240, 245, 0.92), rgba(245, 241, 255, 0.76));
+}
+.agent-config-toggle-title {
+  margin-bottom: 3px;
+  color: var(--ink);
+  font-weight: 650;
+}
+.agent-config-toggle-help {
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.agent-config-aside {
+  position: sticky;
+  top: 86px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.agent-config-note-card {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 8px 24px rgba(95, 69, 83, 0.045);
+}
+.agent-config-note-soft {
+  background: linear-gradient(145deg, rgba(240, 247, 255, 0.75), rgba(250, 245, 255, 0.8));
+}
+.agent-config-note-title {
+  margin-bottom: 9px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+.agent-config-note-card p,
+.agent-config-note-card ol {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.agent-config-note-card p + p { margin-top: 8px; }
+.agent-config-note-card ol { padding-left: 18px; }
+.agent-config-savebar {
+  position: sticky;
+  bottom: 14px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px 13px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 14px 40px rgba(103, 71, 88, 0.14);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+.agent-config-savebar > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.agent-config-savebar strong { color: var(--ink); }
+.agent-config-savebar span {
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+.agent-config-savebar .ant-btn { min-width: 116px; border-radius: 12px; }
+
+@media (max-width: 1100px) {
+  .agent-config-layout { grid-template-columns: 1fr; }
+  .agent-config-aside {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 820px) {
+  .agent-config-hero { grid-template-columns: 1fr; padding: 20px; }
+  .agent-config-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-master-card { min-height: 132px; }
+}
+
+@media (max-width: 560px) {
+  .agent-config-title-row { flex-direction: column; }
+  .agent-config-section { padding: 18px; }
+  .agent-config-grid-2,
+  .agent-config-grid-3,
+  .agent-config-aside { grid-template-columns: 1fr; }
+  .agent-config-metric { flex: 1 1 44%; min-width: 0; }
+  .agent-config-metric-wide { flex-basis: 100%; }
+  .agent-master-card { align-items: flex-start; }
+  .agent-config-savebar {
+    bottom: 8px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .agent-config-savebar .ant-btn { width: 100%; }
+}
+
+/* ── Agent 群级人设：可视化 Persona 编辑器 ───────────────── */
+.persona-config-form { width: 100%; }
+.persona-config-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.persona-config-hero,
+.persona-config-section,
+.persona-note-card,
+.persona-config-savebar {
+  overflow: hidden;
+}
+.persona-config-hero > *,
+.persona-config-section > *,
+.persona-note-card > *,
+.persona-config-savebar > * {
+  position: relative;
+  z-index: 3;
+}
+.persona-config-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.75fr);
+  gap: 18px;
+  padding: 26px;
+  border-radius: 24px;
+  background:
+    radial-gradient(95% 140% at -5% -15%, rgba(243, 235, 255, 0.96), transparent 60%),
+    radial-gradient(80% 120% at 102% 8%, rgba(226, 247, 238, 0.82), transparent 60%),
+    rgba(255, 255, 255, 0.64);
+}
+.persona-config-eyebrow,
+.persona-config-section-kicker {
+  margin-bottom: 8px;
+  color: var(--lavender-500);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+.persona-config-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.persona-config-title-row h2 {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: clamp(24px, 2.6vw, 34px);
+  font-weight: 400;
+  line-height: 1.15;
+}
+.persona-config-title-row p,
+.persona-config-section-head p {
+  margin: 0;
+  color: var(--ink-secondary);
+  line-height: 1.7;
+}
+.persona-config-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
+}
+.persona-config-metric {
+  min-width: 130px;
+  padding: 11px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+.persona-config-metric span {
+  display: block;
+  margin-bottom: 1px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+.persona-config-metric strong {
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 650;
+}
+.persona-config-metric small {
+  margin-left: 5px;
+  color: var(--ink-secondary);
+  font-size: 11px;
+}
+.persona-config-metric-wide { min-width: 176px; }
+.persona-config-metric-wide strong {
+  display: block;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.persona-master-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 100%;
+  padding: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 28px rgba(91, 72, 82, 0.055);
+  transition: background var(--dur-med) var(--ease-soft), border-color var(--dur-med) var(--ease-soft);
+}
+.persona-master-card.is-enabled {
+  border-color: rgba(196, 176, 255, 0.48);
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.76), rgba(247, 244, 255, 0.8));
+}
+.persona-master-copy { max-width: 350px; }
+.persona-master-label {
+  margin-bottom: 8px;
+  color: var(--lavender-500);
+  font-size: 12px;
+  font-weight: 700;
+}
+.persona-master-title {
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.persona-master-description {
+  color: var(--ink-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.persona-master-card .ant-switch {
+  flex: 0 0 auto;
+  transform: scale(1.1);
+}
+.persona-paused-alert {
+  border-radius: 16px;
+  background: rgba(240, 247, 255, 0.66);
+  backdrop-filter: blur(14px);
+}
+.persona-config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 18px;
+  align-items: start;
+}
+.persona-config-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.persona-config-section {
+  padding: 22px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.66);
+}
+.persona-config-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.persona-config-section-head h3 {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+}
+.persona-config-section-head > .ant-tag {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+}
+.persona-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.persona-field-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(255, 233, 240, 0.92);
+  border-radius: 16px;
+  background: rgba(255, 252, 253, 0.62);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 5px 18px rgba(113, 80, 97, 0.035);
+  transition: border-color var(--dur-fast) var(--ease-soft), background var(--dur-fast) var(--ease-soft);
+}
+.persona-field-card:focus-within {
+  border-color: rgba(196, 176, 255, 0.7);
+  background: rgba(255, 255, 255, 0.8);
+}
+.persona-field-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  margin-bottom: 12px;
+}
+.persona-field-head > div { min-width: 0; }
+.persona-field-head .ant-tag {
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.persona-field-title {
+  margin-bottom: 3px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+.persona-field-help {
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.persona-field-input.ant-form-item { margin: 0 0 12px; }
+.persona-field-input .ant-input,
+.persona-field-input textarea.ant-input {
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.persona-field-input textarea.ant-input { line-height: 1.65; }
+.persona-field-resolved {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(255, 188, 209, 0.55);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.persona-field-resolved span { color: var(--ink-secondary); }
+.persona-field-resolved strong {
+  min-width: 0;
+  color: #78636f;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.persona-config-aside {
+  position: sticky;
+  top: 86px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.persona-note-card {
+  padding: 18px;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.65);
+}
+.persona-note-soft {
+  background: linear-gradient(145deg, rgba(245, 241, 255, 0.74), rgba(240, 250, 247, 0.74));
+}
+.persona-note-title {
+  margin-bottom: 11px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+.persona-note-card p {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.persona-note-card p + p { margin-top: 9px; }
+.persona-inherit-flow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.persona-inherit-flow > div {
+  position: relative;
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 1px 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.5);
+}
+.persona-inherit-flow span {
+  grid-row: 1 / 3;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  color: var(--lavender-500);
+  background: rgba(196, 176, 255, 0.18);
+  font-size: 11px;
+  font-weight: 700;
+}
+.persona-inherit-flow strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+.persona-inherit-flow small {
+  color: var(--ink-secondary);
+  font-size: 10px;
+}
+.persona-inherit-flow i {
+  height: 10px;
+  color: var(--lavender-400);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 10px;
+  text-align: center;
+}
+.persona-config-savebar {
+  position: sticky;
+  bottom: 14px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px 13px 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+}
+.persona-save-state {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.persona-save-state strong { color: var(--ink); }
+.persona-save-state span {
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+.persona-config-savebar .ant-btn { min-width: 112px; border-radius: 12px; }
+
+@media (max-width: 1100px) {
+  .persona-config-layout { grid-template-columns: 1fr; }
+  .persona-config-aside {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 820px) {
+  .persona-config-hero { grid-template-columns: 1fr; padding: 20px; }
+  .persona-master-card { min-height: 132px; }
+  .persona-field-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 560px) {
+  .persona-config-title-row { flex-direction: column; }
+  .persona-config-section { padding: 18px; }
+  .persona-config-aside { grid-template-columns: 1fr; }
+  .persona-config-metric { flex: 1 1 44%; min-width: 0; }
+  .persona-config-metric-wide { flex-basis: 100%; }
+  .persona-master-card { align-items: flex-start; }
+  .persona-field-resolved { grid-template-columns: 1fr; gap: 3px; }
+  .persona-config-savebar {
+    bottom: 8px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .persona-config-savebar .ant-space {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+  .persona-config-savebar .ant-space-item { min-width: 0; }
+  .persona-config-savebar .ant-btn { width: 100%; min-width: 0; }
+}
+/* ── Agent Studio：与全局二次元 Liquid Glass 视觉体系对齐 ───────────────
+   运行设置 / 人设沿用各自的信息架构，但材质、光晕、软糖控件、樱花与
+   薰衣草点缀统一复用全局令牌。此层放在旧页面样式之后，避免破坏功能结构。 */
+.agent-studio-page {
+  position: relative;
+  isolation: isolate;
+}
+.agent-studio-page::before,
+.agent-studio-page::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  border-radius: 50%;
+  filter: blur(10px);
+  pointer-events: none;
+}
+.agent-studio-page::before {
+  top: 44px;
+  right: 5%;
+  width: 190px;
+  height: 190px;
+  background: radial-gradient(circle, rgba(255, 188, 209, 0.25), rgba(255, 188, 209, 0) 70%);
+}
+.agent-studio-page::after {
+  top: 360px;
+  left: -42px;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(196, 176, 255, 0.18), rgba(196, 176, 255, 0) 72%);
+}
+
+/* 所有 Agent Studio 外层玻璃都回到全局同一材质，不再使用“企业后台白卡” */
+.agent-studio-page .agent-config-floating {
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  background-color: var(--glass-bg);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.24),
+    var(--glass-shadow);
+  transition:
+    transform var(--dur-fast) var(--ease-spring),
+    box-shadow var(--dur-med) var(--ease-soft),
+    border-color var(--dur-med) var(--ease-soft),
+    background-color var(--dur-med) var(--ease-soft);
+}
+.agent-studio-page .agent-config-floating:hover {
+  transform: translateY(-3px);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.3),
+    0 20px 50px rgba(242, 96, 141, 0.17);
+}
+
+/* Liquid Glass 的光斑/折射层使用 z-index 1/2；内容统一抬到 3，
+   确保鼠标光效在玻璃表面游走但不会盖住文字和表单控件。 */
+.agent-studio-page .agent-studio-hero > *,
+.agent-studio-page .agent-config-section > *,
+.agent-studio-page .persona-config-section > *,
+.agent-studio-page .agent-config-note-card > *,
+.agent-studio-page .persona-note-card > *,
+.agent-studio-page .agent-config-savebar > *,
+.agent-studio-page .persona-config-savebar > * {
+  position: relative;
+  z-index: 3;
+}
+
+/* Hero：仍有语义色，但透明到能看见全局背景与鼠标光斑 */
+.agent-studio-page .agent-studio-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 24px;
+  background:
+    radial-gradient(72% 125% at -6% -18%, rgba(255, 214, 229, 0.54), transparent 64%),
+    radial-gradient(64% 108% at 104% 4%, rgba(221, 239, 255, 0.44), transparent 65%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.44), rgba(255, 249, 252, 0.24));
+}
+.agent-studio-persona .agent-studio-hero {
+  background:
+    radial-gradient(72% 125% at -6% -18%, rgba(228, 216, 255, 0.5), transparent 64%),
+    radial-gradient(64% 108% at 104% 4%, rgba(218, 248, 236, 0.4), transparent 65%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.43), rgba(250, 247, 255, 0.24));
+}
+.agent-studio-page .agent-config-hero-copy,
+.agent-studio-page .persona-config-hero-copy {
+  position: relative;
+  min-width: 0;
+}
+.agent-studio-runtime .agent-config-hero-copy::after,
+.agent-studio-persona .persona-config-hero-copy::after {
+  position: absolute;
+  top: -10px;
+  right: 4px;
+  pointer-events: none;
+  opacity: 0.7;
+  filter: drop-shadow(0 6px 12px rgba(242, 96, 141, 0.16));
+  animation: twinkle 3.2s ease-in-out infinite;
+}
+.agent-studio-runtime .agent-config-hero-copy::after {
+  content: "🌸";
+  font-size: 28px;
+  transform: rotate(12deg);
+}
+.agent-studio-persona .persona-config-hero-copy::after {
+  content: "✦";
+  color: var(--lavender-500);
+  font-size: 34px;
+  transform: rotate(-8deg);
+}
+
+.agent-studio-page .agent-config-eyebrow,
+.agent-studio-page .persona-config-eyebrow,
+.agent-studio-page .agent-config-section-kicker,
+.agent-studio-page .persona-config-section-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin-bottom: 9px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.66);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.48);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76), 0 3px 10px rgba(242, 96, 141, 0.08);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.agent-studio-page .agent-config-eyebrow::before,
+.agent-studio-page .persona-config-eyebrow::before,
+.agent-studio-page .agent-config-section-kicker::before,
+.agent-studio-page .persona-config-section-kicker::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 13%, transparent);
+}
+.agent-studio-runtime .agent-config-eyebrow,
+.agent-studio-runtime .agent-config-section-kicker { color: var(--sakura-600); }
+.agent-studio-persona .persona-config-eyebrow,
+.agent-studio-persona .persona-config-section-kicker { color: var(--lavender-500); }
+
+.agent-studio-page .agent-config-title-row h2,
+.agent-studio-page .persona-config-title-row h2 {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+.agent-studio-page .agent-config-title-row p,
+.agent-studio-page .persona-config-title-row p,
+.agent-studio-page .agent-config-section-head p,
+.agent-studio-page .persona-config-section-head p {
+  color: var(--ink-secondary);
+}
+
+/* Hero 数据 chip：与番茄页、全局 Tag 的软糖质感一致 */
+.agent-studio-page .agent-config-metric,
+.agent-studio-page .persona-config-metric {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.52);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 4px 13px rgba(242, 96, 141, 0.08);
+}
+.agent-studio-page .agent-config-metric::before,
+.agent-studio-page .persona-config-metric::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  background: var(--sakura-400);
+}
+.agent-studio-persona .persona-config-metric::before { background: var(--lavender-400); }
+.agent-studio-page .agent-config-metric span,
+.agent-studio-page .agent-config-metric strong,
+.agent-studio-page .persona-config-metric span,
+.agent-studio-page .persona-config-metric strong,
+.agent-studio-page .persona-config-metric small {
+  position: relative;
+  z-index: 1;
+}
+.agent-studio-page .agent-config-metric span,
+.agent-studio-page .persona-config-metric span { padding-left: 8px; }
+
+/* 总开关是一块更实的“玻璃软糖”，不要再像普通设置卡 */
+.agent-studio-page .agent-master-card,
+.agent-studio-page .persona-master-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  background:
+    radial-gradient(110% 110% at 100% 0%, rgba(255, 214, 228, 0.35), transparent 58%),
+    rgba(255, 255, 255, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 9px 26px rgba(242, 96, 141, 0.09);
+  backdrop-filter: blur(13px) saturate(145%);
+  -webkit-backdrop-filter: blur(13px) saturate(145%);
+}
+.agent-studio-persona .persona-master-card {
+  background:
+    radial-gradient(110% 110% at 100% 0%, rgba(196, 176, 255, 0.35), transparent 58%),
+    rgba(255, 255, 255, 0.5);
+}
+.agent-studio-page .persona-master-card.is-enabled {
+  border-color: rgba(196, 176, 255, 0.46);
+  background:
+    radial-gradient(110% 110% at 100% 0%, rgba(196, 176, 255, 0.4), transparent 58%),
+    rgba(255, 255, 255, 0.54);
+}
+.agent-studio-page .agent-master-card::after,
+.agent-studio-page .persona-master-card::after {
+  content: "✦";
+  position: absolute;
+  right: 16px;
+  bottom: -8px;
+  color: rgba(255, 157, 187, 0.23);
+  font-size: 48px;
+  line-height: 1;
+  pointer-events: none;
+}
+.agent-studio-page .persona-master-card::after { color: rgba(154, 125, 240, 0.2); }
+.agent-studio-page .agent-master-label,
+.agent-studio-page .persona-master-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--sakura-600);
+  font-size: 11px;
+}
+.agent-studio-page .persona-master-label { color: var(--lavender-500); }
+.agent-studio-page .agent-master-title,
+.agent-studio-page .persona-master-title { font-family: var(--font-display); font-weight: 400; }
+.agent-studio-page .agent-master-card .ant-switch,
+.agent-studio-page .persona-master-card .ant-switch {
+  position: relative;
+  z-index: 2;
+  transform: scale(1.12);
+  filter: drop-shadow(0 4px 8px rgba(242, 96, 141, 0.16));
+}
+
+/* 主内容面板：使用同一透明度与折射，语义色只做顶部轻薄光晕 */
+.agent-studio-page .agent-config-section,
+.agent-studio-page .persona-config-section,
+.agent-studio-page .agent-config-note-card,
+.agent-studio-page .persona-note-card {
+  border-color: rgba(255, 255, 255, 0.52);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.04)),
+    var(--glass-bg);
+}
+.agent-studio-page .agent-config-section,
+.agent-studio-page .persona-config-section {
+  position: relative;
+}
+.agent-studio-runtime .agent-config-section:nth-child(2) {
+  background:
+    radial-gradient(62% 62% at 100% 0%, rgba(255, 188, 209, 0.13), transparent 70%),
+    var(--glass-bg);
+}
+.agent-studio-persona .persona-config-section:nth-child(2) {
+  background:
+    radial-gradient(62% 62% at 100% 0%, rgba(196, 176, 255, 0.13), transparent 70%),
+    var(--glass-bg);
+}
+.agent-studio-page .agent-config-section-head h3,
+.agent-studio-page .persona-config-section-head h3 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+.agent-studio-page .persona-config-section-head > .ant-tag,
+.agent-studio-page .persona-field-head .ant-tag {
+  border: 1px solid rgba(255, 255, 255, 0.66) !important;
+  background: rgba(255, 255, 255, 0.54) !important;
+  box-shadow: 0 3px 10px rgba(154, 125, 240, 0.08);
+}
+
+/* 表单控件也必须像软糖玻璃，而不是纯白 SaaS 控件 */
+.agent-studio-page .ant-select-selector,
+.agent-studio-page .ant-input-number,
+.agent-studio-page .persona-field-input .ant-input,
+.agent-studio-page .persona-field-input textarea.ant-input {
+  border-color: rgba(255, 210, 225, 0.66) !important;
+  background: rgba(255, 255, 255, 0.58) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition:
+    border-color var(--dur-fast) var(--ease-soft),
+    box-shadow var(--dur-fast) var(--ease-soft),
+    background var(--dur-fast) var(--ease-soft);
+}
+.agent-studio-persona .ant-select-selector,
+.agent-studio-persona .ant-input-number,
+.agent-studio-persona .persona-field-input .ant-input,
+.agent-studio-persona .persona-field-input textarea.ant-input {
+  border-color: rgba(215, 204, 255, 0.68) !important;
+}
+.agent-studio-page .ant-select-focused .ant-select-selector,
+.agent-studio-page .ant-input-number-focused,
+.agent-studio-page .persona-field-input .ant-input:focus,
+.agent-studio-page .persona-field-input textarea.ant-input:focus {
+  background: rgba(255, 255, 255, 0.78) !important;
+  border-color: var(--sakura-400) !important;
+  box-shadow: 0 0 0 3px rgba(242, 96, 141, 0.11) !important;
+}
+.agent-studio-persona .persona-field-input .ant-input:focus,
+.agent-studio-persona .persona-field-input textarea.ant-input:focus {
+  border-color: var(--lavender-400) !important;
+  box-shadow: 0 0 0 3px rgba(154, 125, 240, 0.1) !important;
+}
+
+/* 开关型设置：软糖块 + hover 微浮动 */
+.agent-studio-page .agent-config-toggle-card {
+  border-color: rgba(255, 220, 231, 0.64);
+  background:
+    linear-gradient(135deg, rgba(255, 248, 251, 0.56), rgba(255, 255, 255, 0.38));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 4px 14px rgba(242, 96, 141, 0.05);
+  transition: transform var(--dur-fast) var(--ease-spring), border-color var(--dur-fast) var(--ease-soft), box-shadow var(--dur-fast) var(--ease-soft);
+}
+.agent-studio-page .agent-config-toggle-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 188, 209, 0.74);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 9px 22px rgba(242, 96, 141, 0.1);
+}
+.agent-studio-page .agent-config-toggle-card-featured {
+  background:
+    radial-gradient(90% 120% at 100% 0%, rgba(196, 176, 255, 0.18), transparent 62%),
+    linear-gradient(135deg, rgba(255, 237, 244, 0.62), rgba(255, 255, 255, 0.38));
+}
+
+/* Persona 字段卡：像角色设定卡而不是数据录入表 */
+.agent-studio-page .persona-field-card {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(255, 255, 255, 0.68);
+  background:
+    radial-gradient(90% 90% at 100% 0%, rgba(228, 216, 255, 0.18), transparent 62%),
+    rgba(255, 255, 255, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 6px 18px rgba(154, 125, 240, 0.06);
+  transition:
+    transform var(--dur-fast) var(--ease-spring),
+    border-color var(--dur-fast) var(--ease-soft),
+    box-shadow var(--dur-fast) var(--ease-soft),
+    background var(--dur-fast) var(--ease-soft);
+}
+.agent-studio-page .persona-field-card:hover,
+.agent-studio-page .persona-field-card:focus-within {
+  transform: translateY(-2px);
+  border-color: rgba(196, 176, 255, 0.56);
+  background:
+    radial-gradient(90% 90% at 100% 0%, rgba(228, 216, 255, 0.25), transparent 62%),
+    rgba(255, 255, 255, 0.57);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88), 0 12px 28px rgba(154, 125, 240, 0.1);
+}
+.agent-studio-page .persona-field-title {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 400;
+}
+.agent-studio-page .persona-field-resolved {
+  border-top-color: rgba(196, 176, 255, 0.28);
+  border-top-style: dashed;
+}
+.agent-studio-page .persona-field-resolved strong { color: #756274; }
+
+/* 侧栏说明：小型“贴纸玻璃” */
+.agent-studio-page .agent-config-note-card,
+.agent-studio-page .persona-note-card {
+  position: relative;
+  overflow: hidden;
+}
+.agent-studio-page .agent-config-note-title::after,
+.agent-studio-page .persona-note-title::after {
+  content: "✦";
+  margin-left: 7px;
+  color: rgba(242, 96, 141, 0.36);
+  font-size: 13px;
+}
+.agent-studio-page .persona-note-title::after { color: rgba(154, 125, 240, 0.4); }
+.agent-studio-page .agent-config-note-soft,
+.agent-studio-page .persona-note-soft {
+  background:
+    linear-gradient(145deg, rgba(235, 246, 255, 0.4), rgba(245, 238, 255, 0.38)),
+    var(--glass-bg);
+}
+.agent-studio-page .agent-config-note-title,
+.agent-studio-page .persona-note-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 400;
+}
+.agent-studio-page .persona-inherit-flow > div {
+  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+/* 暂停提示也做成玻璃提示条 */
+.agent-studio-page .persona-paused-alert {
+  border: 1px solid rgba(202, 222, 255, 0.68);
+  border-radius: 18px;
+  background: rgba(240, 247, 255, 0.5);
+  box-shadow: 0 8px 24px rgba(91, 157, 246, 0.08);
+  backdrop-filter: blur(15px) saturate(145%);
+  -webkit-backdrop-filter: blur(15px) saturate(145%);
+}
+
+/* Sticky save bar：与环境配置页同一类悬浮玻璃，不做厚重白底 */
+.agent-studio-page .agent-config-savebar,
+.agent-studio-page .persona-config-savebar {
+  border-color: rgba(255, 255, 255, 0.72);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 246, 250, 0.48));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 16px 42px rgba(242, 96, 141, 0.14);
+  backdrop-filter: blur(22px) saturate(175%);
+  -webkit-backdrop-filter: blur(22px) saturate(175%);
+}
+.agent-studio-persona .persona-config-savebar {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(248, 244, 255, 0.48));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 16px 42px rgba(154, 125, 240, 0.12);
+}
+.agent-studio-page .agent-config-savebar .ant-btn,
+.agent-studio-page .persona-config-savebar .ant-btn {
+  border-radius: 999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-studio-page .agent-config-floating,
+  .agent-studio-page .agent-config-toggle-card,
+  .agent-studio-page .persona-field-card,
+  .agent-studio-runtime .agent-config-hero-copy::after,
+  .agent-studio-persona .persona-config-hero-copy::after {
+    transition: none;
+    animation: none;
+  }
+  .agent-studio-page .agent-config-floating:hover,
+  .agent-studio-page .agent-config-toggle-card:hover,
+  .agent-studio-page .persona-field-card:hover,
+  .agent-studio-page .persona-field-card:focus-within { transform: none; }
+}
+
+@media (max-width: 560px) {
+  .agent-studio-runtime .agent-config-hero-copy::after,
+  .agent-studio-persona .persona-config-hero-copy::after {
+    top: -4px;
+    right: 0;
+    opacity: 0.42;
+    transform: scale(0.82);
+  }
+  .agent-studio-page .agent-config-metric,
+  .agent-studio-page .persona-config-metric {
+    border-radius: 16px;
+  }
+}
+
 .table-search { max-width: 360px; margin-bottom: 16px; }
 .pagination-only .ant-table-container { display: none; }
 pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320px; overflow: auto; }
