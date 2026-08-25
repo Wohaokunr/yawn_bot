@@ -43,14 +43,29 @@ from .context import (
     build_context,
     build_current_turn,
     now_beijing,
-    topic_break_before,
     trim_context_messages,
+)
+from .context_history import (
+    bot_message_meta as _bot_message_meta,
+    history_message_meta as _history_message_meta,
+    history_message_payload as _history_message_payload,
+    select_context_messages,
+    select_context_messages_only as _select_context_messages,
+)
+from .context_budget import pack_context
+from .execution_trace import (
+    begin_execution_trace,
+    bind_execution_trace,
+    finish_execution_trace,
+    reset_execution_trace,
+    trace_event,
 )
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
-from .memory import effective_relation_confidence, extract_bigrams, rank_memories
+from .memory import effective_relation_confidence, rank_memories
 from .message_parser import NormalizedMessage
 from .outbound import (
+    DELIVERY_CONFIRMED_FAILURE,
     PreparedOutboundMessage,
     SendResult,
     extract_message_id as extract_outbound_message_id,
@@ -76,18 +91,6 @@ _VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 # 条目上限对齐各层最大配额（5+4+12+3），字符预算仍是实际约束。
 _MEMORY_CONTEXT_LIMIT = 24
-_CONTEXT_HISTORY_MAX_MESSAGES = 16
-_CONTEXT_HISTORY_CHAR_BUDGET = 2_800
-_CONTEXT_MESSAGE_CHAR_LIMIT = 500
-_CONTEXT_FRESH_MINUTES = 6
-_CONTEXT_CLUSTER_MAX_AGE_MINUTES = 18
-_CONTEXT_CLUSTER_GAP_MINUTES = 6
-_CONTEXT_RELEVANT_MAX_AGE_MINUTES = 60
-_CONTEXT_PROACTIVE_MAX_AGE_MINUTES = 45
-_CONTEXT_PROACTIVE_MAX_MESSAGES = 10
-_LOW_INFO_HISTORY_TEXTS = frozenset(
-    {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
-)
 _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
@@ -119,7 +122,7 @@ async def _send_group_text(
         dbg_exc(f"群 {group_id} 发送群消息失败 text={text!r}")
         return False, None
     dbg(f"群 {group_id} 发送群消息成功 text={text!r}")
-    return result.sent, result.message_id
+    return result.ends_turn, result.message_id
 
 
 def contains_word(text: str, word: str) -> bool:
@@ -216,12 +219,21 @@ async def _send_unless_expired(
     """过期触发不发送；普通文本与复合 Message 统一走 sender。"""
 
     if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
+        trace_event(
+            "outbound",
+            label,
+            status="skipped",
+            output={"sent": False, "reason": "trigger_expired"},
+            detail="触发消息在队列/群锁等待期间过期，取消用户可见发送",
+        )
         dbg(f"群 {group_id} {label}前触发已过期,跳过发送: message_id={message_id}")
         return SendResult(
             sent=False,
             message_id=None,
             normalized_text="",
             segment_types=(),
+            outcome="expired",
+            delivery_state=DELIVERY_CONFIRMED_FAILURE,
         )
     prepared = prepare_text_message(message) if isinstance(message, str) else message
     try:
@@ -241,6 +253,8 @@ async def _send_unless_expired(
             message_id=None,
             normalized_text=prepared.normalized_text,
             segment_types=(),
+            outcome="send_failed",
+            delivery_state=DELIVERY_CONFIRMED_FAILURE,
         )
 
 
@@ -411,284 +425,6 @@ async def _activity_window_counts(
     }
 
 
-def _bot_message_meta(row: GroupAgentMessage) -> dict[str, Any] | None:
-    """给下一轮模型看的 Bot 自己消息摘要；不回灌路径或完整转发 payload。"""
-
-    if str(row.role or "") != "bot":
-        return None
-    segments = list(row.segments or [])
-    segment_types: list[str] = []
-    mentions: list[int] = []
-    for item in segments[:12]:
-        if not isinstance(item, dict):
-            continue
-        segment_type = str(item.get("type") or "").strip()
-        # 纯 text 是默认形态，外层 text 已经表达完整；只记录真正影响
-        # 消息结构/寻址的非文本 segment，避免每条 bot 文本都产生 message_meta。
-        if segment_type and segment_type != "text":
-            segment_types.append(segment_type)
-        if segment_type == "at":
-            data = item.get("data")
-            raw_user_id = data.get("qq") if isinstance(data, dict) else None
-            if not isinstance(raw_user_id, (int, str)):
-                continue
-            try:
-                user_id = int(raw_user_id)
-            except (TypeError, ValueError):
-                continue
-            if user_id > 0 and user_id not in mentions:
-                mentions.append(user_id)
-    reply_to: list[int] = []
-    for item in list(row.reply_chain or [])[:4]:
-        if not isinstance(item, dict):
-            continue
-        raw_message_id = item.get("message_id")
-        if not isinstance(raw_message_id, (int, str)):
-            continue
-        try:
-            target = int(raw_message_id)
-        except (TypeError, ValueError):
-            continue
-        if target and target not in reply_to:
-            reply_to.append(target)
-    media = [
-        {
-            "type": str(item.get("type") or "media")[:24],
-            **(
-                {"reaction_id": str(item.get("reaction_id"))[:64]}
-                if item.get("reaction_id")
-                else {}
-            ),
-        }
-        for item in list(row.media_refs or [])[:4]
-        if isinstance(item, dict)
-    ]
-    forward_nodes = min(len(list(row.forward_tree or [])), 20)
-    meta: dict[str, Any] = {}
-    if segment_types:
-        meta["segment_types"] = segment_types
-    if mentions:
-        meta["mentions"] = mentions
-    if reply_to:
-        meta["reply_to"] = reply_to
-    if media:
-        meta["media"] = media
-    if forward_nodes:
-        meta["forward_nodes"] = forward_nodes
-    return meta or None
-
-
-def _history_message_meta(row: GroupAgentMessage) -> dict[str, Any]:
-    """历史消息的寻址信息；成员消息也保留 @ 与直接引用关系。"""
-
-    mentions: list[int] = []
-    for item in list(row.segments or [])[:20]:
-        if not isinstance(item, dict):
-            continue
-        segment_type = str(item.get("type") or "").strip()
-        if segment_type != "at":
-            continue
-        data = item.get("data")
-        raw_user_id = data.get("qq") if isinstance(data, dict) else None
-        try:
-            user_id = int(str(raw_user_id))
-        except (TypeError, ValueError):
-            continue
-        if user_id > 0 and user_id not in mentions:
-            mentions.append(user_id)
-    reply_to: dict[str, Any] | None = None
-    chain = list(row.reply_chain or [])
-    if chain and isinstance(chain[0], dict):
-        raw = chain[0]
-        reply_to = {
-            "message_id": raw.get("message_id"),
-            "user_id": raw.get("user_id"),
-            "name": str(raw.get("nickname") or "未知用户")[:64],
-            "text": str(raw.get("text") or "")[:240],
-        }
-    media_types = [
-        str(item.get("type") or "media")[:24]
-        for item in list(row.media_refs or [])[:4]
-        if isinstance(item, dict)
-    ]
-    meta: dict[str, Any] = {}
-    if mentions:
-        meta["mentions"] = mentions
-    if reply_to is not None:
-        meta["reply_to"] = reply_to
-    if media_types:
-        meta["media_types"] = media_types
-    forward_nodes = min(len(list(row.forward_tree or [])), 20)
-    if forward_nodes:
-        meta["forward_nodes"] = forward_nodes
-    return meta
-
-
-def _history_message_payload(
-    row: GroupAgentMessage,
-    *,
-    context_now: datetime,
-    previous_at: datetime | None,
-) -> dict[str, Any]:
-    """把历史消息渲染成稀疏 prompt 结构；默认值不占 token。"""
-
-    message: dict[str, Any] = {
-        "message_id": row.message_id,
-        "user_id": row.user_id,
-        "text": row.normalized_text,
-        "minutes_ago": max(
-            0, int((context_now - row.received_at).total_seconds() // 60)
-        ),
-    }
-    if row.sender_name:
-        message["name"] = row.sender_name
-    if row.role and str(row.role) != "member":
-        message["role"] = row.role
-    if row.title:
-        message["title"] = row.title
-    if topic_break_before(previous_at, row.received_at):
-        message["topic_break_before"] = True
-    message.update(_history_message_meta(row))
-    if (bot_meta := _bot_message_meta(row)) is not None:
-        message["message_meta"] = bot_meta
-    return message
-
-
-def _history_minutes_ago(item: dict[str, Any]) -> int:
-    try:
-        return max(int(item.get("minutes_ago") or 0), 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _history_is_low_info(item: dict[str, Any]) -> bool:
-    text = str(item.get("text") or "").strip()
-    if text in _LOW_INFO_HISTORY_TEXTS:
-        return True
-    return bool(re.fullmatch(r"\[表情(?::\d+)?\]", text))
-
-
-def _history_directly_touches_focus(
-    item: dict[str, Any], focus_user_ids: set[int]
-) -> bool:
-    if not focus_user_ids:
-        return False
-    for raw_user_id in item.get("mentions") or []:
-        if isinstance(raw_user_id, int):
-            user_id = raw_user_id
-        elif isinstance(raw_user_id, str) and raw_user_id.isdecimal():
-            user_id = int(raw_user_id)
-        else:
-            continue
-        if user_id in focus_user_ids:
-            return True
-    reply_to = item.get("reply_to")
-    if isinstance(reply_to, dict):
-        raw_user_id = reply_to.get("user_id")
-        if isinstance(raw_user_id, int):
-            return raw_user_id in focus_user_ids
-        if isinstance(raw_user_id, str) and raw_user_id.isdecimal():
-            return int(raw_user_id) in focus_user_ids
-    return False
-
-
-def _select_context_messages(
-    messages: list[dict[str, Any]],
-    *,
-    focus_user_ids: Sequence[int] | None = None,
-    query_text: str | None = None,
-) -> list[dict[str, Any]]:
-    """按当前回合选择少量真正有用的群聊历史。
-
-    被动对话优先保留：仍在进行的最近对话簇、与当前文本有明显词项重合的旧消息、
-    以及直接 @/回复当前相关成员的消息。若群里已经沉默数分钟且当前文本和旧话题无关，
-    不再机械携带几十条旧聊天。主动发言没有 current_turn，则保留最后一个对话簇。
-    """
-
-    if not messages:
-        return []
-    focus = {
-        int(user_id)
-        for user_id in (focus_user_ids or [])
-        if isinstance(user_id, int) and int(user_id) > 0
-    }
-    query = str(query_text or "").strip()
-    query_tokens = extract_bigrams(query[:1000]) if query else set()
-    selected: set[int] = set()
-
-    if query:
-        # 当前回合与上一条消息足够近时，才把最后一个活跃对话簇作为默认背景。
-        latest_age = _history_minutes_ago(messages[-1])
-        if latest_age <= _CONTEXT_FRESH_MINUTES:
-            next_newer_age = latest_age
-            for index in range(len(messages) - 1, -1, -1):
-                item = messages[index]
-                age = _history_minutes_ago(item)
-                if age > _CONTEXT_CLUSTER_MAX_AGE_MINUTES:
-                    break
-                if age - next_newer_age > _CONTEXT_CLUSTER_GAP_MINUTES:
-                    break
-                if (
-                    not _history_is_low_info(item)
-                    or age <= 2
-                    or _history_directly_touches_focus(item, focus)
-                ):
-                    selected.add(index)
-                next_newer_age = age
-
-        # 较旧历史只有与当前文本明显相关，或直接涉及当前相关成员时才召回。
-        relevance: list[tuple[float, int]] = []
-        for index, item in enumerate(messages):
-            age = _history_minutes_ago(item)
-            if age > _CONTEXT_RELEVANT_MAX_AGE_MINUTES:
-                continue
-            direct = _history_directly_touches_focus(item, focus)
-            item_tokens = extract_bigrams(str(item.get("text") or "")[:700])
-            overlap = query_tokens & item_tokens
-            strong_ascii = any(
-                token.isascii() and len(token) >= 3 for token in overlap
-            )
-            strong_text = len(overlap) >= 2 or strong_ascii
-            if not direct and not strong_text:
-                continue
-            score = (10.0 if direct else 0.0) + len(overlap) * 2.0 - age / 60.0
-            relevance.append((score, index))
-        for _score, index in sorted(relevance, reverse=True)[:6]:
-            selected.add(index)
-            # 召回一条相邻消息帮助恢复短问答语境，但不跨明显时间缝隙。
-            for neighbor in (index - 1, index + 1):
-                if neighbor < 0 or neighbor >= len(messages):
-                    continue
-                if abs(
-                    _history_minutes_ago(messages[neighbor])
-                    - _history_minutes_ago(messages[index])
-                ) <= 2 and not _history_is_low_info(messages[neighbor]):
-                    selected.add(neighbor)
-    else:
-        # 主动发言/续聊没有当前查询：只看最后一个近期对话簇，不回放整小时聊天。
-        next_newer_age = _history_minutes_ago(messages[-1])
-        for index in range(len(messages) - 1, -1, -1):
-            item = messages[index]
-            age = _history_minutes_ago(item)
-            if age > _CONTEXT_PROACTIVE_MAX_AGE_MINUTES:
-                break
-            if age - next_newer_age > _CONTEXT_CLUSTER_GAP_MINUTES:
-                break
-            if not _history_is_low_info(item) or age <= 2:
-                selected.add(index)
-            next_newer_age = age
-            if len(selected) >= _CONTEXT_PROACTIVE_MAX_MESSAGES:
-                break
-
-    chosen = [messages[index] for index in sorted(selected)]
-    return trim_context_messages(
-        chosen,
-        max_messages=_CONTEXT_HISTORY_MAX_MESSAGES,
-        max_message_chars=_CONTEXT_MESSAGE_CHAR_LIMIT,
-        char_budget=_CONTEXT_HISTORY_CHAR_BUDGET,
-    )
-
-
 async def _load_context(
     session: Any,
     group_id: int,
@@ -702,6 +438,10 @@ async def _load_context(
     include_active_profiles: bool = False,
     exclude_message_id: int | None = None,
     reference_at: datetime | None = None,
+    selection_trace: list[dict[str, Any]] | None = None,
+    budget_trace: list[dict[str, Any]] | None = None,
+    context_model: str | None = None,
+    completion_reserve: int = 2048,
 ) -> dict[str, Any]:
     now = now_beijing()
     context_now = reference_at or now
@@ -766,11 +506,14 @@ async def _load_context(
         # 主动发言/短会话会显式传 compact_history=True。
         messages = trim_context_messages(messages_unbounded)
     else:
-        messages = _select_context_messages(
+        selection = select_context_messages(
             messages_unbounded,
             focus_user_ids=focus_user_ids,
             query_text=query_text,
         )
+        messages = selection.messages
+        if selection_trace is not None:
+            selection_trace.extend(selection.trace)
     dbg(
         f"群 {group_id} 加载上下文: 原始历史 {len(messages_unbounded)} 条 -> "
         f"有效历史 {len(messages)} 条/"
@@ -1067,6 +810,9 @@ async def _load_context(
             "salience": row.salience,
             "confidence": row.confidence,
             "source": row.source_kind,
+            "evidence_count": len(row.evidence_message_ids or []),
+            "first_observed_date": (row.created_at or now).date().isoformat(),
+            "last_confirmed_date": (row.updated_at or row.created_at or now).date().isoformat(),
             "source_scope": source,
             "source_date": str(row.memory_key).rsplit(":", 1)[-1]
             if "daily:" in str(row.memory_key)
@@ -1147,6 +893,25 @@ async def _load_context(
         )
         note = str(row.note or "").strip()
         relations.append(f"{line}：{note}" if note else line)
+    context_pack = pack_context(
+        messages=messages,
+        members=members,
+        memories=memories,
+        relations=relations,
+        model=context_model,
+        completion_reserve=completion_reserve,
+    )
+    messages = context_pack.messages
+    members = context_pack.members
+    memories = context_pack.memories
+    relations = context_pack.relations
+    if budget_trace is not None:
+        budget_trace.extend(context_pack.trace)
+    dbg(
+        f"群 {group_id} token 上下文装箱: model={context_pack.budget.model!r} "
+        f"window={context_pack.budget.context_window} "
+        f"context={context_pack.trace[0]['usedTokens']}/{context_pack.budget.context_limit} tokens"
+    )
     dbg(
         f"群 {group_id} 加载上下文: 关系 {len(relations)} 条"
         f"(候选 {len(relation_rows)},上限 20)"
@@ -1330,6 +1095,13 @@ async def _finalize_reply(
         for item in recent
     )
     if duplicate:
+        trace_event(
+            "outbound",
+            "重复回复抑制",
+            status="skipped",
+            output={"sent": False},
+            detail="与近 10 分钟同一输入/回复指纹重复",
+        )
         dbg(f"群 {group_id} 回复与近 10 分钟内重复,抑制发送: {reply_text!r}")
         return
     sent = await _send_unless_expired(
@@ -1343,23 +1115,25 @@ async def _finalize_reply(
         actor_user_id=None,
         source="dialogue",
     )
-    if not sent.sent:
-        dbg(f"群 {group_id} 回复未发送(触发过期或发送失败),放弃本轮状态更新")
+    if not sent.ends_turn:
+        dbg(f"群 {group_id} 回复确认未发送(触发过期或明确失败),放弃本轮状态更新")
         return
-    # bot 发言进入消息历史：后续上下文能看到自己最近说过什么，
-    # 主动插话才能贴着上文连贯接话而不是自说自话。
-    await persist_bot_reply(
-        session,
-        int(bot.self_id),
-        group_id,
-        sent.message_id,
-        sent.normalized_text,
-        int(config.raw_retention_days),
-        segments=sent.segments,
-        reply_chain=sent.reply_chain,
-        forward_tree=sent.forward_tree,
-        media_refs=sent.media_refs,
-    )
+    if sent.sent:
+        # 只有确认成功才写入 Bot 消息历史；unknown 不能伪造一条确定存在的 QQ 消息。
+        await persist_bot_reply(
+            session,
+            int(bot.self_id),
+            group_id,
+            sent.message_id,
+            sent.normalized_text,
+            int(config.raw_retention_days),
+            segments=sent.segments,
+            reply_chain=sent.reply_chain,
+            forward_tree=sent.forward_tree,
+            media_refs=sent.media_refs,
+        )
+    else:
+        dbg(f"群 {group_id} 回复投递状态未知,按可能已送达推进冷却/去重但不写消息历史")
     recent.append(
         {
             "input": input_fingerprint,
@@ -1390,10 +1164,26 @@ async def _finalize_reply(
     try:
         await session.commit()
     except SQLAlchemyError:
+        trace_event(
+            "state",
+            "回复后状态提交",
+            status="failed",
+            output={"rolled_back": True},
+            detail="消息可能已发送，但去重/冷却状态提交失败",
+        )
         # 消息已经发出；状态丢失只影响重复抑制，不能上抛。
         dbg_exc(f"群 {group_id} 回复后状态提交失败,已回滚")
         await session.rollback()
     else:
+        trace_event(
+            "state",
+            "回复后状态提交",
+            output={
+                "recent_fingerprints": len(recent[-8:]),
+                "context_epoch": config.context_epoch,
+                "delivery_state": sent.delivery_state,
+            },
+        )
         dbg(f"群 {group_id} 回复后状态已提交(指纹记录 {len(recent[-8:])} 条)")
 
 
@@ -1430,6 +1220,8 @@ async def _process_group_message(
                 )
                 return
             actor_user_id = int(event.get_user_id())
+            model = resolve_llm_request("agent_dialogue").model
+            context_started = time.monotonic()
             context = await _load_context(
                 session,
                 group_id,
@@ -1440,7 +1232,23 @@ async def _process_group_message(
                 ),
                 query_text=normalized.prompt_text(),
                 exclude_message_id=int(message_id) if message_id is not None else None,
+                context_model=model,
+                completion_reserve=800,
             )
+            trace_event(
+                "context",
+                "上下文选择与装箱",
+                input={"focus_user_ids": _current_turn_focus_ids(actor_user_id, normalized, bot_id=bot_id)},
+                output={
+                    "messages": len(list(context.get("messages") or [])),
+                    "members": len(list(context.get("members") or [])),
+                    "memories": len(list(context.get("memories") or [])),
+                    "relations": len(list(context.get("relations") or [])),
+                    "model": model,
+                },
+                duration_ms=(time.monotonic() - context_started) * 1000,
+            )
+            capability_started = time.monotonic()
             capabilities = await probe_group_capabilities(bot, group_id)
             allow_admin_tools = await user_can_manage_group(
                 bot, group_id, actor_user_id
@@ -1454,8 +1262,25 @@ async def _process_group_message(
                 capabilities,
                 allow_admin_tools=allow_admin_tools,
                 segment_capabilities=get_segment_capabilities(bot, group_id),
+                privileged_allowlist=set(config.tool_allowlist or []),
+            )
+            trace_event(
+                "capability",
+                "协议能力与工具权限计算",
+                output={
+                    "bot_role": capabilities.role,
+                    "bot_can_manage": capabilities.can_manage,
+                    "onebot_actions": sorted(capabilities.actions),
+                    "actor_can_manage": allow_admin_tools,
+                    "tool_names": [
+                        str(item.get("function", {}).get("name") or "")
+                        for item in tools
+                    ],
+                },
+                duration_ms=(time.monotonic() - capability_started) * 1000,
             )
             dbg(f"群 {group_id} 本轮可用工具 {len(tools)} 个")
+            media_started = time.monotonic()
             media_blocks, cached_captions, media_digests = await prepare_image_inputs(
                 bot,
                 group_id,
@@ -1476,6 +1301,22 @@ async def _process_group_message(
                 cached_captions,
                 media_digests,
             )
+            trace_event(
+                "media",
+                "多模态输入准备",
+                input={
+                    "media": [
+                        {"type": item.get("type"), "source": item.get("source", "current")}
+                        for item in normalized.media_refs
+                    ]
+                },
+                output={
+                    "vision_blocks": len(media_blocks),
+                    "cached_captions": len(cached_captions),
+                    "content_hashes": [digest[:12] for digest in media_digests],
+                },
+                duration_ms=(time.monotonic() - media_started) * 1000,
+            )
             current_turn: CurrentTurn = build_current_turn(
                 message_id=int(message_id) if message_id is not None else None,
                 user_id=actor_user_id,
@@ -1491,8 +1332,8 @@ async def _process_group_message(
                 forward_nodes=len(normalized.forward_tree),
                 truncated=normalized.truncated,
             )
-            model = resolve_llm_request("agent_dialogue").model
             dbg(f"群 {group_id} 对话模型={model!r}")
+            prompt_started = time.monotonic()
             messages, _prefix_fingerprint = build_messages(
                 persona=resolve_persona(config),
                 tools=tools,
@@ -1511,6 +1352,22 @@ async def _process_group_message(
                 persona_version=config.persona_version,
             )
             stable_key = stable_context_key(context)
+            trace_event(
+                "prompt",
+                "Prompt 构建",
+                input={
+                    "tool_count": len(tools),
+                    "media_blocks": len(media_blocks),
+                    "persona_version": config.persona_version,
+                },
+                output={
+                    "message_count": len(messages),
+                    "prefix_fingerprint": _prefix_fingerprint[:12],
+                    "prompt_cache": "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss",
+                    "context_cache": "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss",
+                },
+                duration_ms=(time.monotonic() - prompt_started) * 1000,
+            )
             dbg(
                 f"群 {group_id} 提示词构建完成: messages={len(messages)} 条 "
                 f"prompt 前缀指纹={_prefix_fingerprint[:12]}… "
@@ -1552,6 +1409,7 @@ async def _process_group_message(
                         message_id=message_id,
                     )
                     return
+                llm_started = time.monotonic()
                 try:
                     response = await complete_with_tools(  # pyright: ignore[reportArgumentType]
                         messages,  # pyright: ignore[reportArgumentType]
@@ -1564,6 +1422,15 @@ async def _process_group_message(
                         and not fallback_attempted,
                     )
                 except LLMMultimodalUnsupportedError:
+                    trace_event(
+                        "llm",
+                        "模型多模态请求",
+                        status="degraded",
+                        output={"model": model, "fallback": "vision_caption"},
+                        detail="模型不支持当前多模态输入，改用视觉转述后重建 Prompt",
+                        duration_ms=(time.monotonic() - llm_started) * 1000,
+                        round_index=rounds + 1,
+                    )
                     dbg(
                         f"群 {group_id} 模型不支持多模态,降级为视觉转述重建提示词(不占轮次)"
                     )
@@ -1584,6 +1451,15 @@ async def _process_group_message(
                     continue
                 rounds += 1
                 if response is None:
+                    trace_event(
+                        "llm",
+                        "模型调用",
+                        status="degraded",
+                        output={"model": model, "response": "none"},
+                        detail="LLM 返回空结果，进入确定性兜底回复",
+                        duration_ms=(time.monotonic() - llm_started) * 1000,
+                        round_index=rounds,
+                    )
                     fallback = (
                         _deterministic_reply(normalized.plain_text) or _FALLBACK_NOTICE
                     )
@@ -1601,6 +1477,20 @@ async def _process_group_message(
                     return
                 content = (response.content or "").strip()
                 tool_calls = response.tool_calls or []
+                trace_event(
+                    "llm",
+                    "模型调用",
+                    output={
+                        "model": model,
+                        "content_chars": len(content),
+                        "tool_calls": [
+                            str(getattr(getattr(call, "function", None), "name", "") or "")
+                            for call in tool_calls
+                        ],
+                    },
+                    duration_ms=(time.monotonic() - llm_started) * 1000,
+                    round_index=rounds,
+                )
                 dbg(
                     f"群 {group_id} 第 {rounds}/{MAX_TOOL_ROUNDS} 轮 LLM 响应: "
                     f"content={content!r} tool_calls={[getattr(getattr(c, 'function', None), 'name', None) for c in tool_calls]}"
@@ -1635,6 +1525,7 @@ async def _process_group_message(
                         continue
                     tool_name = str(getattr(function, "name", "") or "")
                     raw_args = getattr(function, "arguments", "{}") or "{}"
+                    tool_started = time.monotonic()
                     dbg(
                         f"群 {group_id} 第 {rounds} 轮工具调用: "
                         f"name={tool_name!r} args={raw_args}"
@@ -1671,6 +1562,23 @@ async def _process_group_message(
                                 session=session,
                                 capabilities=capabilities,
                             )
+                    trace_event(
+                        "tool",
+                        f"工具 {tool_name or '[unknown]'}",
+                        status=(
+                            "success"
+                            if bool(result.get("ok"))
+                            else "failed"
+                        ),
+                        input={"arguments": args},
+                        output={
+                            "ok": bool(result.get("ok")),
+                            "error": result.get("error"),
+                            "ends_turn": _visible_tool_send_ends_turn(result),
+                        },
+                        duration_ms=(time.monotonic() - tool_started) * 1000,
+                        round_index=rounds,
+                    )
                     dbg(
                         f"群 {group_id} 工具 {tool_name!r} 返回: "
                         f"{json.dumps(result, ensure_ascii=False)}"
@@ -1767,8 +1675,22 @@ async def _process_group_message(
                     try:
                         await session.commit()
                     except SQLAlchemyError:
+                        trace_event(
+                            "state",
+                            "工具轮状态提交",
+                            status="failed",
+                            detail="数据库提交失败并已回滚",
+                            round_index=rounds,
+                        )
                         dbg_exc(f"群 {group_id} 工具轮状态提交失败,已回滚")
                         await session.rollback()
+                    else:
+                        trace_event(
+                            "state",
+                            "工具轮状态提交",
+                            output={"tool": tool_name},
+                            round_index=rounds,
+                        )
                     # 提交会过期会话内对象；后续轮次还要读取 config 属性，
                     # 先刷新避免同步惰性加载（MissingGreenlet）。
                     await session.refresh(config)
@@ -1806,6 +1728,59 @@ async def process_group_message(
 
     started = time.monotonic()
     outcome = "completed"
+    trace = begin_execution_trace(
+        int(event.group_id),
+        mode="dialogue",
+        source="runtime",
+        actor_user_id=int(event.get_user_id()),
+        message_id=(
+            int(event.message_id)
+            if getattr(event, "message_id", None) is not None
+            else None
+        ),
+    )
+    token = bind_execution_trace(trace)
+    for stage in normalized.parse_trace:
+        if not isinstance(stage, dict):
+            continue
+        trace_event(
+            "parse",
+            str(stage.get("label") or "消息解析"),
+            output=(
+                stage.get("output")
+                if isinstance(stage.get("output"), dict)
+                else {}
+            ),
+            duration_ms=(
+                float(stage.get("duration_ms") or 0.0)
+                if stage.get("duration_ms") is not None
+                else None
+            ),
+        )
+    trace_event(
+        "intake",
+        "消息归一化完成",
+        output={
+            "text_chars": len(normalized.plain_text),
+            "segment_types": [item.type for item in normalized.segments],
+            "media": [
+                {
+                    "type": item.get("type"),
+                    "source": item.get("source", "current"),
+                }
+                for item in normalized.media_refs
+            ],
+            "reply_depth": len(normalized.reply_chain),
+            "forward_nodes": len(normalized.forward_tree),
+            "mentions": normalized.mentions,
+            "truncated": normalized.truncated,
+            "queue_wait_ms": (
+                round(max(started - enqueued_at, 0.0) * 1000, 1)
+                if enqueued_at is not None
+                else None
+            ),
+        },
+    )
     try:
         await _process_group_message(
             bot,
@@ -1815,8 +1790,18 @@ async def process_group_message(
         )
     except BaseException:
         outcome = "error"
+        trace_event("turn", "执行异常", status="failed", detail="未处理异常终止本轮")
         raise
     finally:
+        trace_event(
+            "turn",
+            "回合结束",
+            status="failed" if outcome == "error" else "success",
+            output={"outcome": outcome},
+            duration_ms=max(time.monotonic() - started, 0.0) * 1000,
+        )
+        finish_execution_trace(trace, outcome=outcome)
+        reset_execution_trace(token)
         try:
             from ..metrics import record_agent_turn
 

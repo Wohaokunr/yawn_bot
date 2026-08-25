@@ -818,6 +818,15 @@ def serialize_memory(row: AgentMemory) -> dict[str, Any]:
         "key": row.memory_key,
         "content": row.content,
         "sourceKind": row.source_kind,
+        "evidenceMessageIds": [
+            str(value) for value in row.evidence_message_ids or []
+        ],
+        "provenance": {
+            "kind": row.source_kind,
+            "evidenceCount": len(row.evidence_message_ids or []),
+            "firstObservedAt": iso(row.created_at),
+            "lastConfirmedAt": iso(row.updated_at),
+        },
         "relatedUserIds": [str(value) for value in row.related_user_ids or []],
         "salience": row.salience,
         "confidence": row.confidence,

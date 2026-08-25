@@ -145,6 +145,8 @@ class _FactCandidate(BaseModel):
     evidence_message_ids: list[int] = Field(default_factory=list, max_length=50)
     confidence: float = Field(default=0.5, ge=0, le=1)
     salience: float = Field(default=0.6, ge=0, le=1)
+    # 只有成员本人在证据中明确否定/更正旧事实时才能为 true。
+    correction: bool = False
 
 
 class _RelationCandidate(BaseModel):
@@ -350,12 +352,23 @@ def merge_daily_summary(existing: str, addition: str, *, max_chars: int = 2000) 
 
 
 def merge_profile_update(
-    old_content: str, old_confidence: float, new_content: str, new_confidence: float
+    old_content: str,
+    old_confidence: float,
+    new_content: str,
+    new_confidence: float,
+    *,
+    correction: bool = False,
 ) -> tuple[str, float]:
-    """画像冲突合并：新内容置信度不低于旧值才覆盖，否则保留旧事实。"""
+    """画像冲突合并。
+
+    普通观察仍需新置信度不低于旧值才覆盖；成员本人明确纠正旧事实时，
+    新事实优先且置信度只采用新证据，避免把被推翻旧事实的高置信度继承过去。
+    """
 
     if new_content == old_content:
         return old_content, max(old_confidence, new_confidence)
+    if correction:
+        return new_content, max(0.5, new_confidence)
     if new_confidence >= old_confidence:
         return new_content, max(old_confidence, new_confidence)
     return old_content, old_confidence
@@ -443,11 +456,13 @@ async def _model_summary(
                 "好友/死党/情侣/伴侣/亲属/师徒/同事/同学/搭子/对立 中选择，"
                 "都不合适才用其他简短词；note 用一句话概括证据可见的关系背景，"
                 "没有就留空。"
+                "facts.correction 只有在该 user_id 本人在本批证据里明确撤回、否定或更正"
+                "自己先前事实时才设为 true；普通新增事实、推测、第三方纠正必须为 false。"
                 "只返回 JSON 对象，结构严格为："
                 '{"summary":"...","public_summary":"...","facts":['
                 '{"user_id":1,"key":"display_name|preferred_address|hobby|preference|skill|recurring_topic",'
                 '"content":"单一、简短、最多200字的事实","evidence_message_ids":[1],'
-                '"confidence":0.8,"salience":0.7}],'
+                '"confidence":0.8,"salience":0.7,"correction":false}],'
                 '"relations":[{"subject_user_id":1,"object_user_id":2,"type":"...",'
                 '"note":"...","evidence_message_ids":[1],"confidence":0.7}]}。'
             ),
@@ -613,6 +628,7 @@ def _store_model_facts(
         if key not in _FACT_KEYS or not content or not evidence:
             continue
         confidence = _bounded_float(item.get("confidence"), 0.5)
+        correction = item.get("correction") is True
         existing = profiles.get((user_id, key))
         if existing is None:
             row = AgentMemory(
@@ -636,20 +652,29 @@ def _store_model_facts(
                 continue
             old_content = str(existing.content or "")
             if key in _LIST_FACT_KEYS:
-                merged_content, merged_confidence = merge_list_profile_update(
+                if correction:
+                    # 对多值事实，明确纠正意味着用当前自述重建该键，避免被否定的
+                    # 偏好/技能继续残留在“、”列表中。
+                    merged_content, merged_confidence = content, max(0.5, confidence)
+                else:
+                    merged_content, merged_confidence = merge_list_profile_update(
+                        old_content,
+                        float(existing.confidence or 0.0),
+                        content,
+                        confidence,
+                        max_items=(
+                            _RECURRING_TOPIC_MAX
+                            if key == "recurring_topic"
+                            else _LIST_FACT_MAX
+                        ),
+                    )
+            else:
+                merged_content, merged_confidence = merge_profile_update(
                     old_content,
                     float(existing.confidence or 0.0),
                     content,
                     confidence,
-                    max_items=(
-                        _RECURRING_TOPIC_MAX
-                        if key == "recurring_topic"
-                        else _LIST_FACT_MAX
-                    ),
-                )
-            else:
-                merged_content, merged_confidence = merge_profile_update(
-                    old_content, float(existing.confidence or 0.0), content, confidence
+                    correction=correction,
                 )
             existing.content = merged_content
             # 合并后内容不变（同值复现）才提升置信度；覆盖或追加时不加分。

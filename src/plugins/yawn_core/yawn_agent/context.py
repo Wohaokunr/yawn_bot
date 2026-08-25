@@ -57,6 +57,7 @@ class CurrentTurn:
     trigger: str = "debug_replay"
     received_at: str | None = None
     media_types: tuple[str, ...] = ()
+    media: tuple[dict[str, Any], ...] = ()
     forward_nodes: int = 0
     truncated: bool = False
 
@@ -101,6 +102,29 @@ def build_current_turn(
             continue
         if mention_user_id > 0 and mention_user_id not in clean_mentions:
             clean_mentions.append(mention_user_id)
+    clean_media: list[dict[str, Any]] = []
+    for item in media_refs[:20]:
+        if not isinstance(item, dict):
+            continue
+        media_type = str(item.get("type") or "media")[:24]
+        source = str(item.get("source") or "current")[:16]
+        summary: dict[str, Any] = {"type": media_type, "source": source}
+        if item.get("name"):
+            summary["name"] = str(item.get("name"))[:120]
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            summary["size_bytes"] = size
+        for field in ("source_message_id", "source_user_id"):
+            try:
+                value = int(item.get(field) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value:
+                summary[field] = value
+        clean_media.append(summary)
     return CurrentTurn(
         message_id=message_id,
         user_id=int(user_id),
@@ -117,6 +141,7 @@ def build_current_turn(
             for item in media_refs[:20]
             if isinstance(item, dict)
         ),
+        media=tuple(clean_media),
         forward_nodes=max(int(forward_nodes), 0),
         truncated=bool(truncated),
     )

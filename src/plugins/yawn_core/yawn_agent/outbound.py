@@ -37,6 +37,7 @@ from .capabilities import (
     mark_segment_unsupported,
 )
 from .context import now_beijing
+from .execution_trace import trace_event
 from .media import validate_outbound_image_path
 from .reactions import resolve_reaction
 
@@ -47,6 +48,11 @@ MAX_OUTBOUND_FILE_BYTES = 32 * 1024 * 1024
 MAX_FORWARD_NODES = 20
 MAX_FORWARD_BYTES = 128 * 1024
 SEND_TIMEOUT_SECONDS = 15.0
+
+DELIVERY_CONFIRMED_SUCCESS = "confirmed_success"
+DELIVERY_CONFIRMED_FAILURE = "confirmed_failure"
+DELIVERY_UNKNOWN = "unknown"
+DELIVERY_DEGRADED_SUCCESS = "degraded_success"
 
 _FILE_ROOT = Path(os.environ.get("AGENT_FILE_ROOT", "data/agent_files")).resolve()
 _SUPPORTED_TYPES = COMMON_MESSAGE_SEGMENTS | OPTIONAL_MESSAGE_SEGMENTS
@@ -91,11 +97,28 @@ class SendResult:
     segment_types: tuple[str, ...]
     message_type: str = "text"
     outcome: str = "success"
+    delivery_state: str = DELIVERY_CONFIRMED_SUCCESS
     degraded_from: str | None = None
     segments: tuple[dict[str, Any], ...] = ()
     reply_chain: tuple[dict[str, Any], ...] = ()
     forward_tree: tuple[dict[str, Any], ...] = ()
     media_refs: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def ends_turn(self) -> bool:
+        """成功或投递未知都必须终止本轮，避免回执丢失后重复发送。"""
+
+        return self.delivery_state in {
+            DELIVERY_CONFIRMED_SUCCESS,
+            DELIVERY_DEGRADED_SUCCESS,
+            DELIVERY_UNKNOWN,
+        }
+
+    @property
+    def may_have_delivered(self) -> bool:
+        """unknown 表示消息可能已经被 QQ 接收。"""
+
+        return self.delivery_state != DELIVERY_CONFIRMED_FAILURE
 
     def storage_payload(self) -> dict[str, Any]:
         return {
@@ -103,6 +126,7 @@ class SendResult:
             "text": self.normalized_text,
             "message_type": self.message_type,
             "outcome": self.outcome,
+            "delivery_state": self.delivery_state,
             "degraded_from": self.degraded_from,
             "segments": list(self.segments),
             "reply_chain": list(self.reply_chain),
@@ -130,6 +154,10 @@ def _safe_audit_arguments(
     *,
     source: str,
     degraded_from: str | None = None,
+    delivery_state: str | None = None,
+    onebot_action: str | None = None,
+    error_class: str | None = None,
+    actual_segment_types: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "message_type": message_type,
@@ -138,6 +166,14 @@ def _safe_audit_arguments(
     }
     if degraded_from:
         payload["degraded_from"] = degraded_from[:64]
+    if delivery_state:
+        payload["delivery_state"] = delivery_state[:32]
+    if onebot_action:
+        payload["onebot_action"] = onebot_action[:64]
+    if error_class:
+        payload["error_class"] = error_class[:96]
+    if actual_segment_types is not None:
+        payload["actual_segment_types"] = list(actual_segment_types)
     return payload
 
 
@@ -152,6 +188,10 @@ async def _audit_outbound(
     outcome: str,
     detail: str = "",
     degraded_from: str | None = None,
+    delivery_state: str | None = None,
+    onebot_action: str | None = None,
+    error_class: str | None = None,
+    actual_segment_types: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """输出审计只记结构摘要；不写媒体字节、URL 或卡片 payload。"""
 
@@ -169,6 +209,10 @@ async def _audit_outbound(
                     segment_types,
                     source=source,
                     degraded_from=degraded_from,
+                    delivery_state=delivery_state,
+                    onebot_action=onebot_action,
+                    error_class=error_class,
+                    actual_segment_types=actual_segment_types,
                 ),
                 result=outcome[:24],
                 detail=detail[:500] or None,
@@ -737,6 +781,24 @@ def _is_unsupported_error(error: BaseException) -> bool:
     return any(hint in payload for hint in _UNSUPPORTED_ERROR_HINTS)
 
 
+def _is_ambiguous_delivery_error(error: BaseException) -> bool:
+    """传输层错误无法证明服务端未处理请求，按投递未知处理。
+
+    OneBot 业务错误通常会带明确 retcode/信息，可安全视为失败；超时、连接
+    中断等则可能发生在服务端已经执行 send_group_msg 之后。
+    """
+
+    return isinstance(
+        error,
+        (
+            asyncio.TimeoutError,
+            TimeoutError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ),
+    )
+
+
 def _build_degraded_message(
     prepared: PreparedOutboundMessage,
     *,
@@ -820,12 +882,66 @@ async def send_prepared_outbound(
         for item in original_types
         if item not in caps.supported or item in caps.runtime_unsupported
     )
+    trace_event(
+        "outbound",
+        "构建发送计划",
+        status="planned",
+        input={
+            "message_type": original_type,
+            "segment_types": original_types,
+            "source": source,
+        },
+        output={"known_unsupported": known_unsupported},
+    )
     try:
         if not known_unsupported:
             try:
                 raw_result = await _call_group_send(bot, group_id, prepared.message)
             except Exception as exc:
+                if _is_ambiguous_delivery_error(exc):
+                    trace_event(
+                        "outbound",
+                        "OneBot 发送",
+                        status="unknown",
+                        output={
+                            "delivery_state": DELIVERY_UNKNOWN,
+                            "segment_types": original_types,
+                        },
+                        detail=(
+                            f"{type(exc).__name__}: 回执不确定，"
+                            "为避免重复发送不自动重试"
+                        ),
+                    )
+                    await _audit_outbound(
+                        session,
+                        group_id,
+                        actor_user_id,
+                        message_type=original_type,
+                        segment_types=original_types,
+                        source=source,
+                        outcome="delivery_unknown",
+                        detail=type(exc).__name__,
+                    )
+                    return SendResult(
+                        sent=False,
+                        message_id=None,
+                        normalized_text=prepared.normalized_text,
+                        segment_types=original_types,
+                        message_type=original_type,
+                        outcome="delivery_unknown",
+                        delivery_state=DELIVERY_UNKNOWN,
+                        segments=prepared.segment_records,
+                        reply_chain=prepared.reply_chain,
+                        media_refs=prepared.media_refs,
+                    )
                 if not _is_unsupported_error(exc):
+                    trace_event(
+                        "outbound",
+                        "OneBot 发送",
+                        status="failed",
+                        output={"delivery_state": DELIVERY_CONFIRMED_FAILURE},
+                        detail=type(exc).__name__,
+                    )
                     await _audit_outbound(
                         session,
                         group_id,
@@ -838,8 +954,20 @@ async def send_prepared_outbound(
                     )
                     raise
                 candidate = infer_unsupported_segment(exc, original_types)
+                trace_event(
+                    "outbound",
+                    "协议段不兼容",
+                    status="degraded",
+                    output={
+                        "unsupported_segment": candidate or "unknown",
+                        "original_types": original_types,
+                    },
+                    detail="进入受控消息降级链",
+                )
                 if candidate:
-                    mark_segment_unsupported(bot, group_id, candidate)
+                    mark_segment_unsupported(
+                        bot, group_id, candidate, reason=type(exc).__name__
+                    )
                 await _audit_outbound(
                     session,
                     group_id,
@@ -851,6 +979,15 @@ async def send_prepared_outbound(
                     detail=f"segment={candidate or 'unknown'}",
                 )
             else:
+                trace_event(
+                    "outbound",
+                    "OneBot 发送",
+                    output={
+                        "delivery_state": DELIVERY_CONFIRMED_SUCCESS,
+                        "segment_types": original_types,
+                        "message_id": extract_message_id(raw_result),
+                    },
+                )
                 await _audit_outbound(
                     session,
                     group_id,
@@ -877,10 +1014,57 @@ async def send_prepared_outbound(
         fallback = _build_degraded_message(prepared, allow_at=allow_at)
         fallback_types = tuple(str(item["type"]) for item in fallback.segment_records)
         fallback_type = classify_message_type(fallback_types)
+        trace_event(
+            "outbound",
+            "生成降级发送计划",
+            status="degraded",
+            input={"original_types": original_types},
+            output={"fallback_types": fallback_types, "allow_at": allow_at},
+        )
         try:
             raw_result = await _call_group_send(bot, group_id, fallback.message)
         except Exception as exc:
+            if _is_ambiguous_delivery_error(exc):
+                trace_event(
+                    "outbound",
+                    "降级消息发送",
+                    status="unknown",
+                    output={
+                        "delivery_state": DELIVERY_UNKNOWN,
+                        "segment_types": fallback_types,
+                    },
+                    detail=f"{type(exc).__name__}: 回执不确定，不继续重试",
+                )
+                await _audit_outbound(
+                    session,
+                    group_id,
+                    actor_user_id,
+                    message_type=fallback_type,
+                    segment_types=fallback_types,
+                    source=source,
+                    outcome="delivery_unknown",
+                    detail=type(exc).__name__,
+                    degraded_from=original_type,
+                )
+                return SendResult(
+                    sent=False,
+                    message_id=None,
+                    normalized_text=fallback.normalized_text,
+                    segment_types=fallback_types,
+                    message_type=fallback_type,
+                    outcome="delivery_unknown",
+                    delivery_state=DELIVERY_UNKNOWN,
+                    degraded_from=original_type,
+                    segments=fallback.segment_records,
+                )
             if not allow_at or not _is_unsupported_error(exc):
+                trace_event(
+                    "outbound",
+                    "降级消息发送",
+                    status="failed",
+                    output={"delivery_state": DELIVERY_CONFIRMED_FAILURE},
+                    detail=type(exc).__name__,
+                )
                 await _audit_outbound(
                     session,
                     group_id,
@@ -893,14 +1077,60 @@ async def send_prepared_outbound(
                     degraded_from=original_type,
                 )
                 raise
-            mark_segment_unsupported(bot, group_id, "at")
+            mark_segment_unsupported(
+                bot, group_id, "at", reason=type(exc).__name__
+            )
             text_fallback = _build_degraded_message(prepared, allow_at=False)
             text_types = ("text",)
+            trace_event(
+                "outbound",
+                "再次降级为纯文本",
+                status="degraded",
+                output={"fallback_types": text_types},
+                detail="@ 段也不兼容，移除可选段后只保留文本",
+            )
             try:
                 raw_result = await _call_group_send(
                     bot, group_id, text_fallback.message
                 )
             except Exception as final_exc:
+                if _is_ambiguous_delivery_error(final_exc):
+                    trace_event(
+                        "outbound",
+                        "纯文本降级发送",
+                        status="unknown",
+                        output={"delivery_state": DELIVERY_UNKNOWN},
+                        detail=f"{type(final_exc).__name__}: 回执不确定，不继续重试",
+                    )
+                    await _audit_outbound(
+                        session,
+                        group_id,
+                        actor_user_id,
+                        message_type="text",
+                        segment_types=text_types,
+                        source=source,
+                        outcome="delivery_unknown",
+                        detail=type(final_exc).__name__,
+                        degraded_from=original_type,
+                    )
+                    return SendResult(
+                        sent=False,
+                        message_id=None,
+                        normalized_text=text_fallback.normalized_text,
+                        segment_types=text_types,
+                        message_type="text",
+                        outcome="delivery_unknown",
+                        delivery_state=DELIVERY_UNKNOWN,
+                        degraded_from=original_type,
+                        segments=text_fallback.segment_records,
+                    )
+                trace_event(
+                    "outbound",
+                    "纯文本降级发送",
+                    status="failed",
+                    output={"delivery_state": DELIVERY_CONFIRMED_FAILURE},
+                    detail=type(final_exc).__name__,
+                )
                 await _audit_outbound(
                     session,
                     group_id,
@@ -927,6 +1157,17 @@ async def send_prepared_outbound(
             outcome="degraded_to_text",
             degraded_from=original_type,
         )
+        trace_event(
+            "outbound",
+            "降级发送完成",
+            status="degraded",
+            output={
+                "delivery_state": DELIVERY_DEGRADED_SUCCESS,
+                "segment_types": fallback_types,
+                "message_id": extract_message_id(raw_result),
+                "degraded_from": original_type,
+            },
+        )
         return SendResult(
             sent=True,
             message_id=extract_message_id(raw_result),
@@ -934,6 +1175,7 @@ async def send_prepared_outbound(
             segment_types=fallback_types,
             message_type=fallback_type,
             outcome="degraded_to_text",
+            delivery_state=DELIVERY_DEGRADED_SUCCESS,
             degraded_from=original_type,
             segments=fallback.segment_records,
         )
@@ -1063,6 +1305,27 @@ async def send_prepared_forward(
             timeout=SEND_TIMEOUT_SECONDS,
         )
     except Exception as exc:
+        if _is_ambiguous_delivery_error(exc):
+            await _audit_outbound(
+                session,
+                group_id,
+                actor_user_id,
+                message_type="forward",
+                segment_types=("forward",),
+                source=source,
+                outcome="delivery_unknown",
+                detail=type(exc).__name__,
+            )
+            return SendResult(
+                sent=False,
+                message_id=None,
+                normalized_text=prepared.normalized_text,
+                segment_types=("forward",),
+                message_type="forward",
+                outcome="delivery_unknown",
+                delivery_state=DELIVERY_UNKNOWN,
+                forward_tree=prepared.forward_tree,
+            )
         await _audit_outbound(
             session,
             group_id,

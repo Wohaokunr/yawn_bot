@@ -107,9 +107,9 @@ class AgentConfigPatch(BaseModel):
     admin_tool_daily_limit: int | None = Field(
         default=None, ge=1, le=1000, alias="adminToolDailyLimit"
     )
-    tool_allowlist: list[Literal["mute_member", "create_group_announcement"]] | None = (
-        Field(default=None, alias="toolAllowlist")
-    )
+    tool_allowlist: list[
+        Literal["mute_member", "create_group_announcement", "send_file"]
+    ] | None = Field(default=None, alias="toolAllowlist")
 
     @field_validator("tool_allowlist")
     @classmethod

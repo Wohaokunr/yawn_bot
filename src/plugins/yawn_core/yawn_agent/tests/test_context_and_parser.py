@@ -177,6 +177,14 @@ async def test_parse_message_follows_nested_reply_chain() -> None:
     message.append(MessageSegment("reply", {"id": "3"}))
     message.append(MessageSegment.text("现在的问题"))
     normalized = await parse_message(bot, message)
+    assert [item["label"] for item in normalized.parse_trace] == [
+        "消息段归一化",
+        "合并转发展开",
+        "回复链展开",
+        "消息解析完成",
+    ]
+    assert "parse_trace" not in normalized.as_dict()
+    assert "parse_trace" not in normalized.storage_dict()
     assert [entry["message_id"] for entry in normalized.reply_chain] == [3, 2, 1]
     assert normalized.reply_chain[0]["user_id"] == 201
     assert normalized.reply_chain[0]["nickname"] == "张三"
@@ -439,12 +447,112 @@ def test_prompt_text_quote_only_message_is_not_placeholder() -> None:
     assert "被引用的话" in normalized.prompt_text()
 
 
-def test_prompt_text_empty_and_media_only_keep_legacy_format() -> None:
+def test_prompt_text_empty_and_media_show_source_and_forward_summary() -> None:
     assert NormalizedMessage(plain_text="", segments=[]).prompt_text() == "[非文本消息]"
     message = Message()
     message.append(MessageSegment.text("你好"))
     message.append(MessageSegment.image(file="deadbeef.jpg"))
     normalized = normalize_message(message)
     normalized.forward_tree = [ForwardNode()]
-    # 图片占位符沿用既有行为并入正文;媒体与转发标记保持原格式。
-    assert normalized.prompt_text() == "你好[图片] [媒体: image] [包含转发消息]"
+    prompt = normalized.prompt_text()
+    assert "你好[图片]" in prompt
+    assert "1:当前图片" in prompt
+    assert "[转发摘要]" in prompt
+
+
+@pytest.mark.asyncio
+async def test_reply_image_is_promoted_into_current_media_inputs() -> None:
+    replied = Message()
+    replied.append(
+        MessageSegment(
+            "image",
+            {
+                "file": "reply-image-id",
+                "url": "https://example.test/reply.jpg",
+            },
+        )
+    )
+    current = Message("这张图呢？")
+    normalized = await parse_message(
+        FakeBot(), current, reply=_make_reply(77, 201, "张三", replied)
+    )
+
+    reply_images = [
+        item
+        for item in normalized.media_refs
+        if item.get("type") == "image" and item.get("source") == "reply"
+    ]
+    assert len(reply_images) == 1
+    assert reply_images[0]["source_message_id"] == 77
+    assert reply_images[0]["source_user_id"] == 201
+    assert normalized.reply_chain[0]["media_types"] == ["image"]
+    assert "引用图片" in normalized.prompt_text()
+
+
+@pytest.mark.asyncio
+async def test_forward_image_and_text_are_available_to_prompt() -> None:
+    payloads = {
+        ("get_forward_msg", (("id", 88),)): {
+            "messages": [
+                {
+                    "content": [
+                        {"type": "text", "data": {"text": "这是转发里的说明"}},
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "forward-image-id",
+                                "url": "https://example.test/forward.jpg",
+                            },
+                        },
+                    ],
+                    "sender": {"user_id": 42, "nickname": "李四"},
+                }
+            ]
+        }
+    }
+    message = Message()
+    message.append(MessageSegment("forward", {"id": "88"}))
+    normalized = await parse_message(FakeBot(payloads), message)
+
+    assert any(
+        item.get("type") == "image" and item.get("source") == "forward"
+        for item in normalized.media_refs
+    )
+    prompt = normalized.prompt_text()
+    assert "[转发摘要]" in prompt
+    assert "李四" in prompt
+    assert "这是转发里的说明" in prompt
+    assert "转发图片" in prompt
+
+
+def test_rich_segments_use_safe_semantic_placeholders_and_scrub_cards() -> None:
+    message = Message()
+    message.append(
+        MessageSegment(
+            "location",
+            {"lat": "31.2304", "lon": "121.4737", "title": "人民广场"},
+        )
+    )
+    message.append(
+        MessageSegment(
+            "share",
+            {
+                "title": "项目文档",
+                "content": "看看这个说明",
+                "url": "https://signed.example/secret?token=x",
+            },
+        )
+    )
+    message.append(MessageSegment("json", {"data": '{"token":"secret"}'}))
+    message.append(MessageSegment("xml", {"data": "<msg>secret</msg>"}))
+    normalized = normalize_message(message)
+
+    assert "人民广场" in normalized.plain_text
+    assert "31.23040,121.47370" in normalized.plain_text
+    assert "项目文档" in normalized.plain_text
+    assert "signed.example" not in normalized.plain_text
+    assert "secret" not in normalized.plain_text
+    stored = normalized.storage_dict()
+    serialized = str(stored)
+    assert "token" not in serialized
+    assert "<msg>secret</msg>" not in serialized

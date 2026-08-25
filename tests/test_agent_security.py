@@ -52,6 +52,91 @@ def test_admin_tool_schemas_require_actor_management_permission() -> None:
     assert {"mute_member", "create_group_announcement"} <= admin_tools
 
 
+def test_tool_permission_levels_gate_side_effects_and_allowlist() -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    caps = capabilities.BotGroupCapabilities(
+        role="admin",
+        can_manage=True,
+        actions=frozenset(
+            {
+                "send_group_msg",
+                "send_group_forward_msg",
+                "upload_group_file",
+                "set_group_ban",
+            }
+        ),
+    )
+
+    member_names = _tool_names(tools.build_tool_schemas(caps))
+    assert "send_message" in member_names
+    assert "record_user_relation" in member_names
+    assert "send_file" not in member_names
+    assert "mute_member" not in member_names
+
+    admin_names = _tool_names(
+        tools.build_tool_schemas(
+            caps,
+            allow_admin_tools=True,
+            privileged_allowlist={"send_file"},
+        )
+    )
+    assert "send_file" in admin_names
+    assert "mute_member" not in admin_names
+
+    snapshot = tools.tool_permission_snapshot(
+        caps,
+        allow_admin_tools=True,
+        privileged_allowlist={"send_file"},
+    )
+    by_name = {row["name"]: row for row in snapshot}
+    assert by_name["get_group_info"]["permissionLevel"] == "read"
+    assert by_name["record_user_relation"]["permissionLevel"] == "state_write"
+    assert by_name["send_message"]["permissionLevel"] == "message_send"
+    assert by_name["send_file"] == {
+        "name": "send_file",
+        "permissionLevel": "privileged",
+        "exposed": True,
+        "reason": "exposed",
+        "actions": ["upload_group_file"],
+    }
+    assert by_name["mute_member"]["reason"] == "not_allowlisted"
+
+
+@pytest.mark.asyncio
+async def test_send_file_is_privileged_and_rechecks_actor_role() -> None:
+    capabilities, _media, tools = _load_agent_modules()
+
+    class Bot:
+        self_id = "100"
+        uploaded = False
+
+        async def call_api(self, action: str, **params: Any) -> dict[str, Any]:
+            if action == "get_group_member_info":
+                return {
+                    "role": "admin" if int(params["user_id"]) == BOT_ID else "member"
+                }
+            if action == "upload_group_file":
+                self.uploaded = True
+                return {}
+            raise AssertionError(action)
+
+    bot = Bot()
+    stale = capabilities.BotGroupCapabilities(
+        role="admin", can_manage=True, actions=frozenset({"upload_group_file"})
+    )
+    result = await tools.execute_tool(
+        "send_file",
+        {"file": "anything", "name": "x.txt"},
+        bot=bot,
+        group_id=1,
+        actor_user_id=200,
+        capabilities=stale,
+    )
+
+    assert result == {"ok": False, "error": "特权工具仅允许群主或管理员触发"}
+    assert not bot.uploaded
+
+
 def test_tool_registry_filters_removed_tools_and_forward_capability() -> None:
     capabilities, _media, tools = _load_agent_modules()
     base = capabilities.BotGroupCapabilities(
