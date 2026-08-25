@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import time
 from typing import Any
 
@@ -18,6 +19,73 @@ class BotGroupCapabilities:
 
     def has(self, action: str) -> bool:
         return action in self.actions
+
+
+# Message/MessageSegment 是 NoneBot 对协议消息的公共抽象。这里不把 segment
+# 混进 action 能力：action 仍由 BotGroupCapabilities 管，segment 单独维护兼容矩阵。
+COMMON_MESSAGE_SEGMENTS = frozenset(
+    {
+        "text",
+        "reply",
+        "at",
+        "face",
+        "reaction",
+        "image",
+        "record",
+        "video",
+        "rps",
+        "dice",
+        "poke",
+    }
+)
+OPTIONAL_MESSAGE_SEGMENTS = frozenset({"share", "contact", "location", "music"})
+FORBIDDEN_MESSAGE_SEGMENTS = frozenset(
+    {"xml", "json", "anonymous", "at_all", "raw_cq", "cq"}
+)
+
+# 失败时优先怀疑兼容性较差的段；没有精确信息时只记一个候选，避免一次
+# 复合消息失败就把 reply/face/image 等所有能力永久误判为不支持。
+_SEGMENT_DEGRADE_PRIORITY = (
+    "share",
+    "contact",
+    "location",
+    "music",
+    "poke",
+    "record",
+    "video",
+    "reaction",
+    "reply",
+    "face",
+    "rps",
+    "dice",
+    "image",
+    "at",
+)
+_SEGMENT_UNSUPPORTED_TTL = 10 * 60.0
+_MAX_SEGMENT_CACHE_ENTRIES = 512
+_segment_unsupported_cache: dict[tuple[int, int, str], float] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class MessageSegmentCapabilities:
+    """当前 bot/group 的消息段能力视图。"""
+
+    allowed: frozenset[str]
+    supported: frozenset[str]
+    runtime_unsupported: frozenset[str]
+    forbidden: frozenset[str] = FORBIDDEN_MESSAGE_SEGMENTS
+
+    @property
+    def exposed_types(self) -> frozenset[str]:
+        """可以暴露给 LLM 的段类型。"""
+
+        return self.supported - self.runtime_unsupported
+
+    def can_expose(self, segment_type: str) -> bool:
+        return segment_type in self.exposed_types
+
+    def is_allowed(self, segment_type: str) -> bool:
+        return segment_type in self.allowed and segment_type not in self.forbidden
 
 
 _CAPABILITY_TTL = 60.0
@@ -85,8 +153,99 @@ async def probe_group_capabilities(
     return result
 
 
+def _optional_segments_enabled() -> frozenset[str]:
+    raw = os.environ.get("AGENT_OPTIONAL_MESSAGE_SEGMENTS", "")
+    return frozenset(
+        item
+        for item in (part.strip().lower() for part in raw.split(","))
+        if item in OPTIONAL_MESSAGE_SEGMENTS
+    )
+
+
+def default_allowed_segment_types() -> frozenset[str]:
+    """本地策略允许的段；不包含后端运行时能力判断。"""
+
+    return COMMON_MESSAGE_SEGMENTS | _optional_segments_enabled()
+
+
+def _declared_message_segments(bot: Any) -> frozenset[str] | None:
+    """读取适配器/测试桩显式声明；没有声明时按 OneBot 常用段乐观开放。"""
+
+    declared = getattr(bot, "supported_message_segments", None)
+    if declared is None:
+        declared = getattr(bot, "supported_segments", None)
+    if not isinstance(declared, (set, frozenset, list, tuple)):
+        return None
+    return frozenset(str(item).strip().lower() for item in declared if str(item).strip())
+
+
+def get_segment_capabilities(bot: Any, group_id: int) -> MessageSegmentCapabilities:
+    """构造 segment 能力矩阵，不发网络请求。"""
+
+    allowed = default_allowed_segment_types()
+    declared = _declared_message_segments(bot)
+    supported = allowed if declared is None else allowed & declared
+    now = time.monotonic()
+    bot_id = int(getattr(bot, "self_id", 0) or 0)
+    runtime_unsupported: set[str] = set()
+    expired: list[tuple[int, int, str]] = []
+    for key, expires_at in _segment_unsupported_cache.items():
+        if expires_at <= now:
+            expired.append(key)
+            continue
+        key_bot_id, key_group_id, segment_type = key
+        if key_bot_id == bot_id and key_group_id == int(group_id):
+            runtime_unsupported.add(segment_type)
+    for key in expired:
+        _segment_unsupported_cache.pop(key, None)
+    return MessageSegmentCapabilities(
+        allowed=frozenset(allowed),
+        supported=frozenset(supported),
+        runtime_unsupported=frozenset(runtime_unsupported),
+    )
+
+
+def mark_segment_unsupported(bot: Any, group_id: int, segment_type: str) -> None:
+    """把一次确定/推断的协议不兼容短期记住，后续直接走降级。"""
+
+    normalized = str(segment_type).strip().lower()
+    if normalized not in COMMON_MESSAGE_SEGMENTS | OPTIONAL_MESSAGE_SEGMENTS:
+        return
+    if len(_segment_unsupported_cache) >= _MAX_SEGMENT_CACHE_ENTRIES:
+        oldest = min(_segment_unsupported_cache, key=_segment_unsupported_cache.__getitem__)
+        _segment_unsupported_cache.pop(oldest, None)
+    key = (
+        int(getattr(bot, "self_id", 0) or 0),
+        int(group_id),
+        normalized,
+    )
+    _segment_unsupported_cache[key] = time.monotonic() + _SEGMENT_UNSUPPORTED_TTL
+    dbg(f"群 {group_id} segment 能力降级缓存: {normalized}")
+
+
+def infer_unsupported_segment(
+    error: BaseException,
+    segment_types: tuple[str, ...] | list[str],
+) -> str | None:
+    """从后端错误里尽量定位不支持的 segment；信息不足时只猜一个。"""
+
+    types = tuple(dict.fromkeys(str(item).strip().lower() for item in segment_types))
+    payload = str(error).lower()
+    info = getattr(error, "info", None)
+    if isinstance(info, dict):
+        payload += " " + " ".join(str(value).lower() for value in info.values())
+    for segment_type in types:
+        if segment_type != "text" and segment_type in payload:
+            return segment_type
+    for segment_type in _SEGMENT_DEGRADE_PRIORITY:
+        if segment_type in types:
+            return segment_type
+    return None
+
+
 def reset_capability_cache() -> None:
     _capability_cache.clear()
+    _segment_unsupported_cache.clear()
 
 
 async def user_can_manage_group(bot: Any, group_id: int, user_id: int) -> bool:
@@ -132,7 +291,15 @@ async def target_can_be_muted(
 
 
 __all__ = [
+    "COMMON_MESSAGE_SEGMENTS",
+    "FORBIDDEN_MESSAGE_SEGMENTS",
+    "OPTIONAL_MESSAGE_SEGMENTS",
     "BotGroupCapabilities",
+    "MessageSegmentCapabilities",
+    "default_allowed_segment_types",
+    "get_segment_capabilities",
+    "infer_unsupported_segment",
+    "mark_segment_unsupported",
     "probe_group_capabilities",
     "reset_capability_cache",
     "target_can_be_muted",

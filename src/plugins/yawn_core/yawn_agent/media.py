@@ -44,6 +44,18 @@ def _safe_roots() -> tuple[Path, ...]:
     return tuple(dict.fromkeys(roots))
 
 
+def _media_cache_root() -> Path:
+    return Path(
+        os.path.realpath(
+            str(getattr(ai_config, "agent_media_cache_dir", "data/agent_media"))
+        )
+    )
+
+
+def _agent_file_root() -> Path:
+    return Path(os.path.realpath(os.environ.get("AGENT_FILE_ROOT", "data/agent_files")))
+
+
 def _inside(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
@@ -83,6 +95,71 @@ def _mime_for_bytes(data: bytes, hint: str | None = None) -> str:
 def _valid_image(data: bytes, hint: str | None = None) -> bool:
     mime = _mime_for_bytes(data, hint)
     return mime.startswith(_IMAGE_MIME_PREFIXES)
+
+
+def received_media_reuse_policy() -> str:
+    """收到过的图片默认禁止二次发送；仅显式 same_group 才允许同群缓存复用。"""
+
+    raw = str(os.environ.get("AGENT_RECEIVED_MEDIA_REUSE", "deny") or "deny")
+    normalized = raw.strip().lower().replace("-", "_")
+    return "same_group" if normalized == "same_group" else "deny"
+
+
+async def validate_outbound_image_path(
+    path: Path,
+    *,
+    group_id: int,
+    session: Any = None,
+) -> Path:
+    """校验 Agent 主动发送的本地图片，并落实“收到图片是否可复用”策略。
+
+    - ``AGENT_FILE_ROOT`` 内图片始终可用（包括 reactions 库）。
+    - ``AGENT_MEDIA_CACHE_DIR`` 代表收到/物化的临时图片，默认禁止复用；只有
+      ``AGENT_RECEIVED_MEDIA_REUSE=same_group`` 且数据库确认属于当前群、未过期时
+      才允许发送。
+    - 其余本地路径一律拒绝。
+    """
+
+    candidate = Path(os.path.realpath(str(path)))
+    agent_root = _agent_file_root()
+    cache_root = _media_cache_root()
+    # 缓存目录即使被部署在 AGENT_FILE_ROOT 下面，也必须先套用“收到图片复用”
+    # 策略，不能因为父目录可信而绕过隐私边界。
+    if _inside(candidate, (cache_root,)):
+        if received_media_reuse_policy() != "same_group":
+            raise PermissionError("收到过的图片默认禁止复用")
+        if session is None:
+            raise PermissionError("复用收到的图片需要数据库会话")
+        row = await session.scalar(
+            select(AgentMediaCache.id).where(
+                AgentMediaCache.group_id == group_id,
+                AgentMediaCache.cache_path == str(candidate),
+                AgentMediaCache.media_type == "image",
+                AgentMediaCache.expires_at >= now_beijing(),
+            )
+        )
+        if row is None:
+            raise PermissionError("只能复用当前群仍有效的图片缓存")
+    elif _inside(candidate, (agent_root,)):
+        pass
+    else:
+        raise PermissionError("图片不在 Agent 安全目录")  # noqa: TRY003
+
+    if not candidate.is_file():
+        raise ValueError("图片文件不存在")
+    try:
+        size = candidate.stat().st_size
+    except OSError as exc:
+        raise ValueError("无法读取图片文件") from exc
+    if size > MAX_MEDIA_BYTES:
+        raise ValueError("图片超过媒体大小限制")
+    try:
+        data = candidate.read_bytes()
+    except OSError as exc:
+        raise ValueError("无法读取图片文件") from exc
+    if len(data) > MAX_MEDIA_BYTES or not _valid_image(data, candidate.name):
+        raise ValueError("文件不是受支持的图片类型")
+    return candidate
 
 
 def _data_url(data: bytes, mime: str) -> str:

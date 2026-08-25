@@ -86,7 +86,7 @@ def test_prompt_lists_tool_names_without_repeating_schema() -> None:
         user_prompt="你好",
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v6"
+    assert prompt.PROMPT_VERSION == "yawn-agent-v8"
     assert "search_group_memory" in str(messages[0]["content"])
     assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
     assert '"properties"' not in str(messages[0]["content"])
@@ -640,6 +640,32 @@ def test_proactive_decision_parses_speak_true() -> None:
     assert decision.text == "山上现在应该挺凉的"
     assert decision.topic == "周末爬山"
     assert decision.reason == "话题正热"
+
+
+def test_proactive_decision_accepts_structured_reply_at_face_message() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _decide_proactive_reply
+
+    decision = _decide_proactive_reply(
+        '{"action":"speak","speak":true,"topic":"接话","reason":"回应刚才的人",'
+        '"message":{"segments":['
+        '{"type":"reply","message_id":123},'
+        '{"type":"at","user_id":456},'
+        '{"type":"text","text":"这个确实"},'
+        '{"type":"face","id":14}]}}'
+    )
+
+    assert decision.should_speak is True
+    assert decision.text == "这个确实"
+    assert [item["type"] for item in decision.segments] == [
+        "reply",
+        "at",
+        "text",
+        "face",
+    ]
+    assert "message" in __import__(
+        "src.plugins.yawn_core.yawn_agent.proactive", fromlist=["_JSON_PROTOCOL"]
+    )._JSON_PROTOCOL
 
 
 def test_proactive_decision_parses_speak_false_with_reason() -> None:

@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from nonebot import get_bots, get_driver, logger
-from nonebot.adapters.onebot.v11 import Message
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_orm import get_session
 from sqlalchemy import func, select
@@ -38,7 +37,6 @@ from .conversation import (
 )
 from .dialogue import (
     _activity_window_counts,
-    _extract_message_id,
     _load_context,
     persist_bot_reply,
 )
@@ -53,6 +51,14 @@ from .memory import (
 from .media import cleanup_media_cache
 from .persona import resolve_persona
 from .prompt import build_messages
+from .outbound import (
+    MAX_OUTBOUND_SEGMENTS,
+    PreparedOutboundMessage,
+    SendResult,
+    prepare_outbound_message,
+    prepare_text_message,
+    send_prepared_outbound,
+)
 
 # 普通活跃场景等 30 秒把零散消息合起来；持续刷屏由高活跃通道直接候选，
 # 不再依赖群聊出现 90 秒空隙。
@@ -70,6 +76,7 @@ _WARMUP_PROBABILITY_CAP = 0.6
 # 触发 finish_reason="length"，因此至少给 2048，并保留部署方更高的全局预算。
 _PROACTIVE_MIN_MAX_TOKENS = 2048
 _PROACTIVE_TIMEOUT_SECONDS = 25.0
+_PROACTIVE_SEGMENT_TYPES = frozenset({"text", "reply", "at", "face", "reaction"})
 
 _ACTIVE_INTERJECT_PROMPT = (
     "群里正在聊天。先读懂最近的消息：现在在聊什么话题、谁在积极参与、"
@@ -113,7 +120,10 @@ _JSON_PROTOCOL = (
     '{"action": "speak、wait 或 close", "speak": true或false, '
     '"topic": "当前话题的简短概括", '
     '"reason": "一句话说明为何开口或沉默", '
-    '"text": "要发送的消息，保持沉默时为空字符串"}'
+    '"message": {"segments": [{"type": "text/reply/at/face/reaction", "...": "对应字段"}]}, '
+    '"text": "兼容旧模型的纯文本；使用 message 时可省略，保持沉默时为空字符串"}。'
+    "主动消息只允许 text/reply/at/face/reaction；reply.message_id 与 at.user_id 必须来自上下文，"
+    "reaction_id 必须是系统表情包索引中的真实 ID；不确定时不要使用 reaction，禁止猜图片路径。"
 )
 
 
@@ -160,10 +170,18 @@ class _ProactiveDecision:
     text: str
     topic: str | None
     reason: str
+    segments: tuple[dict[str, Any], ...] = ()
 
     @property
     def should_speak(self) -> bool:
-        return self.action == "speak" and bool(self.text)
+        return self.action == "speak" and (bool(self.text) or bool(self.segments))
+
+    @property
+    def history_text(self) -> str:
+        if self.text:
+            return self.text
+        labels = [str(item.get("type") or "") for item in self.segments]
+        return f"[结构化消息: {','.join(item for item in labels if item)}]"
 
 
 class _RandomSource(Protocol):
@@ -181,10 +199,37 @@ def _decide_proactive_reply(raw: str) -> _ProactiveDecision:
     parsed = parse_json_reply(cleaned)
     if parsed is not None:
         text = str(parsed.get("text") or "").strip()
+        segments: tuple[dict[str, Any], ...] = ()
+        raw_message = parsed.get("message")
+        if isinstance(raw_message, dict):
+            raw_segments = raw_message.get("segments")
+            if isinstance(raw_segments, list) and 0 < len(raw_segments) <= MAX_OUTBOUND_SEGMENTS:
+                if all(
+                    isinstance(item, dict)
+                    and str(item.get("type") or "").strip().lower()
+                    in _PROACTIVE_SEGMENT_TYPES
+                    for item in raw_segments
+                ):
+                    segments = tuple(dict(item) for item in raw_segments)
+                else:
+                    return _ProactiveDecision(
+                        action="wait",
+                        text="",
+                        topic=None,
+                        reason="主动消息包含不允许的消息段",
+                    )
+        if segments:
+            text = "".join(
+                str(item.get("text") or "")
+                for item in segments
+                if str(item.get("type") or "").strip().lower() == "text"
+            ).strip()
         raw_action = str(parsed.get("action") or "").strip().lower()
         if raw_action not in {"speak", "wait", "close"}:
-            raw_action = "speak" if bool(parsed.get("speak")) and text else "wait"
-        if raw_action == "speak" and not text:
+            raw_action = (
+                "speak" if bool(parsed.get("speak")) and (text or segments) else "wait"
+            )
+        if raw_action == "speak" and not text and not segments:
             raw_action = "wait"
         topic = str(parsed.get("topic") or "").strip() or None
         reason = str(parsed.get("reason") or "").strip() or (
@@ -197,6 +242,7 @@ def _decide_proactive_reply(raw: str) -> _ProactiveDecision:
             text=text if raw_action == "speak" else "",
             topic=topic,
             reason=reason,
+            segments=segments if raw_action == "speak" else (),
         )
     # 疑似 JSON 的碎片不可直接发到群里；纯文本说明模型没走 JSON 协议，
     # 按旧行为整段当发言发出去，保持对不吐 JSON 模型的兼容。
@@ -446,10 +492,10 @@ async def _apply_result(
     config: GroupAgentConfig,
     *,
     now: datetime,
-    text: str | None,
+    send_result: SendResult | None,
+    history_text: str | None,
     day_count: int,
     bot_id: int | None,
-    message_id: int | None,
     mode: str,
     reason: str,
     session_turn: int,
@@ -458,7 +504,8 @@ async def _apply_result(
     未发出（内容门拦截、生成失败、撞重）只把 last_proactive_at 回拨到
     剩余半个冷却期，既防下分钟反复抽卡，也不让一次跳过封锁太久。"""
 
-    if text:
+    if send_result is not None and send_result.sent:
+        audit_text = str(history_text or send_result.normalized_text or "[结构化消息]")
         config.last_proactive_at = now
         config.last_agent_at = now
         config.proactive_day = now.strftime("%Y-%m-%d")
@@ -466,7 +513,7 @@ async def _apply_result(
         history = list(config.recent_response_fingerprints or [])
         history.append(
             {
-                "text": text[:500],
+                "text": audit_text[:500],
                 "at": now.isoformat(),
                 "input": "proactive",
             }
@@ -484,16 +531,20 @@ async def _apply_result(
                     "reason": reason[:240],
                 },
                 result="speak",
-                detail=text[:500],
+                detail=audit_text[:500],
             )
         )
         await persist_bot_reply(
             session,
             int(bot_id or 0),
             int(config.group_id),
-            message_id,
-            text,
+            send_result.message_id,
+            send_result.normalized_text,
             int(config.raw_retention_days),
+            segments=send_result.segments,
+            reply_chain=send_result.reply_chain,
+            forward_tree=send_result.forward_tree,
+            media_refs=send_result.media_refs,
         )
         dbg(f"群 {config.group_id} 主动发言计数推进: 今日已用 {day_count + 1} 条")
     else:
@@ -503,6 +554,24 @@ async def _apply_result(
         dbg(
             f"群 {config.group_id} 主动发言未发出,退避剩余半个冷却期至 {backoff_at}"
         )
+
+
+async def _prepare_proactive_message(
+    decision: _ProactiveDecision,
+    *,
+    session: Any,
+    group_id: int,
+) -> PreparedOutboundMessage:
+    """把主动决策转换为和普通对话完全相同的受限消息计划。"""
+
+    if decision.segments:
+        return await prepare_outbound_message(
+            list(decision.segments),
+            session=session,
+            group_id=group_id,
+            actor_user_id=None,
+        )
+    return prepare_text_message(decision.text)
 
 
 async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) -> str:
@@ -551,10 +620,10 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     session,
                     config,
                     now=now,
-                    text=None,
+                    send_result=None,
+                    history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    message_id=None,
                     mode=mode,
                     reason="LLM 返回空内容",
                     session_turn=1,
@@ -604,24 +673,27 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     session,
                     config,
                     now=now,
-                    text=None,
+                    send_result=None,
+                    history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    message_id=None,
                     mode=mode,
                     reason=decision.reason,
                     session_turn=1,
                 )
                 await session.commit()
                 return decision.action
-            text = decision.text
-            dbg(f"群 {group_id} 主动发言生成结果: {text!r} reason={decision.reason!r}")
-            if text.casefold() in {
+            history_text = decision.history_text
+            dbg(
+                f"群 {group_id} 主动发言生成结果: {history_text!r} "
+                f"segments={len(decision.segments)} reason={decision.reason!r}"
+            )
+            if history_text.casefold() in {
                 str(item.get("text") or "").casefold()
                 for item in (config.recent_response_fingerprints or [])
                 if isinstance(item, dict)
             }:
-                dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {text!r}")
+                dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {history_text!r}")
                 session.add(
                     AgentAudit(
                         group_id=group_id,
@@ -641,26 +713,65 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     session,
                     config,
                     now=now,
-                    text=None,
+                    send_result=None,
+                    history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    message_id=None,
                     mode=mode,
                     reason="近期回复撞重",
                     session_turn=1,
                 )
                 await session.commit()
                 return "wait"
+            try:
+                prepared = await _prepare_proactive_message(
+                    decision, session=session, group_id=group_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                reason = f"主动消息计划无效: {exc}"
+                logger.warning("群 %s 主动消息计划无效: %s", group_id, exc)
+                session.add(
+                    AgentAudit(
+                        group_id=group_id,
+                        actor_user_id=None,
+                        tool_name="proactive_reply",
+                        arguments={
+                            "mode": mode,
+                            "action": "wait",
+                            "session_turn": 1,
+                            "reason": reason[:240],
+                        },
+                        result="wait",
+                        detail=reason[:500],
+                    )
+                )
+                await _apply_result(
+                    session,
+                    config,
+                    now=now,
+                    send_result=None,
+                    history_text=None,
+                    day_count=candidate["day_count"],
+                    bot_id=primary_self_id,
+                    mode=mode,
+                    reason=reason,
+                    session_turn=1,
+                )
+                await session.commit()
+                return "wait"
+
             # 多机器人部署下逐个尝试；通常只有一个连接，首个即成功。
-            sent = False
-            sent_message_id: int | None = None
+            sent_result: SendResult | None = None
             sent_bot_id = primary_self_id
             for bot in bots:
                 try:
-                    result = await bot.call_api(
-                        "send_group_msg",
-                        group_id=group_id,
-                        message=Message(text),
+                    sent_result = await send_prepared_outbound(
+                        bot,
+                        group_id,
+                        prepared,
+                        session=session,
+                        actor_user_id=None,
+                        source="proactive",
                     )
                 except Exception:  # noqa: BLE001
                     logger.warning("群 %s 主动消息发送失败，尝试下一个机器人", group_id)
@@ -668,14 +779,12 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                         f"群 {group_id} 主动发言 bot={getattr(bot, 'self_id', None)} 发送失败"
                     )
                     continue
-                sent = True
                 sent_bot_id = int(str(getattr(bot, "self_id", "") or 0))
-                sent_message_id = _extract_message_id(result)
                 dbg(
                     f"群 {group_id} 主动发言发送成功 bot={getattr(bot, 'self_id', None)}"
                 )
                 break
-            if not sent:
+            if sent_result is None:
                 logger.warning("群 %s 主动消息无可用机器人发送", group_id)
                 dbg(f"群 {group_id} 主动发言失败: {len(bots)} 个机器人均发送失败")
                 session.add(
@@ -703,10 +812,10 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 session,
                 config,
                 now=now,
-                text=text,
+                send_result=sent_result,
+                history_text=history_text,
                 day_count=candidate["day_count"],
                 bot_id=sent_bot_id,
-                message_id=sent_message_id,
                 mode=mode,
                 reason=decision.reason,
                 session_turn=1,
@@ -835,17 +944,17 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             decision = _decide_proactive_reply(raw or "")
             action = decision.action
             reason = decision.reason
-            text = decision.text
+            history_text = decision.history_text
             if reason == "LLM 返回了无法解析的 JSON":
                 action = "error"
-                text = ""
-            if action == "speak" and text.casefold() in {
+                history_text = ""
+            if action == "speak" and history_text.casefold() in {
                 str(item.get("text") or "").casefold()
                 for item in (config.recent_response_fingerprints or [])
                 if isinstance(item, dict)
             }:
                 action = "wait"
-                text = ""
+                history_text = ""
                 reason = "续聊内容与近期回复撞重"
 
             if action != "speak":
@@ -874,10 +983,16 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 return action
 
             try:
-                result = await bot.call_api(
-                    "send_group_msg",
-                    group_id=group_id,
-                    message=Message(text),
+                prepared = await _prepare_proactive_message(
+                    decision, session=session, group_id=group_id
+                )
+                sent_result = await send_prepared_outbound(
+                    bot,
+                    group_id,
+                    prepared,
+                    session=session,
+                    actor_user_id=None,
+                    source="followup",
                 )
             except Exception:  # noqa: BLE001
                 logger.warning("群 %s 短会话续聊发送失败", group_id)
@@ -903,7 +1018,6 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 await session.commit()
                 finish_followup_evaluation(batch, "send_failed")
                 return "send_failed"
-            sent_message_id = _extract_message_id(result)
             if decision.topic:
                 config.active_topic = decision.topic[:240]
             sent_at = now_beijing()
@@ -911,10 +1025,10 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 session,
                 config,
                 now=sent_at,
-                text=text,
+                send_result=sent_result,
+                history_text=history_text,
                 day_count=day_count,
                 bot_id=bot_id,
-                message_id=sent_message_id,
                 mode="followup",
                 reason=reason,
                 session_turn=batch.bot_turns + 1,
