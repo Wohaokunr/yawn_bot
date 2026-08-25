@@ -81,6 +81,44 @@ def test_agent_turn_metrics_are_low_cardinality(
     metrics.reset_metrics_for_tests()
 
 
+def test_ai_health_tracks_only_unrecovered_consecutive_failures(
+    runtime_modules: dict[str, Any],
+) -> None:
+    metrics = runtime_modules["metrics"]
+    metrics.record_ai_request("agent_proactive", "error", 0.2)
+    metrics.record_ai_request("agent_proactive", "timeout", 0.3)
+    metrics.record_ai_request("agent_memory", "error", 0.1)
+
+    assert metrics.ai_health_snapshot() == [
+        {
+            "operation": "agent_memory",
+            "consecutiveFailures": 1,
+            "lastFailureOutcome": "error",
+        },
+        {
+            "operation": "agent_proactive",
+            "consecutiveFailures": 2,
+            "lastFailureOutcome": "timeout",
+        },
+    ]
+
+    # 成功只关闭对应 operation 的当前故障；累计 counter 仍保留历史错误。
+    metrics.record_ai_request("agent_proactive", "success", 0.1)
+    assert metrics.ai_health_snapshot() == [
+        {
+            "operation": "agent_memory",
+            "consecutiveFailures": 1,
+            "lastFailureOutcome": "error",
+        }
+    ]
+    snapshot = metrics.snapshot_metrics()
+    assert _counter(
+        snapshot,
+        "yawnbot_ai_requests_total",
+        {"operation": "agent_proactive", "outcome": "error"},
+    ) == 1
+
+
 def _counter(
     snapshot: dict[str, object],
     name: str,

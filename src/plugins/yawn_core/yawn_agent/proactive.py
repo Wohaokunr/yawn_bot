@@ -591,13 +591,14 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             ):
                 dbg(f"群 {group_id} 主动发言生成中止: 配置缺失/未启用/模式不含主动")
                 return "close"
-            # 复用对话路径的完整上下文：40 条消息、成员、记忆与关系，
-            # 让插话贴着群里的真实话题而不是只看 8 条消息的切片；
-            # 消息附带 minutes_ago 便于模型判断话题的新旧与节奏。
+            # 复用对话路径的相关上下文：先读有限候选池，再保留最后一个
+            # 活跃对话簇，避免主动插话把整小时旧聊天与默认空元数据全量注入。
+            # 消息仍附带 minutes_ago，便于模型判断话题的新旧与节奏。
             context = await _load_context(
                 session,
                 group_id,
                 config,
+                compact_history=True,
                 include_active_profiles=True,
             )
             prompt, _fingerprint = build_messages(
@@ -902,6 +903,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 config,
                 bot_id,
                 focus_user_ids=batch.user_ids,
+                compact_history=True,
                 message_cutoff=batch.cutoff_at,
                 include_active_profiles=True,
                 reference_at=batch.cutoff_at,

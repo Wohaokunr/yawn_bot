@@ -94,6 +94,7 @@ function makeOverviewForIssues(): Overview {
         avgDurationMs: 10,
         p95DurationMs: 10,
         degradations: 0,
+        health: [],
       },
       llm: { routes: [], unconfiguredProviders: [] },
       memory: {
@@ -128,6 +129,7 @@ describe("buildOverviewIssues", () => {
     const overview = makeOverviewForIssues();
     overview.bots = [];
     overview.stats.ai.byOutcome = [{ outcome: "timeout", count: 2 }];
+    overview.stats.ai.health = [{ operation: "agent_proactive", consecutiveFailures: 2, lastFailureOutcome: "timeout" }];
     overview.stats.llm.unconfiguredProviders = ["default"];
     overview.stats.memory.failingGroups = 1;
     overview.stats.memory.recentError = { groupId: "100", error: "memory failed", at: null };
@@ -142,5 +144,16 @@ describe("buildOverviewIssues", () => {
     ]);
     expect(issues.find((item) => item.key === "memory")?.to).toBe("/agent/100?tab=memories");
     expect(issues.find((item) => item.key === "llm-provider")?.to).toBe("/environment");
+  });
+
+  it("历史累计失败在后续成功恢复后不再产生当前 AI 告警", () => {
+    const overview = makeOverviewForIssues();
+    overview.stats.ai.failed = 32;
+    overview.stats.ai.byOutcome = [
+      { outcome: "error", count: 32 },
+      { outcome: "success", count: 4 },
+    ];
+    overview.stats.ai.health = [];
+    expect(buildOverviewIssues(overview).some((item) => item.key === "ai-failures")).toBe(false);
   });
 });

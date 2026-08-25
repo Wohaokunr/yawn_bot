@@ -48,7 +48,7 @@ from .context import (
 )
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
-from .memory import effective_relation_confidence, rank_memories
+from .memory import effective_relation_confidence, extract_bigrams, rank_memories
 from .message_parser import NormalizedMessage
 from .outbound import (
     PreparedOutboundMessage,
@@ -76,6 +76,18 @@ _VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 # 条目上限对齐各层最大配额（5+4+12+3），字符预算仍是实际约束。
 _MEMORY_CONTEXT_LIMIT = 24
+_CONTEXT_HISTORY_MAX_MESSAGES = 16
+_CONTEXT_HISTORY_CHAR_BUDGET = 2_800
+_CONTEXT_MESSAGE_CHAR_LIMIT = 500
+_CONTEXT_FRESH_MINUTES = 6
+_CONTEXT_CLUSTER_MAX_AGE_MINUTES = 18
+_CONTEXT_CLUSTER_GAP_MINUTES = 6
+_CONTEXT_RELEVANT_MAX_AGE_MINUTES = 60
+_CONTEXT_PROACTIVE_MAX_AGE_MINUTES = 45
+_CONTEXT_PROACTIVE_MAX_MESSAGES = 10
+_LOW_INFO_HISTORY_TEXTS = frozenset(
+    {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
+)
 _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
@@ -411,7 +423,9 @@ def _bot_message_meta(row: GroupAgentMessage) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             continue
         segment_type = str(item.get("type") or "").strip()
-        if segment_type:
+        # 纯 text 是默认形态，外层 text 已经表达完整；只记录真正影响
+        # 消息结构/寻址的非文本 segment，避免每条 bot 文本都产生 message_meta。
+        if segment_type and segment_type != "text":
             segment_types.append(segment_type)
         if segment_type == "at":
             data = item.get("data")
@@ -450,28 +464,28 @@ def _bot_message_meta(row: GroupAgentMessage) -> dict[str, Any] | None:
         if isinstance(item, dict)
     ]
     forward_nodes = min(len(list(row.forward_tree or [])), 20)
-    if not segment_types and not mentions and not reply_to and not media and not forward_nodes:
-        return None
-    return {
-        "segment_types": segment_types,
-        "mentions": mentions,
-        "reply_to": reply_to,
-        "media": media,
-        "forward_nodes": forward_nodes,
-    }
+    meta: dict[str, Any] = {}
+    if segment_types:
+        meta["segment_types"] = segment_types
+    if mentions:
+        meta["mentions"] = mentions
+    if reply_to:
+        meta["reply_to"] = reply_to
+    if media:
+        meta["media"] = media
+    if forward_nodes:
+        meta["forward_nodes"] = forward_nodes
+    return meta or None
 
 
 def _history_message_meta(row: GroupAgentMessage) -> dict[str, Any]:
     """历史消息的寻址信息；成员消息也保留 @ 与直接引用关系。"""
 
-    segment_types: list[str] = []
     mentions: list[int] = []
     for item in list(row.segments or [])[:20]:
         if not isinstance(item, dict):
             continue
         segment_type = str(item.get("type") or "").strip()
-        if segment_type:
-            segment_types.append(segment_type)
         if segment_type != "at":
             continue
         data = item.get("data")
@@ -497,13 +511,182 @@ def _history_message_meta(row: GroupAgentMessage) -> dict[str, Any]:
         for item in list(row.media_refs or [])[:4]
         if isinstance(item, dict)
     ]
-    return {
-        "segment_types": segment_types,
-        "mentions": mentions,
-        "reply_to": reply_to,
-        "media_types": media_types,
-        "forward_nodes": min(len(list(row.forward_tree or [])), 20),
+    meta: dict[str, Any] = {}
+    if mentions:
+        meta["mentions"] = mentions
+    if reply_to is not None:
+        meta["reply_to"] = reply_to
+    if media_types:
+        meta["media_types"] = media_types
+    forward_nodes = min(len(list(row.forward_tree or [])), 20)
+    if forward_nodes:
+        meta["forward_nodes"] = forward_nodes
+    return meta
+
+
+def _history_message_payload(
+    row: GroupAgentMessage,
+    *,
+    context_now: datetime,
+    previous_at: datetime | None,
+) -> dict[str, Any]:
+    """把历史消息渲染成稀疏 prompt 结构；默认值不占 token。"""
+
+    message: dict[str, Any] = {
+        "message_id": row.message_id,
+        "user_id": row.user_id,
+        "text": row.normalized_text,
+        "minutes_ago": max(
+            0, int((context_now - row.received_at).total_seconds() // 60)
+        ),
     }
+    if row.sender_name:
+        message["name"] = row.sender_name
+    if row.role and str(row.role) != "member":
+        message["role"] = row.role
+    if row.title:
+        message["title"] = row.title
+    if topic_break_before(previous_at, row.received_at):
+        message["topic_break_before"] = True
+    message.update(_history_message_meta(row))
+    if (bot_meta := _bot_message_meta(row)) is not None:
+        message["message_meta"] = bot_meta
+    return message
+
+
+def _history_minutes_ago(item: dict[str, Any]) -> int:
+    try:
+        return max(int(item.get("minutes_ago") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _history_is_low_info(item: dict[str, Any]) -> bool:
+    text = str(item.get("text") or "").strip()
+    if text in _LOW_INFO_HISTORY_TEXTS:
+        return True
+    return bool(re.fullmatch(r"\[表情(?::\d+)?\]", text))
+
+
+def _history_directly_touches_focus(
+    item: dict[str, Any], focus_user_ids: set[int]
+) -> bool:
+    if not focus_user_ids:
+        return False
+    for raw_user_id in item.get("mentions") or []:
+        if isinstance(raw_user_id, int):
+            user_id = raw_user_id
+        elif isinstance(raw_user_id, str) and raw_user_id.isdecimal():
+            user_id = int(raw_user_id)
+        else:
+            continue
+        if user_id in focus_user_ids:
+            return True
+    reply_to = item.get("reply_to")
+    if isinstance(reply_to, dict):
+        raw_user_id = reply_to.get("user_id")
+        if isinstance(raw_user_id, int):
+            return raw_user_id in focus_user_ids
+        if isinstance(raw_user_id, str) and raw_user_id.isdecimal():
+            return int(raw_user_id) in focus_user_ids
+    return False
+
+
+def _select_context_messages(
+    messages: list[dict[str, Any]],
+    *,
+    focus_user_ids: Sequence[int] | None = None,
+    query_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """按当前回合选择少量真正有用的群聊历史。
+
+    被动对话优先保留：仍在进行的最近对话簇、与当前文本有明显词项重合的旧消息、
+    以及直接 @/回复当前相关成员的消息。若群里已经沉默数分钟且当前文本和旧话题无关，
+    不再机械携带几十条旧聊天。主动发言没有 current_turn，则保留最后一个对话簇。
+    """
+
+    if not messages:
+        return []
+    focus = {
+        int(user_id)
+        for user_id in (focus_user_ids or [])
+        if isinstance(user_id, int) and int(user_id) > 0
+    }
+    query = str(query_text or "").strip()
+    query_tokens = extract_bigrams(query[:1000]) if query else set()
+    selected: set[int] = set()
+
+    if query:
+        # 当前回合与上一条消息足够近时，才把最后一个活跃对话簇作为默认背景。
+        latest_age = _history_minutes_ago(messages[-1])
+        if latest_age <= _CONTEXT_FRESH_MINUTES:
+            next_newer_age = latest_age
+            for index in range(len(messages) - 1, -1, -1):
+                item = messages[index]
+                age = _history_minutes_ago(item)
+                if age > _CONTEXT_CLUSTER_MAX_AGE_MINUTES:
+                    break
+                if age - next_newer_age > _CONTEXT_CLUSTER_GAP_MINUTES:
+                    break
+                if (
+                    not _history_is_low_info(item)
+                    or age <= 2
+                    or _history_directly_touches_focus(item, focus)
+                ):
+                    selected.add(index)
+                next_newer_age = age
+
+        # 较旧历史只有与当前文本明显相关，或直接涉及当前相关成员时才召回。
+        relevance: list[tuple[float, int]] = []
+        for index, item in enumerate(messages):
+            age = _history_minutes_ago(item)
+            if age > _CONTEXT_RELEVANT_MAX_AGE_MINUTES:
+                continue
+            direct = _history_directly_touches_focus(item, focus)
+            item_tokens = extract_bigrams(str(item.get("text") or "")[:700])
+            overlap = query_tokens & item_tokens
+            strong_ascii = any(
+                token.isascii() and len(token) >= 3 for token in overlap
+            )
+            strong_text = len(overlap) >= 2 or strong_ascii
+            if not direct and not strong_text:
+                continue
+            score = (10.0 if direct else 0.0) + len(overlap) * 2.0 - age / 60.0
+            relevance.append((score, index))
+        for _score, index in sorted(relevance, reverse=True)[:6]:
+            selected.add(index)
+            # 召回一条相邻消息帮助恢复短问答语境，但不跨明显时间缝隙。
+            for neighbor in (index - 1, index + 1):
+                if neighbor < 0 or neighbor >= len(messages):
+                    continue
+                if abs(
+                    _history_minutes_ago(messages[neighbor])
+                    - _history_minutes_ago(messages[index])
+                ) <= 2 and not _history_is_low_info(messages[neighbor]):
+                    selected.add(neighbor)
+    else:
+        # 主动发言/续聊没有当前查询：只看最后一个近期对话簇，不回放整小时聊天。
+        next_newer_age = _history_minutes_ago(messages[-1])
+        for index in range(len(messages) - 1, -1, -1):
+            item = messages[index]
+            age = _history_minutes_ago(item)
+            if age > _CONTEXT_PROACTIVE_MAX_AGE_MINUTES:
+                break
+            if age - next_newer_age > _CONTEXT_CLUSTER_GAP_MINUTES:
+                break
+            if not _history_is_low_info(item) or age <= 2:
+                selected.add(index)
+            next_newer_age = age
+            if len(selected) >= _CONTEXT_PROACTIVE_MAX_MESSAGES:
+                break
+
+    chosen = [messages[index] for index in sorted(selected)]
+    return trim_context_messages(
+        chosen,
+        max_messages=_CONTEXT_HISTORY_MAX_MESSAGES,
+        max_message_chars=_CONTEXT_MESSAGE_CHAR_LIMIT,
+        char_budget=_CONTEXT_HISTORY_CHAR_BUDGET,
+    )
 
 
 async def _load_context(
@@ -513,6 +696,8 @@ async def _load_context(
     bot_id: int | None = None,
     *,
     focus_user_ids: Sequence[int] | None = None,
+    query_text: str | None = None,
+    compact_history: bool = False,
     message_cutoff: datetime | None = None,
     include_active_profiles: bool = False,
     exclude_message_id: int | None = None,
@@ -567,35 +752,34 @@ async def _load_context(
     messages_unbounded: list[dict[str, Any]] = []
     previous_at: datetime | None = None
     for row in reversed(rows):
-        meta = _history_message_meta(row)
         messages_unbounded.append(
-            {
-                "message_id": row.message_id,
-                "user_id": row.user_id,
-                "name": row.sender_name,
-                "role": row.role,
-                "title": row.title,
-                "text": row.normalized_text,
-                "minutes_ago": max(
-                    0, int((context_now - row.received_at).total_seconds() // 60)
-                ),
-                "topic_break_before": topic_break_before(previous_at, row.received_at),
-                "mentions": meta["mentions"],
-                "reply_to": meta["reply_to"],
-                "media_types": meta["media_types"],
-                "forward_nodes": meta["forward_nodes"],
-                **(
-                    {"message_meta": bot_meta}
-                    if (bot_meta := _bot_message_meta(row)) is not None
-                    else {}
-                ),
-            }
+            _history_message_payload(
+                row,
+                context_now=context_now,
+                previous_at=previous_at,
+            )
         )
         previous_at = row.received_at
-    messages = trim_context_messages(messages_unbounded)
-    dbg(f"群 {group_id} 加载上下文: 历史消息 {len(messages)} 条(上限 40)")
-    # 相关性信号取自刚加载的消息：近 10 条文本与最后一位发言成员。
-    recent_texts = [str(item["text"] or "") for item in messages[-10:]]
+    if query_text is None and not compact_history:
+        # 兼容内部/测试调用：没有当前回合查询、也没有主动会话语义时，
+        # 保持原来的有界历史行为。线上被动对话会显式传 query_text；
+        # 主动发言/短会话会显式传 compact_history=True。
+        messages = trim_context_messages(messages_unbounded)
+    else:
+        messages = _select_context_messages(
+            messages_unbounded,
+            focus_user_ids=focus_user_ids,
+            query_text=query_text,
+        )
+    dbg(
+        f"群 {group_id} 加载上下文: 原始历史 {len(messages_unbounded)} 条 -> "
+        f"有效历史 {len(messages)} 条/"
+        f"{sum(len(str(item.get('text') or '')) for item in messages)} 字"
+    )
+    # 记忆相关性只看最终实际注入的历史，并显式加入当前回合文本。
+    recent_texts = [str(item["text"] or "") for item in messages[-6:]]
+    if query_text:
+        recent_texts.append(str(query_text)[:1000])
     previous_speaker_id = next(
         (
             int(item["user_id"])
@@ -1254,6 +1438,7 @@ async def _process_group_message(
                 focus_user_ids=_current_turn_focus_ids(
                     actor_user_id, normalized, bot_id=bot_id
                 ),
+                query_text=normalized.prompt_text(),
                 exclude_message_id=int(message_id) if message_id is not None else None,
             )
             capabilities = await probe_group_capabilities(bot, group_id)

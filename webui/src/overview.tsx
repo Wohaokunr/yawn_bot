@@ -134,15 +134,17 @@ export function buildOverviewIssues(data: Overview): OverviewIssue[] {
       to: "#plugin-status",
     });
   }
-  const aiFailures = stats.ai.byOutcome
-    .filter((item) => ["error", "timeout", "empty", "unsupported_multimodal"].includes(item.outcome))
-    .reduce((sum, item) => sum + item.count, 0);
+  const activeAiFailures = stats.ai.health.filter((item) => item.consecutiveFailures > 0);
+  const aiFailures = activeAiFailures.reduce((sum, item) => sum + item.consecutiveFailures, 0);
   if (aiFailures > 0) {
+    const detail = activeAiFailures
+      .map((item) => `${item.operation} ${aiOutcomeMeta(item.lastFailureOutcome ?? "error").label} ×${item.consecutiveFailures}`)
+      .join("；");
     issues.push({
       key: "ai-failures",
       severity: "warning",
-      title: `AI 请求累计异常 ${aiFailures} 次`,
-      description: "包含请求错误、超时、空回复或多模态不兼容；建议先检查 Provider 与模型路由。",
+      title: `AI 请求连续异常 ${aiFailures} 次`,
+      description: `${detail}。历史累计失败仍保留在 AI 服务健康统计中；当前连续失败会在下一次成功请求后自动消警。`,
       to: "/environment",
     });
   }

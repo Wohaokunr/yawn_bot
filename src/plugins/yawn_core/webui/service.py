@@ -27,7 +27,7 @@ from ..data_models.user_feature import UserFeature
 from ..data_models.user_group import UserGroup
 from ..data_models.web_admin_audit import WebAdminAudit
 from ..llm import resolve_llm_request, resolve_provider
-from ..metrics import snapshot_metrics, summarize_ai_metrics
+from ..metrics import ai_health_snapshot, snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
@@ -397,7 +397,10 @@ async def overview() -> dict[str, Any]:
         "recentAgentActions": [serialize_agent_audit(row) for row in recent],
         "metrics": metrics_snapshot,
         "stats": {
-            "ai": summarize_ai_metrics(metrics_snapshot),
+            "ai": {
+                **summarize_ai_metrics(metrics_snapshot),
+                "health": ai_health_snapshot(),
+            },
             "llm": llm_stats,
             "activity": db_stats["activity"],
             "memory": memory_stats,

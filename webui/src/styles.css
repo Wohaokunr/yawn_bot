@@ -2637,3 +2637,181 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
   .env-collapse .ant-collapse-header { align-items: flex-start !important; }
   .env-collapse .ant-collapse-extra { max-width: 50%; }
 }
+
+/* ── Agent 对话调试：跟随全局管理台组件语言 ─────────────── */
+.agent-debug-control-row {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+}
+.agent-debug-run-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.agent-debug-source-preview { margin-top: 4px; }
+.agent-debug-message-content {
+  margin: 14px 0 0 !important;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.66);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.46);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-debug-budget-row { width: 100%; }
+.agent-debug-budget-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.agent-debug-list .ant-list-item,
+.agent-debug-prompt-list .ant-list-item { padding-inline: 0; }
+.agent-debug-list-item,
+.agent-debug-prompt-item {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.agent-debug-prompt-content,
+.agent-debug-raw {
+  width: 100%;
+  max-height: 480px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.48);
+  color: var(--ink);
+  font: 12px/1.65 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.agent-debug-details { width: 100%; }
+.agent-debug-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--sakura-700);
+  font-weight: 600;
+  user-select: none;
+}
+.agent-debug-details[open] summary { margin-bottom: 8px; }
+.agent-debug-detail-card > .ant-card-body { padding-top: 8px; }
+
+/* Agent Studio 收敛：功能布局保留，视觉材质统一回全局 Card/玻璃体系。 */
+.agent-studio-page::before,
+.agent-studio-page::after,
+.agent-studio-runtime .agent-config-hero-copy::after,
+.agent-studio-persona .persona-config-hero-copy::after { content: none; }
+
+.agent-studio-page .agent-config-floating,
+.agent-studio-page .agent-studio-hero,
+.agent-studio-page .agent-config-section,
+.agent-studio-page .persona-config-section,
+.agent-studio-page .agent-config-note-card,
+.agent-studio-page .persona-note-card,
+.agent-studio-page.agent-studio-runtime .agent-config-section,
+.agent-studio-page.agent-studio-persona .persona-config-section {
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 22px;
+  background: var(--glass-bg);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25),
+    var(--glass-shadow);
+}
+.agent-studio-page .agent-config-floating:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.68);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.25),
+    0 18px 44px rgba(242, 96, 141, 0.18);
+}
+.agent-studio-page .agent-studio-hero { overflow: visible; }
+.agent-studio-page .agent-config-eyebrow,
+.agent-studio-page .persona-config-eyebrow,
+.agent-studio-page .agent-config-section-kicker,
+.agent-studio-page .persona-config-section-kicker {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-secondary);
+}
+.agent-studio-page .agent-config-eyebrow::before,
+.agent-studio-page .persona-config-eyebrow::before,
+.agent-studio-page .agent-config-section-kicker::before,
+.agent-studio-page .persona-config-section-kicker::before { content: none; }
+.agent-studio-page .agent-config-metric::before,
+.agent-studio-page .persona-config-metric::before { content: none; }
+.agent-studio-page .agent-config-metric span,
+.agent-studio-page .persona-config-metric span { padding-left: 0; }
+.agent-studio-page .agent-config-metric,
+.agent-studio-page .persona-config-metric,
+.agent-studio-page .agent-master-card,
+.agent-studio-page .persona-master-card,
+.agent-studio-page .persona-master-card.is-enabled,
+.agent-studio-page .agent-config-toggle-card,
+.agent-studio-page .agent-config-toggle-card-featured,
+.agent-studio-page .persona-field-card,
+.agent-studio-page .persona-field-card:hover,
+.agent-studio-page .persona-field-card:focus-within,
+.agent-studio-page .persona-inherit-flow > div {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+.agent-studio-page .agent-config-toggle-card:hover,
+.agent-studio-page .persona-field-card:hover,
+.agent-studio-page .persona-field-card:focus-within { transform: none; }
+.agent-studio-page .agent-master-card::after,
+.agent-studio-page .persona-master-card::after,
+.agent-studio-page .agent-config-note-title::after,
+.agent-studio-page .persona-note-title::after { content: none; }
+.agent-studio-page .agent-master-label,
+.agent-studio-page .persona-master-label {
+  background: var(--sakura-100);
+  color: var(--sakura-700);
+}
+.agent-studio-page .ant-select-selector,
+.agent-studio-page .ant-input-number,
+.agent-studio-page .persona-field-input .ant-input,
+.agent-studio-page .persona-field-input textarea.ant-input {
+  border-color: var(--line) !important;
+  background: rgba(255, 255, 255, 0.58) !important;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.agent-studio-page .ant-select-focused .ant-select-selector,
+.agent-studio-page .ant-input-number-focused,
+.agent-studio-page .persona-field-input .ant-input:focus,
+.agent-studio-page .persona-field-input textarea.ant-input:focus,
+.agent-studio-persona .persona-field-input .ant-input:focus,
+.agent-studio-persona .persona-field-input textarea.ant-input:focus {
+  border-color: var(--sakura-400) !important;
+  box-shadow: 0 0 0 3px rgba(242, 96, 141, 0.11) !important;
+}
+.agent-studio-page .agent-config-savebar,
+.agent-studio-page .persona-config-savebar {
+  background: var(--glass-bg-strong);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 14px 36px rgba(242, 96, 141, 0.14);
+}
+
+@media (max-width: 700px) {
+  .agent-debug-control-row { grid-template-columns: 1fr; gap: 8px; }
+  .agent-debug-run-row { align-items: stretch; flex-direction: column; }
+  .agent-debug-run-row .ant-btn { width: 100%; }
+}

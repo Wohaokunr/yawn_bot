@@ -1147,7 +1147,7 @@ async def run_agent_debug(
             meta = _history_message_meta(source)
             mentions = [
                 int(user_id)
-                for user_id in meta["mentions"]
+                for user_id in meta.get("mentions", [])
                 if int(user_id) not in opted_out
             ]
             reply_chain = [
@@ -1206,6 +1206,8 @@ async def run_agent_debug(
             config,
             bot_id,
             focus_user_ids=focus_ids,
+            query_text=current_turn.content if body.mode == "dialogue" else None,
+            compact_history=body.mode != "dialogue",
             message_cutoff=received_at,
             include_active_profiles=True,
             exclude_message_id=(

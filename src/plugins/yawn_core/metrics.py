@@ -112,6 +112,13 @@ class _Histogram:
 _lock = threading.RLock()
 _counters: dict[str, dict[_Labels, int]] = {}
 _histograms: dict[str, dict[_Labels, _Histogram]] = {}
+# AI 累计 counter 适合趋势统计，但不能直接表示“当前是否仍故障”。
+# 这里额外维护每个低基数 operation 的连续失败状态：一次成功即关闭该 operation
+# 的当前故障；历史失败仍完整保留在 yawnbot_ai_requests_total 中。
+_AI_ACTIVE_FAILURE_OUTCOMES = frozenset(
+    {"error", "timeout", "empty", "unsupported_multimodal"}
+)
+_ai_health: dict[str, dict[str, object]] = {}
 # key 只在内存中保存，避免把 game_id 放入公开指标标签。
 _phase_starts: dict[_PhaseKey, tuple[str, float]] = {}
 
@@ -246,7 +253,7 @@ def record_rpg_termination(reason: str) -> None:
 
 
 def record_ai_request(operation: str, outcome: str, elapsed_seconds: float) -> None:
-    """记录一次共享 LLM 调用的结果和耗时。"""
+    """记录一次共享 LLM 调用的结果、耗时与当前连续故障状态。"""
 
     labels = {"operation": operation, "outcome": outcome}
     increment_counter("yawnbot_ai_requests_total", labels=labels)
@@ -255,6 +262,40 @@ def record_ai_request(operation: str, outcome: str, elapsed_seconds: float) -> N
         elapsed_seconds,
         labels={"operation": operation},
     )
+    operation_token = _token(operation)
+    outcome_token = _token(outcome)
+    if operation_token is None or outcome_token is None:
+        return
+    with _lock:
+        state = _ai_health.setdefault(
+            operation_token,
+            {"consecutiveFailures": 0, "lastFailureOutcome": None},
+        )
+        if outcome_token == "success":
+            state["consecutiveFailures"] = 0
+            state["lastFailureOutcome"] = None
+        elif outcome_token in _AI_ACTIVE_FAILURE_OUTCOMES:
+            state["consecutiveFailures"] = int(state["consecutiveFailures"]) + 1
+            state["lastFailureOutcome"] = outcome_token
+
+
+def ai_health_snapshot() -> list[dict[str, object]]:
+    """返回当前仍未被成功请求恢复的 AI 连续故障状态。
+
+    与累计 counter 分离，避免 Overview 把数小时前已经恢复的历史错误永久显示为
+    当前告警。只暴露低基数 operation/outcome，不携带请求正文或用户标识。
+    """
+
+    with _lock:
+        return [
+            {
+                "operation": operation,
+                "consecutiveFailures": int(state["consecutiveFailures"]),
+                "lastFailureOutcome": state["lastFailureOutcome"],
+            }
+            for operation, state in sorted(_ai_health.items())
+            if int(state["consecutiveFailures"]) > 0
+        ]
 
 
 def record_ai_tokens(operation: str, source: str, value: int) -> None:
@@ -613,10 +654,12 @@ def reset_metrics_for_tests() -> None:
     with _lock:
         _counters.clear()
         _histograms.clear()
+        _ai_health.clear()
         _phase_starts.clear()
 
 
 __all__ = [
+    "ai_health_snapshot",
     "finish_game_phase",
     "increment_counter",
     "observe_histogram",

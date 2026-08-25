@@ -5,6 +5,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import nonebot
@@ -187,6 +188,83 @@ def test_context_message_budget_keeps_newest_content() -> None:
     assert all(len(str(item["text"])) <= 800 for item in trimmed)
     assert sum(len(str(item["text"])) for item in trimmed) == 6000
     assert trim_context_messages(messages, max_messages=0) == []
+
+
+def test_history_prompt_payload_omits_default_empty_metadata() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.dialogue import _history_message_payload
+
+    received_at = datetime(2026, 8, 25, 19, 57)  # noqa: DTZ001
+    row = SimpleNamespace(
+        message_id=159298630,
+        user_id=3631683695,
+        sender_name=None,
+        role="bot",
+        title=None,
+        normalized_text="网易这爆料是啥新游啊，看着像开放世界类型",
+        received_at=received_at,
+        segments=[{"type": "text", "data": {"text": "ignored"}}],
+        reply_chain=[],
+        media_refs=[],
+        forward_tree=[],
+    )
+
+    payload = _history_message_payload(
+        row,  # pyright: ignore[reportArgumentType]
+        context_now=received_at + timedelta(minutes=12),
+        previous_at=received_at - timedelta(minutes=1),
+    )
+
+    assert payload == {
+        "message_id": 159298630,
+        "user_id": 3631683695,
+        "role": "bot",
+        "text": "网易这爆料是啥新游啊，看着像开放世界类型",
+        "minutes_ago": 12,
+    }
+    assert "message_meta" not in payload
+    assert "title" not in payload
+    assert "mentions" not in payload
+    assert "reply_to" not in payload
+    assert "media_types" not in payload
+    assert "forward_nodes" not in payload
+    assert "topic_break_before" not in payload
+
+
+def test_history_selector_does_not_drag_unrelated_old_cluster_into_new_turn() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.dialogue import _select_context_messages
+
+    messages = [
+        {
+            "message_id": 1,
+            "user_id": 10,
+            "name": "可恶的网易",
+            "text": "网易其他游戏最新爆料",
+            "minutes_ago": 50,
+        },
+        {
+            "message_id": 2,
+            "user_id": 20,
+            "name": "亦，",
+            "text": "服务器规格：40人云顶服 模组：丰富经济系统",
+            "minutes_ago": 19,
+        },
+        {
+            "message_id": 3,
+            "user_id": 30,
+            "name": "old•崩•die",
+            "text": "[图片]",
+            "minutes_ago": 7,
+            "media_types": ["image"],
+        },
+    ]
+
+    assert _select_context_messages(
+        messages,
+        focus_user_ids=[3856622439],
+        query_text="有人玩那个祖国人模组吗",
+    ) == []
 
 
 def _build_messages_layered(
