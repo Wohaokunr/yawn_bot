@@ -18,6 +18,11 @@ export interface OverviewStats {
     avgDurationMs: number | null;
     p95DurationMs: number | null;
     degradations: number;
+    health: {
+      operation: string;
+      consecutiveFailures: number;
+      lastFailureOutcome: string | null;
+    }[];
   };
   llm: {
     routes: LLMRouteStatus[];

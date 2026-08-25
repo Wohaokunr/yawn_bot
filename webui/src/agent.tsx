@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Col,
+  Descriptions,
   Drawer,
   Empty,
   Form,
@@ -662,7 +663,7 @@ function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
 
         {!personaEnabled && (
           <Alert
-            className="persona-paused-alert"
+            className="section-alert"
             type="info"
             showIcon
             message="群级人设覆盖已暂停"
@@ -1129,10 +1130,184 @@ function debugJson(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
-function DebugJsonCard({ title, value }: { title: string; value: unknown }): React.JSX.Element {
-  return <Card size="small" title={title}>
-    <pre style={{ maxHeight: 420, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>{debugJson(value)}</pre>
+function debugRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function debugDisplay(value: unknown, fallback = "—"): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return debugJson(value);
+}
+
+function DebugRawBlock({ value }: { value: unknown }): React.JSX.Element {
+  return <pre className="agent-debug-raw">{debugJson(value)}</pre>;
+}
+
+function DebugContextBudget({ stats }: { stats: Record<string, unknown> }): React.JSX.Element {
+  const rows = [
+    { key: "history", label: "历史消息" },
+    { key: "memory", label: "记忆" },
+    { key: "relation", label: "关系" },
+  ].map(({ key, label }) => {
+    const data = debugRecord(stats[key]);
+    const count = Number(data.count ?? 0);
+    const limit = Math.max(1, Number(data.limit ?? 1));
+    return { key, label, count, limit, reached: Boolean(data.limitReached), characters: Number(data.characters ?? 0) };
+  });
+  return <Card size="small" title="上下文预算">
+    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+      {rows.map((row) => <div key={row.key} className="agent-debug-budget-row">
+        <div className="agent-debug-budget-head">
+          <Text>{row.label}</Text>
+          <Text type={row.reached ? "warning" : "secondary"}>{row.count} / {row.limit} · {row.characters} 字符</Text>
+        </div>
+        <Progress percent={Math.min(100, Math.round((row.count / row.limit) * 100))} showInfo={false} status={row.reached ? "exception" : "normal"} />
+      </div>)}
+      <Space wrap>
+        <Tag>成员 {Number(stats.memberCount ?? 0)}</Tag>
+        <Tag>媒体摘要 {Number(stats.mediaSummaryCount ?? 0)}</Tag>
+      </Space>
+    </Space>
   </Card>;
+}
+
+function DebugCurrentTurn({ value }: { value: Record<string, unknown> }): React.JSX.Element {
+  const mentions = Array.isArray(value.mentions) ? value.mentions : [];
+  const replyTo = debugRecord(value.reply_to);
+  return <Card size="small" title="当前消息">
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} items={[
+      { key: "actor", label: "发言人", children: debugDisplay(value.name || value.user_id) },
+      { key: "message", label: "消息 ID", children: debugDisplay(value.message_id) },
+      { key: "trigger", label: "触发方式", children: <Tag>{debugDisplay(value.trigger)}</Tag> },
+      { key: "role", label: "角色", children: debugDisplay(value.role) },
+      { key: "mentions", label: "@ 成员", children: mentions.length ? mentions.map(String).join("、") : "—" },
+      { key: "reply", label: "回复对象", children: debugDisplay(replyTo.name || replyTo.user_id) },
+    ]} />
+    <Paragraph className="agent-debug-message-content">{debugDisplay(value.content, "[空消息]")}</Paragraph>
+  </Card>;
+}
+
+function DebugContextView({ context }: { context: AgentDebugResponse["context"] }): React.JSX.Element {
+  const messages = context.messages ?? [];
+  const members = context.members ?? [];
+  const memories = context.memories ?? [];
+  const relations = context.relations ?? [];
+  return <Tabs size="small" items={[
+    {
+      key: "messages",
+      label: `历史消息 ${messages.length}`,
+      children: messages.length === 0 ? <AdminEmpty description="没有进入本轮 Prompt 的历史消息" /> : <List
+        className="agent-debug-list"
+        dataSource={messages}
+        renderItem={(item, index) => {
+          const row = debugRecord(item);
+          return <List.Item key={String(row.message_id ?? index)}>
+            <div className="agent-debug-list-item">
+              <Space wrap size={6}>
+                <Text strong>{debugDisplay(row.name || row.user_id, "未知成员")}</Text>
+                {row.minutes_ago !== undefined && <Text type="secondary">{debugDisplay(row.minutes_ago)} 分钟前</Text>}
+                {Boolean(row.topic_break_before) && <Tag>话题分界</Tag>}
+              </Space>
+              <Text>{debugDisplay(row.text, "[媒体消息]")}</Text>
+            </div>
+          </List.Item>;
+        }}
+      />,
+    },
+    {
+      key: "members",
+      label: `成员 ${members.length}`,
+      children: members.length === 0 ? <AdminEmpty description="本轮没有成员画像上下文" /> : <List
+        className="agent-debug-list"
+        dataSource={members}
+        renderItem={(item, index) => {
+          const row = debugRecord(item);
+          return <List.Item key={String(row.user_id ?? index)}>
+            <div className="agent-debug-list-item">
+              <Text strong>{debugDisplay(row.name || row.nickname || row.user_id, "未知成员")}</Text>
+              <Text type="secondary">{debugDisplay(row.role)}{row.title ? ` · ${debugDisplay(row.title)}` : ""}</Text>
+            </div>
+          </List.Item>;
+        }}
+      />,
+    },
+    {
+      key: "memories",
+      label: `记忆 ${memories.length}`,
+      children: memories.length === 0 ? <AdminEmpty description="本轮没有命中的记忆" /> : <List
+        className="agent-debug-list"
+        dataSource={memories}
+        renderItem={(item, index) => {
+          const row = debugRecord(item);
+          return <List.Item key={String(row.id ?? index)}>
+            <div className="agent-debug-list-item">
+              <Space wrap size={6}><Text strong>{debugDisplay(row.subject_name || row.subject || row.memory_type, "记忆")}</Text>{row.memory_type ? <Tag>{debugDisplay(row.memory_type)}</Tag> : null}</Space>
+              <Text>{debugDisplay(row.content)}</Text>
+            </div>
+          </List.Item>;
+        }}
+      />,
+    },
+    {
+      key: "relations",
+      label: `关系 ${relations.length}`,
+      children: relations.length === 0 ? <AdminEmpty description="本轮没有关系上下文" /> : <List size="small" dataSource={relations} renderItem={(item) => <List.Item><Text>{debugDisplay(item)}</Text></List.Item>} />,
+    },
+  ]} />;
+}
+
+function DebugPromptView({ messages }: { messages: AgentDebugResponse["promptMessages"] }): React.JSX.Element {
+  return messages.length === 0 ? <AdminEmpty description="Prompt 为空" /> : <List
+    className="agent-debug-prompt-list"
+    dataSource={messages}
+    renderItem={(item, index) => <List.Item key={`${item.role}-${index}`}>
+      <div className="agent-debug-prompt-item">
+        <Tag>{item.role}</Tag>
+        {typeof item.content === "string" ? <pre className="agent-debug-prompt-content">{item.content}</pre> : <DebugRawBlock value={item.content} />}
+      </div>
+    </List.Item>}
+  />;
+}
+
+function DebugToolsView({ tools }: { tools: AgentDebugResponse["tools"] }): React.JSX.Element {
+  if (tools.length === 0) return <AdminEmpty description="当前模式没有向模型暴露工具" />;
+  return <List
+    className="agent-debug-list"
+    dataSource={tools}
+    renderItem={(tool, index) => {
+      const row = debugRecord(tool);
+      const fn = debugRecord(row.function);
+      return <List.Item key={String(fn.name || row.name || index)}>
+        <div className="agent-debug-list-item">
+          <Space wrap><Text strong>{debugDisplay(fn.name || row.name, "未命名工具")}</Text><Tag>模型可见</Tag></Space>
+          {(fn.description || row.description) ? <Text type="secondary">{debugDisplay(fn.description || row.description)}</Text> : null}
+          <details className="agent-debug-details"><summary>查看 Schema</summary><DebugRawBlock value={tool} /></details>
+        </div>
+      </List.Item>;
+    }}
+  />;
+}
+
+function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): React.JSX.Element {
+  if (!result) return <AdminEmpty description="本次只生成提示词，没有调用模型" />;
+  const decision = result.decision ? debugRecord(result.decision) : null;
+  return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
+      { key: "outcome", label: "结果", children: <Tag color={result.outcome === "success" ? "green" : result.outcome === "timeout" ? "red" : "orange"}>{result.outcome}</Tag> },
+      { key: "duration", label: "耗时", children: `${result.durationMs} ms` },
+      { key: "finish", label: "结束原因", children: result.finishReason || "—" },
+      { key: "tokens", label: "Token", children: `${result.usage.promptTokens ?? "—"} / ${result.usage.completionTokens ?? "—"}` },
+    ]} />
+    {decision && <Card size="small" title="主动发言决策"><Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
+      { key: "action", label: "动作", children: debugDisplay(decision.action) },
+      { key: "topic", label: "话题", children: debugDisplay(decision.topic) },
+      { key: "reason", label: "原因", children: debugDisplay(decision.reason) },
+      { key: "segments", label: "消息段", children: debugDisplay(decision.segments) },
+    ]} /></Card>}
+    <Card size="small" title="模型文本"><Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{result.text || "（无文本输出）"}</Paragraph></Card>
+    {result.toolCalls.length > 0 && <Card size="small" title={`工具意图（${result.toolCalls.length}）`}><List size="small" dataSource={result.toolCalls} renderItem={(call) => <List.Item><div className="agent-debug-list-item"><Text strong>{call.name}</Text><DebugRawBlock value={call.arguments} /></div></List.Item>} /></Card>}
+  </Space>;
 }
 
 function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
@@ -1163,6 +1338,10 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
     () => (messagesQuery.data ?? []).filter((row) => row.role !== "bot").map((row) => ({ value: row.messageId, label: debugMessageLabel(row) })),
     [messagesQuery.data],
   );
+  const selectedMessage = useMemo(
+    () => (messagesQuery.data ?? []).find((row) => row.messageId === messageId) ?? null,
+    [messageId, messagesQuery.data],
+  );
   const run = async () => {
     if (source === "history" && !messageId) {
       message.warning("请先选择一条历史消息"); return;
@@ -1184,59 +1363,114 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
       setRunning(false);
     }
   };
+
   return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
     <Alert
       type="info"
       showIcon
+      className="section-alert"
       message="无副作用调试"
-      description="真实试跑只请求当前固定路由的模型：不会发送群消息、执行工具、修改 Agent 状态或写入调试记录。媒体仅显示安全摘要，不参与重放。"
+      description="真实试跑只请求当前固定路由的模型，不发送群消息、不执行工具、不修改 Agent 状态。媒体与合并转发仅使用安全摘要。"
     />
-    <Card title="失败案例与试跑配置" extra={<Space><Link to={`?tab=config`}>运行配置</Link><Link to={`?tab=persona`}>人设配置</Link><Link to="/environment">LLM Provider</Link></Space>}>
+
+    <Card
+      title="调试场景"
+      extra={<Space wrap><Link to={`?tab=config`}>运行配置</Link><Link to={`?tab=persona`}>人设配置</Link><Link to="/environment">LLM Provider</Link></Space>}
+    >
       <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-        <Segmented block value={mode} onChange={(value) => setMode(value as AgentDebugMode)} options={AGENT_DEBUG_MODES} />
-        <Segmented value={source} onChange={(value) => setSource(value as "history" | "simulation")} options={[{ value: "history", label: "历史消息回放" }, { value: "simulation", label: "模拟消息" }]} />
-        {source === "history"
-          ? <Select
-              showSearch
-              loading={messagesQuery.loading}
-              value={messageId || undefined}
-              onChange={setMessageId}
-              options={messageOptions}
-              optionFilterProp="label"
-              placeholder="选择保留期内的一条成员消息"
-              style={{ width: "100%" }}
-              notFoundContent={messagesQuery.error ? "消息记录加载失败" : undefined}
-            />
-          : <Row gutter={[16, 16]}>
-              <Col xs={24} md={8}><Input value={actorUserId} onChange={(event) => setActorUserId(event.target.value)} placeholder="发言人 QQ 号" /></Col>
-              <Col xs={24} md={16}><Input.TextArea value={text} onChange={(event) => setText(event.target.value)} autoSize={{ minRows: 2, maxRows: 6 }} maxLength={4000} showCount placeholder="输入要模拟的当前群消息" /></Col>
-            </Row>}
-        <Space><Switch checked={runModel} onChange={setRunModel} /><Text>调用真实模型（30 秒超时，并发上限 2）</Text><Button type="primary" onClick={run} loading={running}>{runModel ? "真实试跑" : "生成提示词"}</Button></Space>
+        <div className="agent-debug-control-row">
+          <Text strong>运行模式</Text>
+          <Segmented block value={mode} onChange={(value) => setMode(value as AgentDebugMode)} options={AGENT_DEBUG_MODES} />
+        </div>
+        <div className="agent-debug-control-row">
+          <Text strong>消息来源</Text>
+          <Segmented value={source} onChange={(value) => setSource(value as "history" | "simulation")} options={[{ value: "history", label: "历史消息回放" }, { value: "simulation", label: "模拟消息" }]} />
+        </div>
+
+        {source === "history" ? <Space orientation="vertical" size="small" style={{ width: "100%" }}>
+          <Select
+            showSearch
+            loading={messagesQuery.loading}
+            value={messageId || undefined}
+            onChange={setMessageId}
+            options={messageOptions}
+            optionFilterProp="label"
+            placeholder="选择保留期内的一条成员消息"
+            style={{ width: "100%" }}
+            notFoundContent={messagesQuery.error ? "消息记录加载失败" : undefined}
+          />
+          {selectedMessage && <Card size="small" className="agent-debug-source-preview">
+            <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+              <Space wrap size={8}>
+                <Text strong>{selectedMessage.senderName || selectedMessage.userId}</Text>
+                <Tag>{selectedMessage.role}</Tag>
+                <Text type="secondary">{formatTime(selectedMessage.receivedAt)}</Text>
+              </Space>
+              <Paragraph style={{ marginBottom: 0 }}>{selectedMessage.text || "[媒体消息]"}</Paragraph>
+            </Space>
+          </Card>}
+        </Space> : <Row gutter={[16, 16]}>
+          <Col xs={24} md={8}>
+            <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+              <Text strong>模拟发言人</Text>
+              <Input value={actorUserId} onChange={(event) => setActorUserId(event.target.value)} placeholder="成员 QQ 号" />
+            </Space>
+          </Col>
+          <Col xs={24} md={16}>
+            <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+              <Text strong>消息正文</Text>
+              <Input.TextArea value={text} onChange={(event) => setText(event.target.value)} autoSize={{ minRows: 3, maxRows: 7 }} maxLength={4000} showCount placeholder="输入要模拟的当前群消息" />
+            </Space>
+          </Col>
+        </Row>}
+
+        <div className="agent-debug-run-row">
+          <Space wrap>
+            <Switch checked={runModel} onChange={setRunModel} />
+            <div>
+              <Text strong>{runModel ? "调用真实模型" : "仅构建提示词"}</Text><br />
+              <Text type="secondary">{runModel ? "30 秒超时，并发上限 2；仍不会执行任何副作用" : "用于检查上下文、Prompt 和可见工具，不产生模型调用"}</Text>
+            </div>
+          </Space>
+          <Button type="primary" onClick={run} loading={running}>{runModel ? "开始真实试跑" : "生成调试快照"}</Button>
+        </div>
       </Space>
     </Card>
+
     {error && <QueryErrorAlert error={error} onRetry={run} />}
+
     {result && <>
       {result.warnings.map((warning) => <Alert key={warning} type="warning" showIcon message={warning} />)}
-      <Card size="small">
-        <Space wrap>
-          <Tag color="blue">{result.promptVersion}</Tag>
-          <Tag>{AGENT_DEBUG_MODES.find((item) => item.value === result.mode)?.label ?? result.mode}</Tag>
-          <Text>路由：{result.route.provider} / {result.route.model}</Text>
-          <Tag color={result.route.configured ? "green" : "red"}>{result.route.configured ? "已配置" : "未配置"}</Tag>
-          <Text type="secondary">{result.route.profile} · thinking={result.route.thinking} · multimodal={result.route.multimodal}</Text>
-        </Space>
+      <Card title="本次调试摘要" extra={<Tag color={result.route.configured ? "green" : "red"}>{result.route.configured ? "路由可用" : "路由未配置"}</Tag>}>
+        <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
+          { key: "mode", label: "模式", children: AGENT_DEBUG_MODES.find((item) => item.value === result.mode)?.label ?? result.mode },
+          { key: "prompt", label: "Prompt 版本", children: result.promptVersion },
+          { key: "provider", label: "Provider", children: result.route.provider || "—" },
+          { key: "model", label: "模型", children: result.route.model || "—" },
+          { key: "profile", label: "路由配置", children: result.route.profile || "—" },
+          { key: "thinking", label: "Thinking", children: result.route.thinking || "—" },
+          { key: "multimodal", label: "多模态", children: result.route.multimodal || "—" },
+          { key: "result", label: "模型结果", children: result.result ? <Tag color={result.result.outcome === "success" ? "green" : "orange"}>{result.result.outcome}</Tag> : <Tag>未调用</Tag> },
+        ]} />
       </Card>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xl={12}><DebugJsonCard title="当前消息" value={result.currentTurn} /></Col>
-        <Col xs={24} xl={12}><DebugJsonCard title="截断统计" value={result.stats} /></Col>
-        <Col xs={24} xl={12}><DebugJsonCard title="历史上下文" value={result.context.messages ?? []} /></Col>
-        <Col xs={24} xl={12}><DebugJsonCard title="成员、记忆与关系" value={{ members: result.context.members ?? [], memories: result.context.memories ?? [], relations: result.context.relations ?? [] }} /></Col>
-      </Row>
-      <DebugJsonCard title="完整脱敏提示词" value={result.promptMessages} />
-      <DebugJsonCard title={`模型可见工具（${result.tools.length}）`} value={result.tools} />
-      {result.result
-        ? <DebugJsonCard title="模型结果、工具意图与用量" value={result.result} />
-        : <Alert type="success" showIcon message="本次只构建提示词，未请求模型" />}
+
+      <Card title="调试详情" className="agent-debug-detail-card">
+        <Tabs items={[
+          {
+            key: "overview",
+            label: "概览",
+            children: <Row gutter={[16, 16]}>
+              <Col xs={24} xl={14}><DebugCurrentTurn value={result.currentTurn} /></Col>
+              <Col xs={24} xl={10}><DebugContextBudget stats={result.stats} /></Col>
+            </Row>,
+          },
+          { key: "context", label: "上下文", children: <DebugContextView context={result.context} /> },
+          { key: "prompt", label: `Prompt ${result.promptMessages.length}`, children: <DebugPromptView messages={result.promptMessages} /> },
+          { key: "tools", label: `工具 ${result.tools.length}`, children: <DebugToolsView tools={result.tools} /> },
+          { key: "model", label: "模型结果", children: <DebugModelView result={result.result} /> },
+          { key: "raw", label: "原始数据", children: <DebugRawBlock value={result} /> },
+        ]} />
+      </Card>
     </>}
   </Space>;
 }
