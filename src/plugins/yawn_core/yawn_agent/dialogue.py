@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from nonebot import logger
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot_plugin_orm import get_session
 from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -29,7 +29,11 @@ from ..llm import (
     resolve_llm_request,
     vision_model_configured,
 )
-from .capabilities import probe_group_capabilities, user_can_manage_group
+from .capabilities import (
+    get_segment_capabilities,
+    probe_group_capabilities,
+    user_can_manage_group,
+)
 from .collector import group_lock, is_pending_trigger_expired
 from .config_store import agent_runtime_enabled, get_or_create_config
 from .conversation import mark_bot_reply
@@ -38,6 +42,13 @@ from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
 from .memory import effective_relation_confidence, rank_memories
 from .message_parser import NormalizedMessage
+from .outbound import (
+    PreparedOutboundMessage,
+    SendResult,
+    extract_message_id as extract_outbound_message_id,
+    prepare_text_message,
+    send_prepared_outbound,
+)
 from .persona import resolve_persona
 from .prompt import build_messages, prompt_cache_key, stable_context_key
 from .tools import MAX_TOOL_ROUNDS, build_tool_schemas, execute_tool
@@ -46,9 +57,9 @@ _GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "�
 _PROMPT_CACHE_KEYS: OrderedDict[str, None] = OrderedDict()
 _PROMPT_CACHE_LIMIT = 256
 _MAX_TURN_SECONDS = 120.0
-_SEND_TIMEOUT = 15.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
+_VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_image", "send_forward"})
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 # 条目上限对齐各层最大配额（5+4+12+3），字符预算仍是实际约束。
 _MEMORY_CONTEXT_LIMIT = 24
@@ -58,19 +69,16 @@ _VISION_SYSTEM_PROMPT = (
 )
 
 
+def _visible_tool_send_ends_turn(result: dict[str, Any]) -> bool:
+    """用户可见发送一旦成功，本轮必须结束，禁止再追加最终纯文本。"""
+
+    return result.get("sent") is True
+
+
 def _extract_message_id(result: Any) -> int | None:
     """OneBot 实现对 send_group_msg 返回值不统一：dict、对象或裸 int；0 视为缺失。"""
 
-    raw: Any
-    if isinstance(result, dict):
-        raw = result.get("message_id")
-    else:
-        raw = getattr(result, "message_id", result)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return value or None
+    return extract_outbound_message_id(result)
 
 
 async def _send_group_text(
@@ -79,16 +87,14 @@ async def _send_group_text(
     """返回 (是否发出, message_id)；message_id 缺失不视为发送失败。"""
 
     try:
-        result = await asyncio.wait_for(
-            bot.call_api("send_group_msg", group_id=group_id, message=Message(text)),
-            timeout=_SEND_TIMEOUT,
-        )
+        prepared = prepare_text_message(text)
+        result = await send_prepared_outbound(bot, group_id, prepared)
     except Exception:  # noqa: BLE001
         logger.warning("群聊 Agent 发送群消息失败: %s", group_id)
         dbg_exc(f"群 {group_id} 发送群消息失败 text={text!r}")
         return False, None
     dbg(f"群 {group_id} 发送群消息成功 text={text!r}")
-    return True, _extract_message_id(result)
+    return result.sent, result.message_id
 
 
 def contains_word(text: str, word: str) -> bool:
@@ -136,18 +142,44 @@ def _deterministic_reply(text: str) -> str | None:
 async def _send_unless_expired(
     bot: Bot,
     group_id: int,
-    text: str,
+    message: str | PreparedOutboundMessage,
     enqueued_at: float | None,
     *,
     label: str,
     message_id: Any = None,
-) -> tuple[bool, int | None]:
-    """过期触发不发送；返回 (是否真正发出, message_id)。"""
+    session: Any = None,
+    actor_user_id: int | None = None,
+    source: str = "dialogue",
+) -> SendResult:
+    """过期触发不发送；普通文本与复合 Message 统一走 sender。"""
 
     if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
         dbg(f"群 {group_id} {label}前触发已过期,跳过发送: message_id={message_id}")
-        return False, None
-    return await _send_group_text(bot, group_id, text)
+        return SendResult(
+            sent=False,
+            message_id=None,
+            normalized_text="",
+            segment_types=(),
+        )
+    prepared = prepare_text_message(message) if isinstance(message, str) else message
+    try:
+        return await send_prepared_outbound(
+            bot,
+            group_id,
+            prepared,
+            session=session,
+            actor_user_id=actor_user_id,
+            source=source,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("群聊 Agent 发送群消息失败: %s", group_id)
+        dbg_exc(f"群 {group_id} {label}失败")
+        return SendResult(
+            sent=False,
+            message_id=None,
+            normalized_text=prepared.normalized_text,
+            segment_types=(),
+        )
 
 
 async def persist_bot_reply(
@@ -157,6 +189,11 @@ async def persist_bot_reply(
     message_id: int | None,
     text: str,
     retention_days: int,
+    *,
+    segments: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    reply_chain: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    forward_tree: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    media_refs: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> None:
     """把 bot 自己发出的消息以 role="bot" 落库，让后续上下文记得自己说过什么。
 
@@ -187,6 +224,10 @@ async def persist_bot_reply(
             role="bot",
             title=None,
             normalized_text=text,
+            segments=list(segments or []),
+            reply_chain=list(reply_chain or []),
+            forward_tree=list(forward_tree or []),
+            media_refs=list(media_refs or []),
             received_at=now,
             expires_at=now + timedelta(days=retention),
         )
@@ -306,6 +347,68 @@ async def _activity_window_counts(
     }
 
 
+def _bot_message_meta(row: GroupAgentMessage) -> dict[str, Any] | None:
+    """给下一轮模型看的 Bot 自己消息摘要；不回灌路径或完整转发 payload。"""
+
+    if str(row.role or "") != "bot":
+        return None
+    segments = list(row.segments or [])
+    segment_types: list[str] = []
+    mentions: list[int] = []
+    for item in segments[:12]:
+        if not isinstance(item, dict):
+            continue
+        segment_type = str(item.get("type") or "").strip()
+        if segment_type:
+            segment_types.append(segment_type)
+        if segment_type == "at":
+            data = item.get("data")
+            raw_user_id = data.get("qq") if isinstance(data, dict) else None
+            if not isinstance(raw_user_id, (int, str)):
+                continue
+            try:
+                user_id = int(raw_user_id)
+            except (TypeError, ValueError):
+                continue
+            if user_id > 0 and user_id not in mentions:
+                mentions.append(user_id)
+    reply_to: list[int] = []
+    for item in list(row.reply_chain or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        raw_message_id = item.get("message_id")
+        if not isinstance(raw_message_id, (int, str)):
+            continue
+        try:
+            target = int(raw_message_id)
+        except (TypeError, ValueError):
+            continue
+        if target and target not in reply_to:
+            reply_to.append(target)
+    media = [
+        {
+            "type": str(item.get("type") or "media")[:24],
+            **(
+                {"reaction_id": str(item.get("reaction_id"))[:64]}
+                if item.get("reaction_id")
+                else {}
+            ),
+        }
+        for item in list(row.media_refs or [])[:4]
+        if isinstance(item, dict)
+    ]
+    forward_nodes = min(len(list(row.forward_tree or [])), 20)
+    if not segment_types and not mentions and not reply_to and not media and not forward_nodes:
+        return None
+    return {
+        "segment_types": segment_types,
+        "mentions": mentions,
+        "reply_to": reply_to,
+        "media": media,
+        "forward_nodes": forward_nodes,
+    }
+
+
 async def _load_context(
     session: Any,
     group_id: int,
@@ -365,11 +468,17 @@ async def _load_context(
     )
     messages = trim_context_messages([
         {
+            "message_id": row.message_id,
             "user_id": row.user_id,
             "name": row.sender_name,
             "role": row.role,
             "title": row.title,
             "text": row.normalized_text,
+            **(
+                {"message_meta": meta}
+                if (meta := _bot_message_meta(row)) is not None
+                else {}
+            ),
             # 主动发言路径开启：让模型分辨"几分钟前在聊什么"与更早的旧话。
             **(
                 {"minutes_ago": int((now - row.received_at).total_seconds() // 60)}
@@ -899,18 +1008,23 @@ async def _finalize_reply(
     config: GroupAgentConfig,
     session: Any,
     normalized: NormalizedMessage,
-    content: str,
+    content: str | PreparedOutboundMessage,
     user_prompt: str,
     enqueued_at: float | None,
     message_id: Any,
 ) -> None:
     """最终回复分支：去重检查、发送、指纹记录、话题推进与状态提交。"""
 
+    prepared = prepare_text_message(content) if isinstance(content, str) else content
+    reply_text = prepared.normalized_text
+    fingerprint_source = reply_text or json.dumps(
+        list(prepared.segment_records), ensure_ascii=False, sort_keys=True
+    )
     input_fingerprint = hashlib.sha256(
         user_prompt.casefold().encode("utf-8")
     ).hexdigest()
     response_fingerprint = hashlib.sha256(
-        content.casefold().encode("utf-8")
+        fingerprint_source.casefold().encode("utf-8")
     ).hexdigest()
     now = now_beijing()
     recent = list(config.recent_response_fingerprints or [])
@@ -919,12 +1033,20 @@ async def _finalize_reply(
         for item in recent
     )
     if duplicate:
-        dbg(f"群 {group_id} 回复与近 10 分钟内重复,抑制发送: {content!r}")
+        dbg(f"群 {group_id} 回复与近 10 分钟内重复,抑制发送: {reply_text!r}")
         return
-    sent, sent_message_id = await _send_unless_expired(
-        bot, group_id, content, enqueued_at, label="正文发送", message_id=message_id
+    sent = await _send_unless_expired(
+        bot,
+        group_id,
+        prepared,
+        enqueued_at,
+        label="正文发送",
+        message_id=message_id,
+        session=session,
+        actor_user_id=None,
+        source="dialogue",
     )
-    if not sent:
+    if not sent.sent:
         dbg(f"群 {group_id} 回复未发送(触发过期或发送失败),放弃本轮状态更新")
         return
     # bot 发言进入消息历史：后续上下文能看到自己最近说过什么，
@@ -933,15 +1055,19 @@ async def _finalize_reply(
         session,
         int(bot.self_id),
         group_id,
-        sent_message_id,
-        content,
+        sent.message_id,
+        sent.normalized_text,
         int(config.raw_retention_days),
+        segments=sent.segments,
+        reply_chain=sent.reply_chain,
+        forward_tree=sent.forward_tree,
+        media_refs=sent.media_refs,
     )
     recent.append(
         {
             "input": input_fingerprint,
             "response": response_fingerprint,
-            "text": content[:500],
+            "text": reply_text[:500],
             "at": now.isoformat(),
         }
     )
@@ -1013,8 +1139,13 @@ async def _process_group_message(
                 bot_id,
                 exclude_message_id=int(message_id) if message_id is not None else None,
             )
-            capabilities = await probe_group_capabilities(bot, group_id)
             actor_user_id = int(event.get_user_id())
+            if message_id is not None:
+                context["current_message"] = {
+                    "message_id": int(message_id),
+                    "user_id": actor_user_id,
+                }
+            capabilities = await probe_group_capabilities(bot, group_id)
             allow_admin_tools = await user_can_manage_group(
                 bot, group_id, actor_user_id
             )
@@ -1024,7 +1155,9 @@ async def _process_group_message(
                 f"发起人 {actor_user_id} 管理工具权限={allow_admin_tools}"
             )
             tools = build_tool_schemas(
-                capabilities, allow_admin_tools=allow_admin_tools
+                capabilities,
+                allow_admin_tools=allow_admin_tools,
+                segment_capabilities=get_segment_capabilities(bot, group_id),
             )
             dbg(f"群 {group_id} 本轮可用工具 {len(tools)} 个")
             media_blocks, cached_captions, media_digests = await prepare_image_inputs(
@@ -1176,6 +1309,7 @@ async def _process_group_message(
                     "tool_calls": [],
                 }
                 messages.append(assistant)
+                round_sent_message = False
                 for call in tool_calls:
                     function = getattr(call, "function", None)
                     if function is None:
@@ -1183,10 +1317,11 @@ async def _process_group_message(
                             f"群 {group_id} 跳过缺少 function 的 tool_call id={getattr(call, 'id', None)}"
                         )
                         continue
+                    tool_name = str(getattr(function, "name", "") or "")
                     raw_args = getattr(function, "arguments", "{}") or "{}"
                     dbg(
                         f"群 {group_id} 第 {rounds} 轮工具调用: "
-                        f"name={getattr(function, 'name', '')!r} args={raw_args}"
+                        f"name={tool_name!r} args={raw_args}"
                     )
                     try:
                         args = json.loads(raw_args)
@@ -1197,25 +1332,111 @@ async def _process_group_message(
                         result = {"ok": False, "error": str(exc)}
                         dbg(f"群 {group_id} 工具参数解析失败: {exc}")
                     else:
-                        result = await execute_tool(
-                            getattr(function, "name", ""),
-                            args,
-                            bot=bot,
-                            group_id=group_id,
-                            actor_user_id=actor_user_id,
-                            session=session,
-                            capabilities=capabilities,
-                        )
+                        if (
+                            tool_name in _VISIBLE_SEND_TOOLS
+                            and enqueued_at is not None
+                            and is_pending_trigger_expired(enqueued_at)
+                        ):
+                            result = {
+                                "ok": False,
+                                "error": "触发消息已过期，取消发送",
+                                "expired": True,
+                            }
+                            dbg(
+                                f"群 {group_id} 工具 {tool_name} 发送前触发已过期,取消副作用"
+                            )
+                        else:
+                            result = await execute_tool(
+                                tool_name,
+                                args,
+                                bot=bot,
+                                group_id=group_id,
+                                actor_user_id=actor_user_id,
+                                session=session,
+                                capabilities=capabilities,
+                            )
                     dbg(
-                        f"群 {group_id} 工具 {getattr(function, 'name', '')!r} 返回: "
+                        f"群 {group_id} 工具 {tool_name!r} 返回: "
                         f"{json.dumps(result, ensure_ascii=False)}"
                     )
+                    if _visible_tool_send_ends_turn(result):
+                        round_sent_message = True
+                        payload = (
+                            result.get("result", {}).get("outbound", {})
+                            if isinstance(result.get("result"), dict)
+                            else {}
+                        )
+                        if isinstance(payload, dict):
+                            await persist_bot_reply(
+                                session,
+                                int(bot.self_id),
+                                group_id,
+                                _extract_message_id(payload.get("message_id")),
+                                str(payload.get("text") or ""),
+                                int(config.raw_retention_days),
+                                segments=(
+                                    payload.get("segments")
+                                    if isinstance(payload.get("segments"), list)
+                                    else []
+                                ),
+                                reply_chain=(
+                                    payload.get("reply_chain")
+                                    if isinstance(payload.get("reply_chain"), list)
+                                    else []
+                                ),
+                                forward_tree=(
+                                    payload.get("forward_tree")
+                                    if isinstance(payload.get("forward_tree"), list)
+                                    else []
+                                ),
+                                media_refs=(
+                                    payload.get("media_refs")
+                                    if isinstance(payload.get("media_refs"), list)
+                                    else []
+                                ),
+                            )
+                            now = now_beijing()
+                            fingerprint_source = str(payload.get("text") or "") or json.dumps(
+                                {
+                                    "segments": payload.get("segments", []),
+                                    "forward_tree": payload.get("forward_tree", []),
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                            response_fingerprint = hashlib.sha256(
+                                fingerprint_source.casefold().encode("utf-8")
+                            ).hexdigest()
+                            input_fingerprint = hashlib.sha256(
+                                user_prompt.casefold().encode("utf-8")
+                            ).hexdigest()
+                            recent = list(config.recent_response_fingerprints or [])
+                            recent.append(
+                                {
+                                    "input": input_fingerprint,
+                                    "response": response_fingerprint,
+                                    "text": str(payload.get("text") or "")[:500],
+                                    "at": now.isoformat(),
+                                }
+                            )
+                            config.recent_response_fingerprints = recent[-8:]
+                            config.last_response_fingerprint = response_fingerprint
+                            config.last_response_input_fingerprint = input_fingerprint
+                            config.last_response_at = now
+                            config.last_agent_at = now
+                            if config.short_conversation_enabled:
+                                mark_bot_reply(
+                                    int(bot.self_id),
+                                    group_id,
+                                    topic=str(config.active_topic or normalized.plain_text or ""),
+                                    source="dialogue",
+                                )
                     assistant["tool_calls"].append(
                         {
                             "id": call.id,
                             "type": "function",
                             "function": {
-                                "name": getattr(function, "name", ""),
+                                "name": tool_name,
                                 "arguments": raw_args,
                             },
                         }
@@ -1235,6 +1456,13 @@ async def _process_group_message(
                     # 提交会过期会话内对象；后续轮次还要读取 config 属性，
                     # 先刷新避免同步惰性加载（MissingGreenlet）。
                     await session.refresh(config)
+                    if round_sent_message:
+                        # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
+                        # 同时调用 send_image/send_message/send_forward 连发多条。
+                        break
+                if round_sent_message:
+                    dbg(f"群 {group_id} 工具已发送用户可见消息,结束本轮避免重复回复")
+                    return
             # 走到这里说明所有轮次都被工具调用耗尽、始终没有最终回复。
             # 其余分支均已 return；给用户一个交代，不能静默。
             dbg(

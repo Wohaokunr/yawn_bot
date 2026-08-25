@@ -25,6 +25,8 @@ from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.user_group import UserGroup
 from .capabilities import (
     BotGroupCapabilities,
+    COMMON_MESSAGE_SEGMENTS,
+    MessageSegmentCapabilities,
     probe_group_capabilities,
     target_can_be_muted,
     user_can_manage_group,
@@ -32,17 +34,65 @@ from .capabilities import (
 from .context import now_beijing
 from .log import dbg
 from .memory import effective_relation_confidence, normalize_relation_type, rank_memories
+from .outbound import (
+    MAX_FORWARD_NODES,
+    MAX_OUTBOUND_SEGMENTS,
+    send_forward_message,
+    send_outbound_message,
+)
+from .reactions import search_reactions
 
 MAX_TOOL_ROUNDS = 4
 MAX_FILE_BYTES = 32 * 1024 * 1024
-MAX_FORWARD_SEND = 20
-MAX_FORWARD_BYTES = 128 * 1024
 _FILE_ROOT = Path(os.environ.get("AGENT_FILE_ROOT", "data/agent_files")).resolve()
 _ALLOWED_FILE_HOSTS = frozenset(
     host.strip().lower()
     for host in os.environ.get("AGENT_FILE_ALLOWED_HOSTS", "").split(",")
     if host.strip()
 )
+
+_MESSAGE_SEGMENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": [
+                "text",
+                "reply",
+                "at",
+                "face",
+                "reaction",
+                "image",
+                "record",
+                "video",
+                "rps",
+                "dice",
+                "poke",
+                "share",
+                "contact",
+                "location",
+                "music",
+            ],
+        },
+        "text": {"type": "string", "maxLength": 4000},
+        "message_id": {"type": "integer"},
+        "user_id": {"type": "integer", "minimum": 1},
+        "id": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "reaction_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "file": {"type": "string", "minLength": 1},
+        "poke_type": {"type": "string", "minLength": 1, "maxLength": 32},
+        "poke_id": {"type": "string", "minLength": 1, "maxLength": 32},
+        "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "content": {"type": "string", "maxLength": 300},
+        "contact_type": {"type": "string", "enum": ["qq", "group"]},
+        "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+        "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+        "provider": {"type": "string", "enum": ["qq", "163", "xm"]},
+    },
+    "required": ["type"],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,23 +161,68 @@ _TOOL_DEFINITIONS = (
         required=("subject_user_id", "object_user_id", "type"),
     ),
     _ToolDefinition(
+        "search_reactions",
+        (
+            "按情绪/场景标签搜索本地表情包库，例如无语、开心、疑惑、吃瓜、震惊。"
+            "返回 reaction_id；发送时必须使用 reaction 段，禁止猜测本地图片路径。"
+        ),
+        {
+            "query": {"type": "string", "minLength": 1, "maxLength": 80},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 8},
+        },
+        required=("query",),
+    ),
+    _ToolDefinition(
+        "send_message",
+        (
+            "发送一条结构化 QQ 群消息，可组合引用、@、文本、QQ 表情、表情包、图片、"
+            "语音、视频、猜拳、骰子和 poke。reply.message_id 必须来自当前上下文"
+            "已有消息，at.user_id 必须是当前群成员；禁止 CQ 码和 @all。"
+            "成功调用后消息已经发出，不要再用最终文本重复发送同样内容。"
+        ),
+        {
+            "segments": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_OUTBOUND_SEGMENTS,
+                "items": _MESSAGE_SEGMENT_SCHEMA,
+            }
+        },
+        required=("segments",),
+        actions=("send_group_msg",),
+    ),
+    _ToolDefinition(
         "send_image",
-        "发送群图片",
+        "兼容旧调用的单图片发送；内部仍走统一消息 sender。优先使用 send_message。",
         {"file": {"type": "string"}},
         required=("file",),
         actions=("send_group_msg",),
     ),
     _ToolDefinition(
         "send_forward",
-        "发送合并转发消息",
+        (
+            "发送受控合并转发。message 节点只能引用当前群近期 message_id；"
+            "custom 节点只给 user_id/content，nickname 由 Python 从当前群成员解析。"
+        ),
         {
-            "messages": {
+            "nodes": {
                 "type": "array",
-                "maxItems": 20,
-                "items": {"type": "object"},
+                "minItems": 1,
+                "maxItems": MAX_FORWARD_NODES,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["message", "custom"]},
+                        "message_id": {"type": "integer"},
+                        "user_id": {"type": "integer", "minimum": 1},
+                        "content": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    },
+                    "required": ["type"],
+                    "additionalProperties": False,
+                },
             }
         },
-        required=("messages",),
+        required=("nodes",),
         actions=("send_group_forward_msg",),
     ),
     _ToolDefinition(
@@ -162,10 +257,14 @@ _TOOL_DEFINITIONS = (
 )
 _TOOL_BY_NAME = {item.name: item for item in _TOOL_DEFINITIONS}
 _ADMIN_TOOLS = frozenset(item.name for item in _TOOL_DEFINITIONS if item.admin)
+_MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_image", "send_forward"})
 
 
 def build_tool_schemas(
-    capabilities: BotGroupCapabilities, *, allow_admin_tools: bool = False
+    capabilities: BotGroupCapabilities,
+    *,
+    allow_admin_tools: bool = False,
+    segment_capabilities: MessageSegmentCapabilities | None = None,
 ) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     for definition in _TOOL_DEFINITIONS:
@@ -181,6 +280,19 @@ def build_tool_schemas(
             capabilities.can_manage and allow_admin_tools
         ):
             continue
+        properties = definition.properties
+        if definition.name == "send_message":
+            properties = json.loads(json.dumps(definition.properties))
+            exposed = (
+                segment_capabilities.exposed_types
+                if segment_capabilities is not None
+                else COMMON_MESSAGE_SEGMENTS
+            )
+            properties["segments"]["items"]["properties"]["type"]["enum"] = [
+                item
+                for item in _MESSAGE_SEGMENT_SCHEMA["properties"]["type"]["enum"]
+                if item in exposed
+            ]
         tools.append(
             {
                 "type": "function",
@@ -189,7 +301,7 @@ def build_tool_schemas(
                     "description": definition.description,
                     "parameters": {
                         "type": "object",
-                        "properties": definition.properties,
+                        "properties": properties,
                         **(
                             {"required": list(definition.required)}
                             if definition.required
@@ -673,50 +785,65 @@ async def execute_tool(
                 f"群 {group_id} record_user_relation: {subject} "
                 f"—{relation_type}→ {target} note={note!r}"
             )
-        elif name == "send_forward":
-            messages = args.get("messages")
-            if (
-                not isinstance(messages, list)
-                or not messages
-                or len(messages) > MAX_FORWARD_SEND
-                or any(not isinstance(item, dict) for item in messages)
-            ):
-                raise ValueError("messages 必须是 1-20 个对象节点")
-            if (
-                len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-                > MAX_FORWARD_BYTES
-            ):
-                raise ValueError("转发内容超过大小限制")
-            result = await bot.call_api(
-                "send_group_forward_msg", group_id=group_id, messages=messages
+        elif name == "search_reactions":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                raise ValueError("query 不能为空")
+            result = search_reactions(query, limit=int(args.get("limit") or 5))
+        elif name == "send_message":
+            sent = await send_outbound_message(
+                bot,
+                group_id,
+                args.get("segments"),
+                session=session,
+                actor_user_id=actor_user_id,
+                source="tool",
             )
+            result = {
+                "message_id": sent.message_id,
+                "segment_types": list(sent.segment_types),
+                "message_type": sent.message_type,
+                "outcome": sent.outcome,
+                "degraded_from": sent.degraded_from,
+                "text": sent.normalized_text[:500],
+                "outbound": sent.storage_payload(),
+            }
+        elif name == "send_forward":
+            sent = await send_forward_message(
+                bot,
+                group_id,
+                args.get("nodes"),
+                session=session,
+                actor_user_id=actor_user_id,
+                source="tool",
+            )
+            result = {
+                "message_id": sent.message_id,
+                "segment_types": list(sent.segment_types),
+                "message_type": sent.message_type,
+                "outcome": sent.outcome,
+                "degraded_from": sent.degraded_from,
+                "text": sent.normalized_text[:500],
+                "outbound": sent.storage_payload(),
+            }
         elif name == "send_image":
-            file_ref = str(args.get("file", "")).strip()
-            temporary: Path | None = None
-            if file_ref.startswith(("http://", "https://")):
-                temporary, content_type = await _download_allowed_file(file_ref)
-                try:
-                    if content_type and not content_type.startswith("image/"):
-                        raise ValueError("远程文件不是图片")
-                    path = _check_downloaded_path(temporary)
-                    mime = content_type or mimetypes.guess_type(path.name)[0] or ""
-                    if not mime.startswith("image/"):
-                        raise ValueError("远程文件不是图片")
-                except Exception:
-                    temporary.unlink(missing_ok=True)
-                    raise
-            else:
-                path = _validate_image_path(Path(file_ref))
-            try:
-                await bot.call_api(
-                    "send_group_msg",
-                    group_id=group_id,
-                    message=MessageSegment.image(str(path)),
-                )
-            finally:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-            result = {"sent": True}
+            sent = await send_outbound_message(
+                bot,
+                group_id,
+                [{"type": "image", "file": str(args.get("file") or "")}],
+                session=session,
+                actor_user_id=actor_user_id,
+                source="tool",
+            )
+            result = {
+                "message_id": sent.message_id,
+                "segment_types": list(sent.segment_types),
+                "message_type": sent.message_type,
+                "outcome": sent.outcome,
+                "degraded_from": sent.degraded_from,
+                "text": sent.normalized_text[:500],
+                "outbound": sent.storage_payload(),
+            }
         elif name == "send_file":
             file_ref = str(args.get("file", ""))
             temporary: Path | None = None
@@ -767,7 +894,10 @@ async def execute_tool(
         await _consume_admin_quota(session, group_id, name)
         await _audit(session, group_id, actor_user_id, name, args, "success")
         dbg(f"群 {group_id} 工具 {name} 执行成功")
-        return {"ok": True, "result": result}
+        response = {"ok": True, "result": result}
+        if name in _MESSAGE_SEND_TOOLS:
+            response["sent"] = True
+        return response
     except Exception as exc:  # noqa: BLE001
         # 工具失败（含 DB 错误）先回滚，避免待回滚事务毒化后续 flush。
         logger.exception("群聊 Agent 工具执行失败: %s", name)
@@ -778,4 +908,4 @@ async def execute_tool(
         return {"ok": False, "error": str(exc)}
 
 
-__all__ = ["MAX_FORWARD_SEND", "MAX_TOOL_ROUNDS", "build_tool_schemas", "execute_tool"]
+__all__ = ["MAX_FORWARD_NODES", "MAX_TOOL_ROUNDS", "build_tool_schemas", "execute_tool"]

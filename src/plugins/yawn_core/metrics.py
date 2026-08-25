@@ -79,6 +79,7 @@ _METRIC_HELP = {
     "yawnbot_rpg_deductions_total": "RPG deduction outcomes.",
     "yawnbot_rpg_terminations_total": "RPG non-story termination reasons.",
     "yawnbot_agent_cache_total": "Agent stable-prefix reuse and media cache signals.",
+    "yawnbot_agent_outbound_total": "Agent outbound message attempts and degradations.",
     "yawnbot_agent_turns_total": "Agent turns grouped by operation and outcome.",
     "yawnbot_agent_turn_duration_seconds": "Agent turn duration in seconds.",
     "yawnbot_agent_queue_wait_seconds": "Agent queue wait duration in seconds.",
@@ -311,6 +312,15 @@ def record_agent_cache(kind: str, outcome: str) -> None:
     increment_counter(
         "yawnbot_agent_cache_total",
         labels={"component": kind, "outcome": outcome},
+    )
+
+
+def record_agent_outbound(message_type: str, outcome: str) -> None:
+    """记录 Agent 输出状态机；只允许低基数消息类型/结果进入标签。"""
+
+    increment_counter(
+        "yawnbot_agent_outbound_total",
+        labels={"operation": message_type, "outcome": outcome},
     )
 
 
