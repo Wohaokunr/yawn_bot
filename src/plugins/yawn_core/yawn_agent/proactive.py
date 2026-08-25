@@ -23,7 +23,7 @@ from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import ai_config, complete
 from .context import ActivitySnapshot, is_recent, now_beijing
 from .collector import group_lock
-from .config_store import list_agent_group_ids
+from .config_store import agent_runtime_enabled, list_agent_group_ids
 from .conversation import (
     CONVERSATION_MAX_BOT_TURNS,
     ConversationBatch,
@@ -383,6 +383,11 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
         # 避免属性访问触发同步惰性加载（MissingGreenlet）。
         await session.refresh(config)
         try:
+            if not await agent_runtime_enabled(
+                session, int(config.group_id), config=config
+            ):
+                dbg(f"群 {config.group_id} 主动发言跳过: Agent 总开关已关闭")
+                continue
             if config.trigger_mode != "mention_or_proactive":
                 dbg(
                     f"群 {config.group_id} 主动发言跳过: "
@@ -512,7 +517,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             config = await session.get(GroupAgentConfig, group_id)
             if (
                 config is None
-                or not config.enabled
+                or not await agent_runtime_enabled(session, group_id, config=config)
                 or config.trigger_mode != "mention_or_proactive"
             ):
                 dbg(f"群 {group_id} 主动发言生成中止: 配置缺失/未启用/模式不含主动")
@@ -768,7 +773,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             config = await session.get(GroupAgentConfig, group_id)
             if (
                 config is None
-                or not config.enabled
+                or not await agent_runtime_enabled(session, group_id, config=config)
                 or not config.short_conversation_enabled
             ):
                 close_conversation(bot_id, group_id, reason="配置关闭短会话续聊")
@@ -986,7 +991,11 @@ async def _memory_due(
     session: Any, group_id: int, now: datetime, *, force: bool
 ) -> bool:
     config = await session.get(GroupAgentConfig, group_id)
-    if config is None or not memory_retry_due(config, now):
+    if (
+        config is None
+        or not await agent_runtime_enabled(session, group_id, config=config)
+        or not memory_retry_due(config, now)
+    ):
         return False
     if force or config.memory_rebuild_required:
         return True
@@ -1012,6 +1021,12 @@ async def _memory_due(
 async def _compact_one(group_id: int, now: datetime) -> None:
     try:
         async with get_session() as session:
+            config = await session.get(GroupAgentConfig, group_id)
+            if config is None or not await agent_runtime_enabled(
+                session, group_id, config=config
+            ):
+                dbg(f"群 {group_id} 记忆整理跳过: Agent 总开关已关闭")
+                return
             await compact_group_memory(session, group_id, now=now)
     except Exception as exc:  # noqa: BLE001
         logger.exception("群 %s Agent 记忆整理失败", group_id)

@@ -37,6 +37,9 @@ message_models = importlib.import_module(
 config_models = importlib.import_module(
     "src.plugins.yawn_core.data_models.group_agent_config"
 )
+group_feature_models = importlib.import_module(
+    "src.plugins.yawn_core.data_models.group_feature"
+)
 user_group_models = importlib.import_module(
     "src.plugins.yawn_core.data_models.user_group"
 )
@@ -1777,6 +1780,7 @@ def test_rank_memories_topic_hint_recalls_without_displacing_window() -> None:
 async def _setup_memory_tables(engine: Any) -> None:
     tables = [
         config_models.GroupAgentConfig.__table__,
+        group_feature_models.GroupFeature.__table__,
         message_models.GroupAgentMessage.__table__,
         models.AgentMemory.__table__,
         models.AgentRelation.__table__,
@@ -2249,6 +2253,16 @@ async def test_memory_due_uses_tuned_thresholds() -> None:
         session.add(_agent_message_row(16, "消息"))
         await session.commit()
         assert await proactive._memory_due(session, 100, NOW, force=False)
+
+        session.add(
+            group_feature_models.GroupFeature(
+                group_id=100, feature="group_agent", enabled=False
+            )
+        )
+        await session.commit()
+        # 群级总开关关闭后，即使达到阈值或强制扫描也不得自动整理。
+        assert not await proactive._memory_due(session, 100, NOW, force=False)
+        assert not await proactive._memory_due(session, 100, NOW, force=True)
     await engine.dispose()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

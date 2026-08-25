@@ -90,6 +90,25 @@ export function profileKeyLabel(key: string): string {
   return PROFILE_KEY_META[key] ?? key;
 }
 
+const PERSONA_FIELD_META: Record<string, { label: string; help: string; placeholder: string }> = {
+  name: { label: "名字", help: "Agent 在群里自称或被称呼的名字。", placeholder: "例如：Yawn" },
+  identity: { label: "身份定位", help: "描述它是谁，以及希望给群友留下的整体印象。", placeholder: "例如：友好、自然、简洁的群友" },
+  role: { label: "群内角色", help: "定义它在群聊中的职责和参与方式。", placeholder: "例如：群聊助手" },
+  tone: { label: "语气", help: "控制措辞的温度、正式程度和情绪表达。", placeholder: "例如：口语化、温和、不过度热情" },
+  speech_style: { label: "表达风格", help: "控制句式、节奏、口头禅以及整体说话方式。", placeholder: "例如：短句为主，偶尔使用轻松语气词" },
+  emotion_baseline: { label: "情绪基线", help: "设定日常情绪状态，以及随上下文变化的幅度。", placeholder: "例如：平静、友善，随对话轻微变化" },
+  response_length: { label: "回复长度", help: "描述通常回答多长，复杂问题是否允许展开。", placeholder: "例如：通常 1-3 句，复杂问题再展开" },
+  values: { label: "价值取向", help: "定义回答时优先遵循的原则和行为偏好。", placeholder: "例如：尊重事实、尊重边界、先倾听再回答" },
+  knowledge_boundary: { label: "知识边界", help: "约束不知道或不确定的信息应该如何处理。", placeholder: "例如：不知道就明确说不知道，不猜测成员隐私" },
+  privacy_boundary: { label: "隐私边界", help: "明确哪些内容绝不能在群聊中主动公开。", placeholder: "例如：不公开私聊内容、隐私记忆和权限信息" },
+};
+
+const PERSONA_SECTIONS = [
+  { key: "identity", kicker: "IDENTITY", title: "身份与角色", description: "先定义 Agent 是谁，以及它在这个群里以什么身份参与。", fields: ["name", "identity", "role"] },
+  { key: "voice", kicker: "VOICE & TEMPERAMENT", title: "语气与表达", description: "塑造说话的声音、情绪基线和回复节奏。", fields: ["tone", "speech_style", "emotion_baseline", "response_length"] },
+  { key: "boundaries", kicker: "VALUES & BOUNDARIES", title: "原则与边界", description: "明确价值取向、知识边界和隐私底线，避免人设覆盖安全约束。", fields: ["values", "knowledge_boundary", "privacy_boundary"] },
+] as const;
+
 // 画像成员的展示名：群名片优先、全局昵称兜底，解析失败回退 QQ 号（与关系图谱同口径）。
 export function memberDisplayName(
   groupNickname: string | null | undefined,
@@ -213,7 +232,7 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
             <Space orientation="vertical" size={6}>
               <Text>待整理消息：{memory.pendingMessages} 条</Text>
               <Text>连续失败：<Tag color={memory.consecutiveFailures > 0 ? "red" : "green"}>{memory.consecutiveFailures} 次</Tag></Text>
-              <Text>整理任务：{memory.inFlight ? "进行中" : "空闲"}</Text>
+              <Text>运行：<Tag color={!memory.runtimeEnabled ? "default" : memory.inFlight ? "processing" : "green"}>{!memory.runtimeEnabled ? "已停用" : memory.inFlight ? "整理中" : "空闲"}</Tag></Text>
               <Text type="secondary">最近成功：{formatTime(memory.lastSuccessAt)}</Text>
             </Space>
           </Card>
@@ -280,39 +299,443 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
   };
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  return <Card title="群级运行配置" extra={<SaveStatus dirty={dirty} saving={saving} />}><Alert type="info" showIcon message={`今日主动发言 ${data.proactiveToday} 次；管理工具 ${data.adminToolsToday} 次`} /><Form form={form} layout="vertical" onFinish={save} onValuesChange={() => setDirty(true)} className="settings-form"><Row gutter={16}><Col xs={24} md={6}><Form.Item name="enabled" label="启用 Agent" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={6}><Form.Item name="shortConversationEnabled" label="短会话续聊" valuePropName="checked" extra="Bot 回复后允许在同一话题中继续自然续聊"><Switch /></Form.Item></Col><Col xs={24} md={6}><Form.Item name="mediaCacheEnabled" label="媒体缓存" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={6}><Form.Item name="triggerMode" label="触发模式" rules={[{ required: true }]}><Select options={[{ value: "mention_only", label: "仅 @" }, { value: "mention_or_reply", label: "@ 或回复" }, { value: "explicit_wakeup", label: "@ 或显式唤醒" }, { value: "mention_or_proactive", label: "@ / 回复 / 唤醒 / 主动" }]} /></Form.Item></Col></Row><Row gutter={16}><Col xs={24} md={8}><Form.Item name="proactiveProbability" label="冷场暖场概率"><InputNumber min={0} max={1} step={0.05} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveEnabled" label="热闹插话" valuePropName="checked"><Switch /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveProbability" label="插话概率"><InputNumber min={0} max={1} step={0.02} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="proactiveActiveWindowMinutes" label="插话窗口（分钟）"><InputNumber min={1} max={1440} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="idleThresholdMinutes" label="冷场阈值（分钟）"><InputNumber min={1} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="cooldownMinutes" label="冷却时间（分钟）"><InputNumber min={0} max={10080} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="dailyLimit" label="主动发言每日上限"><InputNumber min={0} max={1000} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="rawRetentionDays" label="原始消息保留天数"><InputNumber min={1} max={365} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="crossGroupVisibility" label="跨群记忆"><Select options={[{ value: "isolated", label: "群隔离" }, { value: "public_summary", label: "共享低风险公开摘要" }]} /></Form.Item></Col><Col xs={24} md={8}><Form.Item name="adminToolDailyLimit" label="管理工具每日上限"><InputNumber min={1} max={1000} /></Form.Item></Col></Row><Form.Item name="toolAllowlist" label="管理工具白名单"><Select mode="multiple" options={[{ value: "mute_member", label: "禁言成员" }, { value: "create_group_announcement", label: "发布群公告" }]} /></Form.Item><Button type="primary" htmlType="submit" loading={saving} disabled={!dirty}>保存配置</Button></Form></Card>;
+  return (
+    <Form
+      form={form}
+      layout="vertical"
+      onFinish={save}
+      onValuesChange={() => setDirty(true)}
+      className="agent-config-form"
+    >
+      <div className="agent-config-page agent-studio-page agent-studio-runtime">
+        <section className="agent-config-hero agent-studio-hero liquid-glass agent-config-floating">
+          <div className="agent-config-hero-copy">
+            <div className="agent-config-eyebrow">GROUP AGENT</div>
+            <div className="agent-config-title-row">
+              <div>
+                <h2>群级运行配置</h2>
+                <p>控制 Agent 在这个群里的响应方式、主动行为、记忆边界与管理能力。</p>
+              </div>
+              <SaveStatus dirty={dirty} saving={saving} />
+            </div>
+            <div className="agent-config-metrics">
+              <div className="agent-config-metric">
+                <span>今日主动发言</span>
+                <strong>{data.proactiveToday}</strong>
+              </div>
+              <div className="agent-config-metric">
+                <span>今日管理工具</span>
+                <strong>{data.adminToolsToday}</strong>
+              </div>
+              <div className="agent-config-metric agent-config-metric-wide">
+                <span>配置范围</span>
+                <strong>仅当前群</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="agent-master-card">
+            <div className="agent-master-copy">
+              <div className="agent-master-label">总开关</div>
+              <div className="agent-master-title">启用 Agent</div>
+              <div className="agent-master-description">
+                关闭后停止群聊响应、主动发言、短会话以及自动消息采集和记忆整理；子配置会保留。
+              </div>
+            </div>
+            <Form.Item name="enabled" valuePropName="checked" noStyle>
+              <Switch size="default" />
+            </Form.Item>
+          </div>
+        </section>
+
+        <div className="agent-config-layout">
+          <div className="agent-config-main">
+            <section className="agent-config-section liquid-glass agent-config-floating">
+              <div className="agent-config-section-head">
+                <div>
+                  <div className="agent-config-section-kicker">CONVERSATION</div>
+                  <h3>触发与会话</h3>
+                  <p>决定什么时候响应，以及一次回复后是否继续自然续聊。</p>
+                </div>
+              </div>
+              <div className="agent-config-grid agent-config-grid-2">
+                <Form.Item name="triggerMode" label="触发模式" rules={[{ required: true }]}>
+                  <Select
+                    options={[
+                      { value: "mention_only", label: "仅 @" },
+                      { value: "mention_or_reply", label: "@ 或回复" },
+                      { value: "explicit_wakeup", label: "@ 或显式唤醒" },
+                      { value: "mention_or_proactive", label: "@ / 回复 / 唤醒 / 主动" },
+                    ]}
+                  />
+                </Form.Item>
+                <div className="agent-config-toggle-card">
+                  <div>
+                    <div className="agent-config-toggle-title">短会话续聊</div>
+                    <div className="agent-config-toggle-help">Bot 回复后，可在同一话题中继续自然接话。</div>
+                  </div>
+                  <Form.Item name="shortConversationEnabled" valuePropName="checked" noStyle>
+                    <Switch />
+                  </Form.Item>
+                </div>
+              </div>
+            </section>
+
+            <section className="agent-config-section liquid-glass agent-config-floating">
+              <div className="agent-config-section-head">
+                <div>
+                  <div className="agent-config-section-kicker">PROACTIVE</div>
+                  <h3>主动发言</h3>
+                  <p>分别控制冷场暖场和群聊活跃时的自然插话，并限制频率。</p>
+                </div>
+              </div>
+              <div className="agent-config-toggle-card agent-config-toggle-card-featured">
+                <div>
+                  <div className="agent-config-toggle-title">热闹插话</div>
+                  <div className="agent-config-toggle-help">群里正在聊天时，允许 Agent 根据上下文自然加入话题。</div>
+                </div>
+                <Form.Item name="proactiveActiveEnabled" valuePropName="checked" noStyle>
+                  <Switch />
+                </Form.Item>
+              </div>
+              <div className="agent-config-grid agent-config-grid-3">
+                <Form.Item name="proactiveProbability" label="冷场暖场概率" extra="每次满足冷场条件后的发言概率">
+                  <InputNumber min={0} max={1} step={0.05} />
+                </Form.Item>
+                <Form.Item name="proactiveActiveProbability" label="热闹插话概率" extra="活跃窗口内进入候选后的插话概率">
+                  <InputNumber min={0} max={1} step={0.02} />
+                </Form.Item>
+                <Form.Item name="proactiveActiveWindowMinutes" label="活跃窗口" extra="分钟">
+                  <InputNumber min={1} max={1440} />
+                </Form.Item>
+                <Form.Item name="idleThresholdMinutes" label="冷场阈值" extra="连续多少分钟安静后开始考虑暖场">
+                  <InputNumber min={1} max={10080} />
+                </Form.Item>
+                <Form.Item name="cooldownMinutes" label="主动冷却" extra="两次主动发言之间的最短间隔（分钟）">
+                  <InputNumber min={0} max={10080} />
+                </Form.Item>
+                <Form.Item name="dailyLimit" label="每日主动上限" extra="达到后当天停止主动发言">
+                  <InputNumber min={0} max={1000} />
+                </Form.Item>
+              </div>
+            </section>
+
+            <section className="agent-config-section liquid-glass agent-config-floating">
+              <div className="agent-config-section-head">
+                <div>
+                  <div className="agent-config-section-kicker">MEMORY & MEDIA</div>
+                  <h3>记忆与媒体</h3>
+                  <p>设置原始消息保留周期、跨群记忆范围和媒体缓存策略。</p>
+                </div>
+              </div>
+              <div className="agent-config-grid agent-config-grid-2">
+                <Form.Item name="rawRetentionDays" label="原始消息保留" extra="到期后按记忆治理策略清理（天）">
+                  <InputNumber min={1} max={365} />
+                </Form.Item>
+                <Form.Item name="crossGroupVisibility" label="跨群记忆">
+                  <Select
+                    options={[
+                      { value: "isolated", label: "群隔离" },
+                      { value: "public_summary", label: "共享低风险公开摘要" },
+                    ]}
+                  />
+                </Form.Item>
+              </div>
+              <div className="agent-config-toggle-card">
+                <div>
+                  <div className="agent-config-toggle-title">媒体缓存</div>
+                  <div className="agent-config-toggle-help">缓存图片理解结果，减少重复识图调用；关闭不会影响普通文字对话。</div>
+                </div>
+                <Form.Item name="mediaCacheEnabled" valuePropName="checked" noStyle>
+                  <Switch />
+                </Form.Item>
+              </div>
+            </section>
+
+            <section className="agent-config-section liquid-glass agent-config-floating">
+              <div className="agent-config-section-head">
+                <div>
+                  <div className="agent-config-section-kicker">TOOLS</div>
+                  <h3>管理工具权限</h3>
+                  <p>限制 Agent 可以调用的群管理能力，以及每天的调用额度。</p>
+                </div>
+              </div>
+              <div className="agent-config-grid agent-config-grid-2">
+                <Form.Item name="adminToolDailyLimit" label="每日管理工具上限" extra="所有允许的管理工具共用此额度">
+                  <InputNumber min={1} max={1000} />
+                </Form.Item>
+                <Form.Item name="toolAllowlist" label="允许的管理工具">
+                  <Select
+                    mode="multiple"
+                    placeholder="未选择时不允许调用管理工具"
+                    options={[
+                      { value: "mute_member", label: "禁言成员" },
+                      { value: "create_group_announcement", label: "发布群公告" },
+                    ]}
+                  />
+                </Form.Item>
+              </div>
+            </section>
+          </div>
+
+          <aside className="agent-config-aside">
+            <div className="agent-config-note-card liquid-glass agent-config-floating">
+              <div className="agent-config-note-title">配置说明</div>
+              <p>总开关只控制运行状态，不会清空这里的参数、已有记忆或人设。</p>
+              <p>因此你可以先关闭 Agent，再安全调整各项策略，最后重新开启。</p>
+            </div>
+            <div className="agent-config-note-card agent-config-note-soft liquid-glass agent-config-floating">
+              <div className="agent-config-note-title">推荐顺序</div>
+              <ol>
+                <li>先设置触发模式</li>
+                <li>再调整主动发言频率</li>
+                <li>确认记忆边界</li>
+                <li>最后开放管理工具</li>
+              </ol>
+            </div>
+          </aside>
+        </div>
+
+        <div className="agent-config-savebar liquid-glass agent-config-floating">
+          <div>
+            <strong>{dirty ? "有未保存的修改" : "配置已同步"}</strong>
+            <span>{dirty ? "保存后立即按新策略运行" : "修改任意选项后可统一保存"}</span>
+          </div>
+          <Button type="primary" htmlType="submit" size="large" loading={saving} disabled={!dirty}>
+            保存配置
+          </Button>
+        </div>
+      </div>
+    </Form>
+  );
 }
 
 function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
+  const { message } = AntApp.useApp();
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const watchedEnabled = Form.useWatch("enabled", form) as boolean | undefined;
+  const watchedOverrides = Form.useWatch("overrides", form) as Record<string, string> | undefined;
   const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
   const query = useApiQuery(load, { resources: ["agent_persona"] });
   useUnsavedChanges(dirty);
-  useEffect(() => { if (query.data) { form.setFieldsValue({ enabled: query.data.enabled, overrides: query.data.overrides }); setDirty(false); } }, [form, query.data]);
+  useEffect(() => {
+    if (query.data) {
+      form.setFieldsValue({ enabled: query.data.enabled, overrides: query.data.overrides });
+      setDirty(false);
+    }
+  }, [form, query.data]);
   const save = async (values: { enabled: boolean; overrides?: Record<string, string> }) => {
     setSaving(true);
     try {
-      await api<Persona>(`/agent/groups/${groupId}/persona`, { method: "PUT", body: JSON.stringify({ version: query.data?.version, enabled: values.enabled, overrides: values.overrides ?? {} }) });
+      await api<Persona>(`/agent/groups/${groupId}/persona`, {
+        method: "PUT",
+        body: JSON.stringify({ version: query.data?.version, enabled: values.enabled, overrides: values.overrides ?? {} }),
+      });
       setDirty(false);
       message.success("群级人设已保存");
       query.reload();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);
-    } finally { setSaving(false); }
+      if (error instanceof ApiError && error.status === 409) {
+        message.warning(error.message);
+        query.reload();
+      } else message.error((error as Error).message);
+    } finally {
+      setSaving(false);
+    }
   };
   const reset = async () => {
+    setResetting(true);
     try {
-      await api<Persona>(`/agent/groups/${groupId}/persona`, { method: "DELETE", headers: query.data?.version ? { "If-Match": query.data.version } : {} });
+      await api<Persona>(`/agent/groups/${groupId}/persona`, {
+        method: "DELETE",
+        headers: query.data?.version ? { "If-Match": query.data.version } : {},
+      });
       setDirty(false);
       message.success("已恢复全局默认人设");
       query.reload();
     } catch (error) {
       message.error((error as Error).message);
+    } finally {
+      setResetting(false);
     }
   };
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  return <Card title="群级人设覆盖" extra={<SaveStatus dirty={dirty} saving={saving} />}><Form form={form} layout="vertical" onFinish={save} onValuesChange={() => setDirty(true)}><Form.Item name="enabled" label="启用群级覆盖" valuePropName="checked"><Switch /></Form.Item><Row gutter={16}>{data.fields.map((field) => <Col xs={24} lg={12} key={field}><Form.Item name={["overrides", field]} label={field} extra={`全局值：${data.resolved[field]}`}><Input.TextArea maxLength={240} autoSize={{ minRows: 2, maxRows: 4 }} placeholder="留空则继承全局默认" showCount /></Form.Item></Col>)}</Row><Space><Button type="primary" htmlType="submit" loading={saving} disabled={!dirty}>保存人设</Button><Popconfirm title="恢复全局默认人设？" onConfirm={reset}><Button>恢复默认</Button></Popconfirm></Space></Form></Card>;
+
+  const personaEnabled = watchedEnabled ?? data.enabled;
+  const activeOverrideCount = data.fields.filter((field) => Boolean(watchedOverrides?.[field]?.trim())).length;
+  const knownFields = new Set<string>(PERSONA_SECTIONS.flatMap((section) => [...section.fields]));
+  const extraFields = data.fields.filter((field) => !knownFields.has(field));
+  const fieldEditor = (field: string) => {
+    const meta = PERSONA_FIELD_META[field] ?? {
+      label: field,
+      help: "覆盖该字段在当前群中的人设表现。",
+      placeholder: "留空则继承全局默认",
+    };
+    const overridden = Boolean(watchedOverrides?.[field]?.trim());
+    return (
+      <div className="persona-field-card" key={field}>
+        <div className="persona-field-head">
+          <div>
+            <div className="persona-field-title">{meta.label}</div>
+            <div className="persona-field-help">{meta.help}</div>
+          </div>
+          <Tag color={overridden ? "magenta" : undefined}>{overridden ? "群级覆盖" : "继承默认"}</Tag>
+        </div>
+        <Form.Item name={["overrides", field]} className="persona-field-input">
+          {field === "name" ? (
+            <Input maxLength={240} placeholder={meta.placeholder} showCount />
+          ) : (
+            <Input.TextArea maxLength={240} autoSize={{ minRows: 2, maxRows: 5 }} placeholder={meta.placeholder} showCount />
+          )}
+        </Form.Item>
+        <div className="persona-field-resolved">
+          <span>当前已保存的生效值</span>
+          <strong>{data.resolved[field] || "—"}</strong>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <Form
+      form={form}
+      layout="vertical"
+      onFinish={save}
+      onValuesChange={() => setDirty(true)}
+      className="persona-config-form"
+    >
+      <div className="persona-config-page agent-studio-page agent-studio-persona">
+        <section className="persona-config-hero agent-studio-hero liquid-glass agent-config-floating">
+          <div className="persona-config-hero-copy">
+            <div className="persona-config-eyebrow">PERSONA PROFILE</div>
+            <div className="persona-config-title-row">
+              <div>
+                <h2>群级人设</h2>
+                <p>在不修改全局默认的前提下，为当前群塑造独立的身份、语气与行为边界。</p>
+              </div>
+              <SaveStatus dirty={dirty} saving={saving} />
+            </div>
+            <div className="persona-config-metrics">
+              <div className="persona-config-metric">
+                <span>群级覆盖</span>
+                <strong>{activeOverrideCount}</strong>
+                <small>/ {data.fields.length} 项</small>
+              </div>
+              <div className="persona-config-metric">
+                <span>未覆盖字段</span>
+                <strong>{Math.max(0, data.fields.length - activeOverrideCount)}</strong>
+                <small>自动继承</small>
+              </div>
+              <div className="persona-config-metric persona-config-metric-wide">
+                <span>当前状态</span>
+                <strong>{personaEnabled ? "群级人设生效" : "使用全局默认"}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className={`persona-master-card${personaEnabled ? " is-enabled" : ""}`}>
+            <div className="persona-master-copy">
+              <div className="persona-master-label">群级覆盖总开关</div>
+              <div className="persona-master-title">{personaEnabled ? "当前正在使用群级人设" : "当前使用全局默认人设"}</div>
+              <div className="persona-master-description">
+                关闭只会暂停这些覆盖，不会删除已填写内容；重新开启后会继续使用原来的群级设置。
+              </div>
+            </div>
+            <Form.Item name="enabled" valuePropName="checked" noStyle>
+              <Switch />
+            </Form.Item>
+          </div>
+        </section>
+
+        {!personaEnabled && (
+          <Alert
+            className="persona-paused-alert"
+            type="info"
+            showIcon
+            message="群级人设覆盖已暂停"
+            description="下面的内容仍可编辑和保存，但 Agent 当前会使用全局默认人设；重新打开总开关后这些覆盖会再次生效。"
+          />
+        )}
+
+        <div className="persona-config-layout">
+          <div className="persona-config-main">
+            {PERSONA_SECTIONS.map((section) => {
+              const fields = section.fields.filter((field) => data.fields.includes(field));
+              if (fields.length === 0) return null;
+              return (
+                <section className="persona-config-section liquid-glass agent-config-floating" key={section.key}>
+                  <div className="persona-config-section-head">
+                    <div>
+                      <div className="persona-config-section-kicker">{section.kicker}</div>
+                      <h3>{section.title}</h3>
+                      <p>{section.description}</p>
+                    </div>
+                    <Tag>{fields.filter((field) => Boolean(watchedOverrides?.[field]?.trim())).length} 项覆盖</Tag>
+                  </div>
+                  <div className="persona-field-grid">{fields.map(fieldEditor)}</div>
+                </section>
+              );
+            })}
+            {extraFields.length > 0 && (
+              <section className="persona-config-section liquid-glass agent-config-floating">
+                <div className="persona-config-section-head">
+                  <div>
+                    <div className="persona-config-section-kicker">OTHER</div>
+                    <h3>其他字段</h3>
+                    <p>后端新增的人设字段会自动出现在这里。</p>
+                  </div>
+                </div>
+                <div className="persona-field-grid">{extraFields.map(fieldEditor)}</div>
+              </section>
+            )}
+          </div>
+
+          <aside className="persona-config-aside">
+            <div className="persona-note-card liquid-glass agent-config-floating">
+              <div className="persona-note-title">继承规则</div>
+              <div className="persona-inherit-flow">
+                <div><span>1</span><strong>全局默认</strong><small>作为基础人设</small></div>
+                <i>↓</i>
+                <div><span>2</span><strong>群级覆盖</strong><small>仅替换已填写字段</small></div>
+                <i>↓</i>
+                <div><span>3</span><strong>最终生效</strong><small>注入当前群对话</small></div>
+              </div>
+            </div>
+            <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
+              <div className="persona-note-title">编辑建议</div>
+              <p>优先调整身份、语气和回复长度；除非确有需要，不必把所有字段都复制一遍。</p>
+              <p>知识边界与隐私边界建议写成明确规则，而不是模糊的性格描述。</p>
+            </div>
+          </aside>
+        </div>
+
+        <div className="persona-config-savebar liquid-glass agent-config-floating">
+          <div className="persona-save-state">
+            <strong>{dirty ? "人设有未保存的修改" : "人设配置已同步"}</strong>
+            <span>{dirty ? `当前准备覆盖 ${activeOverrideCount} 个字段` : "留空字段会继续继承全局默认值"}</span>
+          </div>
+          <Space>
+            <Popconfirm
+              title="恢复全局默认人设？"
+              description="会清空当前群的全部人设覆盖，并重新启用全局默认。"
+              okText="恢复默认"
+              cancelText="取消"
+              onConfirm={reset}
+            >
+              <Button loading={resetting}>恢复默认</Button>
+            </Popconfirm>
+            <Button type="primary" htmlType="submit" size="large" loading={saving} disabled={!dirty || resetting}>
+              保存人设
+            </Button>
+          </Space>
+        </div>
+      </div>
+    </Form>
+  );
 }
 
 // 记忆表单的可编辑字段；expiresInDays 为空表示永久有效。
@@ -421,6 +844,7 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
         <Text type="secondary">最后成功：{status?.lastSuccessAt ? formatTime(status.lastSuccessAt) : "尚未整理"}</Text>
       </div></Card></Col>
     </Row>
+    {status && !status.runtimeEnabled && <Alert type="info" showIcon message="Agent 总开关已关闭，自动记忆已暂停" description="新群消息不会进入 Agent 记忆采集，定时整理也不会运行；已有记忆仍可查看、导出或手工维护。" className="section-alert" />}
     {status?.lastError && <Alert type="error" showIcon closable message={`最近整理失败（连续 ${status.consecutiveFailures} 次）`} description={status.lastError} className="section-alert" />}
     {status?.rebuildRequired && <Alert type="warning" showIcon message="派生记忆正在重建" description="系统会按连续批次处理保留期内原始消息；手工记忆不会被覆盖。" className="section-alert" />}
     <Card title="公开/群级记忆" extra={<Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{

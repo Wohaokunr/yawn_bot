@@ -191,6 +191,7 @@ export interface MemoryItem {
 // 记忆治理状态(口径见后端 webui/service.py agent_memory_status)
 export interface AgentMemoryStatus {
   groupId: string;
+  runtimeEnabled: boolean;
   pendingMessages: number;
   lastCompactedMessageId: number | null;
   lastCompactedAt: string | null;

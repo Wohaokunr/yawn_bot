@@ -14,7 +14,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..permission import is_group_admin, require_feature
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy
 from ..data_models.group_agent_config import GroupAgentConfig
-from .config_store import get_or_create_config
+from .config_store import (
+    agent_runtime_enabled,
+    get_or_create_config,
+    set_agent_runtime_enabled,
+)
+from .conversation import close_group_conversations
 from .context import now_beijing
 from .log import dbg
 from .memory import delete_group_memories, delete_member_memories, list_memories
@@ -87,7 +92,6 @@ async def handle_agent_command(
     event: GroupMessageEvent,
     session: async_scoped_session,
     args: Message = CommandArg(),
-    _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
         await agent_command.finish("请在群聊中使用")
@@ -104,20 +108,28 @@ async def handle_agent_command(
         await agent_command.finish("Agent 配置暂时不可用，请稍后重试")
     text = args.extract_plain_text().strip()
     if text in {"开", "开启", "on"}:
-        config.enabled = True
+        await set_agent_runtime_enabled(
+            session, int(event.group_id), enabled=True, config=config
+        )
         if not await _commit(session):
             await agent_command.finish("操作失败，请稍后重试")
         dbg(f"群 {event.group_id} Agent 已开启")
         await agent_command.finish("群聊 Agent 已开启")
     if text in {"关", "关闭", "off"}:
-        config.enabled = False
+        await set_agent_runtime_enabled(
+            session, int(event.group_id), enabled=False, config=config
+        )
         if not await _commit(session):
             await agent_command.finish("操作失败，请稍后重试")
+        close_group_conversations(int(event.group_id), reason="命令关闭 Agent 总开关")
         dbg(f"群 {event.group_id} Agent 已关闭")
         await agent_command.finish("群聊 Agent 已关闭")
-    dbg(f"群 {event.group_id} /群聊Agent 查询状态: enabled={config.enabled}")
+    runtime_enabled = await agent_runtime_enabled(
+        session, int(event.group_id), config=config
+    )
+    dbg(f"群 {event.group_id} /群聊Agent 查询状态: enabled={runtime_enabled}")
     await agent_command.finish(
-        f"群聊 Agent：{'开启' if config.enabled else '关闭'}\n暖场概率：{config.proactive_probability:.0%}\n插话概率：{config.proactive_active_probability:.0%}\n冷场阈值：{config.idle_threshold_minutes} 分钟\n主动冷却：{config.cooldown_minutes} 分钟\n每日上限：{config.daily_limit}"
+        f"群聊 Agent：{'开启' if runtime_enabled else '关闭'}\n暖场概率：{config.proactive_probability:.0%}\n插话概率：{config.proactive_active_probability:.0%}\n冷场阈值：{config.idle_threshold_minutes} 分钟\n主动冷却：{config.cooldown_minutes} 分钟\n每日上限：{config.daily_limit}"
     )
 
 
@@ -200,13 +212,16 @@ async def handle_agent_status(
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
         await agent_status.finish("Agent 配置暂时不可用，请稍后重试")
+    runtime_enabled = await agent_runtime_enabled(
+        session, int(event.group_id), config=config
+    )
     dbg(
-        f"群 {event.group_id} /Agent状态: enabled={config.enabled} "
+        f"群 {event.group_id} /Agent状态: enabled={runtime_enabled} "
         f"trigger_mode={config.trigger_mode!r} probability={config.proactive_probability} "
         f"media_cache={config.media_cache_enabled}"
     )
     await agent_status.finish(
-        f"群聊 Agent：{'开启' if config.enabled else '关闭'}；触发：{config.trigger_mode}；主动概率：{config.proactive_probability:.0%}；媒体缓存：{'开' if config.media_cache_enabled else '关'}"
+        f"群聊 Agent：{'开启' if runtime_enabled else '关闭'}；触发：{config.trigger_mode}；主动概率：{config.proactive_probability:.0%}；媒体缓存：{'开' if config.media_cache_enabled else '关'}"
     )
 
 

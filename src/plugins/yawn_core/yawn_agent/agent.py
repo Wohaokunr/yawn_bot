@@ -21,7 +21,7 @@ from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from ..permission import check_feature_permission
 from .collector import enqueue, ensure_worker
-from .config_store import get_or_create_config
+from .config_store import agent_runtime_enabled, get_or_create_config
 from .context import now_beijing
 from .conversation import observe_member_message
 from .dialogue import contains_word, process_group_message
@@ -173,19 +173,24 @@ async def handle_group_agent_message(
     ):
         dbg("跳过: 非群消息或机器人自身消息")
         return
-    # 常驻监听器不走 require_feature 依赖，需要手动接受功能开关约束；
-    # 关闭时既不落库也不响应。
+    config = await get_or_create_config(_session, int(event.group_id))
+    # ``GroupAgentConfig.enabled`` 与通用 GroupFeature(group_agent) 共同构成
+    # 群级总开关。先做硬门禁，再做用户级权限检查，避免用户 override=True
+    # 绕过群管理员已经关闭的 Agent 总开关。
+    if config is None or not await agent_runtime_enabled(
+        _session, int(event.group_id), config=config
+    ):
+        dbg(
+            f"群 {event.group_id} 跳过: Agent 总开关"
+            f"{'配置缺失' if config is None else '已关闭'}"
+        )
+        return
+    # 常驻监听器不走 require_feature 依赖，需要手动接受用户级功能约束；
+    # 群级硬开关已经在上面处理，因此这里只允许用户覆盖进一步收紧权限。
     if not await check_feature_permission(
         int(event.get_user_id()), int(event.group_id), "group_agent", _session
     ):
-        dbg(f"群 {event.group_id} 跳过: group_agent 功能开关关闭(用户或群级别)")
-        return
-    config = await get_or_create_config(_session, int(event.group_id))
-    if config is None or not config.enabled:
-        dbg(
-            f"群 {event.group_id} 跳过: Agent 配置"
-            f"{'缺失' if config is None else '未启用'}"
-        )
+        dbg(f"群 {event.group_id} 跳过: group_agent 用户功能开关关闭")
         return
     privacy = await _session.get(
         AgentPrivacy, (int(event.group_id), int(event.get_user_id()))

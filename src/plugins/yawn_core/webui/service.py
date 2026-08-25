@@ -11,7 +11,7 @@ from typing import Any
 
 from nonebot import get_bots
 from nonebot_plugin_orm import get_session
-from sqlalchemy import String, func, or_, select
+from sqlalchemy import String, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..data_models.agent_audit import AgentAudit
@@ -29,6 +29,7 @@ from ..data_models.web_admin_audit import WebAdminAudit
 from ..llm import resolve_llm_request, resolve_provider
 from ..metrics import snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
+from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
 from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
@@ -344,7 +345,16 @@ async def overview() -> dict[str, Any]:
             await session.scalar(
                 select(func.count())
                 .select_from(GroupAgentConfig)
-                .where(GroupAgentConfig.enabled.is_(True))
+                .where(
+                    GroupAgentConfig.enabled.is_(True),
+                    ~exists(
+                        select(GroupFeature.group_id).where(
+                            GroupFeature.group_id == GroupAgentConfig.group_id,
+                            GroupFeature.feature == "group_agent",
+                            GroupFeature.enabled.is_(False),
+                        )
+                    ),
+                )
             )
             or 0
         )
@@ -428,6 +438,7 @@ async def list_groups(
     group_ids = [row.group_id for row in rows]
     member_counts: dict[int, int] = {}
     configs: dict[int, GroupAgentConfig] = {}
+    agent_feature_overrides: dict[int, bool] = {}
     if group_ids:
         member_counts = {
             int(group_id): int(count)
@@ -451,6 +462,19 @@ async def list_groups(
             .scalars()
             .all()
         }
+        agent_feature_overrides = {
+            int(row.group_id): bool(row.enabled)
+            for row in (
+                await session.execute(
+                    select(GroupFeature).where(
+                        GroupFeature.group_id.in_(group_ids),
+                        GroupFeature.feature == "group_agent",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
     return [
         {
             "groupId": str(row.group_id),
@@ -458,9 +482,10 @@ async def list_groups(
             "firstSeenAt": iso(row.first_seen_at),
             "lastActiveAt": iso(row.last_active_at),
             "memberCount": member_counts.get(row.group_id, 0),
-            "agentEnabled": configs[row.group_id].enabled
-            if row.group_id in configs
-            else True,
+            "agentEnabled": bool(
+                (configs[row.group_id].enabled if row.group_id in configs else True)
+                and agent_feature_overrides.get(int(row.group_id), True)
+            ),
         }
         for row in rows
     ], total
@@ -578,16 +603,32 @@ async def group_feature_rows(
         .scalars()
         .all()
     }
-    return [
-        {
-            "key": key,
-            "name": name,
-            "override": overrides[key].enabled if key in overrides else None,
-            "effective": overrides[key].enabled if key in overrides else True,
-            "source": "group" if key in overrides else "default",
-        }
-        for key, name in FEATURE_REGISTRY.items()
-    ]
+    agent_config = await session.get(GroupAgentConfig, group_id)
+    result: list[dict[str, Any]] = []
+    for key, name in FEATURE_REGISTRY.items():
+        override = overrides[key].enabled if key in overrides else None
+        effective = override if override is not None else True
+        source = "group" if key in overrides else "default"
+        if (
+            key == "group_agent"
+            and agent_config is not None
+            and not agent_config.enabled
+        ):
+            effective = False
+            # 兼容历史分叉数据：专用开关已经关闭时，群功能页也直接显示关闭。
+            if override is None or override is True:
+                override = False
+                source = "agent_config"
+        result.append(
+            {
+                "key": key,
+                "name": name,
+                "override": override,
+                "effective": bool(effective),
+                "source": source,
+            }
+        )
+    return result
 
 
 async def user_feature_rows(
@@ -638,6 +679,15 @@ async def user_feature_rows(
         .scalars()
         .all()
     }
+    agent_config = await session.get(GroupAgentConfig, group_id)
+    group_agent_master = bool(
+        (agent_config.enabled if agent_config is not None else True)
+        and (
+            group_overrides["group_agent"].enabled
+            if "group_agent" in group_overrides
+            else True
+        )
+    )
     result = []
     for key, name in FEATURE_REGISTRY.items():
         user_row = overrides.get(key)
@@ -646,6 +696,10 @@ async def user_feature_rows(
             user_row.enabled if user_row else group_row.enabled if group_row else True
         )
         source = "user" if user_row else "group" if group_row else "default"
+        if key == "group_agent" and not group_agent_master:
+            # 群级总开关是硬门禁；成员显式开启只能在群级允许时生效。
+            effective = False
+            source = "group"
         result.append(
             {
                 "key": key,
@@ -905,6 +959,7 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
 
     now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
     config = await session.get(GroupAgentConfig, group_id)
+    runtime_enabled = await agent_runtime_enabled(session, group_id, config=config)
     cursor = int(config.last_compacted_message_id or 0) if config else 0
     # 与整理取数口径一致：过期但未整理的消息仍算待整理（purge 会保留
     # 到硬上限），状态页不得把它们显示成"已无积压"。
@@ -938,6 +993,7 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
     counts_by_type = {str(row[0]): int(row[1] or 0) for row in type_rows}
     return {
         "groupId": str(group_id),
+        "runtimeEnabled": runtime_enabled,
         "pendingMessages": pending,
         "lastCompactedMessageId": cursor or None,
         "lastCompactedAt": iso(last_compacted_at),
@@ -960,7 +1016,7 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
         "consecutiveFailures": int(
             config.memory_consecutive_failures if config else 0
         ),
-        "inFlight": is_memory_compacting(group_id),
+        "inFlight": bool(runtime_enabled and is_memory_compacting(group_id)),
     }
 
 
@@ -970,12 +1026,16 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
     """聚合群 Agent 当前运行门槛、LLM 路由和记忆治理状态。"""
 
     config = await session.get(GroupAgentConfig, group_id)
-    enabled = bool(config.enabled) if config else True
+    enabled = await agent_runtime_enabled(session, group_id, config=config)
     trigger_mode = config.trigger_mode if config else "mention_or_proactive"
-    proactive_active_enabled = bool(config.proactive_active_enabled) if config else True
-    short_conversation_enabled = (
+    proactive_active_configured = (
+        bool(config.proactive_active_enabled) if config else True
+    )
+    short_conversation_configured = (
         bool(config.short_conversation_enabled) if config else True
     )
+    proactive_active_enabled = bool(enabled and proactive_active_configured)
+    short_conversation_enabled = bool(enabled and short_conversation_configured)
     daily_limit = int(config.daily_limit) if config else 30
     cooldown_minutes = int(config.cooldown_minutes) if config else 8
     last_agent_at = config.last_agent_at if config else None
@@ -1000,7 +1060,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
             current = current_conversation(int(bot_id), group_id)
         except (TypeError, ValueError):
             current = None
-        if current is not None:
+        if current is not None and short_conversation_enabled:
             conversation = {
                 "enabled": short_conversation_enabled,
                 "active": True,
@@ -1032,10 +1092,13 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "code": "agent_disabled",
                 "severity": "error",
                 "title": "Agent 已关闭",
-                "detail": "群级总开关关闭时不会响应，也不会主动发言。",
+                "detail": (
+                    "群级总开关关闭时不会响应、主动发言或短会话续聊，"
+                    "也不会自动采集和整理记忆。"
+                ),
             }
         )
-    if not get_bots():
+    if enabled and not get_bots():
         blockers.append(
             {
                 "code": "bot_offline",
@@ -1044,7 +1107,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": "没有已连接的 Bot 账号，群 Agent 无法收发消息。",
             }
         )
-    if not route_by_task["agent_dialogue"]["configured"]:
+    if enabled and not route_by_task["agent_dialogue"]["configured"]:
         blockers.append(
             {
                 "code": "dialogue_llm_unconfigured",
@@ -1053,8 +1116,8 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": "Agent 对话任务所选 Provider 缺少可用密钥或模型。",
             }
         )
-    proactive_enabled = trigger_mode == "mention_or_proactive"
-    if not proactive_enabled:
+    proactive_enabled = bool(enabled and trigger_mode == "mention_or_proactive")
+    if enabled and not proactive_enabled:
         blockers.append(
             {
                 "code": "proactive_mode_disabled",
@@ -1063,7 +1126,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": "被动回复仍按当前触发规则工作，但定时暖场/插话不会运行。",
             }
         )
-    if proactive_today >= daily_limit:
+    if proactive_enabled and proactive_today >= daily_limit:
         blockers.append(
             {
                 "code": "proactive_daily_limit",
@@ -1072,7 +1135,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": f"今日已用 {proactive_today}/{daily_limit} 次。",
             }
         )
-    elif cooldown_remaining > 0:
+    elif proactive_enabled and cooldown_remaining > 0:
         blockers.append(
             {
                 "code": "proactive_cooldown",
@@ -1081,7 +1144,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": f"预计还需约 {cooldown_remaining} 分钟才满足主动冷却门槛。",
             }
         )
-    if (
+    if enabled and (
         proactive_enabled or short_conversation_enabled
     ) and not route_by_task["agent_proactive"]["configured"]:
         blockers.append(

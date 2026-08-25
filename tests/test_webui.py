@@ -24,7 +24,10 @@ if nonebot.get_plugin("yawn_core") is None:
     nonebot.load_from_toml("pyproject.toml")
 
 auth = importlib.import_module("src.plugins.yawn_core.webui.auth")
+agent_routes = importlib.import_module("src.plugins.yawn_core.webui.agent")
 app_module = importlib.import_module("src.plugins.yawn_core.webui.app")
+route_helpers = importlib.import_module("src.plugins.yawn_core.webui.route_helpers")
+route_models = importlib.import_module("src.plugins.yawn_core.webui.route_models")
 service = importlib.import_module("src.plugins.yawn_core.webui.service")
 
 
@@ -63,12 +66,50 @@ def test_registered_fastapi_routes_serve_login_and_spa() -> None:
     assert client.get("/webui").status_code == 200  # noqa: PLR2004
 
 
+def test_split_route_modules_are_all_registered() -> None:
+    route_modules = [
+        importlib.import_module("src.plugins.yawn_core.webui.auth_routes"),
+        importlib.import_module("src.plugins.yawn_core.webui.overview_routes"),
+        importlib.import_module("src.plugins.yawn_core.webui.environment_routes"),
+        importlib.import_module("src.plugins.yawn_core.webui.groups"),
+        importlib.import_module("src.plugins.yawn_core.webui.users"),
+        importlib.import_module("src.plugins.yawn_core.webui.agent"),
+        importlib.import_module("src.plugins.yawn_core.webui.audits"),
+    ]
+    app = FastAPI()
+    app_module.register(app)
+
+    schema = app.openapi()
+    registered = {
+        (method.upper(), path)
+        for path, operations in schema["paths"].items()
+        for method in operations
+        if method in {"get", "post", "put", "patch", "delete"}
+    }
+    split_routes = {
+        (method, route.path)
+        for module in route_modules
+        for route in module.router.routes
+        for method in route.methods or []
+    }
+
+    assert split_routes <= registered
+    assert {
+        ("GET", "/webui/api/v1/overview"),
+        ("GET", "/webui/api/v1/groups"),
+        ("GET", "/webui/api/v1/users"),
+        ("GET", "/webui/api/v1/agent/groups/{group_id}/diagnostics"),
+        ("GET", "/webui/api/v1/web-audits"),
+        ("PATCH", "/webui/api/v1/environment"),
+    } <= registered
+
+
 def test_agent_config_and_persona_validation() -> None:
     with pytest.raises(ValidationError):
-        app_module.AgentConfigPatch.model_validate(
+        route_models.AgentConfigPatch.model_validate(
             {"version": None, "triggerMode": "always", "rawRetentionDays": 0}
         )
-    body = app_module.AgentConfigPatch.model_validate(
+    body = route_models.AgentConfigPatch.model_validate(
         {
             "version": None,
             "triggerMode": "mention_only",
@@ -77,25 +118,25 @@ def test_agent_config_and_persona_validation() -> None:
     )
     assert body.tool_allowlist == ["mute_member"]
     assert (
-        app_module.AgentConfigPatch.model_validate(
+        route_models.AgentConfigPatch.model_validate(
             {"version": None, "crossGroupVisibility": "public_summary"}
         ).cross_group_visibility
         == "public_summary"
     )
     with pytest.raises(ValidationError):
-        app_module.AgentConfigPatch.model_validate(
+        route_models.AgentConfigPatch.model_validate(
             {"version": None, "crossGroupVisibility": "all"}
         )
 
     with pytest.raises(ValidationError):
-        app_module.AgentConfigPatch.model_validate(
+        route_models.AgentConfigPatch.model_validate(
             {"version": None, "proactiveActiveProbability": 1.5}
         )
     with pytest.raises(ValidationError):
-        app_module.AgentConfigPatch.model_validate(
+        route_models.AgentConfigPatch.model_validate(
             {"version": None, "proactiveActiveWindowMinutes": 0}
         )
-    proactive_patch = app_module.AgentConfigPatch.model_validate(
+    proactive_patch = route_models.AgentConfigPatch.model_validate(
         {
             "version": None,
             "proactiveActiveEnabled": False,
@@ -110,7 +151,7 @@ def test_agent_config_and_persona_validation() -> None:
     assert proactive_patch.proactive_active_window_minutes == 6  # noqa: PLR2004
 
     with pytest.raises(ValidationError):
-        app_module.PersonaPatch.model_validate(
+        route_models.PersonaPatch.model_validate(
             {"version": None, "enabled": True, "overrides": {"unknown": "x"}}
         )
 
@@ -118,9 +159,9 @@ def test_agent_config_and_persona_validation() -> None:
 def test_version_conflict_is_explicit() -> None:
     row = service.GroupAgentConfig(group_id=1)
     row.updated_at = None
-    app_module.check_version(row, None)
+    route_helpers.check_version(row, None)
     with pytest.raises(HTTPException) as exc_info:
-        app_module.check_version(row, "stale")
+        route_helpers.check_version(row, "stale")
     assert exc_info.value.status_code == 409  # noqa: PLR2004
 
 
@@ -244,7 +285,7 @@ def test_games_resolvers_retry_after_failure() -> None:
 
 
 def test_memory_create_body_validates_type_and_expiry() -> None:
-    body = app_module.MemoryCreateBody.model_validate(
+    body = route_models.MemoryCreateBody.model_validate(
         {
             "type": "manual",
             "key": "群规",
@@ -258,37 +299,37 @@ def test_memory_create_body_validates_type_and_expiry() -> None:
     assert body.expires_in_days is None
 
     # core 为管理员手动钉住的核心记忆类型，同样允许创建。
-    core_body = app_module.MemoryCreateBody.model_validate(
+    core_body = route_models.MemoryCreateBody.model_validate(
         {"type": "core", "key": "display_name", "content": "阿眠"}
     )
     assert core_body.type == "core"
 
     with pytest.raises(ValidationError):
-        app_module.MemoryCreateBody.model_validate(
+        route_models.MemoryCreateBody.model_validate(
             {"type": "unknown", "key": "k", "content": "c"}
         )
     with pytest.raises(ValidationError):
-        app_module.MemoryCreateBody.model_validate(
+        route_models.MemoryCreateBody.model_validate(
             {"type": "manual", "key": "k", "content": "c", "expiresInDays": 0}
         )
     with pytest.raises(ValidationError):
-        app_module.MemoryCreateBody.model_validate(
+        route_models.MemoryCreateBody.model_validate(
             {"type": "manual", "key": "", "content": "c"}
         )
 
 
 def test_memory_patch_body_requires_updatable_field() -> None:
-    updates = app_module.MemoryPatchBody.model_validate(
+    updates = route_models.MemoryPatchBody.model_validate(
         {"version": "v1", "salience": 0.8, "expiresInDays": None}
     ).model_dump(exclude_unset=True, exclude={"version"})
     assert updates == {"salience": 0.8, "expires_in_days": None}
 
-    empty = app_module.MemoryPatchBody.model_validate({"version": "v1"})
+    empty = route_models.MemoryPatchBody.model_validate({"version": "v1"})
     assert empty.model_dump(exclude_unset=True, exclude={"version"}) == {}
 
 
 def test_privacy_patch_body_accepts_camel_alias() -> None:
-    assert app_module.PrivacyPatchBody.model_validate({"optedOut": True}).opted_out
+    assert route_models.PrivacyPatchBody.model_validate({"optedOut": True}).opted_out
 
 
 def test_serialize_relation_and_agent_message_as_strings() -> None:
@@ -329,7 +370,7 @@ def test_serialize_relation_and_agent_message_as_strings() -> None:
 
 
 def test_relation_create_body_validates_fields() -> None:
-    body = app_module.RelationCreateBody.model_validate(
+    body = route_models.RelationCreateBody.model_validate(
         {
             "subjectUserId": 111,
             "objectUserId": 222,
@@ -341,11 +382,11 @@ def test_relation_create_body_validates_fields() -> None:
     assert body.confidence == 0.9  # noqa: PLR2004
 
     with pytest.raises(ValidationError):
-        app_module.RelationCreateBody.model_validate(
+        route_models.RelationCreateBody.model_validate(
             {"subjectUserId": 0, "objectUserId": 222, "type": "好友"}
         )
     with pytest.raises(ValidationError):
-        app_module.RelationCreateBody.model_validate(
+        route_models.RelationCreateBody.model_validate(
             {
                 "subjectUserId": 111,
                 "objectUserId": 222,
@@ -354,18 +395,18 @@ def test_relation_create_body_validates_fields() -> None:
             }
         )
     with pytest.raises(ValidationError):
-        app_module.RelationCreateBody.model_validate(
+        route_models.RelationCreateBody.model_validate(
             {"subjectUserId": 111, "objectUserId": 222, "type": ""}
         )
 
 
 def test_relation_patch_body_requires_updatable_field() -> None:
-    updates = app_module.RelationPatchBody.model_validate(
+    updates = route_models.RelationPatchBody.model_validate(
         {"note": "新备注", "confidence": 0.8}
     ).model_dump(exclude_unset=True)
     assert updates == {"note": "新备注", "confidence": 0.8}
 
-    empty = app_module.RelationPatchBody.model_validate({})
+    empty = route_models.RelationPatchBody.model_validate({})
     assert empty.model_dump(exclude_unset=True) == {}
 
 
@@ -398,7 +439,7 @@ class _FakeRelationSession:
 
     async def get(self, model: Any, key: Any) -> Any:
         if model.__name__ == "BotGroup" and key == 100:  # noqa: PLR2004
-            return app_module.BotGroup(group_id=key, group_name="测试群")
+            return service.BotGroup(group_id=key, group_name="测试群")
         return None
 
     async def execute(self, _stmt: Any) -> _ScalarResult:
@@ -412,7 +453,7 @@ class _FakeRelationSession:
 
     async def commit(self) -> None:
         if self.conflict:
-            raise app_module.IntegrityError("insert", {}, Exception("dup"))
+            raise agent_routes.IntegrityError("insert", {}, Exception("dup"))
 
     async def rollback(self) -> None:
         return None
@@ -438,10 +479,10 @@ async def test_create_relation_normalizes_type_and_marks_manual(
 ) -> None:
     session = _FakeRelationSession()
     monkeypatch.setattr(
-        app_module, "get_session", lambda: _FakeSessionFactory(session)
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
     )
 
-    create_body = app_module.RelationCreateBody.model_validate(
+    create_body = route_models.RelationCreateBody.model_validate(
         {
             "subjectUserId": 111,
             "objectUserId": 222,
@@ -449,7 +490,7 @@ async def test_create_relation_normalizes_type_and_marks_manual(
             "note": " 官宣过 ",
         }
     )
-    result = await app_module.create_relation(100, create_body, None)
+    result = await agent_routes.create_relation(100, create_body, None)
 
     assert len(session.added) == 1
     edge = session.added[0]
@@ -464,12 +505,14 @@ async def test_create_relation_rejects_same_endpoints_and_opted_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _FakeRelationSession()
-    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
 
     with pytest.raises(HTTPException) as same:
-        await app_module.create_relation(
+        await agent_routes.create_relation(
             100,
-            app_module.RelationCreateBody.model_validate(
+            route_models.RelationCreateBody.model_validate(
                 {"subjectUserId": 111, "objectUserId": 111, "type": "好友"}
             ),
             None,
@@ -478,12 +521,12 @@ async def test_create_relation_rejects_same_endpoints_and_opted_out(
 
     privacy_session = _FakeRelationSession(opted_out={222})
     monkeypatch.setattr(
-        app_module, "get_session", lambda: _FakeSessionFactory(privacy_session)
+        agent_routes, "get_session", lambda: _FakeSessionFactory(privacy_session)
     )
     with pytest.raises(HTTPException) as opted_out:
-        await app_module.create_relation(
+        await agent_routes.create_relation(
             100,
-            app_module.RelationCreateBody.model_validate(
+            route_models.RelationCreateBody.model_validate(
                 {"subjectUserId": 111, "objectUserId": 222, "type": "好友"}
             ),
             None,
@@ -496,12 +539,14 @@ async def test_create_relation_conflict_returns_409(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _FakeRelationSession(conflict=True)
-    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
 
     with pytest.raises(HTTPException) as conflict:
-        await app_module.create_relation(
+        await agent_routes.create_relation(
             100,
-            app_module.RelationCreateBody.model_validate(
+            route_models.RelationCreateBody.model_validate(
                 {"subjectUserId": 111, "objectUserId": 222, "type": "好友"}
             ),
             None,
@@ -527,13 +572,13 @@ async def test_update_relation_only_touches_note_and_confidence(
     )
     session = _FakeRelationSession(existing=existing)
     monkeypatch.setattr(
-        app_module, "get_session", lambda: _FakeSessionFactory(session)
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
     )
 
-    patch_body = app_module.RelationPatchBody.model_validate(
+    patch_body = route_models.RelationPatchBody.model_validate(
         {"note": "常一起开黑", "confidence": 0.85}
     )
-    result = await app_module.update_relation(100, 7, patch_body, None)
+    result = await agent_routes.update_relation(100, 7, patch_body, None)
 
     assert existing.relation_type == "好友"
     assert existing.note == "常一起开黑"
@@ -557,7 +602,7 @@ class _FakeGraphSession:
 
     async def get(self, model: Any, key: Any) -> Any:
         if model.__name__ == "BotGroup" and key == 100:  # noqa: PLR2004
-            return app_module.BotGroup(group_id=key, group_name="测试群")
+            return service.BotGroup(group_id=key, group_name="测试群")
         return None
 
     async def execute(self, stmt: Any) -> _ScalarResult:
@@ -623,9 +668,11 @@ async def test_relation_graph_merges_members_and_edges(
     session = _FakeGraphSession(
         opted_out={444}, relations=relations, members=members
     )
-    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
 
-    result = await app_module.get_relation_graph(100, None)
+    result = await agent_routes.get_relation_graph(100, None)
 
     data = result["data"]
     assert [edge["id"] for edge in data["edges"]] == ["1", "2"]
@@ -653,9 +700,11 @@ async def test_relation_graph_marks_truncation(
         for index in range(service.RELATION_GRAPH_LIMIT + 1)
     ]
     session = _FakeGraphSession(relations=relations)
-    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
 
-    result = await app_module.get_relation_graph(100, None)
+    result = await agent_routes.get_relation_graph(100, None)
 
     data = result["data"]
     assert len(data["edges"]) == service.RELATION_GRAPH_LIMIT
@@ -679,7 +728,7 @@ class _FakeSubjectsSession:
 
     async def get(self, model: Any, key: Any) -> Any:
         if model.__name__ == "BotGroup" and key == 100:  # noqa: PLR2004
-            return app_module.BotGroup(group_id=key, group_name="测试群")
+            return service.BotGroup(group_id=key, group_name="测试群")
         return None
 
     async def execute(self, stmt: Any) -> _ScalarResult:
@@ -696,10 +745,10 @@ class _FakeSubjectsSession:
             row
             for row in self.memories
             if int(row.subject_user_id or 0) != 0
-            and row.memory_type in app_module._SUBJECT_MEMORY_TYPES
+            and row.memory_type in agent_routes._SUBJECT_MEMORY_TYPES
             and not (
                 row.expires_at is not None
-                and row.expires_at < app_module.now_beijing()
+                and row.expires_at < agent_routes.now_beijing()
             )
             and int(row.subject_user_id) not in self.opted_out
             and not any(
@@ -771,9 +820,11 @@ async def test_memory_subjects_aggregates_counts_and_resolves_nicknames(
     session = _FakeSubjectsSession(
         opted_out={444}, memories=memories, members=members
     )
-    monkeypatch.setattr(app_module, "get_session", lambda: _FakeSessionFactory(session))
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
 
-    result = await app_module.get_memory_subjects(100, None)
+    result = await agent_routes.get_memory_subjects(100, None)
 
     data = result["data"]
     assert [entry["userId"] for entry in data] == ["111", "333", "222"]
