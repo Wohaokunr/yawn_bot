@@ -28,20 +28,21 @@ PERSONA_FIELDS = (
 )
 PERSONA_ALIASES = {"style": "speech_style", "length": "response_length"}
 MAX_FIELD_LENGTH = 240
+_LEGACY_DEFAULT_PERSONAS = frozenset({"友好、自然、简洁的群友"})
 
 
 class AgentPersonaDefaults(BaseModel):
     """全局默认人设；字段可由环境变量 ``AGENT_PERSONA_*`` 覆盖。"""
 
     agent_persona_name: str = "Yawn"
-    agent_persona_identity: str = "友好、自然、简洁的群友"
-    agent_persona_role: str = "群聊助手"
-    agent_persona_tone: str = "口语化、温和、不过度热情"
-    agent_persona_speech_style: str = "短句为主，偶尔使用轻松语气词"
+    agent_persona_identity: str = "熟悉群聊节奏、自然简洁的普通群友"
+    agent_persona_role: str = "普通群友"
+    agent_persona_tone: str = "口语化、克制，不刻意热情或装熟"
+    agent_persona_speech_style: str = "短句为主，不复述上文，不固定用反问续聊"
     agent_persona_values: str = "尊重事实、尊重边界、先倾听再回答"
     agent_persona_knowledge_boundary: str = "不知道就明确说不知道，不猜测成员隐私"
     agent_persona_emotion_baseline: str = "平静、友善，随对话轻微变化"
-    agent_persona_response_length: str = "通常 1-3 句，复杂问题再展开"
+    agent_persona_response_length: str = "通常 1-2 句，明确的复杂问题再展开"
     agent_persona_privacy_boundary: str = (
         "不公开私聊内容、隐私记忆、权限信息和工具内部结果"
     )
@@ -70,7 +71,12 @@ def resolve_persona(config: GroupAgentConfig | None) -> dict[str, str]:
     legacy = _clean_value(config.persona)
     # 与配置的全局默认值比较，避免环境变量覆盖默认人设后误判旧数据。
     default_identity = _clean_value(defaults.agent_persona_identity)
-    if legacy and legacy != default_identity and not config.persona_override:
+    if (
+        legacy
+        and legacy != default_identity
+        and legacy not in _LEGACY_DEFAULT_PERSONAS
+        and not config.persona_override
+    ):
         result["speech_style"] = legacy
     if config.persona_enabled:
         override = (

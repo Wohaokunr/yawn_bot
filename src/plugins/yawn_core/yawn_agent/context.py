@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _CST = timezone(timedelta(hours=8))
 _MESSAGE_CHAR_LIMIT = 800
 _MESSAGE_CONTEXT_CHAR_BUDGET = 6_000
+_TOPIC_BREAK_MINUTES = 30
 
 
 def now_beijing() -> datetime:
@@ -36,6 +40,95 @@ class ActivitySnapshot:
     member_messages_60m: int = 0
     member_messages_5m: int = 0
     member_participants_5m: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTurn:
+    """当前触发回合的结构化事实；普通对话与调试回放共用。"""
+
+    message_id: int | None
+    user_id: int
+    name: str
+    role: str
+    title: str | None
+    content: str
+    mentions: tuple[int, ...] = ()
+    reply_to: dict[str, Any] | None = None
+    trigger: str = "debug_replay"
+    received_at: str | None = None
+    media_types: tuple[str, ...] = ()
+    forward_nodes: int = 0
+    truncated: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def build_current_turn(
+    *,
+    message_id: int | None,
+    user_id: int,
+    name: str | None,
+    role: str | None,
+    title: str | None,
+    content: str,
+    mentions: Sequence[int] = (),
+    reply_chain: Sequence[dict[str, Any]] = (),
+    trigger: str,
+    received_at: datetime | None,
+    media_refs: Sequence[dict[str, Any]] = (),
+    forward_nodes: int = 0,
+    truncated: bool = False,
+) -> CurrentTurn:
+    """从实时消息或数据库行构建同一种当前回合结构。"""
+
+    if received_at is not None and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=_CST)
+    reply_to: dict[str, Any] | None = None
+    if reply_chain:
+        raw = reply_chain[0]
+        reply_to = {
+            "message_id": raw.get("message_id"),
+            "user_id": raw.get("user_id"),
+            "name": str(raw.get("nickname") or "未知用户")[:64],
+            "text": str(raw.get("text") or "")[:720],
+        }
+    clean_mentions: list[int] = []
+    for raw_user_id in mentions:
+        try:
+            mention_user_id = int(raw_user_id)
+        except (TypeError, ValueError):
+            continue
+        if mention_user_id > 0 and mention_user_id not in clean_mentions:
+            clean_mentions.append(mention_user_id)
+    return CurrentTurn(
+        message_id=message_id,
+        user_id=int(user_id),
+        name=(name or str(user_id))[:64],
+        role=(role or "member")[:16],
+        title=(title or "")[:64] or None,
+        content=content,
+        mentions=tuple(clean_mentions),
+        reply_to=reply_to,
+        trigger=trigger,
+        received_at=received_at.isoformat() if received_at else None,
+        media_types=tuple(
+            str(item.get("type") or "media")[:24]
+            for item in media_refs[:20]
+            if isinstance(item, dict)
+        ),
+        forward_nodes=max(int(forward_nodes), 0),
+        truncated=bool(truncated),
+    )
+
+
+def topic_break_before(previous: datetime | None, current: datetime) -> bool:
+    """相邻消息相隔 30 分钟即标记为旧话题边界。"""
+
+    return bool(
+        previous
+        and current - previous >= timedelta(minutes=_TOPIC_BREAK_MINUTES)
+    )
 
 
 def coldness_score(snapshot: ActivitySnapshot, now: datetime) -> float:
@@ -101,11 +194,12 @@ def build_context(
     persona: dict[str, str] | str | None = None,
     active_topic: str | None = None,
     emotion_state: dict[str, Any] | None = None,
+    reference_at: datetime | None = None,
 ) -> dict[str, Any]:
     # Persona belongs to the stable prompt prefix.  Keeping it out of the
     # dynamic JSON prevents a group message from invalidating the cacheable
     # prefix and avoids sending the same policy twice.
-    now = now_beijing().replace(second=0, microsecond=0)
+    now = (reference_at or now_beijing()).replace(second=0, microsecond=0)
     coldness = coldness_score(activity, now)
     stable_members = sorted(
         [
@@ -159,10 +253,13 @@ def build_context(
 
 __all__ = [
     "ActivitySnapshot",
+    "CurrentTurn",
     "build_context",
+    "build_current_turn",
     "coldness_score",
     "is_cooldown_active",
     "is_recent",
     "now_beijing",
+    "topic_break_before",
     "trim_context_messages",
 ]

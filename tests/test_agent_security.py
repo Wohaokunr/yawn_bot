@@ -61,6 +61,8 @@ def test_tool_registry_filters_removed_tools_and_forward_capability() -> None:
     )
     names = _tool_names(tools.build_tool_schemas(base))
     assert {"send_text", "get_recent_messages", "get_group_activity"}.isdisjoint(names)
+    assert "send_image" not in names
+    assert "send_message" in names
     assert "send_forward" not in names
 
     forward = capabilities.BotGroupCapabilities(

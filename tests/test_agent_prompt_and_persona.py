@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -86,10 +87,92 @@ def test_prompt_lists_tool_names_without_repeating_schema() -> None:
         user_prompt="你好",
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v8"
+    assert prompt.PROMPT_VERSION == "yawn-agent-v9"
     assert "search_group_memory" in str(messages[0]["content"])
     assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
     assert '"properties"' not in str(messages[0]["content"])
+
+
+def test_current_turn_has_priority_over_old_group_topic() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context import build_current_turn
+    from src.plugins.yawn_core.yawn_agent.prompt import build_messages
+
+    received_at = datetime(2026, 8, 25, 12, 0)  # noqa: DTZ001
+    current_turn = build_current_turn(
+        message_id=9002,
+        user_id=300,
+        name="当前发言人",
+        role="member",
+        title=None,
+        content="到底有没有一起玩",
+        mentions=[400],
+        reply_chain=[
+            {
+                "message_id": 9001,
+                "user_id": 500,
+                "nickname": "被引用的人",
+                "text": "前面问的是 Roblox",
+            }
+        ],
+        trigger="reply_to_bot",
+        received_at=received_at,
+    )
+    messages, _ = build_messages(
+        persona={"name": "Yawn"},
+        tools=[],
+        context={
+            "active_topic": "几小时前的 Roblox 长篇讨论",
+            "messages": [
+                {
+                    "user_id": 200,
+                    "name": "上一位发言人",
+                    "text": "Brookhaven 和 Doors 都不错",
+                    "minutes_ago": 180,
+                    "topic_break_before": True,
+                }
+            ],
+        },
+        user_prompt="这段不会成为最终 user 消息",
+        current_turn=current_turn,
+    )
+
+    system = str(messages[0]["content"])
+    current = str(messages[-1]["content"])
+    assert "current_turn 是本轮最高优先级" in system
+    assert "不要回答上一位成员的问题" in system
+    assert "默认用 1~2 句" in system
+    assert '"user_id":300' in current
+    assert '"name":"当前发言人"' in current
+    assert '"content":"到底有没有一起玩"' in current
+    assert '"mentions":[400]' in current
+    assert '"user_id":500' in current
+    assert "这段不会成为最终 user 消息" not in current
+    assert "Brookhaven" in str(messages[2]["content"])
+
+
+def test_topic_boundary_and_message_age_mark_old_sessions() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context import topic_break_before
+
+    current = datetime(2026, 8, 25, 12, 0)  # noqa: DTZ001
+    assert not topic_break_before(current - timedelta(minutes=29), current)
+    assert topic_break_before(current - timedelta(minutes=30), current)
+    assert topic_break_before(current - timedelta(days=3), current)
+
+
+def test_current_turn_focus_includes_actor_mentions_and_direct_reply() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.dialogue import _current_turn_focus_ids
+    from src.plugins.yawn_core.yawn_agent.message_parser import NormalizedMessage
+
+    normalized = NormalizedMessage(
+        plain_text="问一下",
+        segments=[],
+        mentions=[100, 400, 300],
+        reply_chain=[{"user_id": 500, "message_id": 12, "text": "原消息"}],
+    )
+    assert _current_turn_focus_ids(300, normalized, bot_id=100) == [300, 400, 500]
 
 
 def test_context_message_budget_keeps_newest_content() -> None:
@@ -767,6 +850,8 @@ def test_followup_prompt_uses_memory_naturally_and_can_wait() -> None:
         assert phrase in prompt
     assert "wait" in prompt
     assert "close" in prompt
+    assert "连续同义复述" in prompt
+    assert "不要靠结尾反问" in prompt
     assert "第 2 条候选发言" in prompt
 
 

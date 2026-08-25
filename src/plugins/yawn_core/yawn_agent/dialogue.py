@@ -37,7 +37,15 @@ from .capabilities import (
 from .collector import group_lock, is_pending_trigger_expired
 from .config_store import agent_runtime_enabled, get_or_create_config
 from .conversation import mark_bot_reply
-from .context import ActivitySnapshot, build_context, now_beijing, trim_context_messages
+from .context import (
+    ActivitySnapshot,
+    CurrentTurn,
+    build_context,
+    build_current_turn,
+    now_beijing,
+    topic_break_before,
+    trim_context_messages,
+)
 from .log import dbg, dbg_exc
 from .media import prepare_image_inputs, store_caption
 from .memory import effective_relation_confidence, rank_memories
@@ -50,7 +58,12 @@ from .outbound import (
     send_prepared_outbound,
 )
 from .persona import resolve_persona
-from .prompt import build_messages, prompt_cache_key, stable_context_key
+from .prompt import (
+    build_messages,
+    prompt_cache_key,
+    render_current_turn,
+    stable_context_key,
+)
 from .tools import MAX_TOOL_ROUNDS, build_tool_schemas, execute_tool
 
 _GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "在吗", "在不在")
@@ -59,7 +72,7 @@ _PROMPT_CACHE_LIMIT = 256
 _MAX_TURN_SECONDS = 120.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
-_VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_image", "send_forward"})
+_VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 # 条目上限对齐各层最大配额（5+4+12+3），字符预算仍是实际约束。
 _MEMORY_CONTEXT_LIMIT = 24
@@ -105,6 +118,43 @@ def contains_word(text: str, word: str) -> bool:
             re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
         )
     return word in text
+
+
+def _current_turn_focus_ids(
+    actor_user_id: int,
+    normalized: NormalizedMessage,
+    *,
+    bot_id: int | None = None,
+) -> list[int]:
+    focus = [int(actor_user_id)]
+    focus.extend(
+        int(user_id)
+        for user_id in normalized.mentions
+        if bot_id is None or int(user_id) != bot_id
+    )
+    if normalized.reply_chain:
+        raw_user_id = normalized.reply_chain[0].get("user_id")
+        try:
+            reply_user_id = int(str(raw_user_id))
+        except (TypeError, ValueError):
+            reply_user_id = 0
+        if reply_user_id > 0 and reply_user_id != bot_id:
+            focus.append(reply_user_id)
+    return list(dict.fromkeys(focus))
+
+
+def _current_turn_trigger(
+    event: GroupMessageEvent, bot: Bot, normalized: NormalizedMessage
+) -> str:
+    if normalized.reply_chain:
+        try:
+            if int(str(normalized.reply_chain[0].get("user_id"))) == int(bot.self_id):
+                return "reply_to_bot"
+        except (TypeError, ValueError):
+            pass
+    if bool(getattr(event, "to_me", False)) or int(bot.self_id) in normalized.mentions:
+        return "mention"
+    return "explicit_wakeup"
 
 
 def _is_recent_duplicate(
@@ -242,6 +292,7 @@ async def _activity_window_counts(
     *,
     bot_id: int | None = None,
     exclude_user_ids: set[int] | None = None,
+    retention_at: datetime | None = None,
 ) -> dict[str, Any]:
     """60 分钟窗口活跃度的一条 SQL 聚合；对话与主动发言路径共用。
 
@@ -255,8 +306,9 @@ async def _activity_window_counts(
         GroupAgentMessage.group_id == group_id,
         (
             GroupAgentMessage.expires_at.is_(None)
-            | (GroupAgentMessage.expires_at >= now)
+            | (GroupAgentMessage.expires_at >= (retention_at or now))
         ),
+        GroupAgentMessage.received_at <= now,
     ]
     if exclude_user_ids is not None and exclude_user_ids:
         clauses.append(GroupAgentMessage.user_id.not_in(exclude_user_ids))
@@ -409,19 +461,65 @@ def _bot_message_meta(row: GroupAgentMessage) -> dict[str, Any] | None:
     }
 
 
+def _history_message_meta(row: GroupAgentMessage) -> dict[str, Any]:
+    """历史消息的寻址信息；成员消息也保留 @ 与直接引用关系。"""
+
+    segment_types: list[str] = []
+    mentions: list[int] = []
+    for item in list(row.segments or [])[:20]:
+        if not isinstance(item, dict):
+            continue
+        segment_type = str(item.get("type") or "").strip()
+        if segment_type:
+            segment_types.append(segment_type)
+        if segment_type != "at":
+            continue
+        data = item.get("data")
+        raw_user_id = data.get("qq") if isinstance(data, dict) else None
+        try:
+            user_id = int(str(raw_user_id))
+        except (TypeError, ValueError):
+            continue
+        if user_id > 0 and user_id not in mentions:
+            mentions.append(user_id)
+    reply_to: dict[str, Any] | None = None
+    chain = list(row.reply_chain or [])
+    if chain and isinstance(chain[0], dict):
+        raw = chain[0]
+        reply_to = {
+            "message_id": raw.get("message_id"),
+            "user_id": raw.get("user_id"),
+            "name": str(raw.get("nickname") or "未知用户")[:64],
+            "text": str(raw.get("text") or "")[:240],
+        }
+    media_types = [
+        str(item.get("type") or "media")[:24]
+        for item in list(row.media_refs or [])[:4]
+        if isinstance(item, dict)
+    ]
+    return {
+        "segment_types": segment_types,
+        "mentions": mentions,
+        "reply_to": reply_to,
+        "media_types": media_types,
+        "forward_nodes": min(len(list(row.forward_tree or [])), 20),
+    }
+
+
 async def _load_context(
     session: Any,
     group_id: int,
     config: GroupAgentConfig,
     bot_id: int | None = None,
     *,
-    include_message_age: bool = False,
     focus_user_ids: Sequence[int] | None = None,
     message_cutoff: datetime | None = None,
     include_active_profiles: bool = False,
     exclude_message_id: int | None = None,
+    reference_at: datetime | None = None,
 ) -> dict[str, Any]:
     now = now_beijing()
+    context_now = reference_at or now
     # 隐私退出是读路径级别的：历史消息同样不得进入提示词。
     opted_out = set(
         (
@@ -466,32 +564,39 @@ async def _load_context(
         .scalars()
         .all()
     )
-    messages = trim_context_messages([
-        {
-            "message_id": row.message_id,
-            "user_id": row.user_id,
-            "name": row.sender_name,
-            "role": row.role,
-            "title": row.title,
-            "text": row.normalized_text,
-            **(
-                {"message_meta": meta}
-                if (meta := _bot_message_meta(row)) is not None
-                else {}
-            ),
-            # 主动发言路径开启：让模型分辨"几分钟前在聊什么"与更早的旧话。
-            **(
-                {"minutes_ago": int((now - row.received_at).total_seconds() // 60)}
-                if include_message_age
-                else {}
-            ),
-        }
-        for row in reversed(rows)
-    ])
+    messages_unbounded: list[dict[str, Any]] = []
+    previous_at: datetime | None = None
+    for row in reversed(rows):
+        meta = _history_message_meta(row)
+        messages_unbounded.append(
+            {
+                "message_id": row.message_id,
+                "user_id": row.user_id,
+                "name": row.sender_name,
+                "role": row.role,
+                "title": row.title,
+                "text": row.normalized_text,
+                "minutes_ago": max(
+                    0, int((context_now - row.received_at).total_seconds() // 60)
+                ),
+                "topic_break_before": topic_break_before(previous_at, row.received_at),
+                "mentions": meta["mentions"],
+                "reply_to": meta["reply_to"],
+                "media_types": meta["media_types"],
+                "forward_nodes": meta["forward_nodes"],
+                **(
+                    {"message_meta": bot_meta}
+                    if (bot_meta := _bot_message_meta(row)) is not None
+                    else {}
+                ),
+            }
+        )
+        previous_at = row.received_at
+    messages = trim_context_messages(messages_unbounded)
     dbg(f"群 {group_id} 加载上下文: 历史消息 {len(messages)} 条(上限 40)")
     # 相关性信号取自刚加载的消息：近 10 条文本与最后一位发言成员。
     recent_texts = [str(item["text"] or "") for item in messages[-10:]]
-    speaker_id = next(
+    previous_speaker_id = next(
         (
             int(item["user_id"])
             for item in reversed(messages)
@@ -507,6 +612,7 @@ async def _load_context(
         if member_id not in recent_member_ids:
             recent_member_ids.append(member_id)
     requested_focus = [int(user_id) for user_id in (focus_user_ids or [])]
+    speaker_id = requested_focus[0] if requested_focus else previous_speaker_id
     focus_ids: list[int] = []
     focus_candidates = [
         *requested_focus,
@@ -670,7 +776,7 @@ async def _load_context(
         local_rows,
         recent_texts,
         speaker_id,
-        now,
+        context_now,
         limit=40,
         topic_hint=str(config.active_topic or ""),
     )
@@ -803,6 +909,7 @@ async def _load_context(
     participant_ids = {
         int(item["user_id"]) for item in messages if item.get("role") != "bot"
     }
+    participant_ids.update(focus_ids)
     relation_rows: list[AgentRelation] = []
     if participant_ids:
         # 先在 SQL 层限定当前上下文参与者，再取候选池，避免无关高置信边
@@ -842,7 +949,7 @@ async def _load_context(
         relation_rows,
         key=lambda row: (
             -effective_relation_confidence(
-                float(row.confidence or 0.0), row.last_seen_at, now
+                float(row.confidence or 0.0), row.last_seen_at, context_now
             ),
             -int(row.evidence_count or 0),
             int(row.id or 0),
@@ -862,7 +969,12 @@ async def _load_context(
     )
     # 活跃度改用聚合查询精确统计 60 分钟窗口，不再受最新 40 条截断影响。
     counts = await _activity_window_counts(
-        session, group_id, now, bot_id=bot_id, exclude_user_ids=opted_out
+        session,
+        group_id,
+        context_now,
+        bot_id=bot_id,
+        exclude_user_ids=opted_out,
+        retention_at=now,
     )
     activity = ActivitySnapshot(
         counts["last_message_at"],
@@ -902,6 +1014,7 @@ async def _load_context(
         emotion_state=config.emotion_state
         if isinstance(config.emotion_state, dict)
         else {},
+        reference_at=context_now,
     )
 
 
@@ -1132,19 +1245,17 @@ async def _process_group_message(
                     f"{'配置缺失' if config is None else '已关闭'}"
                 )
                 return
+            actor_user_id = int(event.get_user_id())
             context = await _load_context(
                 session,
                 group_id,
                 config,
                 bot_id,
+                focus_user_ids=_current_turn_focus_ids(
+                    actor_user_id, normalized, bot_id=bot_id
+                ),
                 exclude_message_id=int(message_id) if message_id is not None else None,
             )
-            actor_user_id = int(event.get_user_id())
-            if message_id is not None:
-                context["current_message"] = {
-                    "message_id": int(message_id),
-                    "user_id": actor_user_id,
-                }
             capabilities = await probe_group_capabilities(bot, group_id)
             allow_admin_tools = await user_can_manage_group(
                 bot, group_id, actor_user_id
@@ -1180,6 +1291,21 @@ async def _process_group_message(
                 cached_captions,
                 media_digests,
             )
+            current_turn: CurrentTurn = build_current_turn(
+                message_id=int(message_id) if message_id is not None else None,
+                user_id=actor_user_id,
+                name=event.sender.card or event.sender.nickname,
+                role=str(event.sender.role or "member"),
+                title=event.sender.title,
+                content=user_prompt,
+                mentions=normalized.mentions,
+                reply_chain=normalized.reply_chain,
+                trigger=_current_turn_trigger(event, bot, normalized),
+                received_at=now_beijing(),
+                media_refs=normalized.media_refs,
+                forward_nodes=len(normalized.forward_tree),
+                truncated=normalized.truncated,
+            )
             model = resolve_llm_request("agent_dialogue").model
             dbg(f"群 {group_id} 对话模型={model!r}")
             messages, _prefix_fingerprint = build_messages(
@@ -1187,6 +1313,7 @@ async def _process_group_message(
                 tools=tools,
                 context=context,
                 user_prompt=user_prompt,
+                current_turn=current_turn,
                 media_inputs=media_blocks
                 if resolve_llm_request("agent_dialogue").multimodal
                 != "unsupported"
@@ -1257,11 +1384,15 @@ async def _process_group_message(
                     )
                     fallback_attempted = True
                     user_prompt = f"{normalized.prompt_text()}\n{await _describe_images(group_id, normalized, media_blocks, session, config, cached_captions, media_digests)}"
+                    current_turn = CurrentTurn(
+                        **{**current_turn.as_dict(), "content": user_prompt}
+                    )
                     messages, _prefix_fingerprint = build_messages(
                         persona=resolve_persona(config),
                         tools=tools,
                         context=context,
                         user_prompt=user_prompt,
+                        current_turn=current_turn,
                     )
                     media_blocks = []
                     # 多模态降级重建提示词，不占用工具轮次。
@@ -1298,7 +1429,7 @@ async def _process_group_message(
                             session,
                             normalized,
                             content,
-                            user_prompt,
+                            render_current_turn(current_turn),
                             enqueued_at,
                             message_id,
                         )
@@ -1408,7 +1539,7 @@ async def _process_group_message(
                                 fingerprint_source.casefold().encode("utf-8")
                             ).hexdigest()
                             input_fingerprint = hashlib.sha256(
-                                user_prompt.casefold().encode("utf-8")
+                                render_current_turn(current_turn).casefold().encode("utf-8")
                             ).hexdigest()
                             recent = list(config.recent_response_fingerprints or [])
                             recent.append(
@@ -1458,7 +1589,7 @@ async def _process_group_message(
                     await session.refresh(config)
                     if round_sent_message:
                         # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
-                        # 同时调用 send_image/send_message/send_forward 连发多条。
+                        # 同时调用 send_message/send_forward 连发多条。
                         break
                 if round_sent_message:
                     dbg(f"群 {group_id} 工具已发送用户可见消息,结束本轮避免重复回复")

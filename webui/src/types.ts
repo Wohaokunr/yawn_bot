@@ -248,6 +248,7 @@ export interface AgentRelationGraph {
 
 export interface AgentMessageItem {
   id: string;
+  messageId: string;
   groupId: string;
   userId: string;
   senderName: string | null;
@@ -256,6 +257,47 @@ export interface AgentMessageItem {
   text: string;
   receivedAt: string | null;
   expiresAt: string | null;
+}
+
+export type AgentDebugMode = "dialogue" | "active" | "warmup" | "followup";
+
+export interface AgentDebugResponse {
+  promptVersion: string;
+  mode: AgentDebugMode;
+  currentTurn: Record<string, unknown>;
+  context: {
+    messages?: Array<Record<string, unknown>>;
+    members?: Array<Record<string, unknown>>;
+    memories?: Array<Record<string, unknown>>;
+    relations?: string[];
+    [key: string]: unknown;
+  };
+  promptMessages: Array<{ role: string; content: unknown }>;
+  tools: Array<Record<string, unknown>>;
+  route: {
+    task: string;
+    profile: string;
+    provider: string;
+    model: string;
+    thinking: string;
+    multimodal: string;
+    configured: boolean;
+  };
+  stats: Record<string, unknown>;
+  warnings: string[];
+  result: null | {
+    outcome: string;
+    text: string;
+    toolCalls: Array<{ name: string; arguments: unknown }>;
+    finishReason: string | null;
+    usage: {
+      promptTokens: number | null;
+      completionTokens: number | null;
+      cachedTokens: number | null;
+    };
+    durationMs: number;
+    decision?: Record<string, unknown>;
+  };
 }
 
 export interface PrivacyItem {

@@ -96,6 +96,45 @@ async def test_missing_key_degrades_all_completions_without_client(
     assert tool_result is None
 
 
+@pytest.mark.asyncio
+async def test_tool_completion_result_exposes_finish_usage_and_duration(
+    llm_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    class Completions:
+        async def create(self, **_kwargs: object) -> Any:
+            message = SimpleNamespace(content="调试回复", tool_calls=[])
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=message, finish_reason="stop")
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=120,
+                    completion_tokens=18,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=40),
+                ),
+            )
+
+    fake = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+    monkeypatch.setattr(llm_module, "get_client", lambda _provider="default": fake)
+
+    result = await llm_module.complete_with_tools_result(
+        [{"role": "user", "content": "hello"}], [], task="agent_dialogue"
+    )
+
+    assert result.outcome == "success"
+    assert result.message is not None
+    assert result.finish_reason == "stop"
+    assert result.prompt_tokens == 120  # noqa: PLR2004
+    assert result.completion_tokens == 18  # noqa: PLR2004
+    assert result.cached_tokens == 40  # noqa: PLR2004
+    assert result.duration_ms >= 0
+
+
 def test_client_is_created_once_on_first_use(
     llm_module: Any,
     monkeypatch: pytest.MonkeyPatch,

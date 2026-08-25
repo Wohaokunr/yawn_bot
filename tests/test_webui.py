@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import nonebot
@@ -66,6 +68,21 @@ def test_registered_fastapi_routes_serve_login_and_spa() -> None:
     assert client.get("/webui").status_code == 200  # noqa: PLR2004
 
 
+def test_agent_debug_route_requires_authentication_and_csrf() -> None:
+    app = FastAPI()
+    app_module.register(app)
+    anonymous = TestClient(app)
+    path = "/webui/api/v1/agent/groups/100/debug/run"
+    body = {"mode": "dialogue", "text": "测试", "actorUserId": 123}
+    assert anonymous.post(path, json=body).status_code == 401  # noqa: PLR2004
+
+    client = TestClient(app, base_url="https://testserver")
+    assert client.post(
+        "/webui/api/v1/auth/login", json={"token": "x" * 40}
+    ).status_code == 200  # noqa: PLR2004
+    assert client.post(path, json=body).status_code == 403  # noqa: PLR2004
+
+
 def test_split_route_modules_are_all_registered() -> None:
     route_modules = [
         importlib.import_module("src.plugins.yawn_core.webui.auth_routes"),
@@ -99,6 +116,7 @@ def test_split_route_modules_are_all_registered() -> None:
         ("GET", "/webui/api/v1/groups"),
         ("GET", "/webui/api/v1/users"),
         ("GET", "/webui/api/v1/agent/groups/{group_id}/diagnostics"),
+        ("POST", "/webui/api/v1/agent/groups/{group_id}/debug/run"),
         ("GET", "/webui/api/v1/web-audits"),
         ("PATCH", "/webui/api/v1/environment"),
     } <= registered
@@ -154,6 +172,23 @@ def test_agent_config_and_persona_validation() -> None:
         route_models.PersonaPatch.model_validate(
             {"version": None, "enabled": True, "overrides": {"unknown": "x"}}
         )
+
+    history = route_models.AgentDebugRunBody.model_validate(
+        {"mode": "dialogue", "messageId": 42, "runModel": False}
+    )
+    assert history.message_id == 42  # noqa: PLR2004
+    simulation = route_models.AgentDebugRunBody.model_validate(
+        {"mode": "followup", "text": "又重复了一遍", "actorUserId": 123}
+    )
+    assert simulation.actor_user_id == 123  # noqa: PLR2004
+    for invalid in (
+        {},
+        {"text": "少了成员"},
+        {"actorUserId": 123},
+        {"messageId": 42, "text": "两种来源", "actorUserId": 123},
+    ):
+        with pytest.raises(ValidationError):
+            route_models.AgentDebugRunBody.model_validate(invalid)
 
 
 def test_version_conflict_is_explicit() -> None:
@@ -365,6 +400,7 @@ def test_serialize_relation_and_agent_message_as_strings() -> None:
         expires_at=datetime(2026, 8, 28, 12, 0, 0),  # noqa: DTZ001
     )
     message_payload = service.serialize_agent_message(message)
+    assert message_payload["messageId"] == "42"
     assert message_payload["userId"] == "9007199254740991"
     assert message_payload["receivedAt"] == "2026-08-21T12:00:00+08:00"
 
@@ -471,6 +507,193 @@ class _FakeSessionFactory:
 
     async def __aexit__(self, *_args: object) -> None:
         return None
+
+
+class _FakeDebugResult:
+    def __init__(self, first: Any = None, scalars: list[Any] | None = None) -> None:
+        self._first = first
+        self._scalars = scalars or []
+
+    def first(self) -> Any:
+        return self._first
+
+    def scalars(self) -> _ScalarResult:
+        return _ScalarResult(self._scalars)
+
+
+class _FakeDebugSession:
+    """调试接口只允许 get/execute；出现 add/commit 会让测试直接失败。"""
+
+    def __init__(self, *, opted_out: bool = False) -> None:
+        self.config = service.GroupAgentConfig(group_id=100)
+        self.member = service.UserGroup(
+            group_id=100,
+            user_id=123,
+            group_nickname="当前发言人",
+            role="member",
+        )
+        self.opted_out = opted_out
+
+    async def get(self, model: Any, _key: Any) -> Any:
+        if model is service.GroupAgentConfig:
+            return self.config
+        return None
+
+    async def execute(self, stmt: Any) -> _FakeDebugResult:
+        entity = stmt.column_descriptions[0]["entity"]
+        if entity is service.UserGroup:
+            return _FakeDebugResult((self.member, "全局昵称"))
+        if entity is service.AgentPrivacy:
+            return _FakeDebugResult(scalars=[123] if self.opted_out else [])
+        raise AssertionError
+
+
+@pytest.mark.asyncio
+async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeDebugSession()
+    model_calls: list[tuple[list[Any], list[Any]]] = []
+
+    async def require_group(*_args: object) -> None:
+        return None
+
+    async def load_context(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
+            "group_id": 100,
+            "group_name": "测试群",
+            "messages": [{"user_id": 7, "text": "旧话题", "minutes_ago": 90}],
+            "members": [],
+            "memories": [],
+            "relations": [],
+            "activity": {},
+        }
+
+    async def complete(messages: list[Any], tools: list[Any], **_kwargs: object) -> Any:
+        model_calls.append((messages, tools))
+        tool_call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="record_user_relation",
+                arguments='{"subject_user_id":123,"object_user_id":456,"type":"好友"}',
+            )
+        )
+        return SimpleNamespace(
+            message=SimpleNamespace(content="", tool_calls=[tool_call]),
+            finish_reason="tool_calls",
+            prompt_tokens=120,
+            completion_tokens=18,
+            cached_tokens=40,
+            outcome="success",
+            duration_ms=12.5,
+        )
+
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
+    monkeypatch.setattr(agent_routes, "require_group", require_group)
+    monkeypatch.setattr(agent_routes, "_load_context", load_context)
+    monkeypatch.setattr(agent_routes, "_debug_bots", list)
+    monkeypatch.setattr(agent_routes, "complete_with_tools_result", complete)
+
+    preview = await agent_routes.run_agent_debug(
+        100,
+        route_models.AgentDebugRunBody.model_validate(
+            {"mode": "dialogue", "text": "到底有没有一起玩", "actorUserId": 123}
+        ),
+        None,
+    )
+    assert preview["data"]["currentTurn"]["user_id"] == 123  # noqa: PLR2004
+    assert preview["data"]["result"] is None
+    assert model_calls == []
+
+    trial = await agent_routes.run_agent_debug(
+        100,
+        route_models.AgentDebugRunBody.model_validate(
+            {
+                "mode": "dialogue",
+                "text": "到底有没有一起玩",
+                "actorUserId": 123,
+                "runModel": True,
+            }
+        ),
+        None,
+    )
+    assert len(model_calls) == 1
+    assert trial["data"]["result"]["toolCalls"] == [
+        {
+            "name": "record_user_relation",
+            "arguments": {
+                "subject_user_id": 123,
+                "object_user_id": 456,
+                "type": "好友",
+            },
+        }
+    ]
+    assert trial["data"]["result"]["finishReason"] == "tool_calls"
+    assert trial["data"]["result"]["usage"]["cachedTokens"] == 40  # noqa: PLR2004
+
+    active = 0
+    max_active = 0
+
+    async def slow_complete(*_args: object, **_kwargs: object) -> Any:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.02)
+            return SimpleNamespace(
+                message=SimpleNamespace(content="好的", tool_calls=[]),
+                finish_reason="stop",
+                prompt_tokens=10,
+                completion_tokens=2,
+                cached_tokens=0,
+                outcome="success",
+                duration_ms=20.0,
+            )
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(agent_routes, "complete_with_tools_result", slow_complete)
+    debug_body = route_models.AgentDebugRunBody.model_validate(
+        {
+            "mode": "dialogue",
+            "text": "并发测试",
+            "actorUserId": 123,
+            "runModel": True,
+        }
+    )
+    await asyncio.gather(
+        *(agent_routes.run_agent_debug(100, debug_body, None) for _ in range(3))
+    )
+    assert max_active == 2  # noqa: PLR2004
+
+    monkeypatch.setattr(agent_routes, "_DEBUG_TIMEOUT_SECONDS", 0.005)
+    timed_out = await agent_routes.run_agent_debug(100, debug_body, None)
+    assert timed_out["data"]["result"]["outcome"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_agent_debug_rejects_privacy_opted_out_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeDebugSession(opted_out=True)
+
+    async def require_group(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
+    monkeypatch.setattr(agent_routes, "require_group", require_group)
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_routes.run_agent_debug(
+            100,
+            route_models.AgentDebugRunBody.model_validate(
+                {"mode": "dialogue", "text": "不要记录我", "actorUserId": 123}
+            ),
+            None,
+        )
+    assert exc_info.value.status_code == 404  # noqa: PLR2004
 
 
 @pytest.mark.asyncio

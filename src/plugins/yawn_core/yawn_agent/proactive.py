@@ -81,9 +81,8 @@ _PROACTIVE_SEGMENT_TYPES = frozenset({"text", "reply", "at", "face", "reaction"}
 _ACTIVE_INTERJECT_PROMPT = (
     "群里正在聊天。先读懂最近的消息：现在在聊什么话题、谁在积极参与、"
     "聊到哪一步了、气氛如何，注意消息里的 minutes_ago 是几分钟前发的。\n"
-    "你已经被选中可以插话，默认值得开口——像真人群友一样自然加入聊天。"
-    "只有明显不合适时才保持沉默(speak=false)：正在聊非常私密或敏感的话题、"
-    "有人正在激烈争吵、或你确实对当前内容毫无反应可说。\n"
+    "只有能回应具体问题、补充新信息或接住一个明确的梗时才开口。"
+    "群友彼此聊得顺畅、内容只是在重复改写、或你只能泛泛附和时保持沉默(speak=false)。\n"
     "插话时顺着话题对某条具体消息或具体观点做出反应，"
     "像随手打的一条消息：1~2 句、口语化，可以带点情绪或吐槽；"
     "不要开场白和客套，不要总结聊天记录，不要只回“哈哈”“确实”这类泛泛附和，"
@@ -92,7 +91,7 @@ _ACTIVE_INTERJECT_PROMPT = (
 
 _WARMUP_PROMPT = (
     "群里冷场有一会儿了。先回想冷场前群里最后在聊什么。\n"
-    "你已经被选中可以开口，默认值得说点什么活跃气氛——"
+    "只有存在自然切入点时才开口——"
     "接上没聊完的话题、分享一个贴合群成员兴趣的小见闻、"
     "或抛一个轻松的新话题都可以。只有确实找不到任何不突兀的开口方式时"
     "才保持沉默(speak=false)。\n"
@@ -104,7 +103,8 @@ _FOLLOWUP_PROMPT = (
     "你刚刚已经参与了这个话题，群友随后又发来一批消息。判断他们是否在延续、"
     "回应或自然关联到当前话题。不要因为每条新消息都抢着回答：群友彼此聊得顺畅时"
     "可以 wait；话题已结束、明显转移或不适合继续时 close；只有确实能推动对话、"
-    "回应群友或自然接梗时才 speak。\n"
+    "回应群友或自然接梗时才 speak。连续同义复述、互相总结、没有新增事实或问题时"
+    "直接 close，不要再换一种说法总结，也不要靠结尾反问延长对话。\n"
     "续聊必须承接当前批次，1~2 句、口语化，不重新打招呼，不另起无关话题。"
 )
 
@@ -598,7 +598,6 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 session,
                 group_id,
                 config,
-                include_message_age=True,
                 include_active_profiles=True,
             )
             prompt, _fingerprint = build_messages(
@@ -902,10 +901,10 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 group_id,
                 config,
                 bot_id,
-                include_message_age=True,
                 focus_user_ids=batch.user_ids,
                 message_cutoff=batch.cutoff_at,
                 include_active_profiles=True,
+                reference_at=batch.cutoff_at,
             )
             prompt, _fingerprint = build_messages(
                 persona=resolve_persona(config),
