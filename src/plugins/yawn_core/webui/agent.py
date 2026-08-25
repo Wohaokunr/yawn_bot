@@ -1,14 +1,15 @@
-# ruff: noqa: FAST002,PLR0913,PLR0917,TC001,TID252
+# ruff: noqa: C901,FAST002,PLR0912,PLR0913,PLR0915,PLR0917,TC001,TID252
 """Agent configuration, memory, privacy, relation and message endpoints."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
-from nonebot import logger
+from nonebot import get_bots, logger
 from nonebot_plugin_orm import get_session
 from sqlalchemy import BigInteger, cast, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -18,9 +19,22 @@ from ..data_models.bot_user import BotUser
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
+from ..llm import (
+    ai_config,
+    complete_with_tools_result,
+    resolve_llm_request,
+    resolve_provider,
+)
+from ..yawn_agent.capabilities import (
+    BotGroupCapabilities,
+    get_segment_capabilities,
+    probe_group_capabilities,
+    user_can_manage_group,
+)
 from ..yawn_agent.config_store import agent_runtime_enabled, set_agent_runtime_enabled
-from ..yawn_agent.context import now_beijing
+from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
 from ..yawn_agent.conversation import close_group_conversations
+from ..yawn_agent.dialogue import _history_message_meta, _load_context
 from ..yawn_agent.memory import (
     compact_group_memory,
     delete_group_memories,
@@ -30,12 +44,17 @@ from ..yawn_agent.memory import (
     rebuild_group_memories,
     record_memory_failure,
 )
+from ..yawn_agent.persona import resolve_persona
+from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
+from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
+from ..yawn_agent.tools import build_tool_schemas
 from .config import API_PATH
 from .deps import ReadSession, WriteSession, ok, page_params
 from .hub import hub
 from .route_helpers import check_version, require_group
 from .route_models import (
     AgentConfigPatch,
+    AgentDebugRunBody,
     MemoryCreateBody,
     MemoryPatchBody,
     PersonaPatch,
@@ -60,6 +79,11 @@ from .service import (
 )
 
 router = APIRouter(prefix=API_PATH)
+_AGENT_DEBUG_RUNS = asyncio.Semaphore(2)
+_DEBUG_HISTORY_LIMIT = 40
+_DEBUG_MEMORY_LIMIT = 30
+_DEBUG_RELATION_LIMIT = 20
+_DEBUG_TIMEOUT_SECONDS = 30.0
 
 
 def _memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:
@@ -925,6 +949,393 @@ async def get_agent_messages(
         [serialize_agent_message(row) for row in rows],
         page_meta(page, page_size, total),
     )
+
+
+def _debug_context_stats(context: dict[str, Any]) -> dict[str, Any]:
+    messages = list(context.get("messages") or [])
+    memories = list(context.get("memories") or [])
+    relations = list(context.get("relations") or [])
+    media_summary_count = sum(
+        1
+        for item in messages
+        if item.get("media_types") or item.get("forward_nodes")
+    )
+    return {
+        "history": {
+            "count": len(messages),
+            "limit": _DEBUG_HISTORY_LIMIT,
+            "characters": sum(len(str(item.get("text") or "")) for item in messages),
+            "limitReached": len(messages) >= _DEBUG_HISTORY_LIMIT,
+        },
+        "memory": {
+            "count": len(memories),
+            "limit": _DEBUG_MEMORY_LIMIT,
+            "characters": sum(len(str(item.get("content") or "")) for item in memories),
+            "limitReached": len(memories) >= _DEBUG_MEMORY_LIMIT,
+        },
+        "relation": {
+            "count": len(relations),
+            "limit": _DEBUG_RELATION_LIMIT,
+            "characters": sum(len(str(item)) for item in relations),
+            "limitReached": len(relations) >= _DEBUG_RELATION_LIMIT,
+        },
+        "memberCount": len(list(context.get("members") or [])),
+        "mediaSummaryCount": media_summary_count,
+    }
+
+
+def _debug_tool_calls(message: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for call in list(getattr(message, "tool_calls", None) or []):
+        function = getattr(call, "function", None)
+        raw_arguments = str(getattr(function, "arguments", "") or "")
+        try:
+            arguments: object = json.loads(raw_arguments)
+        except (TypeError, ValueError):
+            arguments = raw_arguments
+        calls.append(
+            {
+                "name": str(getattr(function, "name", "") or ""),
+                "arguments": arguments,
+            }
+        )
+    return calls
+
+
+def _debug_model_payload(result: Any, mode: str) -> dict[str, Any]:
+    message = result.message
+    content = str(getattr(message, "content", "") or "").strip()
+    payload: dict[str, Any] = {
+        "outcome": result.outcome,
+        "text": content,
+        "toolCalls": _debug_tool_calls(message),
+        "finishReason": result.finish_reason,
+        "usage": {
+            "promptTokens": result.prompt_tokens,
+            "completionTokens": result.completion_tokens,
+            "cachedTokens": result.cached_tokens,
+        },
+        "durationMs": round(float(result.duration_ms), 1),
+    }
+    if mode != "dialogue" and content:
+        decision = _decide_proactive_reply(content)
+        payload["decision"] = {
+            "action": decision.action,
+            "text": decision.text,
+            "topic": decision.topic,
+            "reason": decision.reason,
+            "segments": list(decision.segments),
+        }
+    return payload
+
+
+def _debug_bots() -> list[Any]:
+    try:
+        return list(get_bots().values())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def _run_debug_completion(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    *,
+    task: str,
+    max_tokens: int,
+) -> Any:
+    async with _AGENT_DEBUG_RUNS:
+        return await complete_with_tools_result(  # pyright: ignore[reportArgumentType]
+            messages,  # pyright: ignore[reportArgumentType]
+            tools,  # pyright: ignore[reportArgumentType]
+            task=task,  # pyright: ignore[reportArgumentType]
+            max_tokens=max_tokens,
+            timeout=_DEBUG_TIMEOUT_SECONDS,
+        )
+
+
+@router.post("/agent/groups/{group_id}/debug/run")
+async def run_agent_debug(
+    group_id: int, body: AgentDebugRunBody, _session: WriteSession
+) -> dict[str, Any]:
+    """构建线上同源提示词；可选调用模型，但不执行工具、发送或落库。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+        config = await db.get(GroupAgentConfig, group_id)
+        if config is None:
+            config = GroupAgentConfig(group_id=group_id)
+
+        source: GroupAgentMessage | None = None
+        if body.message_id is not None:
+            source = (
+                (
+                    await db.execute(
+                        select(GroupAgentMessage)
+                        .where(
+                            GroupAgentMessage.group_id == group_id,
+                            GroupAgentMessage.message_id == body.message_id,
+                            GroupAgentMessage.expires_at.is_not(None),
+                            GroupAgentMessage.expires_at >= now_beijing(),
+                        )
+                        .order_by(GroupAgentMessage.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .one_or_none()
+            )
+            if source is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在或已过期")
+            actor_user_id = int(source.user_id)
+            actor_name = source.sender_name
+            actor_role = source.role
+            actor_title = source.title
+            received_at = source.received_at
+        else:
+            actor_user_id = int(body.actor_user_id or 0)
+            member_row = (
+                await db.execute(
+                    select(UserGroup, BotUser.nickname)
+                    .outerjoin(BotUser, BotUser.user_id == UserGroup.user_id)
+                    .where(
+                        UserGroup.group_id == group_id,
+                        UserGroup.user_id == actor_user_id,
+                    )
+                )
+            ).first()
+            if member_row is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "模拟发言人不在当前群")
+            member, nickname = member_row
+            actor_name = member.group_nickname or nickname
+            actor_role = member.role
+            actor_title = member.title
+            received_at = now_beijing()
+
+        opted_out = set(
+            (
+                await db.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == group_id,
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if actor_user_id in opted_out:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在或成员已退出记忆")
+
+        bots = _debug_bots()
+        preferred_bot_id = int(source.bot_id) if source is not None else None
+        bot = next(
+            (
+                item
+                for item in bots
+                if preferred_bot_id is not None
+                and int(str(getattr(item, "self_id", 0) or 0)) == preferred_bot_id
+            ),
+            bots[0] if bots else None,
+        )
+        bot_id = (
+            int(str(getattr(bot, "self_id", 0) or 0))
+            if bot is not None
+            else preferred_bot_id
+        )
+
+        if source is not None:
+            meta = _history_message_meta(source)
+            mentions = [
+                int(user_id)
+                for user_id in meta["mentions"]
+                if int(user_id) not in opted_out
+            ]
+            reply_chain = [
+                item
+                for item in list(source.reply_chain or [])
+                if isinstance(item, dict)
+                and int(str(item.get("user_id") or 0)) not in opted_out
+            ]
+            trigger = "history_replay"
+            if bot_id is not None and bot_id in mentions:
+                trigger = "mention"
+            elif (
+                reply_chain
+                and int(str(reply_chain[0].get("user_id") or 0)) == bot_id
+            ):
+                trigger = "reply_to_bot"
+            current_turn = build_current_turn(
+                message_id=int(source.message_id),
+                user_id=actor_user_id,
+                name=actor_name,
+                role=actor_role,
+                title=actor_title,
+                content=str(source.normalized_text or "[媒体消息]"),
+                mentions=mentions,
+                reply_chain=reply_chain,
+                trigger=trigger,
+                received_at=received_at,
+                media_refs=list(source.media_refs or []),
+                forward_nodes=len(list(source.forward_tree or [])),
+            )
+        else:
+            current_turn = build_current_turn(
+                message_id=None,
+                user_id=actor_user_id,
+                name=actor_name,
+                role=actor_role,
+                title=actor_title,
+                content=str(body.text or ""),
+                trigger="debug_simulation",
+                received_at=received_at,
+            )
+
+        focus_ids = [
+            current_turn.user_id,
+            *(user_id for user_id in current_turn.mentions if user_id != bot_id),
+        ]
+        if (
+            current_turn.reply_to
+            and current_turn.reply_to.get("user_id")
+            and int(str(current_turn.reply_to["user_id"])) != bot_id
+        ):
+            focus_ids.append(int(str(current_turn.reply_to["user_id"])))
+        context = await _load_context(
+            db,
+            group_id,
+            config,
+            bot_id,
+            focus_user_ids=focus_ids,
+            message_cutoff=received_at,
+            include_active_profiles=True,
+            exclude_message_id=(
+                int(source.message_id)
+                if source is not None and body.mode == "dialogue"
+                else None
+            ),
+            reference_at=received_at,
+        )
+        if source is None and body.mode != "dialogue":
+            context["messages"] = trim_context_messages(
+                [
+                    *list(context.get("messages") or []),
+                    {
+                        "message_id": None,
+                        "user_id": current_turn.user_id,
+                        "name": current_turn.name,
+                        "role": current_turn.role,
+                        "title": current_turn.title,
+                        "text": current_turn.content,
+                        "minutes_ago": 0,
+                        "topic_break_before": False,
+                        "mentions": list(current_turn.mentions),
+                        "reply_to": current_turn.reply_to,
+                        "media_types": [],
+                        "forward_nodes": 0,
+                    },
+                ]
+            )
+
+        tools: list[dict[str, Any]] = []
+        if body.mode == "dialogue":
+            if bot is None:
+                capabilities = BotGroupCapabilities(
+                    role="offline", can_manage=False, actions=frozenset()
+                )
+                tools = build_tool_schemas(capabilities)
+            else:
+                capabilities = await probe_group_capabilities(bot, group_id)
+                tools = build_tool_schemas(
+                    capabilities,
+                    allow_admin_tools=await user_can_manage_group(
+                        bot, group_id, actor_user_id
+                    ),
+                    segment_capabilities=get_segment_capabilities(bot, group_id),
+                )
+
+        task = "agent_dialogue" if body.mode == "dialogue" else "agent_proactive"
+        user_prompt = (
+            current_turn.content
+            if body.mode == "dialogue"
+            else _build_user_prompt(
+                body.mode,
+                config,
+                turn=2 if body.mode == "followup" else 1,
+            )
+        )
+        prompt_messages, _fingerprint = build_messages(
+            persona=resolve_persona(config),
+            tools=tools,
+            context=context,
+            user_prompt=user_prompt,
+            current_turn=current_turn if body.mode == "dialogue" else None,
+        )
+        route = resolve_llm_request(task)
+        base_url, api_key = resolve_provider(route.provider)
+        result_payload: dict[str, Any] | None = None
+        if body.run_model:
+            try:
+                result = await asyncio.wait_for(
+                    _run_debug_completion(
+                        prompt_messages,
+                        tools,
+                        task=task,
+                        max_tokens=(
+                            800
+                            if body.mode == "dialogue"
+                            else max(2048, int(ai_config.ai_max_tokens))
+                        ),
+                    ),
+                    timeout=_DEBUG_TIMEOUT_SECONDS,
+                )
+                result_payload = _debug_model_payload(result, body.mode)
+            except TimeoutError:
+                result_payload = {
+                    "outcome": "timeout",
+                    "text": "",
+                    "toolCalls": [],
+                    "finishReason": None,
+                    "usage": {
+                        "promptTokens": None,
+                        "completionTokens": None,
+                        "cachedTokens": None,
+                    },
+                    "durationMs": _DEBUG_TIMEOUT_SECONDS * 1000,
+                }
+
+        stats = _debug_context_stats(context)
+        warnings: list[str] = []
+        if (
+            current_turn.media_types
+            or current_turn.forward_nodes
+            or stats["mediaSummaryCount"]
+        ):
+            warnings.append("媒体和合并转发仅以安全摘要展示，未参与模型重放")
+        if bot is None:
+            warnings.append("当前没有在线 Bot，工具列表按离线能力收敛")
+        payload = {
+            "promptVersion": PROMPT_VERSION,
+            "mode": body.mode,
+            "currentTurn": current_turn.as_dict(),
+            "context": context,
+            "promptMessages": prompt_messages,
+            "tools": tools,
+            "route": {
+                "task": task,
+                "profile": route.profile,
+                "provider": route.provider,
+                "model": route.model,
+                "thinking": route.thinking,
+                "multimodal": route.multimodal,
+                "configured": bool(
+                    base_url.strip() and api_key and route.model.strip()
+                ),
+            },
+            "stats": stats,
+            "warnings": warnings,
+            "result": result_payload,
+        }
+    return ok(payload)
 
 
 @router.patch("/agent/groups/{group_id}/privacy/{user_id}")

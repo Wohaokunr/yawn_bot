@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MEMORY_TYPE_META,
+  debugMessageLabel,
   memberDisplayName,
   memoryTypeLabel,
   PROFILE_KEY_META,
@@ -74,5 +75,22 @@ describe("memberDisplayName", () => {
     expect(memberDisplayName(null, "全局的我", "10001")).toBe("全局的我");
     expect(memberDisplayName("  ", "", "10001")).toBe("10001");
     expect(memberDisplayName(undefined, undefined, "10001")).toBe("10001");
+  });
+});
+
+describe("debugMessageLabel", () => {
+  it("使用昵称与截断后的正文构造失败案例选项", () => {
+    expect(debugMessageLabel({
+      id: "1",
+      messageId: "99",
+      groupId: "10",
+      userId: "10001",
+      senderName: "小明",
+      role: "member",
+      title: null,
+      text: "到底有没有一起玩",
+      receivedAt: null,
+      expiresAt: null,
+    })).toBe("小明 · 到底有没有一起玩");
   });
 });

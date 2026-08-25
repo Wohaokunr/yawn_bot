@@ -943,6 +943,7 @@ async def load_relation_graph(
 def serialize_agent_message(row: GroupAgentMessage) -> dict[str, Any]:
     return {
         "id": str(row.id),
+        "messageId": str(row.message_id),
         "groupId": str(row.group_id),
         "userId": str(row.user_id),
         "senderName": row.sender_name,

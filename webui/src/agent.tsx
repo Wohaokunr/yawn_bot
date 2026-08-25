@@ -45,6 +45,8 @@ import {
 import type {
   AgentAudit,
   AgentConfig,
+  AgentDebugMode,
+  AgentDebugResponse,
   AgentDiagnostics,
   AgentMemoryStatus,
   AgentMessageItem,
@@ -92,12 +94,12 @@ export function profileKeyLabel(key: string): string {
 
 const PERSONA_FIELD_META: Record<string, { label: string; help: string; placeholder: string }> = {
   name: { label: "名字", help: "Agent 在群里自称或被称呼的名字。", placeholder: "例如：Yawn" },
-  identity: { label: "身份定位", help: "描述它是谁，以及希望给群友留下的整体印象。", placeholder: "例如：友好、自然、简洁的群友" },
-  role: { label: "群内角色", help: "定义它在群聊中的职责和参与方式。", placeholder: "例如：群聊助手" },
-  tone: { label: "语气", help: "控制措辞的温度、正式程度和情绪表达。", placeholder: "例如：口语化、温和、不过度热情" },
-  speech_style: { label: "表达风格", help: "控制句式、节奏、口头禅以及整体说话方式。", placeholder: "例如：短句为主，偶尔使用轻松语气词" },
+  identity: { label: "身份定位", help: "描述它是谁，以及希望给群友留下的整体印象。", placeholder: "例如：熟悉群聊节奏、自然简洁的普通群友" },
+  role: { label: "群内角色", help: "定义它在群聊中的职责和参与方式。", placeholder: "例如：普通群友" },
+  tone: { label: "语气", help: "控制措辞的温度、正式程度和情绪表达。", placeholder: "例如：口语化、克制，不刻意热情或装熟" },
+  speech_style: { label: "表达风格", help: "控制句式、节奏、口头禅以及整体说话方式。", placeholder: "例如：短句为主，不复述上文，不固定用反问续聊" },
   emotion_baseline: { label: "情绪基线", help: "设定日常情绪状态，以及随上下文变化的幅度。", placeholder: "例如：平静、友善，随对话轻微变化" },
-  response_length: { label: "回复长度", help: "描述通常回答多长，复杂问题是否允许展开。", placeholder: "例如：通常 1-3 句，复杂问题再展开" },
+  response_length: { label: "回复长度", help: "描述通常回答多长，复杂问题是否允许展开。", placeholder: "例如：通常 1-2 句，明确的复杂问题再展开" },
   values: { label: "价值取向", help: "定义回答时优先遵循的原则和行为偏好。", placeholder: "例如：尊重事实、尊重边界、先倾听再回答" },
   knowledge_boundary: { label: "知识边界", help: "约束不知道或不确定的信息应该如何处理。", placeholder: "例如：不知道就明确说不知道，不猜测成员隐私" },
   privacy_boundary: { label: "隐私边界", help: "明确哪些内容绝不能在群聊中主动公开。", placeholder: "例如：不公开私聊内容、隐私记忆和权限信息" },
@@ -116,6 +118,12 @@ export function memberDisplayName(
   userId: string,
 ): string {
   return (groupNickname || nickname || "").trim() || userId;
+}
+
+export function debugMessageLabel(row: AgentMessageItem): string {
+  const actor = (row.senderName || row.userId).trim();
+  const text = row.text.trim() || "[媒体消息]";
+  return `${actor} · ${text.slice(0, 52)}`;
 }
 
 // 关系类型与来源口径：与后端 memory.py 的枚举/别名表对齐，自定义类型原样展示。
@@ -162,6 +170,7 @@ export function AgentDetailPage(): React.JSX.Element {
     { key: "profiles", label: "成员画像", children: <MemberProfilesPanel groupId={groupId} /> },
     { key: "relations", label: "关系边", children: <RelationsPanel groupId={groupId} /> },
     { key: "messages", label: "消息记录", children: <AgentMessagesPanel groupId={groupId} /> },
+    { key: "debug", label: "对话调试", children: <AgentDebugPanel groupId={groupId} /> },
     { key: "privacy", label: "隐私退出", children: <PrivacyPanel groupId={groupId} /> },
     { key: "audit", label: "工具审计", children: <AgentAuditsPanel groupId={groupId} /> },
   ]} /></>;
@@ -1109,7 +1118,131 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
   </>;
 }
 
+const AGENT_DEBUG_MODES: Array<{ value: AgentDebugMode; label: string }> = [
+  { value: "dialogue", label: "普通对话" },
+  { value: "active", label: "活跃插话" },
+  { value: "warmup", label: "冷场暖场" },
+  { value: "followup", label: "短会话续聊" },
+];
+
+function debugJson(value: unknown): string {
+  return JSON.stringify(value, null, 2) ?? String(value);
+}
+
+function DebugJsonCard({ title, value }: { title: string; value: unknown }): React.JSX.Element {
+  return <Card size="small" title={title}>
+    <pre style={{ maxHeight: 420, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>{debugJson(value)}</pre>
+  </Card>;
+}
+
+function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
+  const { message } = AntApp.useApp();
+  const [searchParams] = useSearchParams();
+  const linkedMessageId = searchParams.get("messageId") ?? "";
+  const [mode, setMode] = useState<AgentDebugMode>("dialogue");
+  const [source, setSource] = useState<"history" | "simulation">(linkedMessageId ? "history" : "simulation");
+  const [messageId, setMessageId] = useState(linkedMessageId);
+  const [actorUserId, setActorUserId] = useState("");
+  const [text, setText] = useState("");
+  const [runModel, setRunModel] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<AgentDebugResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const loadMessages = useCallback(
+    () => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=1&pageSize=100`).then((r) => r.data),
+    [groupId],
+  );
+  const messagesQuery = useApiQuery(loadMessages, { resources: ["agent_group_data", "agent_privacy"] });
+  useEffect(() => {
+    if (linkedMessageId) {
+      setSource("history");
+      setMessageId(linkedMessageId);
+    }
+  }, [linkedMessageId]);
+  const messageOptions = useMemo(
+    () => (messagesQuery.data ?? []).filter((row) => row.role !== "bot").map((row) => ({ value: row.messageId, label: debugMessageLabel(row) })),
+    [messagesQuery.data],
+  );
+  const run = async () => {
+    if (source === "history" && !messageId) {
+      message.warning("请先选择一条历史消息"); return;
+    }
+    if (source === "simulation" && (!actorUserId.trim() || !text.trim())) {
+      message.warning("请填写模拟发言人和消息正文"); return;
+    }
+    setRunning(true); setError(null);
+    try {
+      const body = source === "history"
+        ? { mode, messageId: Number(messageId), runModel }
+        : { mode, actorUserId: Number(actorUserId), text: text.trim(), runModel };
+      const response = await api<AgentDebugResponse>(`/agent/groups/${groupId}/debug/run`, { method: "POST", body: JSON.stringify(body) });
+      setResult(response.data);
+      message.success(runModel ? "真实模型试跑完成，未执行任何动作" : "提示词快照已生成");
+    } catch (caught) {
+      setError((caught as Error).message);
+    } finally {
+      setRunning(false);
+    }
+  };
+  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
+    <Alert
+      type="info"
+      showIcon
+      message="无副作用调试"
+      description="真实试跑只请求当前固定路由的模型：不会发送群消息、执行工具、修改 Agent 状态或写入调试记录。媒体仅显示安全摘要，不参与重放。"
+    />
+    <Card title="失败案例与试跑配置" extra={<Space><Link to={`?tab=config`}>运行配置</Link><Link to={`?tab=persona`}>人设配置</Link><Link to="/environment">LLM Provider</Link></Space>}>
+      <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+        <Segmented block value={mode} onChange={(value) => setMode(value as AgentDebugMode)} options={AGENT_DEBUG_MODES} />
+        <Segmented value={source} onChange={(value) => setSource(value as "history" | "simulation")} options={[{ value: "history", label: "历史消息回放" }, { value: "simulation", label: "模拟消息" }]} />
+        {source === "history"
+          ? <Select
+              showSearch
+              loading={messagesQuery.loading}
+              value={messageId || undefined}
+              onChange={setMessageId}
+              options={messageOptions}
+              optionFilterProp="label"
+              placeholder="选择保留期内的一条成员消息"
+              style={{ width: "100%" }}
+              notFoundContent={messagesQuery.error ? "消息记录加载失败" : undefined}
+            />
+          : <Row gutter={[16, 16]}>
+              <Col xs={24} md={8}><Input value={actorUserId} onChange={(event) => setActorUserId(event.target.value)} placeholder="发言人 QQ 号" /></Col>
+              <Col xs={24} md={16}><Input.TextArea value={text} onChange={(event) => setText(event.target.value)} autoSize={{ minRows: 2, maxRows: 6 }} maxLength={4000} showCount placeholder="输入要模拟的当前群消息" /></Col>
+            </Row>}
+        <Space><Switch checked={runModel} onChange={setRunModel} /><Text>调用真实模型（30 秒超时，并发上限 2）</Text><Button type="primary" onClick={run} loading={running}>{runModel ? "真实试跑" : "生成提示词"}</Button></Space>
+      </Space>
+    </Card>
+    {error && <QueryErrorAlert error={error} onRetry={run} />}
+    {result && <>
+      {result.warnings.map((warning) => <Alert key={warning} type="warning" showIcon message={warning} />)}
+      <Card size="small">
+        <Space wrap>
+          <Tag color="blue">{result.promptVersion}</Tag>
+          <Tag>{AGENT_DEBUG_MODES.find((item) => item.value === result.mode)?.label ?? result.mode}</Tag>
+          <Text>路由：{result.route.provider} / {result.route.model}</Text>
+          <Tag color={result.route.configured ? "green" : "red"}>{result.route.configured ? "已配置" : "未配置"}</Tag>
+          <Text type="secondary">{result.route.profile} · thinking={result.route.thinking} · multimodal={result.route.multimodal}</Text>
+        </Space>
+      </Card>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}><DebugJsonCard title="当前消息" value={result.currentTurn} /></Col>
+        <Col xs={24} xl={12}><DebugJsonCard title="截断统计" value={result.stats} /></Col>
+        <Col xs={24} xl={12}><DebugJsonCard title="历史上下文" value={result.context.messages ?? []} /></Col>
+        <Col xs={24} xl={12}><DebugJsonCard title="成员、记忆与关系" value={{ members: result.context.members ?? [], memories: result.context.memories ?? [], relations: result.context.relations ?? [] }} /></Col>
+      </Row>
+      <DebugJsonCard title="完整脱敏提示词" value={result.promptMessages} />
+      <DebugJsonCard title={`模型可见工具（${result.tools.length}）`} value={result.tools} />
+      {result.result
+        ? <DebugJsonCard title="模型结果、工具意图与用量" value={result.result} />
+        : <Alert type="success" showIcon message="本次只构建提示词，未请求模型" />}
+    </>}
+  </Space>;
+}
+
 function AgentMessagesPanel({ groupId }: { groupId: string }): React.JSX.Element {
+  const [, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1); const [search, setSearch] = useState(""); const [role, setRole] = useState("");
   const load = useCallback(() => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=${page}&pageSize=20&search=${encodeURIComponent(search)}&role=${role}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search, role]);
   const query = useApiQuery(load);
@@ -1118,7 +1251,7 @@ function AgentMessagesPanel({ groupId }: { groupId: string }): React.JSX.Element
     <Input.Search className="table-search" placeholder="搜索消息内容或昵称" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.text}</Paragraph> }} columns={[{ title: "时间", dataIndex: "receivedAt", render: formatTime, width: 170 }, { title: "成员", render: (_, row: AgentMessageItem) => <>{row.senderName || "—"}<br /><Text type="secondary" copyable>{row.userId}</Text></> }, { title: "角色", dataIndex: "role", width: 90, render: (value: string) => <Tag color={value === "bot" ? "blue" : value === "owner" ? "gold" : value === "admin" ? "cyan" : "default"}>{value}</Tag> }, { title: "内容", dataIndex: "text", ellipsis: true }]} />
+        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.text}</Paragraph> }} columns={[{ title: "时间", dataIndex: "receivedAt", render: formatTime, width: 170 }, { title: "成员", render: (_, row: AgentMessageItem) => <>{row.senderName || "—"}<br /><Text type="secondary" copyable>{row.userId}</Text></> }, { title: "角色", dataIndex: "role", width: 90, render: (value: string) => <Tag color={value === "bot" ? "blue" : value === "owner" ? "gold" : value === "admin" ? "cyan" : "default"}>{value}</Tag> }, { title: "内容", dataIndex: "text", ellipsis: true }, { title: "操作", width: 80, render: (_, row: AgentMessageItem) => row.role === "bot" ? null : <Button type="link" size="small" onClick={() => setSearchParams({ tab: "debug", messageId: row.messageId }, { replace: true })}>调试</Button> }]} />
     }</Card>;
 }
 

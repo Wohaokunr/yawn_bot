@@ -448,7 +448,45 @@ async def complete(
     return result
 
 
-async def complete_with_tools(
+@dataclass(frozen=True, slots=True)
+class LLMToolCompletionResult:
+    """工具补全的消息与只读诊断元数据。"""
+
+    message: ChatCompletionMessage | None
+    finish_reason: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    cached_tokens: int | None
+    outcome: str
+    duration_ms: float
+
+
+def _tool_completion_result(
+    *,
+    message: ChatCompletionMessage | None,
+    finish_reason: object = None,
+    response: object = None,
+    outcome: str,
+    started: float,
+) -> LLMToolCompletionResult:
+    usage = _usage_value(response, "usage") if response is not None else None
+    details = _usage_value(usage, "prompt_tokens_details") if usage is not None else None
+
+    def optional_int(value: object) -> int | None:
+        return int(value) if isinstance(value, int) else None
+
+    return LLMToolCompletionResult(
+        message=message,
+        finish_reason=str(finish_reason) if finish_reason is not None else None,
+        prompt_tokens=optional_int(_usage_value(usage, "prompt_tokens")),
+        completion_tokens=optional_int(_usage_value(usage, "completion_tokens")),
+        cached_tokens=optional_int(_usage_value(details, "cached_tokens")),
+        outcome=outcome,
+        duration_ms=max(time.perf_counter() - started, 0.0) * 1000,
+    )
+
+
+async def complete_with_tools_result(  # noqa: PLR0911
     messages: list[ChatCompletionMessageParam],
     tools: list[ChatCompletionToolParam],
     *,
@@ -459,18 +497,15 @@ async def complete_with_tools(
     response_format: dict[str, Any] | None = None,
     multimodal: bool = False,
     raise_on_unsupported: bool = False,
-) -> Optional[ChatCompletionMessage]:
-    """带工具调用的非流式补全：返回完整 message（含 tool_calls）。
+) -> LLMToolCompletionResult:
+    """带工具调用的非流式补全，并返回 WebUI 可展示的诊断元数据。
 
-    面向 agentic 场景（如跑团 KP 通过 tool_call 驱动系统判定）。
-    与 complete() 相同的失败语义：任何失败/超时/空回复返回 None，
-    由调用方决定降级策略；不支持 tools 参数的端点会以 OpenAIError
-    落入 None 分支。返回原始 message 以便调用方读取 content 与
-    tool_calls 并把工具结果回填对话继续循环。
+    面向 agentic 场景（如跑团 KP 通过 tool_call 驱动系统判定）。失败、
+    超时或空回复通过 outcome 和空 message 表达；成功时保留原始 message，
+    供调用方读取 content/tool_calls，并额外返回结束原因、Token 与耗时。
     """
     started = time.perf_counter()
     outcome = "error"
-    result: Optional[ChatCompletionMessage] = None
     request = resolve_llm_request(task)
     extra: dict[str, Any] = {}
     if temperature is not None:
@@ -482,7 +517,9 @@ async def complete_with_tools(
             logger.warning(
                 f"LLM 提供商未配置密钥（task={task}, provider={request.provider}）"
             )
-            return None
+            return _tool_completion_result(
+                message=None, outcome=outcome, started=started
+            )
         async with _COMPLETION_CONCURRENCY:
             try:
                 response = await asyncio.wait_for(
@@ -520,7 +557,9 @@ async def complete_with_tools(
                     f"timeout={timeout}s）",
                     exc_info=True,
                 )
-                return None
+                return _tool_completion_result(
+                    message=None, outcome=outcome, started=started
+                )
             except OpenAIError as exc:
                 if multimodal and _looks_like_multimodal_unsupported(exc):
                     outcome = "unsupported_multimodal"
@@ -531,11 +570,15 @@ async def complete_with_tools(
                     f"timeout={timeout}s）",
                     exc_info=True,
                 )
-                return None
+                return _tool_completion_result(
+                    message=None, outcome=outcome, started=started
+                )
         if not response.choices:
             outcome = "empty"
             logger.warning(f"LLM 未返回任何 choice（task={task}, model={request.model}）")
-            return None
+            return _tool_completion_result(
+                message=None, outcome=outcome, started=started, response=response
+            )
         choice = response.choices[0]
         message = choice.message
         content = (message.content or "").strip()
@@ -546,19 +589,59 @@ async def complete_with_tools(
                 f"LLM 工具补全返回空内容"
                 f"（task={task}, model={request.model}, finish_reason={choice.finish_reason}）"
             )
-            return None
+            return _tool_completion_result(
+                message=None,
+                finish_reason=choice.finish_reason,
+                response=response,
+                outcome=outcome,
+                started=started,
+            )
         outcome = "success"
         logger.debug(
             f"LLM 工具补全成功（task={task}, model={request.model}, "
             f"tool_calls={len(message.tool_calls or [])}, 文本长度={len(content)}）"
         )
-        result = message
+        return _tool_completion_result(
+            message=message,
+            finish_reason=choice.finish_reason,
+            response=response,
+            outcome=outcome,
+            started=started,
+        )
     except asyncio.CancelledError:
         outcome = "cancelled"
         raise
     finally:
         _record_ai_metric(task, outcome, started)
-    return result
+    return _tool_completion_result(message=None, outcome=outcome, started=started)
+
+
+async def complete_with_tools(
+    messages: list[ChatCompletionMessageParam],
+    tools: list[ChatCompletionToolParam],
+    *,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    timeout: float = 40.0,
+    task: LLMTask = "core_chat",
+    response_format: dict[str, Any] | None = None,
+    multimodal: bool = False,
+    raise_on_unsupported: bool = False,
+) -> Optional[ChatCompletionMessage]:
+    """兼容现有调用方，只返回完整 message（含 tool_calls）。"""
+
+    result = await complete_with_tools_result(
+        messages,
+        tools,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+        task=task,
+        response_format=response_format,
+        multimodal=multimodal,
+        raise_on_unsupported=raise_on_unsupported,
+    )
+    return result.message
 
 
 class LLMMultimodalUnsupportedError(RuntimeError):

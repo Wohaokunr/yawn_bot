@@ -192,13 +192,6 @@ _TOOL_DEFINITIONS = (
         actions=("send_group_msg",),
     ),
     _ToolDefinition(
-        "send_image",
-        "兼容旧调用的单图片发送；内部仍走统一消息 sender。优先使用 send_message。",
-        {"file": {"type": "string"}},
-        required=("file",),
-        actions=("send_group_msg",),
-    ),
-    _ToolDefinition(
         "send_forward",
         (
             "发送受控合并转发。message 节点只能引用当前群近期 message_id；"
@@ -257,7 +250,7 @@ _TOOL_DEFINITIONS = (
 )
 _TOOL_BY_NAME = {item.name: item for item in _TOOL_DEFINITIONS}
 _ADMIN_TOOLS = frozenset(item.name for item in _TOOL_DEFINITIONS if item.admin)
-_MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_image", "send_forward"})
+_MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 
 
 def build_tool_schemas(
@@ -813,24 +806,6 @@ async def execute_tool(
                 bot,
                 group_id,
                 args.get("nodes"),
-                session=session,
-                actor_user_id=actor_user_id,
-                source="tool",
-            )
-            result = {
-                "message_id": sent.message_id,
-                "segment_types": list(sent.segment_types),
-                "message_type": sent.message_type,
-                "outcome": sent.outcome,
-                "degraded_from": sent.degraded_from,
-                "text": sent.normalized_text[:500],
-                "outbound": sent.storage_payload(),
-            }
-        elif name == "send_image":
-            sent = await send_outbound_message(
-                bot,
-                group_id,
-                [{"type": "image", "file": str(args.get("file") or "")}],
                 session=session,
                 actor_user_id=actor_user_id,
                 source="tool",

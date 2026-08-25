@@ -138,6 +138,36 @@ class PersonaPatch(BaseModel):
         return clean
 
 
+class AgentDebugRunBody(BaseModel):
+    """无副作用的 Agent 提示词回放或模拟试跑。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["dialogue", "active", "warmup", "followup"] = "dialogue"
+    message_id: int | None = Field(default=None, alias="messageId")
+    text: str | None = Field(default=None, max_length=4000)
+    actor_user_id: Annotated[int, Field(gt=0)] | None = Field(
+        default=None, alias="actorUserId"
+    )
+    run_model: bool = Field(default=False, alias="runModel")
+
+    @model_validator(mode="after")
+    def require_one_source(self) -> "AgentDebugRunBody":
+        has_history = self.message_id is not None
+        has_simulation = (
+            bool((self.text or "").strip()) or self.actor_user_id is not None
+        )
+        if has_history == has_simulation:
+            raise ValueError("请选择一条历史消息，或同时填写模拟消息和发言人")
+        if has_simulation and (
+            not (self.text or "").strip() or self.actor_user_id is None
+        ):
+            raise ValueError("模拟消息必须同时填写 text 和 actorUserId")
+        if self.text is not None:
+            self.text = self.text.strip()
+        return self
+
+
 class MemoryCreateBody(BaseModel):
     """手动新增记忆；manual/core 是运维置顶事实，无整理任务回写。"""
 

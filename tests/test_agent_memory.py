@@ -2045,6 +2045,17 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
                 config_models.GroupAgentConfig(group_id=100),
                 message_models.GroupAgentMessage(
                     bot_id=9,
+                    message_id=0,
+                    group_id=100,
+                    user_id=1,
+                    sender_name="当前成员",
+                    role="member",
+                    normalized_text="三天前的旧会话",
+                    received_at=NOW - timedelta(days=3),
+                    expires_at=NOW + timedelta(days=7),
+                ),
+                message_models.GroupAgentMessage(
+                    bot_id=9,
                     message_id=2,
                     group_id=100,
                     user_id=2,
@@ -2052,6 +2063,17 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
                     role="member",
                     normalized_text="我也想继续聊测试策略",
                     received_at=NOW - timedelta(seconds=1),
+                    expires_at=NOW + timedelta(days=7),
+                ),
+                message_models.GroupAgentMessage(
+                    bot_id=9,
+                    message_id=3,
+                    group_id=100,
+                    user_id=9,
+                    sender_name="Yawn",
+                    role="bot",
+                    normalized_text="回放时点之后的消息",
+                    received_at=NOW + timedelta(minutes=1),
                     expires_at=NOW + timedelta(days=7),
                 ),
                 message_models.GroupAgentMessage(
@@ -2114,6 +2136,20 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
                     related_user_ids=[1],
                     salience=0.9,
                     confidence=0.6,
+                    visibility="group",
+                    expires_at=NOW + timedelta(days=90),
+                ),
+                models.AgentMemory(
+                    group_id=100,
+                    subject_user_id=3,
+                    memory_type="profile",
+                    memory_key="hobby",
+                    content="当前触发者喜欢桌游",
+                    evidence_message_ids=[2],
+                    source_kind="auto",
+                    related_user_ids=[3],
+                    salience=0.7,
+                    confidence=0.8,
                     visibility="group",
                     expires_at=NOW + timedelta(days=90),
                 ),
@@ -2188,12 +2224,24 @@ async def test_context_prioritizes_core_memory_for_speaker() -> None:
             target,
             exclude_message_id=2,
             focus_user_ids=[3],
+            message_cutoff=NOW,
+            reference_at=NOW,
         )
         assert all(
             item["text"] != "我也想继续聊测试策略"
             for item in bounded["messages"]
         )
         assert {item["user_id"] for item in bounded["members"]} == {1, 3}
+        assert [item["message_id"] for item in bounded["messages"]] == [0, 1]
+        assert bounded["messages"][0]["minutes_ago"] == 3 * 24 * 60
+        assert bounded["messages"][1]["minutes_ago"] == 0
+        assert bounded["messages"][1]["topic_break_before"] is True
+        assert any(
+            item["source_scope"] == "speaker"
+            and item["subject_user_id"] == 3
+            and item["content"] == "当前触发者喜欢桌游"
+            for item in bounded["memories"]
+        )
 
         context = await dialogue._load_context(session, 100, target)
         speaker_items = [
