@@ -1039,8 +1039,11 @@ async def _compact_tick(*, force: bool = False, cleanup: bool = False) -> None:
                 decayed = await decay_stale_relations(session, now_beijing())
                 if decayed:
                     dbg(f"每日关系衰减: 更新 {decayed} 条陈旧 auto 边")
-                await cleanup_media_cache(session)
                 await session.commit()
+            # 媒体清理单独使用事务：cleanup_media_cache 只有在 DB 删除提交
+            # 成功后才删磁盘文件，不能和关系衰减共享一个未提交事务。
+            async with get_session() as media_session:
+                await cleanup_media_cache(media_session)
         except Exception:  # noqa: BLE001
             logger.exception("Agent 每日缓存/关系衰减清理失败")
             dbg_exc("每日媒体缓存清理异常")

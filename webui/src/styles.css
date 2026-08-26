@@ -227,6 +227,27 @@ h1, h2, h3, h4, h5,
 .ops-issues-card .ant-alert { align-items: flex-start; }
 .danger-action { font-weight: 600; }
 
+.guest-access-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.guest-access-grid .ant-card { height: 100%; }
+.guest-access-one-time-code {
+  margin: 18px 0 0 !important;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.56);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .guest-access-grid { grid-template-columns: 1fr; }
+}
+
 /* 页面入场：逐个轻微上浮 */
 .app-content > * { animation: rise-in 0.5s cubic-bezier(0.22, 0.9, 0.32, 1) both; }
 .app-content > *:nth-child(1) { animation-delay: 0.02s; }

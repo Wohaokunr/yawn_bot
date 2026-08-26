@@ -12,14 +12,14 @@ from sqlalchemy import func, select
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.web_admin_audit import WebAdminAudit
 from .config import API_PATH
-from .deps import ReadSession, ok, page_params
+from .deps import AdminReadSession, ok, page_params
 from .service import page_meta, serialize_agent_audit, serialize_web_audit
 
 router = APIRouter(prefix=API_PATH)
 
 @router.get("/agent/audits")
 async def get_agent_audits(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     group_id: int | None = Query(default=None, alias="groupId"),
@@ -58,7 +58,7 @@ async def get_agent_audits(
 
 @router.get("/web-audits")
 async def get_web_audits(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     result: str = Query(default="", max_length=24),

@@ -1187,6 +1187,10 @@ const AGENT_DEBUG_MODES: Array<{ value: AgentDebugMode; label: string }> = [
   { value: "followup", label: "短会话续聊" },
 ];
 
+function agentDebugModeLabel(value: string): string {
+  return AGENT_DEBUG_MODES.find((item) => item.value === value)?.label ?? value;
+}
+
 function debugJson(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
@@ -1250,7 +1254,7 @@ function DebugCurrentTurn({ value }: { value: Record<string, unknown> }): React.
     <Paragraph className="agent-debug-message-content">{debugDisplay(value.content, "[空消息]")}</Paragraph>
     {media.length > 0 && <Space wrap>
       {media.map((item, index) => <Tag key={`${debugDisplay(item.type)}-${index}`} color={item.source === "reply" ? "blue" : item.source === "forward" ? "purple" : "green"}>
-        {debugDisplay(item.source, "current")} · {debugDisplay(item.type, "media")}{item.name ? ` · ${debugDisplay(item.name)}` : ""}
+        {TRACE_MEDIA_SOURCE_LABELS[String(item.source || "current")] ?? debugDisplay(item.source, "current")} · {SEGMENT_NAME_LABELS[String(item.type)] ?? debugDisplay(item.type, "media")}{item.name ? ` · ${debugDisplay(item.name)}` : ""}
       </Tag>)}
     </Space>}
   </Card>;
@@ -1388,12 +1392,265 @@ const TOOL_PERMISSION_LABELS: Record<string, string> = {
 
 const TOOL_PERMISSION_REASON_LABELS: Record<string, string> = {
   exposed: "已暴露",
-  permission_level: "超过本轮权限等级",
-  onebot_action: "OneBot Action 不可用",
-  bot_not_admin: "机器人不是群管理",
-  actor_not_admin: "调用者不是群管理",
-  not_allowlisted: "未加入群级白名单",
+  permission_level: "属于特权操作，本轮没有开放",
+  onebot_action: "当前 OneBot 实现不支持这个操作",
+  bot_not_admin: "机器人没有群管理权限",
+  actor_not_admin: "当前调用者没有群管理权限",
+  not_allowlisted: "当前群没有把这个特权工具加入白名单",
 };
+
+const TOOL_NAME_LABELS: Record<string, string> = {
+  get_group_info: "查看群信息",
+  get_group_member: "查看成员详情",
+  list_group_members: "查看群成员列表",
+  search_group_memory: "搜索群记忆",
+  get_person_profile: "查看成员画像",
+  list_user_relations: "查看成员关系",
+  record_user_relation: "记录成员关系",
+  search_reactions: "搜索表情包",
+  send_message: "发送消息",
+  send_forward: "发送合并转发",
+  mute_member: "禁言成员",
+  create_group_announcement: "发布群公告",
+  send_file: "发送群文件",
+};
+
+const SEGMENT_NAME_LABELS: Record<string, string> = {
+  text: "文本",
+  at: "@成员",
+  reply: "引用回复",
+  image: "图片",
+  face: "QQ 表情",
+  record: "语音",
+  video: "视频",
+  file: "文件",
+  forward: "合并转发",
+};
+
+const DELIVERY_STATE_LABELS: Record<string, string> = {
+  confirmed_success: "确认发送成功",
+  confirmed_failure: "确认发送失败",
+  degraded_success: "降级后发送成功",
+  unknown: "投递结果未知",
+};
+
+const TRACE_MEDIA_SOURCE_LABELS: Record<string, string> = {
+  current: "当前消息",
+  reply: "引用消息",
+  forward: "合并转发",
+};
+
+const TRACE_OUTCOME_LABELS: Record<string, string> = {
+  completed: "正常完成",
+  success: "成功",
+  speak: "已发言",
+  wait: "决定暂不发言",
+  close: "结束会话",
+  error: "执行失败",
+  timeout: "模型调用超时",
+  snapshot: "仅生成调试快照",
+  delivery_unknown: "消息投递结果未知",
+};
+
+function traceOutcomeLabel(value: unknown): string {
+  const key = String(value ?? "");
+  return TRACE_OUTCOME_LABELS[key] ?? (key || "—");
+}
+
+function toolDisplayName(name: unknown): string {
+  const key = String(name ?? "");
+  return TOOL_NAME_LABELS[key] ?? (key || "未知工具");
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function traceMetric(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function ToolArgumentSummary({ name, value }: { name: string; value: unknown }): React.JSX.Element | null {
+  const args = debugRecord(value);
+  if (Object.keys(args).length === 0) return null;
+
+  if (name === "send_message") {
+    const segments = Array.isArray(args.segments) ? args.segments.map((item) => debugRecord(item)) : [];
+    const types = segments.map((item) => String(item.type ?? "")).filter(Boolean);
+    return <Text type="secondary">
+      准备发送 {segments.length} 个消息段{types.length > 0 ? `：${types.map((type) => SEGMENT_NAME_LABELS[type] ?? type).join(" + ")}` : ""}
+    </Text>;
+  }
+  if (name === "send_forward") {
+    const nodes = Array.isArray(args.nodes) ? args.nodes.length : 0;
+    return <Text type="secondary">准备发送包含 {nodes} 个节点的合并转发</Text>;
+  }
+  if (name === "search_group_memory") {
+    return <Text type="secondary">搜索内容：{String(args.query ?? args.keyword ?? "（未提供关键词）")}</Text>;
+  }
+  if (name === "get_group_member" || name === "get_person_profile") {
+    return <Text type="secondary">目标成员：{String(args.user_id ?? args.userId ?? "未知")}</Text>;
+  }
+  if (name === "list_user_relations") {
+    return <Text type="secondary">查看成员 {String(args.user_id ?? args.userId ?? "未知")} 的关系</Text>;
+  }
+  if (name === "record_user_relation") {
+    return <Text type="secondary">
+      记录 {String(args.subject_user_id ?? "?")} → {String(args.object_user_id ?? "?")} 的「{String(args.type ?? "关系")}」关系
+    </Text>;
+  }
+  if (name === "mute_member") {
+    return <Text type="secondary">目标成员：{String(args.user_id ?? "未知")}；时长：{String(args.duration ?? args.duration_seconds ?? "默认")} 秒</Text>;
+  }
+  if (name === "create_group_announcement") {
+    const content = String(args.content ?? args.text ?? "");
+    return <Text type="secondary">公告内容：{content ? `${content.slice(0, 80)}${content.length > 80 ? "…" : ""}` : "（空）"}</Text>;
+  }
+  if (name === "send_file") {
+    return <Text type="secondary">发送一个经过 Agent 文件安全校验的群文件</Text>;
+  }
+  if (name === "search_reactions") {
+    return <Text type="secondary">搜索表情：{String(args.query ?? args.keyword ?? args.tag ?? "未指定")}</Text>;
+  }
+  return null;
+}
+
+function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][number] }): React.JSX.Element | null {
+  const input = debugRecord(event.input);
+  const output = debugRecord(event.output);
+
+  if (event.phase === "capability") {
+    const exposed = stringArray(output.exposed_tools ?? output.tool_names);
+    const blocked = Array.isArray(output.blocked_tools)
+      ? output.blocked_tools.map((item) => debugRecord(item))
+      : [];
+    const toolCount = traceMetric(output.tool_count, exposed.length);
+    return <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+      <Text>
+        本轮向模型开放 <Text strong>{toolCount}</Text> 个工具
+        {blocked.length > 0 ? <>，另有 <Text strong>{blocked.length}</Text> 个工具未开放。</> : "。"}
+      </Text>
+      {exposed.length > 0 && <Space wrap size={[6, 6]}>
+        <Text type="secondary">可用：</Text>
+        {exposed.map((name) => <Tag color="green" key={name}>{toolDisplayName(name)}</Tag>)}
+      </Space>}
+      {blocked.length > 0 && <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+        <Text type="secondary">未开放：</Text>
+        {blocked.map((item, index) => {
+          const name = String(item.name ?? "");
+          const reason = String(item.reason ?? "");
+          return <Text key={`${name}-${index}`}>
+            <Tag>{toolDisplayName(name)}</Tag>
+            {TOOL_PERMISSION_REASON_LABELS[reason] ?? (reason || "未满足当前权限条件")}
+          </Text>;
+        })}
+      </Space>}
+    </Space>;
+  }
+
+  if (event.phase === "context") {
+    return <Text>
+      最终选入 <Text strong>{traceMetric(output.messages)}</Text> 条历史消息、
+      <Text strong>{traceMetric(output.members)}</Text> 位成员、
+      <Text strong>{traceMetric(output.memories)}</Text> 条记忆和
+      <Text strong>{traceMetric(output.relations)}</Text> 条关系。
+    </Text>;
+  }
+
+  if (event.phase === "parse" || event.phase === "intake") {
+    const replyDepth = traceMetric(output.reply_depth);
+    const forwardNodes = traceMetric(output.forward_nodes ?? output.top_level_nodes);
+    const mediaRefs = traceMetric(output.media_refs ?? output.media_refs_total);
+    const segments = stringArray(output.segment_types);
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        {event.label}：{replyDepth > 0 ? `解析了 ${replyDepth} 层引用；` : ""}
+        {forwardNodes > 0 ? `展开 ${forwardNodes} 个转发节点；` : ""}
+        {mediaRefs > 0 ? `发现 ${mediaRefs} 个媒体引用。` : "未发现额外媒体。"}
+      </Text>
+      {segments.length > 0 && <Space wrap size={[6, 6]}>{segments.map((name) => <Tag key={name}>{SEGMENT_NAME_LABELS[name] ?? name}</Tag>)}</Space>}
+    </Space>;
+  }
+
+  if (event.phase === "media") {
+    const media = Array.isArray(input.media) ? input.media.map((item) => debugRecord(item)) : [];
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        准备了 <Text strong>{traceMetric(output.vision_blocks)}</Text> 个视觉输入，
+        命中 <Text strong>{traceMetric(output.cached_captions)}</Text> 条图片转述缓存。
+      </Text>
+      {media.length > 0 && <Space wrap size={[6, 6]}>{media.map((item, index) => {
+        const source = String(item.source || "current");
+        return <Tag key={`${String(item.type)}-${index}`}>{SEGMENT_NAME_LABELS[String(item.type)] ?? String(item.type || "媒体")} · {TRACE_MEDIA_SOURCE_LABELS[source] ?? source}</Tag>;
+      })}</Space>}
+    </Space>;
+  }
+
+  if (event.phase === "prompt") {
+    const count = traceMetric(output.message_count);
+    const promptCache = String(output.prompt_cache ?? "");
+    const contextCache = String(output.context_cache ?? "");
+    return <Text>
+      已组装 <Text strong>{count}</Text> 条 Prompt 消息
+      {promptCache ? `；Prompt 前缀缓存${promptCache === "hit" ? "命中" : "未命中"}` : ""}
+      {contextCache ? `，稳定上下文缓存${contextCache === "hit" ? "命中" : "未命中"}` : ""}。
+    </Text>;
+  }
+
+  if (event.phase === "llm") {
+    const tools = stringArray(output.tool_calls);
+    const action = String(output.action ?? "");
+    const chars = traceMetric(output.content_chars);
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        {action ? `模型决策：${action}` : `模型返回 ${chars} 个字符`}
+        {tools.length > 0 ? `，并请求调用 ${tools.length} 个工具。` : "。"}
+      </Text>
+      {tools.length > 0 && <Space wrap size={[6, 6]}>{tools.map((name) => <Tag color="blue" key={name}>{toolDisplayName(name)}</Tag>)}</Space>}
+      {typeof output.confidence === "number" && <Text type="secondary">决策置信度：{Math.round(output.confidence * 100)}%</Text>}
+    </Space>;
+  }
+
+  if (event.phase === "tool") {
+    const toolName = event.label.replace(/^工具\s+/, "").replace(/^工具意图\s+/, "");
+    const executed = output.executed;
+    const ok = output.ok;
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        {executed === false
+          ? <>模型计划调用 <Text strong>{toolDisplayName(toolName)}</Text>，但这是无副作用调试，因此没有实际执行。</>
+          : <><Text strong>{toolDisplayName(toolName)}</Text>{ok === false ? " 执行失败" : " 执行完成"}{output.ends_turn ? "，并结束本轮回复" : ""}。</>}
+      </Text>
+      <ToolArgumentSummary name={toolName} value={input.arguments} />
+    </Space>;
+  }
+
+  if (event.phase === "outbound") {
+    const segments = stringArray(output.segment_types ?? output.fallback_types ?? input.segment_types);
+    const deliveryState = String(output.delivery_state ?? "");
+    const degradedFrom = String(output.degraded_from ?? "");
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        {deliveryState ? (DELIVERY_STATE_LABELS[deliveryState] ?? deliveryState) : event.label}
+        {degradedFrom ? `；已从 ${degradedFrom} 方案降级` : ""}。
+      </Text>
+      {segments.length > 0 && <Space wrap size={[6, 6]}><Text type="secondary">实际消息：</Text>{segments.map((name) => <Tag key={name}>{SEGMENT_NAME_LABELS[name] ?? name}</Tag>)}</Space>}
+    </Space>;
+  }
+
+  if (event.phase === "state") {
+    if (event.status === "skipped") return <Text>本次是调试执行，不会修改数据库、冷却时间或 Agent 状态。</Text>;
+    if (event.status === "failed") return <Text type="danger">状态写入失败，已按当前流程回滚或保留发送结果。</Text>;
+    return <Text>本轮状态已经写入，包括去重指纹、冷却时间和会话进度。</Text>;
+  }
+
+  if (event.phase === "turn") {
+    const outcome = String(output.outcome ?? "");
+    return <Text>本轮执行结束{outcome ? `，结果：${traceOutcomeLabel(outcome)}` : ""}。</Text>;
+  }
+
+  return null;
+}
 
 function DebugToolsView({ tools, permissions }: { tools: AgentDebugResponse["tools"]; permissions: AgentDebugResponse["toolPermissions"] }): React.JSX.Element {
   if (permissions.length === 0) return <AdminEmpty description="当前模式不使用工具权限矩阵" />;
@@ -1414,7 +1671,8 @@ function DebugToolsView({ tools, permissions }: { tools: AgentDebugResponse["too
       return <List.Item key={permission.name}>
         <div className="agent-debug-list-item">
           <Space wrap>
-            <Text strong>{permission.name}</Text>
+            <Text strong>{toolDisplayName(permission.name)}</Text>
+            <Text type="secondary" code>{permission.name}</Text>
             <Tag color={permission.permissionLevel === "privileged" ? "red" : permission.permissionLevel === "message_send" ? "blue" : permission.permissionLevel === "state_write" ? "orange" : "default"}>{TOOL_PERMISSION_LABELS[permission.permissionLevel] ?? permission.permissionLevel}</Tag>
             <Tag color={permission.exposed ? "green" : "default"}>{TOOL_PERMISSION_REASON_LABELS[permission.reason] ?? permission.reason}</Tag>
           </Space>
@@ -1459,7 +1717,7 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
     <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 5 }} items={[
       { key: "source", label: "来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
       { key: "status", label: "状态", children: <Tag color={status.color}>{status.label}</Tag> },
-      { key: "outcome", label: "结果", children: trace.outcome || "—" },
+      { key: "outcome", label: "结果", children: traceOutcomeLabel(trace.outcome) },
       { key: "duration", label: "总耗时", children: trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(1)} ms` },
       { key: "trace", label: "Trace", children: <Text code>{trace.traceId.slice(0, 12)}</Text> },
     ]} />
@@ -1480,9 +1738,10 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
               <Text type="secondary">+{event.offsetMs.toFixed(1)} ms</Text>
               {event.durationMs != null && <Text type="secondary">耗时 {event.durationMs.toFixed(1)} ms</Text>}
             </Space>
+            <TraceHumanSummary event={event} />
             {event.detail && <Text type={event.status === "failed" ? "danger" : "secondary"}>{event.detail}</Text>}
             {(hasInput || hasOutput) && <details className="agent-debug-details">
-              <summary>输入 / 输出摘要</summary>
+              <summary>查看技术细节（JSON）</summary>
               {hasInput && <><Text type="secondary">输入</Text><DebugRawBlock value={event.input} /></>}
               {hasOutput && <><Text type="secondary">输出</Text><DebugRawBlock value={event.output} /></>}
             </details>}
@@ -1498,7 +1757,7 @@ function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): R
   const decision = result.decision ? debugRecord(result.decision) : null;
   return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
     <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
-      { key: "outcome", label: "结果", children: <Tag color={result.outcome === "success" ? "green" : result.outcome === "timeout" ? "red" : "orange"}>{result.outcome}</Tag> },
+      { key: "outcome", label: "结果", children: <Tag color={result.outcome === "success" ? "green" : result.outcome === "timeout" ? "red" : "orange"}>{traceOutcomeLabel(result.outcome)}</Tag> },
       { key: "duration", label: "耗时", children: `${result.durationMs} ms` },
       { key: "finish", label: "结束原因", children: result.finishReason || "—" },
       { key: "tokens", label: "Token", children: `${result.usage.promptTokens ?? "—"} / ${result.usage.completionTokens ?? "—"}` },
@@ -1512,7 +1771,19 @@ function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): R
       { key: "segments", label: "消息段", children: debugDisplay(decision.segments) },
     ]} /></Card>}
     <Card size="small" title="模型文本"><Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{result.text || "（无文本输出）"}</Paragraph></Card>
-    {result.toolCalls.length > 0 && <Card size="small" title={`工具意图（${result.toolCalls.length}）`}><List size="small" dataSource={result.toolCalls} renderItem={(call) => <List.Item><div className="agent-debug-list-item"><Text strong>{call.name}</Text><DebugRawBlock value={call.arguments} /></div></List.Item>} /></Card>}
+    {result.toolCalls.length > 0 && <Card size="small" title={`工具意图（${result.toolCalls.length}）`}><List
+      size="small"
+      dataSource={result.toolCalls}
+      renderItem={(call) => <List.Item><div className="agent-debug-list-item">
+        <Space wrap>
+          <Text strong>{toolDisplayName(call.name)}</Text>
+          <Text type="secondary" code>{call.name}</Text>
+          <Tag color="blue">模型计划</Tag>
+        </Space>
+        <ToolArgumentSummary name={call.name} value={call.arguments} />
+        <details className="agent-debug-details"><summary>查看工具参数（JSON）</summary><DebugRawBlock value={call.arguments} /></details>
+      </div></List.Item>}
+    /></Card>}
   </Space>;
 }
 
@@ -1605,7 +1876,7 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
                 style={{ width: "100%" }}
                 options={(runtimeTraceQuery.data ?? []).map((trace) => ({
                   value: trace.traceId,
-                  label: `${formatTime(trace.startedAt)} · ${trace.mode} · ${trace.outcome ?? trace.status} · ${trace.events.length} events`,
+                  label: `${formatTime(trace.startedAt)} · ${agentDebugModeLabel(trace.mode)} · ${traceOutcomeLabel(trace.outcome ?? trace.status)} · ${trace.events.length} 个事件`,
                 }))}
               />
               {runtimeTrace && <ExecutionTraceView trace={runtimeTrace} />}

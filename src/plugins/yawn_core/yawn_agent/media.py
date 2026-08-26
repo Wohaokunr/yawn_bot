@@ -288,11 +288,7 @@ async def _find_cache(
     )
     if model_name is not None:
         stmt = stmt.where(AgentMediaCache.model_name == model_name)
-    row = await session.scalar(stmt.order_by(AgentMediaCache.id.desc()))
-    if row is not None:
-        row.last_access_at = now
-        await session.flush()
-    return row
+    return await session.scalar(stmt.order_by(AgentMediaCache.id.desc()))
 
 
 async def prepare_image_inputs(
@@ -375,36 +371,38 @@ async def prepare_image_inputs(
                 dbg(f"群 {group_id} 媒体缓存磁盘写入完成: {path}")
                 existing = await _find_cache(session, group_id, digest, model_name="")
                 if existing is None and session is not None:
-                    session.add(
-                        AgentMediaCache(
-                            group_id=group_id,
-                            content_hash=digest,
-                            media_type="image",
-                            cache_path=str(path),
-                            model_name="",
-                            status="ready",
-                            size_bytes=len(data),
-                            expires_at=now_beijing()
-                            + timedelta(
-                                seconds=max(
-                                    int(
-                                        getattr(
-                                            ai_config, "agent_media_cache_ttl", 86400
+                    try:
+                        async with session.begin_nested():
+                            session.add(
+                                AgentMediaCache(
+                                    group_id=group_id,
+                                    content_hash=digest,
+                                    media_type="image",
+                                    cache_path=str(path),
+                                    model_name="",
+                                    status="ready",
+                                    size_bytes=len(data),
+                                    expires_at=now_beijing()
+                                    + timedelta(
+                                        seconds=max(
+                                            int(
+                                                getattr(
+                                                    ai_config,
+                                                    "agent_media_cache_ttl",
+                                                    86400,
+                                                )
+                                            ),
+                                            60,
                                         )
                                     ),
-                                    60,
                                 )
-                            ),
-                        )
-                    )
-                    try:
-                        await session.flush()
+                            )
+                            await session.flush()
                     except SQLAlchemyError:
-                        # 并发重复插入会撞唯一约束；回滚后不影响本轮对话。
+                        # 缓存写失败只回滚 SAVEPOINT；不得回滚主对话事务。
                         dbg_exc(
-                            f"群 {group_id} 媒体缓存 DB 行写入失败(多为并发重复),已回滚"
+                            f"群 {group_id} 媒体缓存 DB 行写入失败(已隔离),继续本轮对话"
                         )
-                        await session.rollback()
                     else:
                         dbg(f"群 {group_id} 媒体缓存 DB 行已写入 digest={digest[:16]}…")
         mime = _mime_for_bytes(data, hint)
@@ -446,26 +444,38 @@ async def store_caption(
         seconds=max(int(getattr(ai_config, "agent_media_cache_ttl", 86400)), 60)
     )
     row = await _find_cache(session, group_id, content_hash, model_name=model_name)
-    if row is None:
-        row = AgentMediaCache(
-            group_id=group_id,
-            content_hash=content_hash,
-            media_type="image",
-            model_name=model_name,
-            status="captioned",
-            caption=caption.strip()[:2000],
-            expires_at=expires_at,
+    try:
+        async with session.begin_nested():
+            if row is None:
+                session.add(
+                    AgentMediaCache(
+                        group_id=group_id,
+                        content_hash=content_hash,
+                        media_type="image",
+                        model_name=model_name,
+                        status="captioned",
+                        caption=caption.strip()[:2000],
+                        expires_at=expires_at,
+                    )
+                )
+            else:
+                row.caption = caption.strip()[:2000]
+                row.status = "captioned"
+                row.expires_at = expires_at
+            await session.flush()
+    except SQLAlchemyError:
+        dbg_exc(
+            f"群 {group_id} 字幕缓存写入失败(已隔离),不影响本轮回复 "
+            f"digest={content_hash[:16]}…"
         )
-        session.add(row)
-    else:
-        row.caption = caption.strip()[:2000]
-        row.status = "captioned"
-        row.expires_at = expires_at
+        return
+    if row is not None:
         dbg(f"群 {group_id} 字幕缓存已更新 digest={content_hash[:16]}…")
-    await session.flush()
 
 
 async def cleanup_media_cache(session: Any, *, now: datetime | None = None) -> int:
+    """原子删除过期 DB 行，提交成功后才清理对应磁盘文件。"""
+
     now = now or now_beijing()
     rows = (
         (
@@ -476,15 +486,24 @@ async def cleanup_media_cache(session: Any, *, now: datetime | None = None) -> i
         .scalars()
         .all()
     )
-    for row in rows:
-        if row.cache_path:
-            unlink_cache_file(str(row.cache_path))
+    cache_paths = [str(row.cache_path) for row in rows if row.cache_path]
     result = await session.execute(
         delete(AgentMediaCache).where(AgentMediaCache.expires_at < now)
     )
     await session.flush()
     removed = int(result.rowcount or 0)
-    dbg(f"媒体缓存清理完成: 过期 {removed} 行(含磁盘文件 {len(rows)} 个)")
+    try:
+        await session.commit()
+    except SQLAlchemyError:
+        await session.rollback()
+        dbg_exc("媒体缓存 DB 清理提交失败,保留磁盘文件等待下次重试")
+        raise
+    for cache_path in cache_paths:
+        unlink_cache_file(cache_path)
+    dbg(
+        f"媒体缓存清理完成: 过期 {removed} 行"
+        f"(提交后清理磁盘文件 {len(cache_paths)} 个)"
+    )
     return removed
 
 

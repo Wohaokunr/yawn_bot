@@ -20,7 +20,7 @@ from sqlalchemy import String, func, or_, select
 from ..data_models.bot_group import BotGroup
 from ..permission import check_feature_permission
 from .config import API_PATH
-from .deps import ReadSession, WriteSession, ok, page_params
+from .deps import AdminReadSession, AdminWriteSession, ok, page_params
 from .hub import hub
 from .service import iso, page_meta
 
@@ -205,7 +205,7 @@ def _serialize_job(job: Any, book: Any, group_name: str | None) -> dict[str, Any
 
 
 @router.get("/fanqie/status")
-async def fanqie_status(_session: ReadSession) -> dict[str, Any]:
+async def fanqie_status(_session: AdminReadSession) -> dict[str, Any]:
     state = _fanqie_state()
     models = _fanqie_models()
     cfg = _fanqie_config()
@@ -242,7 +242,7 @@ async def fanqie_status(_session: ReadSession) -> dict[str, Any]:
 
 @router.get("/fanqie/jobs")
 async def list_fanqie_jobs(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     status_filter: Literal[
@@ -294,7 +294,7 @@ async def list_fanqie_jobs(
 
 
 @router.get("/fanqie/jobs/{job_id}")
-async def get_fanqie_job(job_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_fanqie_job(job_id: int, _session: AdminReadSession) -> dict[str, Any]:
     models = _require_models()
     async with get_session() as db:
         row = (
@@ -357,7 +357,7 @@ class FanqieSubmitBody(BaseModel):
 
 @router.post("/fanqie/jobs")
 async def create_fanqie_job(
-    body: FanqieSubmitBody, _session: WriteSession
+    body: FanqieSubmitBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     state = _require_state()
     cfg = _require_config()
@@ -400,7 +400,7 @@ async def create_fanqie_job(
 
 
 @router.post("/fanqie/jobs/{job_id}/cancel")
-async def cancel_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, Any]:
+async def cancel_fanqie_job(job_id: int, _session: AdminWriteSession) -> dict[str, Any]:
     state = _require_state()
     if not await state.cancel_job(job_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务不存在或当前状态不可取消")
@@ -409,7 +409,7 @@ async def cancel_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, An
 
 
 @router.post("/fanqie/jobs/{job_id}/retry")
-async def retry_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, Any]:
+async def retry_fanqie_job(job_id: int, _session: AdminWriteSession) -> dict[str, Any]:
     state = _require_state()
     retried, error = await state.retry_job(job_id)
     if not retried:
@@ -419,7 +419,7 @@ async def retry_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, Any
 
 
 @router.post("/fanqie/jobs/{job_id}/send")
-async def send_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, Any]:
+async def send_fanqie_job(job_id: int, _session: AdminWriteSession) -> dict[str, Any]:
     state = _require_state()
     sent, message = await state.deliver_job(job_id)
     if not sent:
@@ -429,7 +429,7 @@ async def send_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, Any]
 
 
 @router.delete("/fanqie/jobs/{job_id}")
-async def delete_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, Any]:
+async def delete_fanqie_job(job_id: int, _session: AdminWriteSession) -> dict[str, Any]:
     state = _require_state()
     if not await state.delete_job(job_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务不存在")
@@ -442,7 +442,7 @@ async def delete_fanqie_job(job_id: int, _session: WriteSession) -> dict[str, An
 
 @router.get("/fanqie/search")
 async def fanqie_search(
-    _session: ReadSession,
+    _session: AdminReadSession,
     keyword: str = Query(min_length=1, max_length=80),
     order: Literal["related", "new", "hot"] = Query(default="related"),
 ) -> dict[str, Any]:
@@ -461,7 +461,7 @@ async def fanqie_search(
 
 
 @router.get("/fanqie/rank/categories")
-async def fanqie_rank_categories(_session: ReadSession) -> dict[str, Any]:
+async def fanqie_rank_categories(_session: AdminReadSession) -> dict[str, Any]:
     cfg = _require_config()
     provider_mod = _require_provider()
     try:
@@ -488,7 +488,7 @@ async def fanqie_rank_categories(_session: ReadSession) -> dict[str, Any]:
 
 @router.get("/fanqie/rank/books")
 async def fanqie_rank_books(
-    _session: ReadSession,
+    _session: AdminReadSession,
     gender: Literal["male", "female"] = Query(),
     rank_type: Literal["read", "new"] = Query(alias="rankType"),
     category_id: str = Query(
@@ -517,7 +517,7 @@ async def fanqie_rank_books(
 
 @router.get("/fanqie/resolve")
 async def fanqie_resolve(
-    _session: ReadSession,
+    _session: AdminReadSession,
     source: str = Query(min_length=1, max_length=512),
 ) -> dict[str, Any]:
     """解析书籍页/阅读页链接或 book ID;source 放查询参数以免斜杠进路径。"""
@@ -536,7 +536,9 @@ async def fanqie_resolve(
 
 
 @router.get("/fanqie/books/{book_id}/chapters")
-async def fanqie_book_chapters(book_id: str, _session: ReadSession) -> dict[str, Any]:
+async def fanqie_book_chapters(
+    book_id: str, _session: AdminReadSession
+) -> dict[str, Any]:
     cfg = _require_config()
     provider_mod = _require_provider()
     try:

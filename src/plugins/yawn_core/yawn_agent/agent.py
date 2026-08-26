@@ -103,6 +103,7 @@ async def _persist_message(
     duplicate = await session.scalar(
         select(GroupAgentMessage).where(
             GroupAgentMessage.bot_id == bot_id,
+            GroupAgentMessage.group_id == group_id,
             GroupAgentMessage.message_id == message_id,
         )
     )

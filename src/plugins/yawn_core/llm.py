@@ -349,7 +349,7 @@ async def test_llm_connection(
 _COMPLETION_CONCURRENCY = asyncio.Semaphore(6)
 
 
-async def complete(
+async def complete(  # noqa: PLR0911
     messages: list[ChatCompletionMessageParam],
     *,
     max_tokens: Optional[int] = None,
@@ -361,7 +361,6 @@ async def complete(
 ) -> Optional[str]:
     """非流式补全：返回完整回复文本；失败/超时/空回复返回 None。"""
     _ = multimodal  # reserved for role-specific provider capability handling
-    request = resolve_llm_request(task)
     started = time.perf_counter()
     outcome = "error"
     result: Optional[str] = None
@@ -371,6 +370,7 @@ async def complete(
     if temperature is not None:
         extra["temperature"] = temperature
     try:
+        request = resolve_llm_request(task)
         llm_client = get_client(request.provider)
         if llm_client is None:
             outcome = "not_configured"
@@ -443,6 +443,14 @@ async def complete(
     except asyncio.CancelledError:
         outcome = "cancelled"
         raise
+    except Exception:  # noqa: BLE001
+        outcome = "error"
+        logger.warning(
+            "LLM 非流式补全发生未预期异常（task=%s）",
+            task,
+            exc_info=True,
+        )
+        return None
     finally:
         _record_ai_metric(task, outcome, started)
     return result
@@ -486,7 +494,7 @@ def _tool_completion_result(
     )
 
 
-async def complete_with_tools_result(  # noqa: PLR0911
+async def complete_with_tools_result(  # noqa: C901,PLR0911
     messages: list[ChatCompletionMessageParam],
     tools: list[ChatCompletionToolParam],
     *,
@@ -506,11 +514,11 @@ async def complete_with_tools_result(  # noqa: PLR0911
     """
     started = time.perf_counter()
     outcome = "error"
-    request = resolve_llm_request(task)
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
     try:
+        request = resolve_llm_request(task)
         llm_client = get_client(request.provider)
         if llm_client is None:
             outcome = "not_configured"
@@ -608,9 +616,19 @@ async def complete_with_tools_result(  # noqa: PLR0911
             outcome=outcome,
             started=started,
         )
+    except LLMMultimodalUnsupportedError:
+        raise
     except asyncio.CancelledError:
         outcome = "cancelled"
         raise
+    except Exception:  # noqa: BLE001
+        outcome = "error"
+        logger.warning(
+            "LLM 工具补全发生未预期异常（task=%s）",
+            task,
+            exc_info=True,
+        )
+        return _tool_completion_result(message=None, outcome=outcome, started=started)
     finally:
         _record_ai_metric(task, outcome, started)
     return _tool_completion_result(message=None, outcome=outcome, started=started)

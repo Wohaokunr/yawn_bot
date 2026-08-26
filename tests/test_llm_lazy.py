@@ -84,6 +84,9 @@ async def test_missing_key_degrades_all_completions_without_client(
 
     llm_module._client_pool.clear()
     monkeypatch.setattr(llm_module.ai_config, "ai_api_key", None)
+    monkeypatch.setattr(llm_module.ai_config, "ai_default_provider", "default")
+    monkeypatch.setattr(llm_module.ai_config, "ai_providers", [])
+    monkeypatch.setattr(llm_module.ai_config, "ai_provider_api_keys", {})
     monkeypatch.setattr(llm_module, "AsyncOpenAI", fail_constructor)
 
     result = await llm_module.complete([{"role": "user", "content": "hello"}])

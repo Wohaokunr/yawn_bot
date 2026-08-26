@@ -21,7 +21,7 @@ from sqlalchemy import String, func, or_, select
 
 from ..data_models.bot_group import BotGroup
 from .config import API_PATH
-from .deps import ReadSession, WriteSession, ok, page_params
+from .deps import AdminReadSession, AdminWriteSession, ok, page_params
 from .hub import hub
 from .service import iso, page_meta
 from ..replay import load_replay  # noqa: TID252
@@ -384,7 +384,7 @@ async def _group_names(group_ids: set[int]) -> dict[int, str | None]:
 
 
 @router.get("/games/live")
-async def get_live_games(_session: ReadSession) -> dict[str, Any]:
+async def get_live_games(_session: AdminReadSession) -> dict[str, Any]:
     ww = _werewolf_state()
     rpg = _rpg_state()
     ww_games = (
@@ -420,7 +420,7 @@ def _require_live_game(state: Any, kind: str, group_id: int) -> Any:
 
 
 @router.post("/games/werewolf/{group_id}/stop")
-async def stop_werewolf_game(group_id: int, _session: WriteSession) -> dict[str, Any]:
+async def stop_werewolf_game(group_id: int, _session: AdminWriteSession) -> dict[str, Any]:
     state = _werewolf_state()
     if state is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "狼人杀子插件未加载")
@@ -433,7 +433,7 @@ async def stop_werewolf_game(group_id: int, _session: WriteSession) -> dict[str,
 @router.get("/games/werewolf/{group_id}/events")
 async def get_werewolf_game_events(
     group_id: int,
-    _session: ReadSession,
+    _session: AdminReadSession,
     after_seq: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     """可视化对局详情：实时快照 + 内存事件日志（支持 afterSeq 增量）。"""
@@ -452,7 +452,7 @@ async def get_werewolf_game_events(
 
 
 @router.post("/games/rpg/{group_id}/stop")
-async def stop_rpg_game(group_id: int, _session: WriteSession) -> dict[str, Any]:
+async def stop_rpg_game(group_id: int, _session: AdminWriteSession) -> dict[str, Any]:
     state = _rpg_state()
     if state is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
@@ -463,7 +463,7 @@ async def stop_rpg_game(group_id: int, _session: WriteSession) -> dict[str, Any]
 
 
 @router.get("/games/rpg/{group_id}/detail")
-async def get_rpg_detail(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_rpg_detail(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
     state = _rpg_state()
     engine = _rpg_engine()
     if state is None or engine is None:
@@ -476,7 +476,7 @@ async def get_rpg_detail(group_id: int, _session: ReadSession) -> dict[str, Any]
 async def get_rpg_player_private(
     group_id: int,
     user_id: int,
-    _session: ReadSession,
+    _session: AdminReadSession,
 ) -> dict[str, Any]:
     state = _rpg_state()
     engine = _rpg_engine()
@@ -499,7 +499,7 @@ async def get_rpg_player_private(
 async def submit_rpg_action(
     group_id: int,
     body: RpgActionSubmit,
-    _session: WriteSession,
+    _session: AdminWriteSession,
 ) -> dict[str, Any]:
     state = _rpg_state()
     config = _rpg_config()
@@ -635,7 +635,7 @@ async def _paged_history(
 
 @router.get("/games/werewolf/history")
 async def werewolf_history(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -711,7 +711,7 @@ async def werewolf_history(
 
 @router.get("/games/rpg/history")
 async def rpg_history(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -790,7 +790,7 @@ async def rpg_history(
 @router.get("/games/rpg/history/{row_id}/replay")
 async def get_rpg_history_replay(
     row_id: int,
-    _session: ReadSession,
+    _session: AdminReadSession,
 ) -> dict[str, Any]:
     """按 ORM 对局行定位事件日志，并返回公开回放投影。"""
     if _rpg_state() is None:

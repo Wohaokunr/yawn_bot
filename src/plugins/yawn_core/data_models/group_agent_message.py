@@ -20,7 +20,12 @@ class GroupAgentMessage(Model):
     """短期群消息索引；媒体只保存可重建引用。"""
 
     __table_args__ = (
-        UniqueConstraint("bot_id", "message_id", name="uq_agent_message_bot_message"),
+        UniqueConstraint(
+            "bot_id",
+            "group_id",
+            "message_id",
+            name="uq_agent_message_bot_group_message",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

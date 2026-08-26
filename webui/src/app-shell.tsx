@@ -4,6 +4,8 @@ import {
   BookOutlined,
   CrownOutlined,
   DashboardOutlined,
+  EyeOutlined,
+  KeyOutlined,
   LogoutOutlined,
   MenuOutlined,
   ReadOutlined,
@@ -18,6 +20,7 @@ import type { MenuProps } from "antd";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, openStatusStream, setCsrfToken } from "./api";
+import type { AuthSessionData } from "./auth-session";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 
 const { Header, Sider, Content } = Layout;
@@ -25,7 +28,7 @@ const { Text } = Typography;
 
 type MenuItem = Required<MenuProps>["items"][number];
 
-const NAV_ITEMS: MenuItem[] = [
+const ADMIN_NAV_ITEMS: MenuItem[] = [
   {
     type: "group",
     label: "运行监控",
@@ -56,7 +59,18 @@ const NAV_ITEMS: MenuItem[] = [
     type: "group",
     label: "系统设置",
     children: [
+      { key: "/guest-access", icon: <KeyOutlined />, label: "访客访问" },
       { key: "/environment", icon: <SettingOutlined />, label: "环境配置" },
+    ],
+  },
+];
+
+const GUEST_NAV_ITEMS: MenuItem[] = [
+  {
+    type: "group",
+    label: "访客视图",
+    children: [
+      { key: "/guest", icon: <EyeOutlined />, label: "可查看群聊" },
     ],
   },
 ];
@@ -70,59 +84,85 @@ const BREADCRUMB_LABELS: Record<string, string> = {
   modules: "模组库",
   fanqie: "番茄小说",
   agent: "Agent 管理",
+  "guest-access": "访客访问",
   environment: "环境配置",
+  guest: "可查看群聊",
 };
 
-function breadcrumbItems(pathname: string): { title: React.ReactNode }[] {
+function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { title: React.ReactNode }[] {
   const segments = pathname.split("/").filter(Boolean);
-  const items: { title: React.ReactNode }[] = [{ title: <Link to="/overview">管理台</Link> }];
+  const rootPath = role === "guest" ? "/guest" : "/overview";
+  const rootTitle = role === "guest" ? "访客视图" : "管理台";
+  const items: { title: React.ReactNode }[] = [{ title: <Link to={rootPath}>{rootTitle}</Link> }];
   if (segments.length === 0) return items;
   const root = segments[0];
   const rootLabel = BREADCRUMB_LABELS[root] ?? root;
-  items.push({ title: segments.length > 1 ? <Link to={`/${root}`}>{rootLabel}</Link> : rootLabel });
-  if (segments.length > 1) {
-    items.push({ title: root === "agent" ? `群 ${segments[1]}` : segments[1] });
+  if (root !== "overview" || role === "guest") {
+    items.push({ title: segments.length > 1 ? <Link to={`/${root}`}>{rootLabel}</Link> : rootLabel });
   }
+  if (segments.length > 1) items.push({ title: `群 ${segments[1]}` });
   return items;
 }
 
-export function Shell({ onLogout }: { onLogout: () => void }): React.JSX.Element {
+export function Shell({
+  session,
+  onLogout,
+}: {
+  session: AuthSessionData;
+  onLogout: () => void;
+}): React.JSX.Element {
   const navigate = useNavigate();
   const location = useLocation();
-  const [stream, setStream] = useState<"connecting" | "open" | "closed">("connecting");
+  const isGuest = session.role === "guest";
+  const [stream, setStream] = useState<"connecting" | "open" | "closed">(
+    session.capabilities.realtimeAdminStream ? "connecting" : "closed",
+  );
   const [mobileOpen, setMobileOpen] = useState(false);
   const [dirtyCount, setDirtyCount] = useState(0);
-  const selected = `/${location.pathname.split("/")[1] || "overview"}`;
-  const crumbs = useMemo(() => breadcrumbItems(location.pathname), [location.pathname]);
-
-  useEffect(() => openStatusStream((payload) => {
-    if (payload.type === "snapshot" || payload.type === "overview.updated") {
-      window.dispatchEvent(new CustomEvent("yawnbot-overview", { detail: payload.data }));
-    }
-    if (payload.type === "entity.changed") {
-      window.dispatchEvent(new CustomEvent<EntityChangeDetail>("yawnbot-entity-changed", {
-        detail: payload.data as EntityChangeDetail,
-      }));
-    }
-  }, setStream), []);
+  const selected = `/${location.pathname.split("/")[1] || (isGuest ? "guest" : "overview")}`;
+  const crumbs = useMemo(
+    () => breadcrumbItems(location.pathname, session.role),
+    [location.pathname, session.role],
+  );
+  const navItems = isGuest ? GUEST_NAV_ITEMS : ADMIN_NAV_ITEMS;
 
   useEffect(() => {
+    if (!session.capabilities.realtimeAdminStream) {
+      setStream("closed");
+      return undefined;
+    }
+    return openStatusStream((payload) => {
+      if (payload.type === "snapshot" || payload.type === "overview.updated") {
+        window.dispatchEvent(new CustomEvent("yawnbot-overview", { detail: payload.data }));
+      }
+      if (payload.type === "entity.changed") {
+        window.dispatchEvent(new CustomEvent<EntityChangeDetail>("yawnbot-entity-changed", {
+          detail: payload.data as EntityChangeDetail,
+        }));
+      }
+    }, setStream);
+  }, [session.capabilities.realtimeAdminStream]);
+
+  useEffect(() => {
+    if (isGuest) return undefined;
     const listener = (event: Event) => {
       const detail = (event as CustomEvent<{ count: number }>).detail;
       setDirtyCount(detail?.count ?? 0);
     };
     window.addEventListener("yawnbot-dirty-state", listener);
     return () => window.removeEventListener("yawnbot-dirty-state", listener);
-  }, []);
+  }, [isGuest]);
+
+  const canLeave = () => isGuest || confirmDiscardChanges();
 
   const go = (key: string) => {
-    if (!confirmDiscardChanges()) return;
+    if (!canLeave()) return;
     setMobileOpen(false);
     navigate(key);
   };
 
   const logout = async () => {
-    if (!confirmDiscardChanges()) return;
+    if (!canLeave()) return;
     try {
       await api("/auth/logout", { method: "POST" });
     } finally {
@@ -136,7 +176,7 @@ export function Shell({ onLogout }: { onLogout: () => void }): React.JSX.Element
       mode="inline"
       selectedKeys={[selected]}
       onClick={({ key }) => go(String(key))}
-      items={NAV_ITEMS}
+      items={navItems}
       className="admin-menu"
     />
   );
@@ -168,14 +208,18 @@ export function Shell({ onLogout }: { onLogout: () => void }): React.JSX.Element
               onClick={() => setMobileOpen(true)}
             />
             <SafetyCertificateOutlined />
-            <Text>Core / Agent</Text>
-            <Tag className="status-tag" color={stream === "open" ? "green" : "orange"}>
-              <span className="live-dot" />
-              {stream === "open" ? "实时连接" : "正在重连"}
-            </Tag>
-            {dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
+            <Text>{isGuest ? "开放群聊视图" : "Core / Agent"}</Text>
+            {isGuest ? (
+              <Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>
+            ) : (
+              <Tag className="status-tag" color={stream === "open" ? "green" : "orange"}>
+                <span className="live-dot" />
+                {stream === "open" ? "实时连接" : "正在重连"}
+              </Tag>
+            )}
+            {!isGuest && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
           </Space>
-          <Button icon={<LogoutOutlined />} onClick={() => void logout()}>退出</Button>
+          <Button icon={<LogoutOutlined />} onClick={() => void logout()}>{isGuest ? "退出访客" : "退出"}</Button>
         </Header>
         <Content className="app-content">
           <Breadcrumb className="app-breadcrumb" items={crumbs} />

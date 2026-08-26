@@ -10,7 +10,7 @@ from nonebot_plugin_orm import get_session
 
 from ..permission import FEATURE_REGISTRY
 from .config import API_PATH
-from .deps import ReadSession, WriteSession, ok, page_params
+from .deps import AdminReadSession, AdminWriteSession, ok, page_params
 from .hub import hub
 from .route_helpers import require_user
 from .route_models import FeatureOverrideBody
@@ -20,7 +20,7 @@ router = APIRouter(prefix=API_PATH)
 
 @router.get("/users")
 async def get_users(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -35,7 +35,7 @@ async def get_users(
 
 @router.get("/users/{user_id}/features")
 async def get_global_user_features(
-    user_id: int, _session: ReadSession
+    user_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_user(db, user_id)
@@ -45,7 +45,7 @@ async def get_global_user_features(
 
 @router.patch("/users/{user_id}/features/{feature}")
 async def patch_global_user_feature(
-    user_id: int, feature: str, body: FeatureOverrideBody, _session: WriteSession
+    user_id: int, feature: str, body: FeatureOverrideBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     if feature not in FEATURE_REGISTRY:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "功能不存在")

@@ -36,6 +36,7 @@ from .config import API_PATH, BASE_PATH, COOKIE_NAME, DIST_DIR
 from .environment_routes import router as environment_router
 from .fanqie import router as fanqie_router
 from .games import router as games_router
+from .guest_access_routes import router as guest_access_router
 from .groups import router as groups_router
 from .hub import hub
 from .overview_routes import router as overview_router
@@ -117,6 +118,7 @@ def register(app: FastAPI) -> None:
     app.include_router(auth_router)
     app.include_router(overview_router)
     app.include_router(environment_router)
+    app.include_router(guest_access_router)
     app.include_router(groups_router)
     app.include_router(users_router)
     app.include_router(agent_router)
@@ -133,6 +135,8 @@ def register(app: FastAPI) -> None:
         authenticated = (
             verify_session(request.cookies.get(COOKIE_NAME)) if should_audit else None
         )
+        if authenticated is not None and authenticated.role != "admin":
+            authenticated = None
         request_id = str(uuid.uuid4())
         try:
             response = await call_next(request)
@@ -172,6 +176,9 @@ def register(app: FastAPI) -> None:
         session = websocket_session(websocket)
         if session is None:
             await websocket.close(code=4401)
+            return
+        if session.role != "admin":
+            await websocket.close(code=4403)
             return
         await hub.connect(websocket)
         try:

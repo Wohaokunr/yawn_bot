@@ -11,7 +11,7 @@ import contextvars
 import re
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -20,6 +20,7 @@ from .context import now_beijing
 
 _MAX_EVENTS = 96
 _MAX_GROUP_TRACES = 12
+_MAX_TRACKED_GROUPS = 512
 _MAX_STRING = 600
 _MAX_LIST = 24
 _MAX_DICT = 32
@@ -102,9 +103,19 @@ class ExecutionTrace:
 _current_trace: contextvars.ContextVar[ExecutionTrace | None] = contextvars.ContextVar(
     "yawn_agent_execution_trace", default=None
 )
-_recent_traces: dict[int, deque[ExecutionTrace]] = defaultdict(
-    lambda: deque(maxlen=_MAX_GROUP_TRACES)
-)
+_recent_traces: OrderedDict[int, deque[ExecutionTrace]] = OrderedDict()
+
+
+def _trace_bucket(group_id: int) -> deque[ExecutionTrace]:
+    group = int(group_id)
+    bucket = _recent_traces.get(group)
+    if bucket is None:
+        bucket = deque(maxlen=_MAX_GROUP_TRACES)
+        _recent_traces[group] = bucket
+    _recent_traces.move_to_end(group)
+    while len(_recent_traces) > _MAX_TRACKED_GROUPS:
+        _recent_traces.popitem(last=False)
+    return bucket
 
 
 def _safe_value(value: Any, *, depth: int = 0) -> Any:
@@ -241,7 +252,7 @@ def finish_execution_trace(
         1,
     )
     if store:
-        bucket = _recent_traces[trace.group_id]
+        bucket = _trace_bucket(trace.group_id)
         if not bucket or bucket[-1] is not trace:
             bucket.append(trace)
     return trace

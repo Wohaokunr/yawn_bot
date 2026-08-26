@@ -22,6 +22,7 @@ from ..data_models.global_user_feature import GlobalUserFeature
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.group_feature import GroupFeature
+from ..data_models.guest_access import GuestGroupAccess
 from ..data_models.scheduled_reminder import ScheduledReminder
 from ..data_models.user_feature import UserFeature
 from ..data_models.user_group import UserGroup
@@ -494,6 +495,64 @@ async def list_groups(
     ], total
 
 
+async def list_guest_groups(
+    session: AsyncSession, *, page: int, page_size: int, search: str
+) -> tuple[list[dict[str, Any]], int]:
+    """Return only groups explicitly allowlisted for guest viewers.
+
+    Keep this projection intentionally small: guest navigation only needs a human
+    readable group identity and member count, not Agent runtime/configuration data.
+    """
+    conditions = []
+    if search:
+        pattern = f"%{search}%"
+        conditions.append(
+            or_(
+                BotGroup.group_name.ilike(pattern),
+                BotGroup.group_id.cast(String).like(pattern),
+            )
+        )
+    base = BotGroup.__table__.join(
+        GuestGroupAccess.__table__, GuestGroupAccess.group_id == BotGroup.group_id
+    )
+    count_stmt = select(func.count()).select_from(base)
+    stmt = (
+        select(BotGroup)
+        .join(GuestGroupAccess, GuestGroupAccess.group_id == BotGroup.group_id)
+        .order_by(BotGroup.last_active_at.desc(), BotGroup.group_id)
+    )
+    if conditions:
+        count_stmt = count_stmt.where(*conditions)
+        stmt = stmt.where(*conditions)
+    total = int(await session.scalar(count_stmt) or 0)
+    rows = list(
+        (await session.execute(stmt.offset((page - 1) * page_size).limit(page_size)))
+        .scalars()
+        .all()
+    )
+    group_ids = [int(row.group_id) for row in rows]
+    member_counts: dict[int, int] = {}
+    if group_ids:
+        member_counts = {
+            int(group_id): int(count)
+            for group_id, count in (
+                await session.execute(
+                    select(UserGroup.group_id, func.count())
+                    .where(UserGroup.group_id.in_(group_ids))
+                    .group_by(UserGroup.group_id)
+                )
+            ).all()
+        }
+    return [
+        {
+            "groupId": str(row.group_id),
+            "groupName": row.group_name,
+            "memberCount": member_counts.get(int(row.group_id), 0),
+        }
+        for row in rows
+    ], total
+
+
 async def get_group(session: AsyncSession, group_id: int) -> dict[str, Any] | None:
     row = await session.get(BotGroup, group_id)
     if row is None:
@@ -807,6 +866,8 @@ def serialize_persona(row: GroupAgentConfig | None, group_id: int) -> dict[str, 
 
 
 def serialize_memory(row: AgentMemory) -> dict[str, Any]:
+    """Administrator projection with full memory provenance/governance fields."""
+
     return {
         "id": str(row.id),
         "groupId": str(row.group_id) if row.group_id is not None else None,
@@ -837,7 +898,30 @@ def serialize_memory(row: AgentMemory) -> dict[str, Any]:
     }
 
 
+def serialize_guest_memory(row: AgentMemory) -> dict[str, Any]:
+    """Minimal human-readable memory projection for guest viewers.
+
+    Resource identity and the subject are retained so the read-only UI can group
+    and render memories, while evidence ids, provenance, source/debug metadata,
+    related-user internals and governance fields stay administrator-only.
+    """
+
+    return {
+        "id": str(row.id),
+        "subjectUserId": str(row.subject_user_id)
+        if int(row.subject_user_id or 0) != 0
+        else None,
+        "type": row.memory_type,
+        "key": row.memory_key,
+        "content": row.content,
+        "confidence": row.confidence,
+        "updatedAt": iso(row.updated_at),
+    }
+
+
 def serialize_relation(row: AgentRelation) -> dict[str, Any]:
+    """Administrator projection with relation evidence/source metadata."""
+
     return {
         "id": str(row.id),
         "groupId": str(row.group_id),
@@ -852,14 +936,32 @@ def serialize_relation(row: AgentRelation) -> dict[str, Any]:
     }
 
 
+def serialize_guest_relation(row: AgentRelation) -> dict[str, Any]:
+    """Minimal relation projection for guest viewers."""
+
+    return {
+        "id": str(row.id),
+        "subjectUserId": str(row.subject_user_id),
+        "objectUserId": str(row.object_user_id),
+        "type": row.relation_type,
+        "note": row.note,
+        "confidence": row.confidence,
+        "lastSeenAt": iso(row.last_seen_at),
+    }
+
+
 # 图谱端点与导出端点同口径：全量边上限 5000，超出时以 meta.truncated 告知前端。
 RELATION_GRAPH_LIMIT = 5000
 
 
 async def load_relation_graph(
-    session: AsyncSession, group_id: int
+    session: AsyncSession, group_id: int, *, guest: bool = False
 ) -> dict[str, Any]:
-    """关系图谱数据：全群边 + 成员节点（含无边成员，linked 标记是否出现在边中）。"""
+    """关系图谱数据。
+
+    管理员保留全群成员节点以支持治理视图；访客仅返回实际出现在可展示
+    关系边中的节点，避免通过孤立节点泄露 opted-out 或无关群成员。
+    """
 
     opted_out = set(
         (
@@ -922,13 +1024,16 @@ async def load_relation_graph(
 
     nodes: dict[int, dict[str, Any]] = {}
     for membership, user in member_rows:
-        nodes[int(user.user_id)] = {
+        user_id = int(user.user_id)
+        if guest and user_id not in degrees:
+            continue
+        nodes[user_id] = {
             "userId": str(user.user_id),
             "nickname": user.nickname,
             "groupNickname": membership.group_nickname,
             "role": membership.role,
-            "linked": int(user.user_id) in degrees,
-            "degree": degrees.get(int(user.user_id), 0),
+            "linked": user_id in degrees,
+            "degree": degrees.get(user_id, 0),
         }
     # 关系端点可能已不在成员表（退群残留），补齐为昵称回退节点，避免边悬空。
     for user_id, degree in degrees.items():
@@ -942,13 +1047,15 @@ async def load_relation_graph(
                 "degree": degree,
             }
 
+    relation_serializer = serialize_guest_relation if guest else serialize_relation
+    meta = {"relationTruncated": relation_truncated}
+    if not guest:
+        # 这是管理员治理视图的成员表截断信息；访客没有必要知道群成员表规模。
+        meta["memberTruncated"] = member_truncated
     return {
         "nodes": [nodes[key] for key in sorted(nodes)],
-        "edges": [serialize_relation(row) for row in relation_rows],
-        "meta": {
-            "relationTruncated": relation_truncated,
-            "memberTruncated": member_truncated,
-        },
+        "edges": [relation_serializer(row) for row in relation_rows],
+        "meta": meta,
     }
 
 
