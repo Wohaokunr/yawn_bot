@@ -9,6 +9,7 @@ from sqlalchemy import event
 from . import (
     ai_chat,
     checkin,
+    command_catalog,
     event_log,
     friend_approve,
     help_panel,
@@ -20,11 +21,13 @@ from . import (
     replay,
     replay_commands,
 )
+from .command_catalog import unregister_command_group
 
 __all__ = [
     "SubPluginLoadStatus",
     "ai_chat",
     "checkin",
+    "command_catalog",
     "event_log",
     "friend_approve",
     "get_sub_plugin_load_report",
@@ -54,10 +57,10 @@ class SubPluginLoadStatus:
 
 
 _SUB_PLUGIN_SPECS = (
-    ("yawn_werewolf", "狼人杀"),
-    ("yawn_rpg", "跑团"),
-    ("yawn_fanqie", "番茄小说"),
-    ("yawn_agent", "群聊 Agent"),
+    ("yawn_werewolf", "狼人杀", "yawn_werewolf"),
+    ("yawn_rpg", "跑团", "yawn_rpg"),
+    ("yawn_fanqie", "番茄小说", "yawn_fanqie"),
+    ("yawn_agent", "群聊 Agent", "yawn_agent"),
 )
 _SUB_PLUGIN_LOAD_REPORT: tuple[SubPluginLoadStatus, ...] = ()
 
@@ -91,6 +94,7 @@ def _load_sub_plugins(
     """加载可选业务子插件；子插件缺失或加载失败不影响 yawn_core。"""
     import nonebot
 
+    runtime_load = load_plugin is None
     package_dir = package_dir or Path(__file__).parent
     load_plugin = load_plugin or nonebot.load_plugin
     report: list[SubPluginLoadStatus] = []
@@ -98,9 +102,11 @@ def _load_sub_plugins(
     # 用 __name__ 推导模块路径：nonebot 以 CWD 相对路径注册插件
     # （如 src.plugins.yawn_core），硬编码包名会找不到模块。
     # 子插件逐个隔离加载，某个目录缺失或导入失败不能阻断其他玩法。
-    for dirname, label in _SUB_PLUGIN_SPECS:
+    for dirname, label, command_group_id in _SUB_PLUGIN_SPECS:
         module_name = f"{__name__}.{dirname}"
         if not (package_dir / dirname).is_dir():
+            if runtime_load:
+                unregister_command_group(command_group_id)
             report.append(
                 SubPluginLoadStatus(module_name, label, "missing", "目录不存在")
             )
@@ -108,11 +114,15 @@ def _load_sub_plugins(
         try:
             plugin = load_plugin(module_name)
         except Exception as exc:  # noqa: BLE001
+            if runtime_load:
+                unregister_command_group(command_group_id)
             detail = f"{type(exc).__name__}: {exc}"
             report.append(SubPluginLoadStatus(module_name, label, "failed", detail))
             logger.warning(f"{label}子插件加载失败，已跳过：{detail}", exc_info=True)
             continue
         if plugin is None:
+            if runtime_load:
+                unregister_command_group(command_group_id)
             detail = "NoneBot 未返回已注册插件"
             report.append(SubPluginLoadStatus(module_name, label, "failed", detail))
             logger.warning(f"{label}子插件未能注册，已跳过：{detail}")

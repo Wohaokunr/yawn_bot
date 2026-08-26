@@ -34,12 +34,31 @@ from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_orm import async_scoped_session, get_session
 from sqlalchemy import func, select
 
+from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 from .data_models.bot_group import BotGroup
 from .data_models.scheduled_reminder import ScheduledReminder
 from .permission import (
     check_feature_permission,
     is_group_admin,
     require_feature,
+)
+
+COMMAND_GROUP = register_command_group(
+    PluginCommandGroup(
+        plugin_id="yawn_core.reminder",
+        display_name="定时提醒",
+        entrypoint="定时提醒",
+        help_section="admin",
+        commands=(
+            CommandSpec(
+                name="定时提醒",
+                aliases=("提醒",),
+                description="交互式管理群聊定时提醒",
+                feature="reminder",
+                permission="group_admin",
+            ),
+        ),
+    )
 )
 
 __plugin_meta__ = PluginMetadata(
@@ -49,19 +68,7 @@ __plugin_meta__ = PluginMetadata(
         "群主/管理员发送 /定时提醒 打开当前群的管理向导；"
         "超级用户可私聊发送 /定时提醒 选择要管理的群"
     ),
-    extra={
-        "commands": [
-            {
-                "name": "定时提醒",
-                "aliases": ["提醒"],
-                "description": "交互式管理群聊定时提醒",
-                "feature": "reminder",
-                "scope": "all",
-                "superuser": False,
-                "admin": True,
-            },
-        ],
-    },
+    extra={"command_group": COMMAND_GROUP},
 )
 
 logger.info("定时提醒模块已加载")

@@ -24,6 +24,7 @@ from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
+from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 from .data_models.bot_user import BotUser
 from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
@@ -74,71 +75,70 @@ async def _ensure_group_record(
         await session.flush()
 
 
+COMMAND_GROUP = register_command_group(
+    PluginCommandGroup(
+        plugin_id="yawn_core.panel",
+        display_name="管理面板",
+        entrypoint="面板",
+        commands=(
+            CommandSpec(
+                name="面板",
+                aliases=("个人面板", "我的面板"),
+                description="查看个人信息面板",
+            ),
+            CommandSpec(
+                name="群管理",
+                aliases=("群管理面板",),
+                description="群功能开关管理（需群管/超管）",
+                scope="group",
+                permission="group_admin",
+                display_level="advanced",
+                help_section="admin",
+            ),
+            CommandSpec(
+                name="全局群功能",
+                description="管理任意群的功能开关",
+                permission="superuser",
+                display_level="advanced",
+                help_section="admin",
+            ),
+            CommandSpec(
+                name="全局用户功能",
+                description="管理任意用户的功能开关",
+                permission="superuser",
+                display_level="advanced",
+                help_section="admin",
+            ),
+            CommandSpec(
+                name="权限查询",
+                description="查询用户权限状态",
+                permission="superuser",
+                display_level="advanced",
+                help_section="admin",
+            ),
+            CommandSpec(
+                name="查看用户对话",
+                description="查看指定用户的对话记录",
+                permission="superuser",
+                display_level="advanced",
+                help_section="admin",
+            ),
+            CommandSpec(
+                name="删除用户对话",
+                description="删除指定用户的对话或消息",
+                permission="superuser",
+                display_level="advanced",
+                help_section="admin",
+            ),
+        ),
+    )
+)
+
 __plugin_meta__ = PluginMetadata(
     name="管理面板",
     description="个人面板与群管理面板",
     usage="发送 /面板 查看个人信息",
-    extra={
-        "commands": [
-            {
-                "name": "面板",
-                "aliases": ["个人面板", "我的面板"],
-                "description": "查看个人信息面板",
-                "feature": None,
-                "scope": "all",
-                "superuser": False,
-            },
-            {
-                "name": "群管理",
-                "aliases": ["群管理面板"],
-                "description": "群功能开关管理（需群管/超管）",
-                "feature": None,
-                "scope": "group",
-                "superuser": False,
-                "admin": True,
-            },
-            {
-                "name": "全局群功能",
-                "aliases": [],
-                "description": "管理任意群的功能开关",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-            {
-                "name": "全局用户功能",
-                "aliases": [],
-                "description": "管理任意用户的功能开关",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-            {
-                "name": "权限查询",
-                "aliases": [],
-                "description": "查询用户权限状态",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-            {
-                "name": "查看用户对话",
-                "aliases": [],
-                "description": "查看指定用户的对话记录",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-            {
-                "name": "删除用户对话",
-                "aliases": [],
-                "description": "删除指定用户的对话或消息",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-        ],
-    },
+    extra={"command_group": COMMAND_GROUP},
 )
 
 logger.info("统一管理面板模块已加载")

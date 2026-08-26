@@ -15,42 +15,48 @@ from nonebot.plugin import PluginMetadata, on_command, on_request
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import select
 
+from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 from .data_models.friend_request import FriendRequest
 
 _CST = timezone(timedelta(hours=8))
+
+COMMAND_GROUP = register_command_group(
+    PluginCommandGroup(
+        plugin_id="yawn_core.friend_approve",
+        display_name="好友审批",
+        entrypoint="pending",
+        help_section="admin",
+        commands=(
+            CommandSpec(
+                name="pending",
+                aliases=("待审批",),
+                description="查看待审批好友申请列表",
+                permission="superuser",
+                display_level="advanced",
+            ),
+            CommandSpec(
+                name="approve",
+                aliases=("同意",),
+                description="同意好友申请",
+                permission="superuser",
+                display_level="advanced",
+            ),
+            CommandSpec(
+                name="reject",
+                aliases=("拒绝",),
+                description="拒绝好友申请",
+                permission="superuser",
+                display_level="advanced",
+            ),
+        ),
+    )
+)
 
 __plugin_meta__ = PluginMetadata(
     name="好友审批",
     description="好友申请审批管理",
     usage="发送 /pending 查看待审批列表",
-    extra={
-        "commands": [
-            {
-                "name": "approve",
-                "aliases": ["同意"],
-                "description": "同意好友申请",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-            {
-                "name": "reject",
-                "aliases": ["拒绝"],
-                "description": "拒绝好友申请",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-            {
-                "name": "pending",
-                "aliases": ["待审批"],
-                "description": "查看待审批好友申请列表",
-                "feature": None,
-                "scope": "all",
-                "superuser": True,
-            },
-        ],
-    },
+    extra={"command_group": COMMAND_GROUP},
 )
 
 friend_request = on_request()

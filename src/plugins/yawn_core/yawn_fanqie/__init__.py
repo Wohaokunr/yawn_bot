@@ -7,8 +7,37 @@
 from nonebot import get_plugin_config, logger
 from nonebot.plugin import PluginMetadata
 
+from ..command_catalog import (  # noqa: TID252
+    CommandSpec,
+    PluginCommandGroup,
+    register_command_group,
+)
 from . import commands, models  # noqa: F401
 from .config import Config
+
+COMMAND_GROUP = register_command_group(
+    PluginCommandGroup(
+        plugin_id="yawn_fanqie",
+        display_name="番茄小说",
+        entrypoint="番茄小说",
+        help_section="fanqie",
+        commands=(
+            CommandSpec(
+                name="番茄小说",
+                aliases=("番茄下载", "下载小说"),
+                description="模糊搜索、浏览榜单并下载番茄免费小说公开章节",
+                feature="fanqie",
+            ),
+            CommandSpec(
+                name="番茄任务",
+                aliases=("小说任务",),
+                description="查看或管理番茄小说下载任务",
+                feature="fanqie",
+                display_level="advanced",
+            ),
+        ),
+    )
+)
 
 __plugin_meta__ = PluginMetadata(
     name="番茄小说",
@@ -18,26 +47,7 @@ __plugin_meta__ = PluginMetadata(
         "发送 /番茄任务 查看进度或管理已有任务"
     ),
     config=Config,
-    extra={
-        "commands": [
-            {
-                "name": "番茄小说",
-                "aliases": ["番茄下载", "下载小说"],
-                "description": "模糊搜索、浏览榜单并下载番茄免费小说公开章节",
-                "feature": "fanqie",
-                "scope": "all",
-                "superuser": False,
-            },
-            {
-                "name": "番茄任务",
-                "aliases": ["小说任务"],
-                "description": "查看或管理番茄小说下载任务",
-                "feature": "fanqie",
-                "scope": "all",
-                "superuser": False,
-            },
-        ],
-    },
+    extra={"command_group": COMMAND_GROUP},
 )
 
 config = get_plugin_config(Config)

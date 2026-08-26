@@ -25,7 +25,7 @@ from .log import dbg
 from .memory import delete_group_memories, delete_member_memories, list_memories
 from .persona import PERSONA_FIELDS, parse_persona_assignments, resolve_persona
 
-# 命令元数据登记在包级 __init__.__plugin_meta__（help_panel 只扫描包级）。
+# 命令元数据由包级 __init__ 注册到 command_catalog。
 
 agent_command = on_command("群聊Agent", aliases={"群AI"}, priority=5, block=True)
 agent_settings = on_command("Agent设置", priority=5, block=True)
