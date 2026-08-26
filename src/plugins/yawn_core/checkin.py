@@ -12,6 +12,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy.exc import IntegrityError
 
+from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 from .data_models.bot_group import BotGroup
 from .data_models.bot_user import BotUser
 from .data_models.checkin_record import CheckinRecord
@@ -19,22 +20,27 @@ from .data_models.checkin_user import CheckinUser
 from .data_models.user_group import UserGroup
 from .permission import require_feature
 
+COMMAND_GROUP = register_command_group(
+    PluginCommandGroup(
+        plugin_id="yawn_core.checkin",
+        display_name="签到",
+        entrypoint="签到",
+        commands=(
+            CommandSpec(
+                name="签到",
+                description="每日签到获取积分",
+                feature="checkin",
+                scope="group",
+            ),
+        ),
+    )
+)
+
 __plugin_meta__ = PluginMetadata(
     name="签到",
     description="每日签到获取积分",
     usage="发送 /签到",
-    extra={
-        "commands": [
-            {
-                "name": "签到",
-                "aliases": [],
-                "description": "每日签到获取积分",
-                "feature": "checkin",
-                "scope": "group",
-                "superuser": False,
-            },
-        ],
-    },
+    extra={"command_group": COMMAND_GROUP},
 )
 
 logger.info("签到模块已加载")

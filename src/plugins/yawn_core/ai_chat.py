@@ -40,6 +40,7 @@ from .chat_state import (
     is_in_mode,
     stop_worker,
 )
+from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
 from .llm import _COMPLETION_CONCURRENCY
@@ -85,6 +86,39 @@ def _record_stream_metric(outcome: str, started: float) -> None:
     except Exception:  # noqa: BLE001
         logger.debug("流式 AI 指标更新失败", exc_info=True)
 
+COMMAND_GROUP = register_command_group(
+    PluginCommandGroup(
+        plugin_id="yawn_core.ai_chat",
+        display_name="Yawn对话",
+        entrypoint="Yawn对话",
+        commands=(
+            CommandSpec(
+                name="Yawn对话",
+                aliases=("对话", "ai对话", "AI对话"),
+                description="AI智能对话",
+                feature="ai_chat",
+                scope="private",
+            ),
+            CommandSpec(
+                name="新对话",
+                aliases=("新建对话", "重置对话"),
+                description="重置对话上下文",
+                feature="ai_chat",
+                scope="private",
+                display_level="advanced",
+            ),
+            CommandSpec(
+                name="退出",
+                aliases=("退出对话", "结束对话"),
+                description="退出对话模式",
+                feature="ai_chat",
+                scope="private",
+                display_level="advanced",
+            ),
+        ),
+    )
+)
+
 __plugin_meta__ = PluginMetadata(
     name="Yawn对话",
     description="基于 AI 的智能对话",
@@ -93,34 +127,7 @@ __plugin_meta__ = PluginMetadata(
         "发送 /退出 退出对话。"
         "也可 /对话 <内容> 一次性对话"
     ),
-    extra={
-        "commands": [
-            {
-                "name": "Yawn对话",
-                "aliases": ["对话", "ai对话", "AI对话"],
-                "description": "AI智能对话",
-                "feature": "ai_chat",
-                "scope": "private",
-                "superuser": False,
-            },
-            {
-                "name": "新对话",
-                "aliases": ["新建对话", "重置对话"],
-                "description": "重置对话上下文",
-                "feature": "ai_chat",
-                "scope": "private",
-                "superuser": False,
-            },
-            {
-                "name": "退出",
-                "aliases": ["退出对话", "结束对话"],
-                "description": "退出对话模式",
-                "feature": "ai_chat",
-                "scope": "private",
-                "superuser": False,
-            },
-        ],
-    },
+    extra={"command_group": COMMAND_GROUP},
 )
 
 logger.info("Yawn对话模块已加载")
