@@ -114,8 +114,9 @@ export function Shell({
   const navigate = useNavigate();
   const location = useLocation();
   const isGuest = session.role === "guest";
+  const canUseAdminStream = !isGuest && session.capabilities.realtimeAdminStream;
   const [stream, setStream] = useState<"connecting" | "open" | "closed">(
-    session.capabilities.realtimeAdminStream ? "connecting" : "closed",
+    canUseAdminStream ? "connecting" : "closed",
   );
   const [mobileOpen, setMobileOpen] = useState(false);
   const [dirtyCount, setDirtyCount] = useState(0);
@@ -127,7 +128,7 @@ export function Shell({
   const navItems = isGuest ? GUEST_NAV_ITEMS : ADMIN_NAV_ITEMS;
 
   useEffect(() => {
-    if (!session.capabilities.realtimeAdminStream) {
+    if (!canUseAdminStream) {
       setStream("closed");
       return undefined;
     }
@@ -141,7 +142,7 @@ export function Shell({
         }));
       }
     }, setStream);
-  }, [session.capabilities.realtimeAdminStream]);
+  }, [canUseAdminStream]);
 
   useEffect(() => {
     if (isGuest) return undefined;
