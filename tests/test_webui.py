@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,10 @@ app_module = importlib.import_module("src.plugins.yawn_core.webui.app")
 route_helpers = importlib.import_module("src.plugins.yawn_core.webui.route_helpers")
 route_models = importlib.import_module("src.plugins.yawn_core.webui.route_models")
 service = importlib.import_module("src.plugins.yawn_core.webui.service")
+
+
+def _concrete_api_path(path: str) -> str:
+    return re.sub(r"\{[^}]+\}", "100", path)
 
 
 @pytest.fixture(autouse=True)
@@ -114,6 +119,7 @@ def test_guest_session_is_role_aware_and_cannot_access_admin_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     credential_version = 7
+    audit_events: list[dict[str, Any]] = []
 
     async def authenticate(token: str) -> Any:
         assert token == "guest-test-code"
@@ -131,9 +137,13 @@ def test_guest_session_is_role_aware_and_cannot_access_admin_routes(
     async def group_is_allowed(_group_id: int) -> bool:
         return False
 
+    async def record_request_audit(**kwargs: Any) -> None:
+        audit_events.append(kwargs)
+
     monkeypatch.setattr(auth_routes, "authenticate_guest_credential", authenticate)
     monkeypatch.setattr(deps, "guest_session_is_current", session_is_current)
     monkeypatch.setattr(deps, "guest_group_is_allowed", group_is_allowed)
+    monkeypatch.setattr(app_module, "_record_request_audit", record_request_audit)
     app = FastAPI()
     app_module.register(app)
     client = TestClient(app, base_url="https://testserver")
@@ -156,35 +166,59 @@ def test_guest_session_is_role_aware_and_cannot_access_admin_routes(
     assert current.status_code == 200  # noqa: PLR2004
     assert current.json()["data"]["role"] == "guest"
 
-    for path in (
-        "/webui/api/v1/overview",
-        "/webui/api/v1/environment",
-        "/webui/api/v1/web-audits",
-        "/webui/api/v1/groups",
-        "/webui/api/v1/agent/groups/100/messages",
-        "/webui/api/v1/agent/groups/100/privacy",
-        "/webui/api/v1/agent/groups/100/diagnostics",
-    ):
-        response = client.get(path)
+    guest_group_get_whitelist = {
+        "/webui/api/v1/groups/{group_id}",
+        "/webui/api/v1/agent/groups/{group_id}/memories",
+        "/webui/api/v1/agent/groups/{group_id}/memories/subjects",
+        "/webui/api/v1/agent/groups/{group_id}/relations",
+        "/webui/api/v1/agent/groups/{group_id}/relations/graph",
+        "/webui/api/v1/agent/groups/{group_id}/relations/types",
+    }
+
+    schema_paths = app.openapi()["paths"]
+
+    # Every management GET must fail before its handler can touch service/DB state.
+    checked_management_gets: list[str] = []
+    for path, operations in schema_paths.items():
+        if "get" not in operations or not path.startswith("/webui/api/v1/"):
+            continue
+        if path.startswith("/webui/api/v1/auth/"):
+            continue
+        if path == "/webui/api/v1/guest/groups":
+            continue
+        if path in guest_group_get_whitelist:
+            continue
+        response = client.get(_concrete_api_path(path))
+        assert response.status_code == 403, path  # noqa: PLR2004
+        checked_management_gets.append(path)
+    assert checked_management_gets
+
+    # The explicit guest GET whitelist is still group-scoped; this group is not allowed.
+    for path in guest_group_get_whitelist:
+        response = client.get(_concrete_api_path(path))
         assert response.status_code == 403, path  # noqa: PLR2004
 
-    for path in (
-        "/webui/api/v1/groups/100",
-        "/webui/api/v1/agent/groups/100/memories",
-        "/webui/api/v1/agent/groups/100/memories/subjects",
-        "/webui/api/v1/agent/groups/100/relations",
-        "/webui/api/v1/agent/groups/100/relations/graph",
-        "/webui/api/v1/agent/groups/100/relations/types",
-    ):
-        response = client.get(path)
-        assert response.status_code == 403, path  # noqa: PLR2004
+    # Every non-auth write is admin-only. A forged CSRF token cannot bypass the role gate.
+    checked_writes: list[tuple[str, str]] = []
+    for path, operations in schema_paths.items():
+        if not path.startswith("/webui/api/v1/") or path.startswith("/webui/api/v1/auth/"):
+            continue
+        for method in ("post", "put", "patch", "delete"):
+            if method not in operations:
+                continue
+            response = client.request(
+                method.upper(),
+                _concrete_api_path(path),
+                headers={"X-CSRF-Token": "forged-admin-csrf"},
+                json={},
+            )
+            assert response.status_code == 403, (method, path)  # noqa: PLR2004
+            checked_writes.append((method.upper(), path))
 
-    write = client.post(
-        "/webui/api/v1/agent/groups/100/debug/run",
-        headers={"X-CSRF-Token": data["csrfToken"]},
-        json={"mode": "dialogue", "text": "测试", "actorUserId": 123},
-    )
-    assert write.status_code == 403  # noqa: PLR2004
+    assert checked_writes
+    assert len(audit_events) == len(checked_writes)
+    assert all(event["session"].role == "guest" for event in audit_events)
+    assert all(event["status_code"] == 403 for event in audit_events)
 
     guest_cookie = client.cookies.get(auth.COOKIE_NAME)
     assert guest_cookie
@@ -194,6 +228,121 @@ def test_guest_session_is_role_aware_and_cannot_access_admin_routes(
     ):
         pass
     assert exc_info.value.code == 4403  # noqa: PLR2004
+
+
+def test_anonymous_webui_reads_are_rejected_before_business_handlers() -> None:
+    app = FastAPI()
+    app_module.register(app)
+    client = TestClient(app)
+
+    for path in (
+        "/webui/api/v1/auth/session",
+        "/webui/api/v1/guest/groups",
+        "/webui/api/v1/overview",
+        "/webui/api/v1/groups/100",
+        "/webui/api/v1/agent/groups/100/memories",
+    ):
+        assert client.get(path).status_code == 401, path  # noqa: PLR2004
+
+
+def test_admin_stream_keeps_snapshot_behavior_but_guest_never_reaches_overview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overview_calls = 0
+
+    async def safe_overview() -> dict[str, Any]:
+        nonlocal overview_calls
+        overview_calls += 1
+        return {"sensitive": "admin-only"}
+
+    monkeypatch.setattr(app_module, "overview", safe_overview)
+    app = FastAPI()
+    app_module.register(app)
+    client = TestClient(app)
+
+    admin_cookie = auth.create_session(role="admin")[0]
+    with client.websocket_connect(
+        "/webui/api/v1/stream",
+        headers={"cookie": f"{auth.COOKIE_NAME}={admin_cookie}"},
+    ) as websocket:
+        assert websocket.receive_json() == {
+            "type": "snapshot",
+            "version": 1,
+            "data": {"sensitive": "admin-only"},
+        }
+    assert overview_calls == 1
+
+    guest_cookie = auth.create_session(role="guest", credential_version=7)[0]
+    with pytest.raises(WebSocketDisconnect) as exc_info, client.websocket_connect(
+        "/webui/api/v1/stream",
+        headers={"cookie": f"{auth.COOKIE_NAME}={guest_cookie}"},
+    ):
+        pass
+    assert exc_info.value.code == 4403  # noqa: PLR2004
+    assert overview_calls == 1
+
+    with pytest.raises(WebSocketDisconnect) as anonymous_exc, client.websocket_connect(
+        "/webui/api/v1/stream"
+    ):
+        pass
+    assert anonymous_exc.value.code == 4401  # noqa: PLR2004
+    assert overview_calls == 1
+
+
+def test_guest_group_authorization_revocation_applies_to_existing_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"allowed": True, "version": 5}
+
+    async def authenticate(_token: str) -> Any:
+        return guest_access.GuestPolicySnapshot(
+            enabled=True,
+            credential_configured=True,
+            credential_version=state["version"],
+            authorized_group_count=1,
+            updated_at=None,
+        )
+
+    async def session_is_current(version: int | None) -> bool:
+        return version == state["version"]
+
+    async def group_is_allowed(group_id: int) -> bool:
+        return group_id == 100 and state["allowed"]
+
+    async def get_group(_db: Any, group_id: int) -> dict[str, Any]:
+        assert group_id == 100  # noqa: PLR2004
+        return {
+            "groupId": "100",
+            "groupName": "测试群",
+            "memberCount": 42,
+            "features": [],
+        }
+
+    monkeypatch.setattr(auth_routes, "authenticate_guest_credential", authenticate)
+    monkeypatch.setattr(deps, "guest_session_is_current", session_is_current)
+    monkeypatch.setattr(deps, "guest_group_is_allowed", group_is_allowed)
+    monkeypatch.setattr(
+        group_routes, "get_session", lambda: _FakeSessionFactory(SimpleNamespace())
+    )
+    monkeypatch.setattr(group_routes, "get_group", get_group)
+
+    app = FastAPI()
+    app_module.register(app)
+    guest_client = TestClient(app, base_url="https://testserver")
+    login = guest_client.post("/webui/api/v1/auth/guest", json={"token": "guest-code"})
+    assert login.status_code == 200  # noqa: PLR2004
+    assert guest_client.get("/webui/api/v1/groups/100").status_code == 200  # noqa: PLR2004
+
+    state["allowed"] = False
+    revoked = guest_client.get("/webui/api/v1/groups/100")
+    assert revoked.status_code == 403  # noqa: PLR2004
+    assert "未向访客开放" in revoked.json()["error"]["message"]
+
+    admin_client = TestClient(app, base_url="https://testserver")
+    assert admin_client.post(
+        "/webui/api/v1/auth/login", json={"token": "x" * 40}
+    ).status_code == 200  # noqa: PLR2004
+    assert admin_client.get("/webui/api/v1/groups/100").status_code == 200  # noqa: PLR2004
 
 
 def test_guest_session_is_immediately_invalid_when_policy_version_changes(
@@ -292,6 +441,36 @@ async def test_guest_group_detail_only_returns_basic_display_fields(
     assert admin_result["data"] == payload
 
 
+@pytest.mark.asyncio
+async def test_guest_group_collection_is_guest_only_and_uses_public_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def list_guest_groups(
+        _db: Any, *, page: int, page_size: int, search: str
+    ) -> tuple[list[dict[str, Any]], int]:
+        assert (page, page_size, search) == (1, 20, "测试")
+        return ([{"groupId": "100", "groupName": "测试群", "memberCount": 42}], 1)
+
+    monkeypatch.setattr(
+        group_routes, "get_session", lambda: _FakeSessionFactory(SimpleNamespace())
+    )
+    monkeypatch.setattr(group_routes, "list_guest_groups", list_guest_groups)
+
+    admin = auth.create_session(role="admin", now=1_000)[1]
+    with pytest.raises(HTTPException) as exc_info:
+        await group_routes.get_guest_groups(admin, page=1, page_size=20, search="测试")
+    assert exc_info.value.status_code == 403  # noqa: PLR2004
+
+    guest = auth.create_session(role="guest", credential_version=7, now=1_000)[1]
+    result = await group_routes.get_guest_groups(
+        guest, page=1, page_size=20, search="测试"
+    )
+    assert result["data"] == [
+        {"groupId": "100", "groupName": "测试群", "memberCount": 42}
+    ]
+    assert result["meta"] == {"page": 1, "pageSize": 20, "total": 1}
+
+
 def test_agent_debug_route_requires_authentication_and_csrf() -> None:
     app = FastAPI()
     app_module.register(app)
@@ -342,6 +521,7 @@ def test_split_route_modules_are_all_registered() -> None:
         ("POST", "/webui/api/v1/guest-access/credential"),
         ("PATCH", "/webui/api/v1/guest-access/groups/{group_id}"),
         ("GET", "/webui/api/v1/groups"),
+        ("GET", "/webui/api/v1/guest/groups"),
         ("GET", "/webui/api/v1/users"),
         ("GET", "/webui/api/v1/agent/groups/{group_id}/diagnostics"),
         ("GET", "/webui/api/v1/agent/groups/{group_id}/execution-traces"),
@@ -363,6 +543,7 @@ def test_business_api_routes_only_expose_the_explicit_guest_group_get_whitelist(
         "/webui/api/v1/agent/groups/{group_id}/relations/graph",
         "/webui/api/v1/agent/groups/{group_id}/relations/types",
     }
+    guest_collection_get_whitelist = {"/webui/api/v1/guest/groups"}
 
     for route in app.routes:
         if not isinstance(route, APIRoute):
@@ -381,6 +562,18 @@ def test_business_api_routes_only_expose_the_explicit_guest_group_get_whitelist(
 
         if route.methods == {"GET"} and route.path in guest_group_get_whitelist:
             assert "require_group_view_access" in dependency_names, (
+                route.path,
+                dependency_names,
+            )
+            admin_dependencies = {"admin_read_session", "admin_write_session"}
+            assert not dependency_names & admin_dependencies, (
+                route.path,
+                dependency_names,
+            )
+            continue
+
+        if route.methods == {"GET"} and route.path in guest_collection_get_whitelist:
+            assert "authenticated_session" in dependency_names, (
                 route.path,
                 dependency_names,
             )
@@ -1454,9 +1647,11 @@ async def test_memory_subjects_aggregates_counts_and_resolves_nicknames(
         agent_routes, "get_session", lambda: _FakeSessionFactory(session)
     )
 
-    result = await agent_routes.get_memory_subjects(100, None)
+    guest = auth.create_session(role="guest", credential_version=7, now=1_000)[1]
+    result = await agent_routes.get_memory_subjects(100, guest)
 
     data = result["data"]
+    assert "444" not in {entry["userId"] for entry in data}
     assert [entry["userId"] for entry in data] == ["111", "333", "222"]
     assert all(isinstance(entry["userId"], str) for entry in data)
     first = data[0]

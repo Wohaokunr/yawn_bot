@@ -67,6 +67,7 @@ async def _record_request_audit(
                     detail={
                         "statusCode": status_code,
                         "queryKeys": sorted(request.query_params.keys()),
+                        "actorRole": session.role,
                     },
                 )
             )
@@ -135,8 +136,6 @@ def register(app: FastAPI) -> None:
         authenticated = (
             verify_session(request.cookies.get(COOKIE_NAME)) if should_audit else None
         )
-        if authenticated is not None and authenticated.role != "admin":
-            authenticated = None
         request_id = str(uuid.uuid4())
         try:
             response = await call_next(request)

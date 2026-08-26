@@ -774,11 +774,11 @@ export function RelationGraphView({
         className="rg-node"
         transform={`translate(${pos.x.toFixed(2)},${pos.y.toFixed(2)})`}
         style={{ "--i": Math.min(index, 24) } as React.CSSProperties}
-        onPointerDown={(event) => handleNodePointerDown(event, node.userId)}
+        onPointerDown={readOnly ? (event) => event.stopPropagation() : (event) => handleNodePointerDown(event, node.userId)}
         onPointerEnter={() => setHoverNodeId(node.userId)}
         onPointerLeave={() => setHoverNodeId(null)}
         onClick={() => handleNodeClick(node.userId)}
-        onDoubleClick={() => handleNodeDoubleClick(node.userId)}
+        onDoubleClick={readOnly ? undefined : () => handleNodeDoubleClick(node.userId)}
       >
         {selected && <circle className="rg-node-select-ring" r={radius + 6} fill="none" />}
         <g className="rg-node-core">
@@ -893,9 +893,9 @@ export function RelationGraphView({
       {size.w === 0 && <Spin className="rg-loading" />}
       <div className="rg-toolbar">
         <Space size={4} wrap>
-          <Tooltip title="重新自动布局（清除手动固定）">
+          {!readOnly && <Tooltip title="重新自动布局（清除手动固定）">
             <Button size="small" icon={<ReloadOutlined />} onClick={() => { resetLayoutRef.current = true; pinnedRef.current.clear(); setRelayoutCounter((c) => c + 1); }} />
-          </Tooltip>
+          </Tooltip>}
           <Tooltip title="适配全图">
             <Button size="small" icon={<AimOutlined />} onClick={doFit} />
           </Tooltip>
@@ -932,7 +932,7 @@ export function RelationGraphView({
         })}
       </div>
       <div className="rg-hint">
-        拖动节点会牵动相邻 · 双击解除固定 · 滚轮缩放 · 空白拖拽平移
+        {readOnly ? "点击节点或关系边查看详情 · 滚轮缩放 · 空白拖拽平移" : "拖动节点会牵动相邻 · 双击解除固定 · 滚轮缩放 · 空白拖拽平移"}
         {maximized ? " · Esc 退出最大化" : ""}
       </div>
       <Drawer

@@ -4,7 +4,6 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./app-shell";
 import { api, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
-import { GuestHome } from "./guest-home";
 import { Login } from "./login";
 import { OverviewPage } from "./overview";
 
@@ -41,6 +40,12 @@ const GuestAccessPage = lazy(() =>
 const WebAuditsPage = lazy(() =>
   import("./audits").then(({ WebAuditsPage: Page }) => ({ default: Page })),
 );
+const GuestGroupsPage = lazy(() =>
+  import("./guest-home").then(({ GuestGroupsPage: Page }) => ({ default: Page })),
+);
+const GuestGroupPage = lazy(() =>
+  import("./guest-home").then(({ GuestGroupPage: Page }) => ({ default: Page })),
+);
 
 function App(): React.JSX.Element {
   const [session, setSession] = useState<AuthSessionData | null | undefined>(undefined);
@@ -75,13 +80,24 @@ function App(): React.JSX.Element {
     );
   }
   if (session.role === "guest") {
-    return <GuestHome session={session} onLogout={() => setSession(null)} />;
+    return (
+      <AntApp>
+        <Routes>
+          <Route element={<Shell session={session} onLogout={() => setSession(null)} />}>
+            <Route index element={<Navigate to="/guest" replace />} />
+            <Route path="guest" element={<GuestGroupsPage />} />
+            <Route path="guest/:groupId" element={<GuestGroupPage />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/guest" replace />} />
+        </Routes>
+      </AntApp>
+    );
   }
 
   return (
     <AntApp>
       <Routes>
-        <Route element={<Shell onLogout={() => setSession(null)} />}>
+        <Route element={<Shell session={session} onLogout={() => setSession(null)} />}>
           <Route index element={<Navigate to="/overview" replace />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="groups" element={<GroupsPage />} />

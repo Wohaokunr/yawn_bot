@@ -843,7 +843,7 @@ function MemoryEditDrawer({ memory, saving, onClose, onSave }: { memory: MemoryI
   </Drawer>;
 }
 
-function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
+export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; readOnly?: boolean }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [, setSearchParams] = useSearchParams();
   const [page, setPage] = useState(1); const [search, setSearch] = useState("");
@@ -853,14 +853,20 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const [createForm] = Form.useForm();
   const load = useCallback(() => api<MemoryItem[]>(`/agent/groups/${groupId}/memories?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search]);
   const query = useApiQuery(load, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
-  const statusLoad = useCallback(() => api<AgentMemoryStatus>(`/agent/groups/${groupId}/memories/status`).then((r) => r.data), [groupId]);
+  const statusLoad = useCallback(
+    () => readOnly
+      ? Promise.resolve(null)
+      : api<AgentMemoryStatus>(`/agent/groups/${groupId}/memories/status`).then((r) => r.data),
+    [groupId, readOnly],
+  );
   const statusQuery = useApiQuery(statusLoad, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
-  const status = statusQuery.data;
-  const remove = async (id: string) => { await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" }); message.success("记忆已删除"); query.reload(); };
-  const removeMember = async (userId: string) => { const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/members/${userId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条成员数据`); query.reload(); };
-  const removeGroup = async () => { const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条群 Agent 数据`); query.reload(); };
-  const exportData = async () => { const result = await api(`/agent/groups/${groupId}/memories/export`); const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `yawnbot-agent-${groupId}.json`; anchor.click(); URL.revokeObjectURL(url); };
+  const status = readOnly ? null : statusQuery.data;
+  const remove = async (id: string) => { if (readOnly) return; await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" }); message.success("记忆已删除"); query.reload(); };
+  const removeMember = async (userId: string) => { if (readOnly) return; const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/members/${userId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条成员数据`); query.reload(); };
+  const removeGroup = async () => { if (readOnly) return; const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条群 Agent 数据`); query.reload(); };
+  const exportData = async () => { if (readOnly) return; const result = await api(`/agent/groups/${groupId}/memories/export`); const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `yawnbot-agent-${groupId}.json`; anchor.click(); URL.revokeObjectURL(url); };
   const compact = async () => {
+    if (readOnly) return;
     try {
       await api(`/agent/groups/${groupId}/memories/compact`, { method: "POST" });
       message.success("整理已在后台启动，完成后这里会自动刷新");
@@ -871,6 +877,7 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
     }
   };
   const rebuild = async () => {
+    if (readOnly) return;
     try {
       await api(`/agent/groups/${groupId}/memories/rebuild`, { method: "POST" });
       message.success("派生记忆重建已启动，手工记忆会保留");
@@ -879,9 +886,9 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
       message.error((error as Error).message);
     }
   };
-  const openEdit = (row: MemoryItem) => setEditing(row);
+  const openEdit = (row: MemoryItem) => { if (!readOnly) setEditing(row); };
   const saveEdit = async (values: MemoryFormValues) => {
-    if (!editing) return;
+    if (readOnly || !editing) return;
     setSaving(true);
     try {
       await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.updatedAt }) });
@@ -893,6 +900,7 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
     } finally { setSaving(false); }
   };
   const saveCreate = async (values: MemoryFormValues & { type: string; key: string; subjectUserId?: number }) => {
+    if (readOnly) return;
     setSaving(true);
     try {
       await api<MemoryItem>(`/agent/groups/${groupId}/memories`, { method: "POST", body: JSON.stringify(values) });
@@ -906,24 +914,63 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
       else message.error((error as Error).message);
     } finally { setSaving(false); }
   };
+  const pageRows = query.data?.rows ?? [];
+  const pageTypeCounts = pageRows.reduce<Record<string, number>>((counts, row) => {
+    counts[row.type] = (counts[row.type] ?? 0) + 1;
+    return counts;
+  }, {});
   return <>
-    <Row gutter={[12, 12]} className="section-row">
-      <Col xs={12} md={6}><Card size="small"><Statistic title="有效记忆" value={status?.total ?? "—"} suffix="条" /></Card></Col>
-      <Col xs={12} md={6}><Card size="small"><Statistic title="待整理消息" value={status?.pendingMessages ?? "—"} suffix="条" /></Card></Col>
-      <Col xs={24} md={12}><Card size="small"><div className="ag-stat-line">
-        <Space wrap size={[8, 8]}>{Object.entries(status?.countsByType ?? {}).map(([type, count]) => <Tag key={type} color={MEMORY_TYPE_META[type]?.color}>{memoryTypeLabel(type)} × {count}</Tag>)}{status && Object.keys(status.countsByType).length === 0 && <Text type="secondary">暂无记忆</Text>}</Space>
-        <Text type="secondary">最后成功：{status?.lastSuccessAt ? formatTime(status.lastSuccessAt) : "尚未整理"}</Text>
-      </div></Card></Col>
-    </Row>
-    {status && !status.runtimeEnabled && <Alert type="info" showIcon message="Agent 总开关已关闭，自动记忆已暂停" description="新群消息不会进入 Agent 记忆采集，定时整理也不会运行；已有记忆仍可查看、导出或手工维护。" className="section-alert" />}
-    {status?.lastError && <Alert type="error" showIcon closable message={`最近整理失败（连续 ${status.consecutiveFailures} 次）`} description={status.lastError} className="section-alert" />}
-    {status?.rebuildRequired && <Alert type="warning" showIcon message="派生记忆正在重建" description="系统会按连续批次处理保留期内原始消息；手工记忆不会被覆盖。" className="section-alert" />}
-    <Card title="公开/群级记忆" extra={<Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
+    {readOnly ? (
+      <Row gutter={[12, 12]} className="section-row">
+        <Col xs={12} md={6}><Card size="small"><Statistic title="可查看记忆" value={query.data?.total ?? (query.loading ? "—" : 0)} suffix="条" /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="本页显示" value={pageRows.length} suffix="条" /></Card></Col>
+        <Col xs={24} md={12}><Card size="small"><Space wrap size={[8, 8]}>{Object.entries(pageTypeCounts).map(([type, count]) => <Tag key={type} color={MEMORY_TYPE_META[type]?.color}>{memoryTypeLabel(type)} × {count}</Tag>)}{!query.loading && pageRows.length === 0 && <Text type="secondary">暂无记忆</Text>}</Space></Card></Col>
+      </Row>
+    ) : <>
+      <Row gutter={[12, 12]} className="section-row">
+        <Col xs={12} md={6}><Card size="small"><Statistic title="有效记忆" value={status?.total ?? "—"} suffix="条" /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="待整理消息" value={status?.pendingMessages ?? "—"} suffix="条" /></Card></Col>
+        <Col xs={24} md={12}><Card size="small"><div className="ag-stat-line">
+          <Space wrap size={[8, 8]}>{Object.entries(status?.countsByType ?? {}).map(([type, count]) => <Tag key={type} color={MEMORY_TYPE_META[type]?.color}>{memoryTypeLabel(type)} × {count}</Tag>)}{status && Object.keys(status.countsByType).length === 0 && <Text type="secondary">暂无记忆</Text>}</Space>
+          <Text type="secondary">最后成功：{status?.lastSuccessAt ? formatTime(status.lastSuccessAt) : "尚未整理"}</Text>
+        </div></Card></Col>
+      </Row>
+      {status && !status.runtimeEnabled && <Alert type="info" showIcon message="Agent 总开关已关闭，自动记忆已暂停" description="新群消息不会进入 Agent 记忆采集，定时整理也不会运行；已有记忆仍可查看、导出或手工维护。" className="section-alert" />}
+      {status?.lastError && <Alert type="error" showIcon closable message={`最近整理失败（连续 ${status.consecutiveFailures} 次）`} description={status.lastError} className="section-alert" />}
+      {status?.rebuildRequired && <Alert type="warning" showIcon message="派生记忆正在重建" description="系统会按连续批次处理保留期内原始消息；手工记忆不会被覆盖。" className="section-alert" />}
+    </>}
+    <Card title="公开/群级记忆" extra={readOnly ? undefined : <Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row: MemoryItem) => <Space orientation="vertical" size={6}><Paragraph copyable style={{ marginBottom: 0 }}>{row.content}</Paragraph><Text type="secondary">证据 {row.provenance.evidenceCount} 条 · 首次观察 {formatTime(row.provenance.firstObservedAt)} · 最近确认 {formatTime(row.provenance.lastConfirmedAt)}</Text>{row.evidenceMessageIds.length > 0 && <Text type="secondary" copyable={{ text: row.evidenceMessageIds.join(",") }}>证据消息：{row.evidenceMessageIds.join(", ")}</Text>}</Space> }} columns={[{ title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> }, { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" }, { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> }, { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> }, { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" }, { title: "更新时间", dataIndex: "updatedAt", render: formatTime }, { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> }]} />
+        : <Table
+          rowKey="id"
+          loading={query.loading}
+          dataSource={query.data?.rows ?? []}
+          pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }}
+          expandable={readOnly ? undefined : {
+            expandedRowRender: (row: MemoryItem) => <Space orientation="vertical" size={6}>
+              <Paragraph copyable style={{ marginBottom: 0 }}>{row.content}</Paragraph>
+              <Text type="secondary">证据 {row.provenance.evidenceCount} 条 · 首次观察 {formatTime(row.provenance.firstObservedAt)} · 最近确认 {formatTime(row.provenance.lastConfirmedAt)}</Text>
+              {row.evidenceMessageIds.length > 0 && <Text type="secondary" copyable={{ text: row.evidenceMessageIds.join(",") }}>证据消息：{row.evidenceMessageIds.join(", ")}</Text>}
+            </Space>,
+          }}
+          columns={readOnly ? [
+            { title: "记忆", render: (_, row: MemoryItem) => <Space orientation="vertical" size={4}><Space wrap><Text strong>{row.key}</Text><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag></Space><Paragraph style={{ marginBottom: 0 }}>{row.content}</Paragraph></Space> },
+            { title: "归属成员", dataIndex: "subjectUserId", width: 150, render: (value?: string | null) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" },
+            { title: "置信度", width: 150, render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
+            { title: "更新时间", dataIndex: "updatedAt", width: 180, render: formatTime },
+          ] : [
+            { title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> },
+            { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSearchParams({ tab: "profiles", userId: value }, { replace: true })}>{value}</Button> : "群级" },
+            { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> },
+            { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> },
+            { title: "有效期至", dataIndex: "expiresAt", render: (value?: string | null) => value ? formatTime(value) : "永久" },
+            { title: "更新时间", dataIndex: "updatedAt", render: formatTime },
+            { title: "操作", render: (_, row: MemoryItem) => <Space><Button type="link" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" danger>删除</Button></Popconfirm>{row.subjectUserId && <Popconfirm title={`清理成员 ${row.subjectUserId} 的全部 Agent 数据？`} onConfirm={() => removeMember(row.subjectUserId!)}><Button type="link" danger>清理成员</Button></Popconfirm>}</Space> },
+          ]}
+        />
     }</Card>
-    <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />
+    {!readOnly && <><MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />
     <Drawer open={creating} width={520} title="新增记忆" onClose={() => setCreating(false)}>
       <Form form={createForm} layout="vertical" onFinish={saveCreate} initialValues={{ type: "manual", salience: 0.7, confidence: 0.9 }}>
         <Form.Item name="type" label="类型" rules={[{ required: true }]}><Select options={Object.entries(MEMORY_TYPE_META).map(([value, meta]) => ({ value, label: meta.label }))} /></Form.Item>
@@ -937,14 +984,14 @@ function MemoriesPanel({ groupId }: { groupId: string }): React.JSX.Element {
         <Form.Item name="expiresInDays" label="有效期（天）"><InputNumber min={1} max={3650} placeholder="留空则永久有效" style={{ width: "100%" }} /></Form.Item>
         <Space><Button type="primary" htmlType="submit" loading={saving}>新增</Button><Button onClick={() => setCreating(false)}>取消</Button></Space>
       </Form>
-    </Drawer>
+    </Drawer></>}
   </>;
 }
 
 // 画像分组展示顺序：core 为反复确认晋升的不过期事实，置前展示。
 const PROFILE_TYPE_ORDER = ["core", "profile", "manual"];
 
-function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Element {
+export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: string; readOnly?: boolean }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
   const userId = searchParams.get("userId") ?? "";
@@ -976,12 +1023,13 @@ function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Elemen
     label: `${memberDisplayName(item.groupNickname, item.nickname, item.userId)}（${item.userId}）· 画像 ${item.counts.profile} / 核心 ${item.counts.core}`,
   }));
   const remove = async (id: string) => {
+    if (readOnly) return;
     await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" });
     message.success("记忆已删除");
     memberQuery.reload(); subjectsQuery.reload();
   };
   const saveEdit = async (values: MemoryFormValues) => {
-    if (!editing) return;
+    if (readOnly || !editing) return;
     setSaving(true);
     try {
       await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.updatedAt }) });
@@ -1009,7 +1057,7 @@ function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       <Button type="primary" disabled={!draft.trim()} onClick={() => setUserId(draft.trim())}>查看画像</Button>
       {userId && <Button onClick={() => setUserId("")}>返回列表</Button>}
     </Space>}>
-      <Alert type="info" showIcon className="section-alert" message="画像由记忆整理自动生成，也可在「记忆」页手工新增；已退出记忆（隐私）的成员不展示。" />
+      <Alert type="info" showIcon className="section-alert" message={readOnly ? "这里只展示允许公开的成员画像；已退出记忆治理的成员不会出现。" : "画像由记忆整理自动生成，也可在「记忆」页手工新增；已退出记忆（隐私）的成员不展示。"} />
       {userId
         ? (memberQuery.error && !memberQuery.data
           ? <QueryErrorAlert error={memberQuery.error} onRetry={memberQuery.reload} />
@@ -1029,7 +1077,7 @@ function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                 ? <Empty description="该成员暂无画像" />
                 : grouped.map((group) => <Card key={group.type} size="small" className="section-row" title={<Space size={8}><Tag color={MEMORY_TYPE_META[group.type]?.color}>{memoryTypeLabel(group.type)}</Tag><Text type="secondary">{group.items.length} 条</Text></Space>}>
                   <List dataSource={group.items} renderItem={(row) => (
-                    <List.Item actions={[
+                    <List.Item actions={readOnly ? undefined : [
                       <Button key="edit" type="link" size="small" onClick={() => setEditing(row)}>编辑</Button>,
                       <Popconfirm key="remove" title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" size="small" danger>删除</Button></Popconfirm>,
                     ]}>
@@ -1037,13 +1085,13 @@ function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                         title={<Space wrap size={[8, 4]}>
                           <Text strong>{profileKeyLabel(row.key)}</Text>
                           {row.key !== profileKeyLabel(row.key) && <Text type="secondary">{row.key}</Text>}
-                          <Text type="secondary">{row.sourceKind === "manual" ? "手工" : "自动"} · {row.expiresAt ? `有效期至 ${formatTime(row.expiresAt)}` : "永久"} · 更新 {formatTime(row.updatedAt)}</Text>
+                          <Text type="secondary">{readOnly ? `更新 ${formatTime(row.updatedAt)}` : `${row.sourceKind === "manual" ? "手工" : "自动"} · ${row.expiresAt ? `有效期至 ${formatTime(row.expiresAt)}` : "永久"} · 更新 ${formatTime(row.updatedAt)}`}</Text>
                         </Space>}
                         description={<>
                           <Paragraph copyable style={{ marginBottom: 8 }}>{row.content}</Paragraph>
                           <Space wrap size={[16, 4]}>
                             <Space size={6}>置信度<Progress percent={Math.round(row.confidence * 100)} size="small" style={{ width: 90 }} strokeColor="var(--ant-color-success)" /></Space>
-                            <Space size={6}>显著度<Progress percent={Math.round(row.salience * 100)} size="small" style={{ width: 90 }} /></Space>
+                            {!readOnly && <Space size={6}>显著度<Progress percent={Math.round(row.salience * 100)} size="small" style={{ width: 90 }} /></Space>}
                           </Space>
                         </>}
                       />
@@ -1062,11 +1110,11 @@ function MemberProfilesPanel({ groupId }: { groupId: string }): React.JSX.Elemen
             { title: "操作", width: 110, render: (_, row: MemorySubjectItem) => <Button type="link" onClick={() => setUserId(row.userId)}>查看画像</Button> },
           ]} />)}
     </Card>
-    <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />
+    {!readOnly && <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />}
   </>;
 }
 
-function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
+export function RelationsPanel({ groupId, readOnly = false }: { groupId: string; readOnly?: boolean }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
   const view = searchParams.get("view") === "graph" ? "graph" : "table";
@@ -1098,8 +1146,9 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const typesLoad = useCallback(() => api<string[]>(`/agent/groups/${groupId}/relations/types`).then((r) => r.data), [groupId]);
   const typesQuery = useApiQuery(typesLoad, { resources: ["agent_relation"] });
   const typeOptions = Array.from(new Set([...RELATION_TYPE_PRESETS, ...(typesQuery.data ?? [])])).map((value) => ({ value, label: value }));
-  const remove = async (id: string) => { await api(`/agent/groups/${groupId}/relations/${id}`, { method: "DELETE" }); message.success("关系边已删除"); query.reload(); typesQuery.reload(); graphQuery.reload(); };
+  const remove = async (id: string) => { if (readOnly) return; await api(`/agent/groups/${groupId}/relations/${id}`, { method: "DELETE" }); message.success("关系边已删除"); query.reload(); typesQuery.reload(); graphQuery.reload(); };
   const saveCreate = async (values: { subjectUserId: number; objectUserId: number; type: string; note: string; confidence: number }) => {
+    if (readOnly) return;
     setSaving(true);
     try {
       await api<AgentRelationItem>(`/agent/groups/${groupId}/relations`, { method: "POST", body: JSON.stringify(values) });
@@ -1109,9 +1158,9 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
       else message.error((error as Error).message);
     } finally { setSaving(false); }
   };
-  const openEdit = (row: AgentRelationItem) => { setEditing(row); editForm.setFieldsValue({ note: row.note, confidence: row.confidence }); };
+  const openEdit = (row: AgentRelationItem) => { if (readOnly) return; setEditing(row); editForm.setFieldsValue({ note: row.note, confidence: row.confidence }); };
   const saveEdit = async (values: { note: string; confidence: number }) => {
-    if (!editing) return;
+    if (readOnly || !editing) return;
     setSaving(true);
     try {
       await api<AgentRelationItem>(`/agent/groups/${groupId}/relations/${editing.id}`, { method: "PUT", body: JSON.stringify(values) });
@@ -1135,17 +1184,24 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
       <Segmented value={view} onChange={(value) => setView(String(value))} options={[{ value: "table", label: "列表视图" }, { value: "graph", label: "图谱视图" }]} />
       <Select value={typeFilter} onChange={(value) => { setTypeFilter(value); setPage(1); }} style={{ width: 140 }} options={[{ value: "", label: "全部类型" }, ...typeOptions]} />
       {view === "table" && <Input.Search className="table-search" placeholder="搜索成员 QQ 号" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />}
-      <Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增关系边</Button>
+      {!readOnly && <Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增关系边</Button>}
     </Space>}>{
       view === "graph"
         ? (graphQuery.error && !graph
           ? <QueryErrorAlert error={graphQuery.error} onRetry={graphQuery.reload} />
           : graph
-            ? <Suspense fallback={<div className="rg-loading-wrap"><Spin /></div>}><LazyRelationGraphView graph={graph} typeFilter={typeFilter} onEditRelation={openEdit} onDeleteRelation={(edge) => remove(edge.id)} /></Suspense>
+            ? <Suspense fallback={<div className="rg-loading-wrap"><Spin /></div>}><LazyRelationGraphView graph={graph} typeFilter={typeFilter} readOnly={readOnly} onEditRelation={readOnly ? undefined : openEdit} onDeleteRelation={readOnly ? undefined : (edge) => remove(edge.id)} /></Suspense>
             : <div className="rg-loading-wrap"><Spin /></div>)
         : (query.error && !query.data
           ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-          : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} locale={{ emptyText: <Empty description="暂无关系记忆" /> }} columns={[
+          : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} locale={{ emptyText: <Empty description="暂无关系记忆" /> }} columns={readOnly ? [
+            { title: "主体", dataIndex: "subjectUserId", render: renderMemberCell },
+            { title: "客体", dataIndex: "objectUserId", render: renderMemberCell },
+            { title: "类型", dataIndex: "type", render: (value: string) => <Tag color={relationTypeColor(value)}>{value}</Tag> },
+            { title: "备注", dataIndex: "note", ellipsis: true, render: (value: string) => value || <Text type="secondary">—</Text> },
+            { title: "置信度", render: (_, row: AgentRelationItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
+            { title: "最后见到", dataIndex: "lastSeenAt", render: formatTime, width: 170 },
+          ] : [
             { title: "主体", dataIndex: "subjectUserId", render: renderMemberCell },
             { title: "客体", dataIndex: "objectUserId", render: renderMemberCell },
             { title: "类型", dataIndex: "type", render: (value: string) => <Tag color={relationTypeColor(value)}>{value}</Tag> },
@@ -1157,7 +1213,7 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
             { title: "操作", width: 120, render: (_, row: AgentRelationItem) => <Space><Button type="link" size="small" onClick={() => openEdit(row)}>编辑</Button><Popconfirm title="删除这条关系边？" onConfirm={() => remove(row.id)}><Button type="link" size="small" danger>删除</Button></Popconfirm></Space> },
           ]} />)
     }</Card>
-    <Drawer open={creating} width={520} title="新增关系边" onClose={() => setCreating(false)}>
+    {!readOnly && <><Drawer open={creating} width={520} title="新增关系边" onClose={() => setCreating(false)}>
       <Form form={createForm} layout="vertical" onFinish={saveCreate} initialValues={{ confidence: 0.9 }}>
         <Row gutter={16}>
           <Col span={12}><Form.Item name="subjectUserId" label="主体 QQ" rules={[{ required: true, message: "请输入主体 QQ" }]}><InputNumber min={1} precision={0} style={{ width: "100%" }} /></Form.Item></Col>
@@ -1176,7 +1232,7 @@ function RelationsPanel({ groupId }: { groupId: string }): React.JSX.Element {
         <Form.Item name="confidence" label="置信度" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} /></Form.Item>
         <Space><Button type="primary" htmlType="submit" loading={saving}>保存</Button><Button onClick={() => setEditing(null)}>取消</Button></Space>
       </Form>
-    </Drawer>
+    </Drawer></>}
   </>;
 }
 

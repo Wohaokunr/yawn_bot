@@ -22,7 +22,13 @@ vi.mock("./app-shell", () => ({
 }));
 
 vi.mock("./login", () => ({ Login: () => <div>login page</div> }));
-vi.mock("./guest-home", () => ({ GuestHome: () => <div>guest home</div> }));
+vi.mock("./guest-home", () => {
+  state.lazyLoads.push("guest-home");
+  return {
+    GuestGroupsPage: () => <div>guest groups page</div>,
+    GuestGroupPage: () => <div>guest group page</div>,
+  };
+});
 vi.mock("./overview", () => ({
   OverviewPage: () => <div>overview page</div>,
   AI_OUTCOME_META: {},
@@ -123,7 +129,7 @@ describe("route lazy loading", () => {
           adminConsole: false,
           adminWrite: false,
           realtimeAdminStream: false,
-          guestGroupRead: false,
+          guestGroupRead: true,
         },
       },
     });
@@ -134,8 +140,36 @@ describe("route lazy loading", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("guest home")).toBeInTheDocument();
+    expect(await screen.findByText("guest groups page")).toBeInTheDocument();
     expect(screen.queryByText("environment page")).not.toBeInTheDocument();
-    expect(state.lazyLoads).toEqual([]);
+    await waitFor(() => expect(state.lazyLoads).toEqual(["guest-home"]));
+  });
+
+  it("redirects a guest away from an admin Agent config URL without loading the Agent module", async () => {
+    state.api.mockResolvedValueOnce({
+      data: {
+        authenticated: true,
+        role: "guest",
+        csrfToken: "guest-csrf",
+        expiresAt: 123,
+        capabilities: {
+          adminConsole: false,
+          adminWrite: false,
+          realtimeAdminStream: false,
+          guestGroupRead: true,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/agent/123?tab=config"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("guest groups page")).toBeInTheDocument();
+    expect(screen.queryByText("agent group page")).not.toBeInTheDocument();
+    expect(state.lazyLoads).not.toContain("agent");
+    expect(state.lazyLoads).not.toContain("environment");
   });
 });
