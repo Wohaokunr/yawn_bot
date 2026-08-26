@@ -73,7 +73,12 @@ async def handle_tutorial_help(
     """按当前阶段或指定主题显示简短帮助。"""
     topic = str(arg).strip()
     if not topic:
-        game = game_of_user(int(event.get_user_id()))
+        group_id = getattr(event, "group_id", None)
+        game = (
+            get_game(int(group_id))
+            if group_id is not None
+            else game_of_user(int(event.get_user_id()))
+        )
         if game is not None:
             topic = {
                 Phase.SIGNUP: "报名",

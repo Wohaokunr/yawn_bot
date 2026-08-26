@@ -9,7 +9,7 @@ from ..command_catalog import (  # noqa: TID252
     register_command_group,
 )
 from . import commands, models  # noqa: F401
-from .command_context import get_available_commands
+from .command_context import get_available_commands, get_help_hint
 from .config import Config
 
 config = get_plugin_config(Config)
@@ -21,6 +21,7 @@ COMMAND_GROUP = register_command_group(
         entrypoint="狼人杀",
         help_section="werewolf",
         get_available_commands=get_available_commands,
+        get_help_hint=get_help_hint,
         commands=(
             CommandSpec(
                 name="狼人杀",
