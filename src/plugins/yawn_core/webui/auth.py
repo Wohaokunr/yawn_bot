@@ -10,6 +10,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import Literal, cast
 
 from fastapi import HTTPException, Request, WebSocket, status
 
@@ -19,6 +20,8 @@ _LOGIN_WINDOW_SECONDS = 300
 _LOGIN_MAX_FAILURES = 5
 _failures: dict[str, deque[float]] = defaultdict(deque)
 
+SessionRole = Literal["admin", "guest"]
+
 
 @dataclass(frozen=True, slots=True)
 class Session:
@@ -26,6 +29,8 @@ class Session:
     csrf_token: str
     issued_at: int
     expires_at: int
+    role: SessionRole
+    credential_version: int | None = None
 
     @property
     def actor_fingerprint(self) -> str:
@@ -45,13 +50,20 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def create_session(*, now: int | None = None) -> tuple[str, Session]:
+def create_session(
+    *,
+    role: SessionRole = "admin",
+    credential_version: int | None = None,
+    now: int | None = None,
+) -> tuple[str, Session]:
     issued_at = int(time.time() if now is None else now)
     session = Session(
         session_id=secrets.token_hex(16),
         csrf_token=secrets.token_urlsafe(24),
         issued_at=issued_at,
         expires_at=issued_at + config.webui_session_ttl_hours * 3600,
+        role=role,
+        credential_version=credential_version,
     )
     payload = json.dumps(
         {
@@ -59,6 +71,8 @@ def create_session(*, now: int | None = None) -> tuple[str, Session]:
             "csrf": session.csrf_token,
             "iat": session.issued_at,
             "exp": session.expires_at,
+            "role": session.role,
+            "cv": session.credential_version,
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -77,11 +91,18 @@ def verify_session(value: str | None, *, now: int | None = None) -> Session | No
         if not hmac.compare_digest(supplied_signature, expected):
             return None
         payload = json.loads(_b64decode(encoded))
+        role = str(payload.get("role", "admin"))
+        if role not in {"admin", "guest"}:
+            return None
         session = Session(
             session_id=str(payload["sid"]),
             csrf_token=str(payload["csrf"]),
             issued_at=int(payload["iat"]),
             expires_at=int(payload["exp"]),
+            role=cast("SessionRole", role),
+            credential_version=(
+                int(payload["cv"]) if payload.get("cv") is not None else None
+            ),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -103,6 +124,18 @@ def login_allowed(key: str, *, now: float | None = None) -> bool:
     return len(failures) < _LOGIN_MAX_FAILURES
 
 
+def record_login_failure(key: str, *, now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    failures = _failures[key]
+    while failures and current - failures[0] >= _LOGIN_WINDOW_SECONDS:
+        failures.popleft()
+    failures.append(current)
+
+
+def clear_login_failures(key: str) -> None:
+    _failures.pop(key, None)
+
+
 def check_admin_token(key: str, supplied: str, *, now: float | None = None) -> bool:
     current = time.monotonic() if now is None else now
     if not login_allowed(key, now=current):
@@ -110,9 +143,9 @@ def check_admin_token(key: str, supplied: str, *, now: float | None = None) -> b
     expected = config.webui_admin_token.get_secret_value()
     valid = hmac.compare_digest(supplied.encode(), expected.encode())
     if valid:
-        _failures.pop(key, None)
+        clear_login_failures(key)
     else:
-        _failures[key].append(current)
+        record_login_failure(key, now=current)
     return valid
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from collections import defaultdict
 from typing import Any, Awaitable, Callable
 
@@ -20,7 +21,9 @@ QueueKey = tuple[int, int]
 QueueItem = tuple[Any, Any, Any, float]
 _queues: dict[QueueKey, asyncio.Queue[QueueItem]] = {}
 _workers: dict[QueueKey, asyncio.Task[None]] = {}
-_locks: dict[QueueKey, asyncio.Lock] = {}
+_locks: weakref.WeakValueDictionary[QueueKey, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _prune_idle() -> None:
@@ -40,7 +43,6 @@ def _prune_idle() -> None:
         ):
             _queues.pop(key, None)
             _workers.pop(key, None)
-            _locks.pop(key, None)
 
 
 def _key(

@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, status
 from nonebot import logger
 
 from .config import API_PATH
-from .deps import ReadSession, ok
+from .deps import AdminReadSession, ok
 
 router = APIRouter(prefix=API_PATH)
 
@@ -43,7 +43,7 @@ def _enum_value(value: Any) -> Any:
 
 
 def _module_source(module: Any) -> dict[str, Any] | None:
-    """Read the source YAML for optional editor linting without mutating runtime state."""
+    """Read source YAML for optional editor linting without mutating runtime state."""
     schema = _rpg_module_schema()
     schema_file = getattr(schema, "__file__", None)
     if not schema_file:
@@ -60,7 +60,7 @@ def _module_source(module: Any) -> dict[str, Any] | None:
 
 
 def _static_health(module: Any, *, include_issues: bool = False) -> dict[str, Any]:
-    """Return read-only schema/lint health; editor tooling remains optional at runtime."""
+    """Return schema/lint health; editor tooling remains optional at runtime."""
     base: dict[str, Any] = {
         "status": "healthy",
         "schemaValidated": True,
@@ -330,7 +330,7 @@ def _detail(module: Any) -> dict[str, Any]:
 
 
 @router.get("/rpg/modules")
-async def list_rpg_modules(_session: ReadSession) -> dict[str, Any]:
+async def list_rpg_modules(_session: AdminReadSession) -> dict[str, Any]:
     schema = _rpg_module_schema()
     if schema is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")
@@ -338,7 +338,7 @@ async def list_rpg_modules(_session: ReadSession) -> dict[str, Any]:
 
 
 @router.get("/rpg/modules/{module_id}")
-async def get_rpg_module(module_id: str, _session: ReadSession) -> dict[str, Any]:
+async def get_rpg_module(module_id: str, _session: AdminReadSession) -> dict[str, Any]:
     schema = _rpg_module_schema()
     if schema is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "跑团子插件未加载")

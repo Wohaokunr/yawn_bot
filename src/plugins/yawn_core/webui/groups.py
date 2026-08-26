@@ -13,7 +13,14 @@ from ..permission import FEATURE_REGISTRY
 from ..yawn_agent.config_store import get_or_create_config
 from ..yawn_agent.conversation import close_group_conversations
 from .config import API_PATH
-from .deps import ReadSession, WriteSession, ok, page_params
+from .deps import (
+    AdminReadSession,
+    AdminWriteSession,
+    AuthenticatedSession,
+    GroupViewSession,
+    ok,
+    page_params,
+)
 from .hub import hub
 from .route_helpers import require_group
 from .route_models import FeatureOverrideBody
@@ -22,6 +29,7 @@ from .service import (
     group_feature_rows,
     list_group_members,
     list_groups,
+    list_guest_groups,
     page_meta,
     set_group_feature,
     set_user_feature,
@@ -32,7 +40,7 @@ router = APIRouter(prefix=API_PATH)
 
 @router.get("/groups")
 async def get_groups(
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -45,19 +53,41 @@ async def get_groups(
     return ok(rows, page_meta(page, page_size, total))
 
 
+@router.get("/guest/groups")
+async def get_guest_groups(
+    _session: AuthenticatedSession,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    search: str = Query(default="", max_length=120),
+) -> dict[str, Any]:
+    if _session.role != "guest":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "仅访客会话可访问")
+    page, page_size = page_params(page, page_size)
+    async with get_session() as db:
+        rows, total = await list_guest_groups(
+            db, page=page, page_size=page_size, search=search.strip()
+        )
+    return ok(rows, page_meta(page, page_size, total))
+
+
 @router.get("/groups/{group_id}")
-async def get_group_detail(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_group_detail(group_id: int, _session: GroupViewSession) -> dict[str, Any]:
     async with get_session() as db:
         result = await get_group(db, group_id)
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "群不存在")
+    if _session.role == "guest":
+        result = {
+            key: result[key]
+            for key in ("groupId", "groupName", "memberCount")
+        }
     return ok(result)
 
 
 @router.get("/groups/{group_id}/members")
 async def get_members(
     group_id: int,
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -73,7 +103,7 @@ async def get_members(
 
 @router.patch("/groups/{group_id}/features/{feature}")
 async def patch_group_feature(
-    group_id: int, feature: str, body: FeatureOverrideBody, _session: WriteSession
+    group_id: int, feature: str, body: FeatureOverrideBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     if feature not in FEATURE_REGISTRY:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "功能不存在")
@@ -101,7 +131,7 @@ async def patch_group_feature(
 
 @router.get("/groups/{group_id}/members/{user_id}/features")
 async def get_member_features(
-    group_id: int, user_id: int, _session: ReadSession
+    group_id: int, user_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         membership = await db.get(UserGroup, (group_id, user_id))
@@ -117,7 +147,7 @@ async def patch_member_feature(
     user_id: int,
     feature: str,
     body: FeatureOverrideBody,
-    _session: WriteSession,
+    _session: AdminWriteSession,
 ) -> dict[str, Any]:
     if feature not in FEATURE_REGISTRY:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "功能不存在")

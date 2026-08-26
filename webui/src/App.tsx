@@ -3,6 +3,8 @@ import { lazy, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./app-shell";
 import { api, setCsrfToken } from "./api";
+import type { AuthSessionData } from "./auth-session";
+import { GuestHome } from "./guest-home";
 import { Login } from "./login";
 import { OverviewPage } from "./overview";
 
@@ -33,44 +35,53 @@ const FanqiePage = lazy(() =>
 const EnvironmentPage = lazy(() =>
   import("./environment").then(({ EnvironmentPage: Page }) => ({ default: Page })),
 );
+const GuestAccessPage = lazy(() =>
+  import("./guest-access").then(({ GuestAccessPage: Page }) => ({ default: Page })),
+);
 const WebAuditsPage = lazy(() =>
   import("./audits").then(({ WebAuditsPage: Page }) => ({ default: Page })),
 );
 
 function App(): React.JSX.Element {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [session, setSession] = useState<AuthSessionData | null | undefined>(undefined);
 
   useEffect(() => {
-    api<{ authenticated: boolean; csrfToken: string }>("/auth/session")
+    api<AuthSessionData>("/auth/session")
       .then(({ data }) => {
         setCsrfToken(data.csrfToken);
-        setAuthenticated(true);
+        setSession(data);
       })
-      .catch(() => setAuthenticated(false));
+      .catch(() => setSession(null));
 
-    const lost = () => setAuthenticated(false);
+    const lost = () => {
+      setCsrfToken("");
+      setSession(null);
+    };
     window.addEventListener("yawnbot-auth-lost", lost);
     return () => window.removeEventListener("yawnbot-auth-lost", lost);
   }, []);
 
-  if (authenticated === null) {
+  if (session === undefined) {
     return <div className="center-screen"><Spin size="large" /></div>;
   }
-  if (!authenticated) {
+  if (session === null) {
     return (
       <Login
-        onSuccess={(csrf) => {
-          setCsrfToken(csrf);
-          setAuthenticated(true);
+        onSuccess={(nextSession) => {
+          setCsrfToken(nextSession.csrfToken);
+          setSession(nextSession);
         }}
       />
     );
+  }
+  if (session.role === "guest") {
+    return <GuestHome session={session} onLogout={() => setSession(null)} />;
   }
 
   return (
     <AntApp>
       <Routes>
-        <Route element={<Shell onLogout={() => setAuthenticated(false)} />}>
+        <Route element={<Shell onLogout={() => setSession(null)} />}>
           <Route index element={<Navigate to="/overview" replace />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="groups" element={<GroupsPage />} />
@@ -81,6 +92,7 @@ function App(): React.JSX.Element {
           <Route path="fanqie" element={<FanqiePage />} />
           <Route path="agent" element={<AgentGroupsPage />} />
           <Route path="agent/:groupId" element={<AgentDetailPage />} />
+          <Route path="guest-access" element={<GuestAccessPage />} />
           <Route path="environment" element={<EnvironmentPage />} />
           <Route path="audits" element={<WebAuditsPage />} />
         </Route>

@@ -339,13 +339,15 @@ function nodeFillUrl(node: AgentRelationGraphNode): string {
 interface RelationGraphViewProps {
   graph: AgentRelationGraph;
   typeFilter: string;
-  onEditRelation: (edge: AgentRelationItem) => void;
-  onDeleteRelation: (edge: AgentRelationItem) => void;
+  readOnly?: boolean;
+  onEditRelation?: (edge: AgentRelationItem) => void;
+  onDeleteRelation?: (edge: AgentRelationItem) => void;
 }
 
 export function RelationGraphView({
   graph,
   typeFilter,
+  readOnly = false,
   onEditRelation,
   onDeleteRelation,
 }: RelationGraphViewProps): React.JSX.Element {
@@ -808,11 +810,11 @@ export function RelationGraphView({
     return (
       <List.Item
         key={edge.id}
-        actions={[
-          <Button key="edit" type="link" size="small" onClick={() => { setSelectedNodeId(null); onEditRelation(edge); }}>
+        actions={readOnly ? [] : [
+          <Button key="edit" type="link" size="small" onClick={() => { setSelectedNodeId(null); onEditRelation?.(edge); }}>
             编辑
           </Button>,
-          <Popconfirm key="delete" title="删除这条关系边？" onConfirm={() => { setSelectedNodeId(null); onDeleteRelation(edge); }}>
+          <Popconfirm key="delete" title="删除这条关系边？" onConfirm={() => { setSelectedNodeId(null); onDeleteRelation?.(edge); }}>
             <Button type="link" size="small" danger>删除</Button>
           </Popconfirm>,
         ]}
@@ -830,7 +832,7 @@ export function RelationGraphView({
             <>
               <Progress percent={Math.round(edge.confidence * 100)} size="small" showInfo={false} />
               <Text type="secondary" style={{ fontSize: 12 }}>
-                置信度 {edge.confidence.toFixed(2)} · 证据 {edge.evidenceCount} · {edge.note || "无备注"}
+                置信度 {edge.confidence.toFixed(2)}{readOnly ? "" : ` · 证据 ${edge.evidenceCount}`} · {edge.note || "无备注"}
               </Text>
             </>
           }
@@ -983,21 +985,23 @@ export function RelationGraphView({
               </Text>
               <Progress percent={Math.round(selectedEdge.confidence * 100)} size="small" />
               <Text type="secondary" style={{ fontSize: 12 }}>
-                置信度 {selectedEdge.confidence.toFixed(2)} · 证据 {selectedEdge.evidenceCount} ·
+                置信度 {selectedEdge.confidence.toFixed(2)}{readOnly ? "" : ` · 证据 ${selectedEdge.evidenceCount}`} ·
                 最后见到 {selectedEdge.lastSeenAt ? formatTime(selectedEdge.lastSeenAt) : "—"}
               </Text>
               {selectedEdge.note && <Text>{selectedEdge.note}</Text>}
             </Space>
-            <div style={{ marginTop: 16 }}>
-              <Space>
-                <Button type="primary" onClick={() => { setSelectedEdgeId(null); onEditRelation(selectedEdge); }}>
-                  编辑备注 / 置信度
-                </Button>
-                <Popconfirm title="删除这条关系边？" onConfirm={() => { setSelectedEdgeId(null); onDeleteRelation(selectedEdge); }}>
-                  <Button danger>删除</Button>
-                </Popconfirm>
-              </Space>
-            </div>
+            {!readOnly && (
+              <div style={{ marginTop: 16 }}>
+                <Space>
+                  <Button type="primary" onClick={() => { setSelectedEdgeId(null); onEditRelation?.(selectedEdge); }}>
+                    编辑备注 / 置信度
+                  </Button>
+                  <Popconfirm title="删除这条关系边？" onConfirm={() => { setSelectedEdgeId(null); onDeleteRelation?.(selectedEdge); }}>
+                    <Button danger>删除</Button>
+                  </Popconfirm>
+                </Space>
+              </div>
+            )}
           </>
         )}
       </Drawer>

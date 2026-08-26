@@ -22,6 +22,7 @@ vi.mock("./app-shell", () => ({
 }));
 
 vi.mock("./login", () => ({ Login: () => <div>login page</div> }));
+vi.mock("./guest-home", () => ({ GuestHome: () => <div>guest home</div> }));
 vi.mock("./overview", () => ({
   OverviewPage: () => <div>overview page</div>,
   AI_OUTCOME_META: {},
@@ -80,7 +81,18 @@ describe("route lazy loading", () => {
     state.lazyLoads.length = 0;
     state.api.mockReset();
     state.api.mockResolvedValue({
-      data: { authenticated: true, csrfToken: "csrf" },
+      data: {
+        authenticated: true,
+        role: "admin",
+        csrfToken: "csrf",
+        expiresAt: 123,
+        capabilities: {
+          adminConsole: true,
+          adminWrite: true,
+          realtimeAdminStream: true,
+          guestGroupRead: false,
+        },
+      },
     });
   });
 
@@ -98,5 +110,32 @@ describe("route lazy loading", () => {
     fireEvent.click(screen.getByRole("button", { name: "open groups" }));
     expect(await screen.findByText("groups page")).toBeInTheDocument();
     await waitFor(() => expect(state.lazyLoads).toEqual(["access-pages"]));
+  });
+
+  it("keeps guest sessions out of admin routes and lazy modules", async () => {
+    state.api.mockResolvedValueOnce({
+      data: {
+        authenticated: true,
+        role: "guest",
+        csrfToken: "guest-csrf",
+        expiresAt: 123,
+        capabilities: {
+          adminConsole: false,
+          adminWrite: false,
+          realtimeAdminStream: false,
+          guestGroupRead: false,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/environment"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("guest home")).toBeInTheDocument();
+    expect(screen.queryByText("environment page")).not.toBeInTheDocument();
+    expect(state.lazyLoads).toEqual([]);
   });
 });

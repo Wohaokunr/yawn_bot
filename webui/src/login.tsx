@@ -1,27 +1,45 @@
-import { RobotOutlined } from "@ant-design/icons";
-import { Alert, Button, Card, Form, Input, Typography } from "antd";
+import { RobotOutlined, TeamOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Divider, Form, Input, Typography } from "antd";
 import { useState } from "react";
 import { api } from "./api";
+import type { AuthSessionData } from "./auth-session";
 
 const { Title, Paragraph } = Typography;
 
-export function Login({ onSuccess }: { onSuccess: (csrf: string) => void }): React.JSX.Element {
-  const [loading, setLoading] = useState(false);
+export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => void }): React.JSX.Element {
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [guestLoading, setGuestLoading] = useState(false);
   const [error, setError] = useState("");
 
   const submit = async ({ token }: { token: string }) => {
-    setLoading(true);
+    setAdminLoading(true);
     setError("");
     try {
-      const { data } = await api<{ authenticated: boolean; csrfToken: string }>("/auth/login", {
+      const { data } = await api<AuthSessionData>("/auth/login", {
         method: "POST",
         body: JSON.stringify({ token }),
       });
-      onSuccess(data.csrfToken);
+      onSuccess(data);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "登录失败");
     } finally {
-      setLoading(false);
+      setAdminLoading(false);
+    }
+  };
+
+  const guestLogin = async ({ guestToken }: { guestToken: string }) => {
+    setGuestLoading(true);
+    setError("");
+    try {
+      const { data } = await api<AuthSessionData>("/auth/guest", {
+        method: "POST",
+        body: JSON.stringify({ token: guestToken }),
+      });
+      onSuccess(data);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "访客登录失败");
+    } finally {
+      setGuestLoading(false);
     }
   };
 
@@ -51,8 +69,28 @@ export function Login({ onSuccess }: { onSuccess: (csrf: string) => void }): Rea
           >
             <Input.Password autoFocus autoComplete="current-password" size="large" />
           </Form.Item>
-          <Button type="primary" htmlType="submit" size="large" block loading={loading}>
-            登录
+          <Button type="primary" htmlType="submit" size="large" block loading={adminLoading}>
+            运维登录
+          </Button>
+        </Form>
+        <Divider plain>或</Divider>
+        <Form layout="vertical" onFinish={guestLogin} requiredMark={false}>
+          <Form.Item
+            name="guestToken"
+            label="访客访问码"
+            rules={[{ required: true, message: "请输入访客访问码" }]}
+          >
+            <Input.Password autoComplete="current-password" size="large" />
+          </Form.Item>
+          <Button
+            icon={<TeamOutlined />}
+            htmlType="submit"
+            size="large"
+            block
+            loading={guestLoading}
+            disabled={adminLoading}
+          >
+            访客登录
           </Button>
         </Form>
       </Card>

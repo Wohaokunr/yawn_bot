@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from ..llm import LLMProviderConfig, test_llm_connection
 from .config import API_PATH
-from .deps import ReadSession, WriteSession, ok
+from .deps import AdminReadSession, AdminWriteSession, ok
 from .environment import (
     EnvironmentConflictError,
     EnvironmentValidationError,
@@ -25,13 +25,13 @@ router = APIRouter(prefix=API_PATH)
 _LLM_TEST_CONCURRENCY = asyncio.Semaphore(2)
 
 @router.get("/environment")
-async def get_environment(_session: ReadSession) -> dict[str, Any]:
+async def get_environment(_session: AdminReadSession) -> dict[str, Any]:
     return ok(await asyncio.to_thread(load_environment))
 
 
 @router.patch("/environment")
 async def patch_environment(
-    body: EnvironmentPatch, _session: WriteSession
+    body: EnvironmentPatch, _session: AdminWriteSession
 ) -> dict[str, Any]:
     try:
         result = await asyncio.to_thread(
@@ -58,7 +58,7 @@ async def patch_environment(
 
 @router.post("/llm/test")
 async def test_llm(
-    body: LLMConnectionTestBody, _session: WriteSession
+    body: LLMConnectionTestBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     stored_base_url = ""
     stored_api_key: str | None = None

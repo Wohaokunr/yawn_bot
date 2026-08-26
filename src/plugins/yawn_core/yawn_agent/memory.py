@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import re
+import weakref
 from datetime import datetime, timedelta
 from itertools import pairwise
 from typing import Any
@@ -132,7 +133,9 @@ _DISPLAY_NAME_STRONG_RE = re.compile(
     r"(?=$|[，,。.!！?？；;：:\s])"
 )
 
-_COMPACTION_LOCKS: dict[int, asyncio.Lock] = {}
+_COMPACTION_LOCKS: weakref.WeakValueDictionary[int, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 _COMPACTION_CONCURRENCY = asyncio.Semaphore(2)
 
 

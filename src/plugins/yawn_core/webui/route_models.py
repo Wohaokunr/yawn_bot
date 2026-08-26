@@ -14,6 +14,14 @@ class LoginBody(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
 
 
+class GuestAccessPatch(BaseModel):
+    enabled: bool
+
+
+class GuestGroupAccessPatch(BaseModel):
+    allowed: bool
+
+
 class FeatureOverrideBody(BaseModel):
     override: bool | None
 

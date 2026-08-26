@@ -58,7 +58,7 @@ from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
 from ..yawn_agent.tools import build_tool_schemas, tool_permission_snapshot
 from .config import API_PATH
-from .deps import ReadSession, WriteSession, ok, page_params
+from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
 from .hub import hub
 from .route_helpers import check_version, require_group
 from .route_models import (
@@ -82,6 +82,8 @@ from .service import (
     page_meta,
     serialize_agent_config,
     serialize_agent_message,
+    serialize_guest_memory,
+    serialize_guest_relation,
     serialize_memory,
     serialize_persona,
     serialize_relation,
@@ -93,6 +95,10 @@ _DEBUG_HISTORY_LIMIT = 40
 _DEBUG_MEMORY_LIMIT = 30
 _DEBUG_RELATION_LIMIT = 20
 _DEBUG_TIMEOUT_SECONDS = 30.0
+
+
+def _is_guest_view(session: Any) -> bool:
+    return getattr(session, "role", "admin") == "guest"
 
 
 def _memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:
@@ -111,7 +117,7 @@ def _memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:
 
 
 @router.get("/agent/groups/{group_id}/config")
-async def get_agent_config(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
@@ -131,7 +137,9 @@ async def get_agent_config(group_id: int, _session: ReadSession) -> dict[str, An
 
 
 @router.get("/agent/groups/{group_id}/diagnostics")
-async def get_agent_diagnostics(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_agent_diagnostics(
+    group_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         return ok(await agent_diagnostics(db, group_id))
@@ -139,7 +147,7 @@ async def get_agent_diagnostics(group_id: int, _session: ReadSession) -> dict[st
 
 @router.get("/agent/groups/{group_id}/capabilities")
 async def get_agent_capabilities(
-    group_id: int, _session: ReadSession
+    group_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -170,7 +178,7 @@ async def get_agent_capabilities(
 
 @router.get("/agent/groups/{group_id}/execution-traces")
 async def get_agent_execution_traces(
-    group_id: int, _session: ReadSession
+    group_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
     """返回当前进程内最近的真实 Agent 执行时间线。
 
@@ -185,7 +193,7 @@ async def get_agent_execution_traces(
 
 @router.post("/agent/groups/{group_id}/capabilities/refresh")
 async def refresh_agent_capabilities(
-    group_id: int, _session: WriteSession
+    group_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -200,7 +208,7 @@ async def refresh_agent_capabilities(
 
 @router.patch("/agent/groups/{group_id}/config")
 async def patch_agent_config(
-    group_id: int, body: AgentConfigPatch, _session: WriteSession
+    group_id: int, body: AgentConfigPatch, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -239,7 +247,9 @@ async def patch_agent_config(
 
 
 @router.get("/agent/groups/{group_id}/persona")
-async def get_agent_persona(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_agent_persona(
+    group_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
@@ -248,7 +258,7 @@ async def get_agent_persona(group_id: int, _session: ReadSession) -> dict[str, A
 
 @router.put("/agent/groups/{group_id}/persona")
 async def put_agent_persona(
-    group_id: int, body: PersonaPatch, _session: WriteSession
+    group_id: int, body: PersonaPatch, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -271,7 +281,7 @@ async def put_agent_persona(
 @router.delete("/agent/groups/{group_id}/persona")
 async def reset_agent_persona(
     group_id: int,
-    _session: WriteSession,
+    _session: AdminWriteSession,
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> dict[str, Any]:
     async with get_session() as db:
@@ -294,7 +304,7 @@ async def reset_agent_persona(
 @router.get("/agent/groups/{group_id}/memories")
 async def get_memories(
     group_id: int,
-    _session: ReadSession,
+    _session: GroupViewSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -357,9 +367,10 @@ async def get_memories(
             .scalars()
             .all()
         )
-    return ok(
-        [serialize_memory(row) for row in rows], page_meta(page, page_size, total)
+    serializer = (
+        serialize_guest_memory if _is_guest_view(_session) else serialize_memory
     )
+    return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
 
 
 # 成员画像面板的成员索引口径：profile/core/manual 都是按成员沉淀的可读事实
@@ -368,7 +379,9 @@ _SUBJECT_MEMORY_TYPES = ("profile", "core", "manual")
 
 
 @router.get("/agent/groups/{group_id}/memories/subjects")
-async def get_memory_subjects(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_memory_subjects(
+    group_id: int, _session: GroupViewSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         opted_out = set(
@@ -450,7 +463,7 @@ async def get_memory_subjects(group_id: int, _session: ReadSession) -> dict[str,
 
 
 @router.get("/agent/groups/{group_id}/memories/export")
-async def export_memories(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def export_memories(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         opted_out = set(
@@ -516,7 +529,9 @@ async def export_memories(group_id: int, _session: ReadSession) -> dict[str, Any
 
 
 @router.get("/agent/groups/{group_id}/memories/status")
-async def get_memory_status(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_memory_status(
+    group_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         return ok(await agent_memory_status(db, group_id))
@@ -567,7 +582,7 @@ async def _run_manual_rebuild(group_id: int) -> None:
 
 @router.post("/agent/groups/{group_id}/memories/compact")
 async def trigger_memory_compact(
-    group_id: int, _session: WriteSession
+    group_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -582,7 +597,7 @@ async def trigger_memory_compact(
 
 @router.post("/agent/groups/{group_id}/memories/rebuild")
 async def trigger_memory_rebuild(
-    group_id: int, _session: WriteSession
+    group_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -597,7 +612,7 @@ async def trigger_memory_rebuild(
 
 @router.post("/agent/groups/{group_id}/memories")
 async def create_memory(
-    group_id: int, body: MemoryCreateBody, _session: WriteSession
+    group_id: int, body: MemoryCreateBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -643,7 +658,7 @@ async def create_memory(
 
 @router.put("/agent/groups/{group_id}/memories/{memory_id}")
 async def update_memory(
-    group_id: int, memory_id: int, body: MemoryPatchBody, _session: WriteSession
+    group_id: int, memory_id: int, body: MemoryPatchBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     updates = body.model_dump(exclude_unset=True, exclude={"version"})
     if not updates:
@@ -680,7 +695,7 @@ async def update_memory(
 
 @router.delete("/agent/groups/{group_id}/memories/{memory_id}")
 async def delete_memory(
-    group_id: int, memory_id: int, _session: WriteSession
+    group_id: int, memory_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -694,7 +709,7 @@ async def delete_memory(
 
 @router.delete("/agent/groups/{group_id}/members/{user_id}/data")
 async def delete_member_agent_data(
-    group_id: int, user_id: int, _session: WriteSession
+    group_id: int, user_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -705,7 +720,7 @@ async def delete_member_agent_data(
 
 @router.delete("/agent/groups/{group_id}/data")
 async def delete_group_agent_data(
-    group_id: int, _session: WriteSession
+    group_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -717,7 +732,7 @@ async def delete_group_agent_data(
 @router.get("/agent/groups/{group_id}/privacy")
 async def get_privacy(
     group_id: int,
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict[str, Any]:
@@ -761,7 +776,7 @@ async def get_privacy(
 @router.get("/agent/groups/{group_id}/relations")
 async def get_relations(
     group_id: int,
-    _session: ReadSession,
+    _session: GroupViewSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=24),
@@ -819,27 +834,55 @@ async def get_relations(
             .scalars()
             .all()
         )
-    return ok(
-        [serialize_relation(row) for row in rows], page_meta(page, page_size, total)
+    serializer = (
+        serialize_guest_relation if _is_guest_view(_session) else serialize_relation
     )
+    return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
 
 
 @router.get("/agent/groups/{group_id}/relations/graph")
-async def get_relation_graph(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_relation_graph(
+    group_id: int, _session: GroupViewSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
-        return ok(await load_relation_graph(db, group_id))
+        return ok(
+            await load_relation_graph(db, group_id, guest=_is_guest_view(_session))
+        )
 
 
 @router.get("/agent/groups/{group_id}/relations/types")
-async def get_relation_types(group_id: int, _session: ReadSession) -> dict[str, Any]:
+async def get_relation_types(
+    group_id: int, _session: GroupViewSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
+        clauses = [AgentRelation.group_id == group_id]
+        if _is_guest_view(_session):
+            opted_out = set(
+                (
+                    await db.execute(
+                        select(AgentPrivacy.user_id).where(
+                            AgentPrivacy.group_id == group_id,
+                            AgentPrivacy.opted_out.is_(True),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if opted_out:
+                clauses.extend(
+                    (
+                        AgentRelation.subject_user_id.not_in(opted_out),
+                        AgentRelation.object_user_id.not_in(opted_out),
+                    )
+                )
         rows = (
             (
                 await db.execute(
                     select(AgentRelation.relation_type)
-                    .where(AgentRelation.group_id == group_id)
+                    .where(*clauses)
                     .distinct()
                     .order_by(AgentRelation.relation_type)
                 )
@@ -852,7 +895,7 @@ async def get_relation_types(group_id: int, _session: ReadSession) -> dict[str, 
 
 @router.post("/agent/groups/{group_id}/relations")
 async def create_relation(
-    group_id: int, body: RelationCreateBody, _session: WriteSession
+    group_id: int, body: RelationCreateBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     relation_type = normalize_relation_type(body.type)
     if not relation_type:
@@ -907,7 +950,10 @@ async def create_relation(
 
 @router.put("/agent/groups/{group_id}/relations/{relation_id}")
 async def update_relation(
-    group_id: int, relation_id: int, body: RelationPatchBody, _session: WriteSession
+    group_id: int,
+    relation_id: int,
+    body: RelationPatchBody,
+    _session: AdminWriteSession,
 ) -> dict[str, Any]:
     updates = body.model_dump(exclude_unset=True)
     if not updates:
@@ -935,7 +981,7 @@ async def update_relation(
 
 @router.delete("/agent/groups/{group_id}/relations/{relation_id}")
 async def delete_relation(
-    group_id: int, relation_id: int, _session: WriteSession
+    group_id: int, relation_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -956,7 +1002,7 @@ async def delete_relation(
 @router.get("/agent/groups/{group_id}/messages")
 async def get_agent_messages(
     group_id: int,
-    _session: ReadSession,
+    _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
@@ -1131,7 +1177,7 @@ async def _run_debug_completion(
 
 @router.post("/agent/groups/{group_id}/debug/run")
 async def run_agent_debug(
-    group_id: int, body: AgentDebugRunBody, _session: WriteSession
+    group_id: int, body: AgentDebugRunBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     """构建线上同源提示词；可选调用模型，但不执行工具、发送或落库。"""
 
@@ -1611,7 +1657,7 @@ async def run_agent_debug(
 
 @router.patch("/agent/groups/{group_id}/privacy/{user_id}")
 async def patch_privacy(
-    group_id: int, user_id: int, body: PrivacyPatchBody, _session: WriteSession
+    group_id: int, user_id: int, body: PrivacyPatchBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)

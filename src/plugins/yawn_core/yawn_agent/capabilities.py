@@ -146,6 +146,7 @@ async def probe_group_capabilities(
     if len(_capability_cache) >= _MAX_CACHE_ENTRIES:
         oldest = min(_capability_cache, key=lambda item: _capability_cache[item][0])
         _capability_cache.pop(oldest, None)
+        _capability_probe_status.pop(oldest, None)
     _capability_cache[key] = (
         now,
         result,
@@ -232,6 +233,7 @@ def mark_segment_unsupported(
     if len(_segment_unsupported_cache) >= _MAX_SEGMENT_CACHE_ENTRIES:
         oldest = min(_segment_unsupported_cache, key=_segment_unsupported_cache.__getitem__)
         _segment_unsupported_cache.pop(oldest, None)
+        _segment_failure_status.pop(oldest, None)
     key = (
         int(getattr(bot, "self_id", 0) or 0),
         int(group_id),
