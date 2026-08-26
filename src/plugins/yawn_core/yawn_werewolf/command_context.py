@@ -3,15 +3,7 @@
 from ..command_catalog import CommandContext  # noqa: TID252
 from .commands import config
 from .roles import Role
-from .state import (
-    DUEL_PHASES,
-    SELF_DETONATE_PHASES,
-    Game,
-    Phase,
-    PlayerState,
-    game_of_user,
-    get_game,
-)
+from .state import Game, Phase, PlayerState, game_of_user, get_game
 
 _ENTRY_COMMANDS = frozenset({"狼人杀", "战绩"})
 _VOTE_PHASES = frozenset(
@@ -26,30 +18,20 @@ _SPEECH_PHASES = frozenset(
         Phase.PK_SPEECH,
     }
 )
-_PRIVATE_ROLE_ACTIONS = {
-    (Phase.NIGHT_HALFBLOOD, Role.HALFBLOOD): frozenset({"认主"}),
-    (Phase.NIGHT_WOLVES, Role.WEREWOLF): frozenset({"刀"}),
-    (Phase.NIGHT_WITCH, Role.WITCH): frozenset({"救", "毒"}),
-    (Phase.NIGHT_SEER, Role.SEER): frozenset({"查验"}),
-    (Phase.NIGHT_ELDER, Role.SILENT_ELDER): frozenset({"禁言"}),
-    (Phase.HUNTER_SHOT, Role.HUNTER): frozenset({"开枪", "不开枪"}),
-}
-
-
 def _signup_commands(context: CommandContext, game: Game) -> set[str]:
     if context.group_id is None:
         if config.ww_role_request and context.user_id in game.signup_user_ids:
             return {"选身份", "取消选身份"}
         return set()
 
-    available = {"查看报名", "狼人状态", "板子"}
+    available = {"查看报名"}
     available.add("退报名" if context.user_id in game.signup_user_ids else "报名")
     if (
         context.user_id == game.host_user_id
         or context.is_group_admin
         or context.is_superuser
     ):
-        available.update({"开始游戏", "结束游戏", "添加AI", "移除AI"})
+        available.update({"板子", "开始游戏", "结束游戏", "添加AI", "移除AI"})
     return available
 
 
@@ -65,34 +47,62 @@ def _group_action_commands(game: Game, player: PlayerState) -> set[str]:
         available.add("退水" if player.sheriff_candidate else "上警")
     elif game.phase is Phase.SHERIFF_SPEECH and player.sheriff_candidate:
         available.add("退水")
-    if game.phase in _VOTE_PHASES and player.can_vote:
+    if (
+        game.phase in _VOTE_PHASES
+        and player.can_vote
+        and player.seat not in game.vote_exclude
+    ):
         available.update({"投票", "弃票"})
     if game.phase in _SPEECH_PHASES and game.current_speaker == player.seat:
         available.add("过")
-    if game.phase is Phase.DAY_SPEECH and player.is_sheriff:
+    if (
+        game.phase is Phase.DAY_SPEECH
+        and game.current_speaker is None
+        and player.is_sheriff
+    ):
         available.add("排序")
-    if game.phase in SELF_DETONATE_PHASES and player.role is Role.WEREWOLF:
-        available.add("自爆")
-    if game.phase in DUEL_PHASES and player.role is Role.KNIGHT:
-        available.add("决斗")
+    return available
+
+
+def _private_role_actions(game: Game, player: PlayerState) -> set[str]:
+    """只返回该身份在当前私聊窗口仍可执行的动作。"""
+
+    available: set[str] = set()
+    if game.phase is Phase.HUNTER_SHOT and player.role is Role.HUNTER:
+        available.update({"开枪", "不开枪"})
+    elif not player.alive:
+        pass
+    elif (
+        game.phase is Phase.NIGHT_HALFBLOOD
+        and player.role is Role.HALFBLOOD
+        and player.owner_seat is None
+    ):
+        available.add("认主")
+    elif game.phase is Phase.NIGHT_WOLVES and player.role is Role.WEREWOLF:
+        available.add("刀")
+    elif game.phase is Phase.NIGHT_WITCH and player.role is Role.WITCH:
+        if not player.save_used:
+            available.add("救")
+        if not player.poison_used:
+            available.add("毒")
+    elif game.phase is Phase.NIGHT_SEER and player.role is Role.SEER:
+        available.add("查验")
+    elif game.phase is Phase.NIGHT_ELDER and player.role is Role.SILENT_ELDER:
+        available.add("禁言")
     return available
 
 
 def get_available_commands(context: CommandContext) -> frozenset[str]:
     """按阶段、玩家身份和当前行动窗口返回可用命令名。"""
 
-    available = set(_ENTRY_COMMANDS)
+    available: set[str] = set()
     game = (
         get_game(context.group_id)
         if context.group_id is not None
         else game_of_user(context.user_id)
     )
     if game is None:
-        if context.group_id is not None and (
-            context.is_group_admin or context.is_superuser
-        ):
-            available.add("结束游戏")
-        return frozenset(available)
+        return _ENTRY_COMMANDS
 
     player = game.player_by_user(context.user_id)
 
@@ -111,13 +121,21 @@ def get_available_commands(context: CommandContext) -> frozenset[str]:
     elif player is not None:
         available.add("身份")
 
+    if context.group_id is None and player is not None:
+        available.update(_private_role_actions(game, player))
+        return frozenset(available)
+
     if player is None or not player.alive:
         available.update(_inactive_player_commands(game, player))
         return frozenset(available)
 
-    if context.group_id is None:
-        available.update(_PRIVATE_ROLE_ACTIONS.get((game.phase, player.role), ()))
-        return frozenset(available)
-
     available.update(_group_action_commands(game, player))
     return frozenset(available)
+
+
+def get_help_hint(context: CommandContext) -> str | None:
+    """给无房间场景补一条状态说明，不预告具体游戏结构。"""
+
+    if context.group_id is not None and get_game(context.group_id) is None:
+        return "创建房间后会自动显示报名和游戏相关操作。"
+    return None

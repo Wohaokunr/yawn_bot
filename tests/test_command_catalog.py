@@ -94,6 +94,7 @@ def test_help_builds_progressive_sections_with_admin_gating(
             ),
         ),
         get_available_commands=lambda _context: {"入口", "管理命令"},
+        get_help_hint=lambda _context: "只显示当前可用操作。",
     )
     monkeypatch.setattr(help_panel, "get_registered_command_groups", lambda: (group,))
     member_context = catalog.CommandContext(user_id=1, group_id=10)
@@ -115,12 +116,14 @@ def test_help_builds_progressive_sections_with_admin_gating(
     assert [view.section.key for view in member_sections] == ["basic"]
     assert [view.section.key for view in admin_sections] == ["basic", "admin"]
     assert [command.name for command in member_sections[0].groups[0][1]] == ["入口"]
+    assert member_sections[0].groups[0][2] == "只显示当前可用操作。"
 
     menu = help_panel._build_section_menu(admin_sections)
     assert "个人与基础功能" in menu
     assert "管理功能" in menu
     assert "/入口" not in menu
     assert "/管理命令" not in menu
+    assert "只显示当前可用操作" not in menu
 
 
 def test_help_resolves_direct_topic_and_menu_number(
@@ -143,7 +146,7 @@ def test_help_resolves_direct_topic_and_menu_number(
     )
     view = help_panel.HelpSectionView(
         next(section for section in help_panel.HELP_SECTIONS if section.key == "agent"),
-        ((group, group.commands),),
+        ((group, group.commands, "当前阶段提示"),),
     )
     sections = (view,)
 
@@ -155,6 +158,7 @@ def test_help_resolves_direct_topic_and_menu_number(
     detail = help_panel._build_section_text(view)
     assert "/Agent状态" in detail
     assert "/群AI状态" in detail
+    assert "提示：当前阶段提示" in detail
 
 
 def test_rpg_availability_is_owned_by_rpg_state(
@@ -165,20 +169,39 @@ def test_rpg_availability_is_owned_by_rpg_state(
     context_module = catalog_modules["rpg_context"]
     state = catalog_modules["rpg_state"]
     game = state.Game(group_id=10, host_user_id=1, signup_user_ids=[1])
-    monkeypatch.setattr(context_module, "get_game", lambda _group_id: game)
+    current_game = None
+    monkeypatch.setattr(context_module, "get_game", lambda _group_id: current_game)
+    monkeypatch.setattr(context_module, "game_of_user", lambda _user_id: current_game)
 
     host_context = catalog.CommandContext(user_id=1, group_id=10)
     guest_context = catalog.CommandContext(user_id=2, group_id=10)
+    assert context_module.get_available_commands(host_context) == {
+        "跑团",
+        "模组列表",
+        "跑团帮助",
+    }
+
+    current_game = game
     host_signup = context_module.get_available_commands(host_context)
     guest_signup = context_module.get_available_commands(guest_context)
 
     assert {"选择模组", "开始游戏", "退报名"} <= host_signup
     assert "报名" in guest_signup
+    assert "跑团" not in host_signup
     assert "检定" not in host_signup
+
+    game.phase = state.Phase.CHAR_CREATE
+    group_card = context_module.get_available_commands(host_context)
+    private_card = context_module.get_available_commands(
+        catalog.CommandContext(user_id=1, group_id=None)
+    )
+    assert group_card == {"跑团帮助", "局面", "结束游戏"}
+    assert private_card == {"跑团帮助"}
+    assert "建卡阶段" in context_module.get_help_hint(host_context)
 
     game.phase = state.Phase.PLAY
     game.players = [state.PlayerState(user_id=1, seat=1)]
-    game.combat_order = [1]
+    game.current_scene = "scene"
     game.pending_deduction = state.PendingDeduction(
         proposer_user_id=1,
         clue_ids=("clue",),
@@ -188,8 +211,15 @@ def test_rpg_availability_is_owned_by_rpg_state(
     )
     active = context_module.get_available_commands(host_context)
 
-    assert {"状态", "检定", "攻击", "撤回推理"} <= active
+    assert {"状态", "检定", "撤回推理"} <= active
     assert "报名" not in active
+    assert "NPC 对话直接说话" in context_module.get_help_hint(host_context)
+
+    game.combat_order = [1]
+    combat = context_module.get_available_commands(host_context)
+    assert {"攻击", "跳过"} <= combat
+    assert "检定" not in combat
+    assert "撤回推理" not in combat
 
 
 def test_werewolf_availability_tracks_role_and_action_window(
@@ -201,14 +231,31 @@ def test_werewolf_availability_tracks_role_and_action_window(
     state = catalog_modules["ww_state"]
     roles = catalog_modules["ww_roles"]
     game = state.Game(group_id=20, host_user_id=1, signup_user_ids=[1])
-    monkeypatch.setattr(context_module, "get_game", lambda _group_id: game)
-    monkeypatch.setattr(context_module, "game_of_user", lambda _user_id: game)
+    current_game = None
+    monkeypatch.setattr(context_module, "get_game", lambda _group_id: current_game)
+    monkeypatch.setattr(context_module, "game_of_user", lambda _user_id: current_game)
 
+    host_context = catalog.CommandContext(user_id=1, group_id=20)
+    assert context_module.get_available_commands(host_context) == {"狼人杀", "战绩"}
+    assert "创建房间后" in context_module.get_help_hint(host_context)
+
+    current_game = game
     signup = context_module.get_available_commands(
-        catalog.CommandContext(user_id=1, group_id=20)
+        host_context
     )
-    assert {"查看报名", "开始游戏", "添加AI"} <= signup
+    guest_signup = context_module.get_available_commands(
+        catalog.CommandContext(user_id=2, group_id=20)
+    )
+    assert {"查看报名", "板子", "开始游戏", "添加AI"} <= signup
+    assert "板子" not in guest_signup
+    assert "狼人杀" not in signup
+    assert "狼人状态" not in signup
     assert "投票" not in signup
+    monkeypatch.setattr(context_module.config, "ww_role_request", True)
+    private_signup = context_module.get_available_commands(
+        catalog.CommandContext(user_id=1, group_id=None)
+    )
+    assert private_signup == {"选身份", "取消选身份"}
 
     player = state.PlayerState(
         user_id=1,
@@ -230,3 +277,18 @@ def test_werewolf_availability_tracks_role_and_action_window(
     )
     assert {"狼人状态", "投票", "弃票"} <= group_commands
     assert "查验" not in group_commands
+    assert "战绩" not in group_commands
+
+    player.role = roles.Role.WEREWOLF
+    wolf_group_commands = context_module.get_available_commands(
+        catalog.CommandContext(user_id=1, group_id=20)
+    )
+    assert "自爆" not in wolf_group_commands
+
+    player.role = roles.Role.HUNTER
+    player.alive = False
+    game.phase = state.Phase.HUNTER_SHOT
+    hunter_commands = context_module.get_available_commands(
+        catalog.CommandContext(user_id=1, group_id=None)
+    )
+    assert {"身份", "开枪", "不开枪"} <= hunter_commands

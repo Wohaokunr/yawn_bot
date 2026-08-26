@@ -56,6 +56,7 @@ class CommandSpec:
 
 
 CommandAvailability = Callable[[CommandContext], Collection[str]]
+CommandHelpHint = Callable[[CommandContext], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,7 @@ class PluginCommandGroup:
     entrypoint: str
     commands: tuple[CommandSpec, ...]
     get_available_commands: CommandAvailability | None = None
+    get_help_hint: CommandHelpHint | None = None
     help_section: HelpSectionKey = "basic"
 
     def __post_init__(self) -> None:
@@ -83,6 +85,13 @@ class PluginCommandGroup:
             return self.commands
         available = frozenset(self.get_available_commands(context))
         return tuple(command for command in self.commands if command.name in available)
+
+    def help_hint(self, context: CommandContext) -> str | None:
+        """返回插件根据当前状态提供的一句操作提示。"""
+
+        if self.get_help_hint is None:
+            return None
+        return self.get_help_hint(context)
 
 
 _COMMAND_GROUPS: dict[str, PluginCommandGroup] = {}

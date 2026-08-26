@@ -69,7 +69,10 @@ class HelpSectionView:
     """一个分类在当前用户、会话和游戏状态下的可见内容。"""
 
     section: HelpSection
-    groups: tuple[tuple[PluginCommandGroup, tuple[CommandSpec, ...]], ...]
+    groups: tuple[
+        tuple[PluginCommandGroup, tuple[CommandSpec, ...], str | None],
+        ...,
+    ]
 
 
 HELP_SECTIONS = (
@@ -154,7 +157,9 @@ def _collect_visible_sections(
     registered_groups = get_registered_command_groups()
     views: list[HelpSectionView] = []
     for section in HELP_SECTIONS:
-        section_groups: list[tuple[PluginCommandGroup, tuple[CommandSpec, ...]]] = []
+        section_groups: list[
+            tuple[PluginCommandGroup, tuple[CommandSpec, ...], str | None]
+        ] = []
         for group in registered_groups:
             commands = tuple(
                 command
@@ -168,7 +173,7 @@ def _collect_visible_sections(
                 )
             )
             if commands:
-                section_groups.append((group, commands))
+                section_groups.append((group, commands, group.help_hint(context)))
         if section_groups:
             views.append(HelpSectionView(section, tuple(section_groups)))
     return tuple(views)
@@ -198,7 +203,7 @@ def _build_section_text(view: HelpSectionView) -> str:
     """构建单个分类的第二层命令帮助。"""
 
     lines = [f"═══ {view.section.display_name} ═══"]
-    for group_index, (group, commands) in enumerate(view.groups):
+    for group_index, (group, commands, hint) in enumerate(view.groups):
         if group_index or len(view.groups) > 1:
             lines.extend(("", f"【{group.display_name}】"))
         for command in commands:
@@ -208,6 +213,8 @@ def _build_section_text(view: HelpSectionView) -> str:
                 aliases = f"（别名：{alias_text}）"
             description = f" — {command.description}" if command.description else ""
             lines.append(f"/{command.name}{aliases}{description}")
+        if hint:
+            lines.append(f"提示：{hint}")
     lines.extend(("", "发送 /help 返回分类菜单。"))
     return "\n".join(lines)
 
