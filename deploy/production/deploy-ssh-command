@@ -1,0 +1,8 @@
+#!/bin/sh
+set -efu
+
+set -- ${SSH_ORIGINAL_COMMAND:-}
+[ "$#" -eq 4 ] || exit 2
+[ "$1" = /opt/yawnbot/bin/deploy-release ] || exit 2
+
+exec "$@"

@@ -16,37 +16,42 @@ YawnBot 当前仍按**单实例**设计：
 
 ## 2. Docker Compose 生产基线
 
-推荐从仓库根目录执行：
+仓库根目录的 `compose.yaml` 用于本地构建和 clean-deploy smoke。生产环境使用
+`deploy/production/compose.yaml`，只接受 GHCR 的不可变 digest 引用：
 
 ```bash
-git pull --ff-only
-docker compose build
-docker compose up -d
+ghcr.io/wohaokunr/yawn_bot@sha256:<release-digest>
 ```
 
-Compose 默认：
+服务器固定目录为：
+
+```text
+/opt/yawnbot/.env                  运行时配置与密钥，权限 600
+/opt/yawnbot/compose.yaml          生产 Compose
+/opt/yawnbot/bin/deploy-release    部署入口
+/opt/yawnbot/data/                 持久数据
+/opt/yawnbot/data/backups/         部署前 SQLite online backup
+/opt/yawnbot/deployments/          每次成功部署的 manifest
+```
+
+生产 Compose：
 
 - 只运行一个 `yawnbot` 服务；
-- 把 `/app/data` 持久化到 named volume；
-- 暴露容器 `8080`；
+- 把 `/opt/yawnbot/data` 挂载到 `/app/data`；
+- 只把 `8080` 绑定到宿主机回环地址；
 - 使用 `/healthz` 做 liveness；
 - 容器以非 root 用户运行；
-- 启动时自动同步 canonical migration 并执行 `nb orm upgrade heads`。
+- 连接共享的 `yawnbot-internal` 网络；
+- 禁止容器启动时自行迁移，migration 只由部署脚本显式执行。
 
 可在 `.env` 增加：
-
-```dotenv
-YAWNBOT_PORT=8080
-YAWNBOT_AUTO_MIGRATE=true
-```
-
-如果生产变更流程要求“先人工审查 migration，再启动新代码”，设置：
 
 ```dotenv
 YAWNBOT_AUTO_MIGRATE=false
 ```
 
-然后先构建镜像，再使用同一镜像人工执行 migration，确认无误后启动服务。不要同时启动旧实例和新实例处理同一群。
+`.env` 不由 GitHub Actions 下发。OneBot Token、AI API key、WebUI token 等密钥只在
+服务器长期保存。
 
 ## 3. 为什么容器启动前要同步 migration
 
@@ -74,7 +79,18 @@ data/nonebot_plugin_orm/migrations/
 
 ## 4. SQLite 备份
 
-### 4.1 最稳妥方式：停机冷备份
+### 4.1 生产部署：SQLite online backup
+
+`deploy-release` 在停止旧容器前通过 Python `sqlite3.Connection.backup()` 创建一致性
+快照，并执行 `PRAGMA integrity_check`。文件名为：
+
+```text
+/opt/yawnbot/data/backups/pre-deploy-<version>-<UTC timestamp>.sqlite3
+```
+
+默认保留最近 10 份。不要把在线 WAL 数据库直接用 `cp` 复制成备份。
+
+### 4.2 手工维护：停机冷备份
 
 升级前先停止 YawnBot，确保没有继续写 SQLite：
 
@@ -98,7 +114,7 @@ docker volume ls
 
 把 volume 内容复制/打包到独立备份目录后，再继续升级。备份必须存放在 volume 之外，否则删除 volume 时会一起丢失。
 
-### 4.2 原生部署
+### 4.3 原生部署
 
 停止 Bot 后备份整个 `data/`，至少包括 SQLite 主文件以及同目录可能存在的：
 
@@ -137,17 +153,20 @@ uv run nb orm revision -m "short description"
 
 ## 6. 标准升级流程
 
-### Docker
+### Docker / GitHub Release
 
-1. 确认当前没有需要保留的进行中 RPG/狼人杀局。
-2. 记录当前 Git commit、当前 migration heads 和镜像信息。
-3. 停止服务并备份 `data` volume。
-4. `git pull --ff-only`。
-5. 阅读新增 migration 和 release/change notes。
-6. `docker compose build`。
-7. `docker compose up -d`。
-8. 检查 `docker compose ps`、启动日志与 `/healthz`。
-9. 确认 OneBot V11 已重新连接，再验证 WebUI/关键命令。
+1. Release workflow 重跑 quality gates，并发布带 SBOM/provenance 的 GHCR 镜像。
+2. `deploy-production` 把 `image@sha256:digest`、版本和 commit SHA 传给服务器。
+3. 服务器在旧实例仍运行时做 SQLite online backup 并校验。
+4. 拉取不可变镜像。
+5. 停止旧 YawnBot；NapCat 不参与此生命周期。
+6. 使用新镜像显式执行 `nb orm upgrade heads`。
+7. 执行 `docker compose up -d --no-deps yawnbot`。
+8. 等待 `/healthz`，然后记录 deployment manifest。
+9. 确认 OneBot V11 重连，再验证 WebUI/关键命令。
+
+每份 manifest 记录 previous/current image、commit SHA、DB backup、迁移前后状态、
+目标 migration heads 和部署时间。
 
 ### 原生 Windows/Linux
 
@@ -172,7 +191,7 @@ uv run nb orm revision -m "short description"
 - Docker 镜像/tag（如使用）；
 - 关键 `.env` 配置版本（不要把密钥写进版本库）。
 
-如果新版本只改代码、没有 migration，可停止新版本后切回旧 commit/镜像再启动。
+如果新版本只改代码、没有 migration，可停止新版本后切回旧 digest 再启动。
 
 如果已执行 schema migration：
 
@@ -181,7 +200,24 @@ uv run nb orm revision -m "short description"
 3. 无法确认安全时，不要强行 downgrade；
 4. 恢复发布前的完整 data/SQLite 备份，再切回对应代码版本。
 
-## 8. 反向代理与 HTTPS
+部署脚本在 migration 或 healthcheck 失败时会退出并保留诊断现场，不会自动 downgrade
+schema、恢复旧数据库或偷偷切回旧镜像。
+
+## 8. GitHub production Environment
+
+`production` Environment 只保存连接服务器所需的四项：
+
+```text
+DEPLOY_HOST
+DEPLOY_USER
+DEPLOY_SSH_PRIVATE_KEY
+DEPLOY_HOST_KEY
+```
+
+运行时业务密钥不进入 GitHub Actions。建议为 production Environment 开启 required
+reviewers；同一时间只允许一个 production deploy。
+
+## 9. 反向代理与 HTTPS
 
 公开 WebUI 时，推荐让 Caddy/Nginx/Traefik 等在 YawnBot 前终止 TLS：
 
@@ -212,7 +248,7 @@ WEBUI_COOKIE_SECURE=true
 
 不要直接把管理 Token 写进镜像。优先用 Compose secrets、宿主机环境、受限权限的 `.env` 或其他密钥管理方式注入。
 
-## 9. 网络与端口
+## 10. 网络与端口
 
 反向 WebSocket 模式下，OneBot 实现需要访问：
 
@@ -235,7 +271,7 @@ WebUI 使用：
 
 如果 WebUI 不需要公网访问，可以只让反向代理/内网访问 8080，不要直接暴露管理端。
 
-## 10. 安全基线
+## 11. 安全基线
 
 - OneBot access token、WebUI admin token、AI API key 三者分离；
 - `.env`、数据库、浏览器 profile、缓存和备份不提交 Git；
@@ -247,7 +283,7 @@ WebUI 使用：
 - 不把个人浏览器 profile 给番茄 Playwright 使用；
 - 不在生产长期打开 `AGENT_DEBUG_LOG=true`。
 
-## 11. 发布前质量门槛
+## 12. 发布前质量门槛
 
 ```bash
 python tools/repo_guard.py

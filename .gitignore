@@ -81,6 +81,7 @@ ms-playwright/
 /data/nonebot_plugin_orm/*
 !/data/nonebot_plugin_orm/migrations/
 !/data/nonebot_plugin_orm/migrations/**
+/deploy/napcat/data/
 
 # IDE / coding-agent / developer private state
 **/.qoder/

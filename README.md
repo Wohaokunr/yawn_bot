@@ -148,6 +148,42 @@ ws://yawnbot:8080/onebot/v11/ws
 
 OneBot 端的 access token 必须与 `.env` 中 `ONEBOT_V11_ACCESS_TOKEN` 一致。
 
+### 首次启动 NapCat Docker
+
+NapCat 使用独立的 `deploy/napcat/compose.yaml`，不会进入 YawnBot 主 Compose
+的构建、启动和 CI 流程。首次部署先创建两个 Compose 共用的内部网络：
+
+```bash
+docker network inspect yawnbot-internal >/dev/null 2>&1 || docker network create yawnbot-internal
+cd deploy/napcat
+cp .env.example .env
+docker compose up -d
+```
+
+独立 Compose 会在 `deploy/napcat/data/` 下持久化：
+
+```text
+data/QQ       -> /app/.config/QQ
+data/config   -> /app/napcat/config
+data/plugins  -> /app/napcat/plugins
+```
+
+WebUI 只绑定宿主机回环地址。先建立 SSH 隧道，再打开
+`http://127.0.0.1:6099/webui` 扫码登录：
+
+```bash
+ssh -L 6099:127.0.0.1:6099 deploy@服务器地址
+```
+
+登录后新增 Reverse WebSocket：
+
+```text
+ws://yawnbot:8080/onebot/v11/ws
+```
+
+Access Token 必须与 `.env` 中 `ONEBOT_V11_ACCESS_TOKEN` 完全一致。NapCat 与
+YawnBot 通过 `yawnbot-internal` 网络和服务名通信，无需互相配置公网地址。
+
 也支持正向 WebSocket / HTTP API，配置见 [Core、OneBot 与存储配置](docs/configuration/core.md)。
 
 ---
@@ -287,9 +323,9 @@ WW_AI_ENABLED=true
 - Release 会先重新执行完整 CI，包括 fresh-checkout clean-install smoke 和 Docker clean-deploy smoke；
 - 通过后从新的 GitHub Actions checkout 重新构建 WebUI 和 Docker 镜像；
 - 镜像发布到 `ghcr.io/wohaokunr/yawn_bot:<version>`，同时保留 `sha-<commit>` 标签；
-- GitHub Release 附带 `yawnbot-<version>-deploy.tar.gz`、镜像 digest 文件和 `SHA256SUMS.txt`。
-
-当前做到 **Continuous Delivery**：自动产出可部署镜像/包，但不会自动 SSH 到任何生产机。以后确定生产环境后，应追加受 GitHub Environment 审批与保护规则约束的 Deploy job。
+- GitHub Release 附带 `yawnbot-<version>-deploy.tar.gz`、镜像 digest 文件和 `SHA256SUMS.txt`；
+- `deploy-production` 通过受保护的 `production` Environment，把不可变的
+  `image@sha256:digest` 交给服务器部署；业务运行时密钥始终只保存在服务器。
 
 ## 开发
 
