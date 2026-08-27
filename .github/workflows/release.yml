@@ -15,6 +15,11 @@ on:
         required: false
         default: true
         type: boolean
+      skip_quality_gates:
+        description: "Skip full CI quality gates and proceed directly to build/deploy (manual runs only)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -22,11 +27,24 @@ permissions:
 jobs:
   quality-gates:
     name: Re-run release quality gates
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_quality_gates }}
     uses: ./.github/workflows/ci.yml
 
   release:
     name: Build and publish release
     needs: quality-gates
+    if: >-
+      ${{
+        always() &&
+        (
+          needs.quality-gates.result == 'success' ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            inputs.skip_quality_gates &&
+            needs.quality-gates.result == 'skipped'
+          )
+        )
+      }}
     outputs:
       version: ${{ steps.release_meta.outputs.version }}
       image: ${{ steps.release_meta.outputs.image }}
@@ -38,6 +56,12 @@ jobs:
       contents: write
       packages: write
     steps:
+      - name: Warn when quality gates are manually skipped
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_quality_gates }}
+        shell: bash
+        run: |
+          echo "::warning::Full release quality gates were manually skipped for this deployment."
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -66,11 +90,18 @@ jobs:
             fi
           fi
 
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.skip_quality_gates }}" == "true" ]]; then
+            quality_gates="skipped-manually"
+          else
+            quality_gates="passed"
+          fi
+
           repo_lower="${GITHUB_REPOSITORY,,}"
           short_sha="${GITHUB_SHA:0:12}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$repo_lower" >> "$GITHUB_OUTPUT"
           echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "quality_gates=$quality_gates" >> "$GITHUB_OUTPUT"
 
       - name: Re-check release checkout content
         run: python tools/repository_content_test.py
@@ -182,8 +213,9 @@ jobs:
           fail_on_unmatched_files: true
           body: |
             Docker image: `${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}`
+            Quality gates: `${{ steps.release_meta.outputs.quality_gates }}`
 
-            This release was rebuilt from a clean GitHub Actions checkout after all CI gates passed.
+            This release was rebuilt from a clean GitHub Actions checkout. Manual runs may explicitly bypass the full CI quality gates; the status above records whether that happened.
           files: |
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-deploy.tar.gz
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-image.txt
