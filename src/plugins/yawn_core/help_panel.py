@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from nonebot import get_driver, logger
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent
+from nonebot.adapters.onebot.v11 import (
+    GroupMessageEvent,
+    Message,
+    MessageEvent,
+    MessageSegment,
+)
 from nonebot.matcher import Matcher
 from nonebot.params import Arg, CommandArg
 from nonebot.plugin import PluginMetadata, on_command
@@ -18,7 +23,10 @@ from .command_catalog import (
     get_registered_command_groups,
     register_command_group,
 )
+from .command_ux import invalid_choice
 from .permission import get_user_feature_status, is_group_admin
+from .session_interaction import is_cancel
+from .ui.panel_renderer import HelpMenuCard, render_help_menu
 
 logger.info("帮助面板模块已加载")
 
@@ -193,7 +201,7 @@ def _build_section_menu(sections: tuple[HelpSectionView, ...]) -> str:
         (
             "",
             "回复序号或分类名称继续；也可直接发送 /help 分类名称。",
-            "发送“取消”退出。",
+            "发送“0 / 取消 / 退出”结束。",
         )
     )
     return "\n".join(lines)
@@ -286,7 +294,20 @@ async def handle_help_entry(
     sections = await _current_help_sections(event, session)
     if not sections:
         await help_cmd.finish("当前没有可用的帮助分类。")
-    await help_cmd.send(_build_section_menu(sections))
+    cards = tuple(
+        HelpMenuCard(
+            index=index,
+            title=view.section.display_name,
+            summary=view.section.summary,
+            entrypoint=view.section.entrypoint,
+        )
+        for index, view in enumerate(sections, start=1)
+    )
+    help_image = await render_help_menu(cards)
+    if help_image is None:
+        await help_cmd.send(_build_section_menu(sections))
+    else:
+        await help_cmd.send(MessageSegment.image(help_image))
 
 
 @help_cmd.got("help_topic")
@@ -298,7 +319,7 @@ async def handle_help_topic(
     """接收首层菜单的序号/名称，并结束本次帮助会话。"""
 
     topic_text = topic.extract_plain_text().strip()
-    if _normalize_topic(topic_text) in {"取消", "退出"}:
+    if is_cancel(topic_text):
         await help_cmd.finish("已退出帮助。")
 
     sections = await _current_help_sections(event, session)
@@ -306,7 +327,7 @@ async def handle_help_topic(
     if view is None:
         await help_cmd.reject_arg(
             "help_topic",
-            f"没有这个帮助分类，请重新选择。\n\n{_build_section_menu(sections)}",
+            invalid_choice(valid=f"1-{len(sections)} 或分类名称"),
         )
     await help_cmd.finish(_build_section_text(view))
 

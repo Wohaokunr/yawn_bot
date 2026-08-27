@@ -30,6 +30,7 @@ from nonebot.rule import Rule
 from nonebot_plugin_orm import get_session
 
 from ..event_log import record_game_event  # noqa: TID252
+from ..game_command_routing import game_context_rule  # noqa: TID252
 from ..permission import (  # noqa: TID252
     check_feature_permission,
     is_group_admin,
@@ -198,20 +199,6 @@ def _signup_cap(game_module_max: int | None) -> int:
     return min(config.rpg_max_players, game_module_max)
 
 
-def _rpg_game_in_group(event: MessageEvent) -> bool:
-    """规则：群消息 ∧ 本群有跑团对局。
-
-    与 priority=4 配合做注册表门控：报名 / 开始游戏 等命令
-    与狼人杀子插件同名，本插件先加载的狼人杀匹配器会无条件
-    finish() 把它们全部遮蔽。门控后群里有跑团局时 RPG 先接
-    （优先级数值更小者先检查）；没有时规则不通过，同名狼人杀
-    命令照常接管，两边 UX 都不受影响。
-    """
-    if not isinstance(event, GroupMessageEvent):
-        return False
-    return get_game(int(event.group_id)) is not None
-
-
 # ── 开房与报名 ────────────────────────────────────────────
 
 rpg_open = on_command(
@@ -314,8 +301,8 @@ async def handle_select_module(
 signup_cmd = on_command(
     "报名",
     aliases={"上车", "加一"},
-    rule=Rule(_rpg_game_in_group),
-    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
+    rule=game_context_rule("rpg"),
+    priority=5,
     block=True,
 )
 
@@ -339,8 +326,8 @@ async def handle_signup(
 leave_cmd = on_command(
     "退报名",
     aliases={"下车"},
-    rule=Rule(_rpg_game_in_group),
-    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
+    rule=game_context_rule("rpg"),
+    priority=5,
     block=True,
 )
 
@@ -362,8 +349,8 @@ async def handle_leave(
 view_cmd = on_command(
     "查看报名",
     aliases={"报名情况"},
-    rule=Rule(_rpg_game_in_group),
-    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
+    rule=game_context_rule("rpg"),
+    priority=5,
     block=True,
 )
 
@@ -394,8 +381,8 @@ async def handle_view(
 situation_cmd = on_command(
     "局面",
     aliases={"当前局面", "跑团状态"},
-    rule=Rule(_rpg_game_in_group),
-    priority=4,
+    rule=game_context_rule("rpg"),
+    priority=5,
     block=True,
 )
 
@@ -421,8 +408,8 @@ async def handle_situation(
 start_cmd = on_command(
     "开始游戏",
     aliases={"发车"},
-    rule=Rule(_rpg_game_in_group),
-    priority=4,  # 先于狼人杀同名命令；规则不通过时放行
+    rule=game_context_rule("rpg"),
+    priority=5,
     block=True,
 )
 
@@ -460,8 +447,8 @@ async def handle_start(
 end_cmd = on_command(
     "结束游戏",
     aliases={"解散团"},
-    rule=Rule(_rpg_game_in_group),
-    priority=4,  # 先于狼人杀同名命令（其无局分支会全员解禁）；规则不通过时放行
+    rule=game_context_rule("rpg"),
+    priority=5,
     block=True,
 )
 

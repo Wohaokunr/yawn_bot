@@ -30,6 +30,10 @@ from nonebot.rule import Rule
 from nonebot_plugin_orm import async_scoped_session, get_session
 from sqlalchemy import select
 
+from ..game_command_routing import (  # noqa: TID252
+    game_context_rule,
+    no_active_game_rule,
+)
 from ..permission import (  # noqa: TID252
     check_feature_permission,
     is_group_admin,
@@ -357,6 +361,7 @@ async def handle_open(
 signup_cmd = on_command(
     "报名",
     aliases={"上车", "加一"},
+    rule=game_context_rule("werewolf"),
     priority=5,
     block=True,
 )
@@ -395,6 +400,7 @@ async def handle_signup(
 leave_cmd = on_command(
     "退报名",
     aliases={"下车"},
+    rule=game_context_rule("werewolf"),
     priority=5,
     block=True,
 )
@@ -431,6 +437,7 @@ async def handle_leave(
 view_cmd = on_command(
     "查看报名",
     aliases={"报名情况"},
+    rule=game_context_rule("werewolf"),
     priority=5,
     block=True,
 )
@@ -632,6 +639,7 @@ async def handle_remove_ai(
 start_cmd = on_command(
     "开始游戏",
     aliases={"发车"},
+    rule=game_context_rule("werewolf"),
     priority=5,
     block=True,
 )
@@ -687,6 +695,7 @@ async def handle_start(
 end_cmd = on_command(
     "结束游戏",
     aliases={"解散狼局"},
+    rule=game_context_rule("werewolf"),
     priority=5,
     block=True,
 )
@@ -717,6 +726,28 @@ async def handle_end(
     # 先回执，后台等待清理完成
     _spawn_background(stop_game(game))
     await end_cmd.finish("对局已结束")
+
+
+recovery_cmd = on_command(
+    "解散狼局",
+    rule=no_active_game_rule(),
+    priority=5,
+    block=True,
+)
+
+
+@recovery_cmd.handle()
+async def handle_recovery(
+    bot: Bot,
+    event: GroupMessageEvent,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """无活跃玩法时保留显式的狼人杀禁言恢复入口。"""
+    user_id = int(event.get_user_id())
+    if not (is_group_admin(event) or _is_su(user_id)):
+        await recovery_cmd.finish("本群当前没有狼人杀对局")
+    await api.unban_all_members(bot, int(event.group_id))
+    await recovery_cmd.finish("已执行恢复操作：关闭全员禁言并解禁全体群成员")
 
 
 # ── 报名阶段私聊命令（选身份）────────────────────────────
