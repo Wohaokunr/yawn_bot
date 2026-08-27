@@ -1,0 +1,113 @@
+name: Deploy existing release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing GitHub Release tag, for example v0.1.0-rc.4"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy-production:
+    name: Deploy existing release to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+    concurrency:
+      group: yawnbot-production
+      cancel-in-progress: false
+    steps:
+      - name: Resolve immutable release metadata
+        id: release_meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release version must look like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+
+          asset="yawnbot-${VERSION}-image.txt"
+          gh release download "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" \
+            --dir "$RUNNER_TEMP/release-meta"
+
+          meta="$RUNNER_TEMP/release-meta/$asset"
+          test -s "$meta"
+
+          release_image="$(sed -n 's/^image=//p' "$meta")"
+          digest="$(sed -n 's/^digest=//p' "$meta")"
+          commit="$(sed -n 's/^commit=//p' "$meta")"
+          expected_image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION"
+
+          [[ "$release_image" == "$expected_image" ]] || {
+            echo "::error::Release image metadata does not match this repository/version"
+            exit 1
+          }
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Release digest is invalid"
+            exit 1
+          }
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Release commit SHA is invalid"
+            exit 1
+          }
+
+          image="${release_image%:$VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Deploying existing immutable release $VERSION ($digest)"
+
+      - name: Configure deployment SSH identity
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_SSH_PRIVATE_KEY"
+          test -n "$DEPLOY_HOST_KEY"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/yawnbot-deploy
+          printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/yawnbot-deploy ~/.ssh/known_hosts
+
+      - name: Deploy immutable release image
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.release_meta.outputs.image }}
+          DIGEST: ${{ steps.release_meta.outputs.digest }}
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          COMMIT: ${{ steps.release_meta.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$GHCR_USERNAME"
+          test -n "$GHCR_TOKEN"
+          test -n "$DIGEST"
+
+          printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
+            ssh -i ~/.ssh/yawnbot-deploy \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
