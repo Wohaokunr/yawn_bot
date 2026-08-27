@@ -10,6 +10,11 @@ on:
         description: "Release tag, for example v0.1.0"
         required: true
         type: string
+      deploy_production:
+        description: "Deploy this release to production after publishing"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -187,7 +192,7 @@ jobs:
   deploy-production:
     name: Deploy production
     needs: release
-    if: ${{ !contains(needs.release.outputs.version, '-') }}
+    if: ${{ !contains(needs.release.outputs.version, '-') || (github.event_name == 'workflow_dispatch' && inputs.deploy_production) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -203,6 +208,8 @@ jobs:
           DEPLOY_HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
         run: |
           set -euo pipefail
+          test -n "$DEPLOY_SSH_PRIVATE_KEY"
+          test -n "$DEPLOY_HOST_KEY"
           install -d -m 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/yawnbot-deploy
           printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
