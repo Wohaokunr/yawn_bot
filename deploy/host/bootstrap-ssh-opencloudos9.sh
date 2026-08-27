@@ -27,7 +27,9 @@ fi
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091
   source /etc/os-release
-  if [[ "${ID,,}" != *opencloudos* ]] || [[ "${VERSION_ID:-}" != 9* ]]; then
+  os_id="${ID:-}"
+  os_version="${VERSION_ID:-}"
+  if [[ "${os_id,,}" != *opencloudos* ]] || [[ "$os_version" != 9* ]]; then
     echo "error: this bootstrap is intentionally limited to OpenCloudOS 9" >&2
     exit 1
   fi
@@ -62,7 +64,13 @@ if command -v restorecon >/dev/null 2>&1; then
   restorecon -RF "$home_dir/.ssh" || true
 fi
 
-firewall-cmd --permanent --add-service=ssh >/dev/null
+mapfile -t active_zones < <(firewall-cmd --get-active-zones | awk '/^[^[:space:]]/ {print $1}')
+if ((${#active_zones[@]} == 0)); then
+  active_zones=("$(firewall-cmd --get-default-zone)")
+fi
+for zone in "${active_zones[@]}"; do
+  firewall-cmd --permanent --zone="$zone" --add-service=ssh >/dev/null
+done
 firewall-cmd --reload >/dev/null
 
 cat <<MSG
