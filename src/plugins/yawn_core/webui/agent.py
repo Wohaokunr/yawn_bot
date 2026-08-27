@@ -1558,7 +1558,7 @@ async def run_agent_debug(
                         detail="调试模式不发送群消息，也不执行工具内发送",
                         trace=debug_trace,
                     )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 result_payload = {
                     "outcome": "timeout",
                     "text": "",
