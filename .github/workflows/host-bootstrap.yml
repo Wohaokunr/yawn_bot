@@ -24,6 +24,19 @@ jobs:
       - name: Bash syntax
         shell: bash
         run: bash -n deploy/host/*.sh
+      - name: Production bootstrap must fail closed without GitHub deploy key
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          if sudo env -u GITHUB_DEPLOY_PUBLIC_KEY \
+            bash deploy/host/bootstrap-production-opencloudos9.sh >"$log" 2>&1; then
+            cat "$log"
+            echo '::error::production bootstrap unexpectedly succeeded without GITHUB_DEPLOY_PUBLIC_KEY'
+            exit 1
+          fi
+          cat "$log"
+          grep -Fq 'GITHUB_DEPLOY_PUBLIC_KEY is required for production CD' "$log"
       - name: Ensure no maintainer private state is tracked
         shell: bash
         run: |
