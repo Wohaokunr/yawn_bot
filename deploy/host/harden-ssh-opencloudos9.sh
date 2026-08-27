@@ -55,17 +55,41 @@ ClientAliveCountMax 2
 CFG
 
 sshd -t
+effective="$(sshd -T)"
+for expected in \
+  'pubkeyauthentication yes' \
+  'passwordauthentication no' \
+  'kbdinteractiveauthentication no' \
+  'permitrootlogin no' \
+  'x11forwarding no' \
+  'allowagentforwarding no' \
+  'allowtcpforwarding local' \
+  'gatewayports no' \
+  'permittunnel no'; do
+  if ! grep -Fqx "$expected" <<<"$effective"; then
+    echo "error: effective sshd configuration did not apply: $expected" >&2
+    echo "check the Include order in /etc/ssh/sshd_config before retrying" >&2
+    exit 1
+  fi
+done
+
 systemctl reload sshd
 
 systemctl enable --now firewalld
-firewall-cmd --permanent --add-service=ssh >/dev/null
+mapfile -t active_zones < <(firewall-cmd --get-active-zones | awk '/^[^[:space:]]/ {print $1}')
+if ((${#active_zones[@]} == 0)); then
+  active_zones=("$(firewall-cmd --get-default-zone)")
+fi
+for zone in "${active_zones[@]}"; do
+  firewall-cmd --permanent --zone="$zone" --add-service=ssh >/dev/null
+done
 firewall-cmd --reload >/dev/null
 
 cat <<'MSG'
 SSH hardening applied successfully.
 
 Host firewall baseline:
-  - SSH service is explicitly allowed.
+  - SSH service is explicitly allowed in every active firewalld zone.
   - Existing unrelated firewalld services/ports are NOT deleted automatically, because doing so blindly can break a cloud image or existing service.
 
 Review them now with:
