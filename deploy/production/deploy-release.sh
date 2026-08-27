@@ -5,7 +5,16 @@ root=${YAWNBOT_ROOT:-/opt/yawnbot}
 image=${1:-}
 version=${2:-}
 commit=${3:-}
+auth_mode=${4:-}
 keep_backups=${YAWNBOT_BACKUP_KEEP:-10}
+docker_config_dir=""
+
+cleanup() {
+    if [ -n "$docker_config_dir" ] && [ -d "$docker_config_dir" ]; then
+        rm -rf "$docker_config_dir"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
 
 case "$image" in
     ghcr.io/wohaokunr/yawn_bot@sha256:*) ;;
@@ -18,6 +27,22 @@ esac
 case "$commit" in
     [0-9a-f][0-9a-f]*) ;;
     *) echo "invalid commit SHA: $commit" >&2; exit 2 ;;
+esac
+case "$auth_mode" in
+    "") ;;
+    github-token-stdin)
+        IFS= read -r ghcr_username || { echo "missing GHCR username on stdin" >&2; exit 2; }
+        IFS= read -r ghcr_token || { echo "missing GHCR token on stdin" >&2; exit 2; }
+        [ -n "$ghcr_username" ] || { echo "empty GHCR username" >&2; exit 2; }
+        [ -n "$ghcr_token" ] || { echo "empty GHCR token" >&2; exit 2; }
+        docker_config_dir=$(mktemp -d)
+        chmod 700 "$docker_config_dir"
+        export DOCKER_CONFIG="$docker_config_dir"
+        printf '%s' "$ghcr_token" | docker login ghcr.io \
+            --username "$ghcr_username" --password-stdin >/dev/null
+        unset ghcr_token
+        ;;
+    *) echo "invalid registry auth mode: $auth_mode" >&2; exit 2 ;;
 esac
 
 [ -d "$root/data/backups" ] || {
