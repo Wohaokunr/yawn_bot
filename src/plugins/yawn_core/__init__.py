@@ -13,6 +13,7 @@ from . import (
     event_log,
     friend_approve,
     game_command_routing,
+    health,
     help_panel,
     metrics,
     panel,
@@ -33,6 +34,7 @@ __all__ = [
     "friend_approve",
     "game_command_routing",
     "get_sub_plugin_load_report",
+    "health",
     "help_panel",
     "metrics",
     "panel",
@@ -167,6 +169,7 @@ async def _report_sub_plugin_status() -> None:
 
 game_command_routing.register_no_active_game_matchers()
 _SUB_PLUGIN_LOAD_REPORT = _load_sub_plugins()
+health.install_healthcheck(get_sub_plugin_load_report)
 
 # WebUI 需要读取上面的子插件加载报告，因此在核心初始化完成后注册。
 from . import webui as webui

@@ -224,3 +224,34 @@ jobs:
         run: uv sync --all-groups --locked --python 3.10
       - name: Test SPA serving contract
         run: uv run --python 3.10 pytest -q tests/test_webui_spa.py
+
+  docker-deploy-smoke:
+    name: Docker clean-deploy smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare minimal configuration
+        run: cp .env.example .env
+      - name: Validate Compose
+        run: docker compose config
+      - name: Build runtime image
+        run: docker compose build
+      - name: Start and wait for health
+        shell: bash
+        run: |
+          docker compose up -d
+          for _ in {1..45}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/healthz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs yawnbot
+          exit 1
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs yawnbot
+      - name: Stop clean-deploy smoke
+        if: always()
+        run: docker compose down -v

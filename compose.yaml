@@ -1,0 +1,30 @@
+services:
+  yawnbot:
+    build:
+      context: .
+    image: yawnbot:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      LOCALSTORE_USE_CWD: "true"
+      YAWNBOT_AUTO_MIGRATE: "${YAWNBOT_AUTO_MIGRATE:-true}"
+    ports:
+      - "${YAWNBOT_PORT:-8080}:8080"
+    volumes:
+      - yawnbot-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  yawnbot-data:

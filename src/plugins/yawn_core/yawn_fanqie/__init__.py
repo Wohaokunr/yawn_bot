@@ -4,7 +4,9 @@
 临时文件中保存，任务记录与正文内容分离，方便任务恢复与权限审计。
 """
 
-from nonebot import get_plugin_config, logger
+from pathlib import Path
+
+from nonebot import get_driver, get_plugin_config, logger
 from nonebot.plugin import PluginMetadata
 
 from ..command_catalog import (  # noqa: TID252
@@ -53,3 +55,34 @@ __plugin_meta__ = PluginMetadata(
 config = get_plugin_config(Config)
 
 logger.info("番茄小说子插件已加载")
+
+
+def _browser_executable_exists(path: str) -> bool:
+    return Path(path).is_file()
+
+
+@get_driver().on_startup
+async def _diagnose_playwright_chromium() -> None:
+    """Report an actionable warning before the first browser search request."""
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.warning(
+            "番茄搜索不可用：未安装 Playwright Python 包；请重新执行 uv sync --locked"
+        )
+        return
+
+    try:
+        async with async_playwright() as playwright:
+            executable = playwright.chromium.executable_path
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"番茄搜索浏览器诊断失败：{type(exc).__name__}: {exc}")
+        return
+
+    if not _browser_executable_exists(executable):
+        logger.warning(
+            "番茄搜索已启用，但 Playwright Chromium 未安装；"
+            "原生部署请执行 `uv run playwright install chromium`。"
+            "官方 Docker 镜像构建会自动安装 Chromium。"
+        )
