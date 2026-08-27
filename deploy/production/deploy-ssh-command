@@ -2,7 +2,11 @@
 set -efu
 
 set -- ${SSH_ORIGINAL_COMMAND:-}
-[ "$#" -eq 4 ] || exit 2
+case "$#" in
+    4) ;;
+    5) [ "$5" = github-token-stdin ] || exit 2 ;;
+    *) exit 2 ;;
+esac
 [ "$1" = /opt/yawnbot/bin/deploy-release ] || exit 2
 
 exec "$@"
