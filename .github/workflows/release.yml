@@ -224,7 +224,15 @@ jobs:
   deploy-production:
     name: Deploy production
     needs: release
-    if: ${{ !contains(needs.release.outputs.version, '-') || (github.event_name == 'workflow_dispatch' && inputs.deploy_production) }}
+    if: >-
+      ${{
+        always() &&
+        needs.release.result == 'success' &&
+        (
+          !contains(needs.release.outputs.version, '-') ||
+          (github.event_name == 'workflow_dispatch' && inputs.deploy_production)
+        )
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
