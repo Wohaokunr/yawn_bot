@@ -49,7 +49,7 @@ The hardening drop-in:
 - enables public-key authentication;
 - disables password and keyboard-interactive authentication;
 - disables root SSH login;
-- disables X11, agent forwarding and SSH tunnels;
+- disables X11 forwarding, SSH agent forwarding and TUN/TAP tunnel devices;
 - keeps **local TCP forwarding** enabled so maintainers can later tunnel the NapCat/SnowLuma management UI without exposing it publicly;
 - validates the resulting OpenSSH configuration with `sshd -t` before reloading `sshd`.
 
