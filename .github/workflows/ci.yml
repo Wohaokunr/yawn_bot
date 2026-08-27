@@ -7,8 +7,84 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  quality:
+  repository-hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject whitespace errors
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          else
+            git show --check --format= HEAD
+          fi
+
+      - name: Reject generated, runtime, secret or oversized tracked files
+        run: python tools/repo_guard.py
+
+  python-lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Ruff
+        run: >-
+          uv run --python 3.10 ruff check
+          src tests tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+      - name: Compile Python sources
+        run: >-
+          uv run --python 3.10 python -m compileall -q
+          src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+
+  python-typecheck:
+    name: Python typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Pyright
+        run: >-
+          uv run --python 3.10 pyright
+          src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+
+  python-tests:
+    name: Python tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -16,33 +92,91 @@ jobs:
       LOCALSTORE_USE_CWD: "true"
       RPG_AI_ENABLED: "false"
       WW_AI_ENABLED: "false"
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-
       - name: Set up Python
         run: uv python install 3.10
-
       - name: Install dependencies
         run: uv sync --all-groups --locked --python 3.10
+      - name: Test backend and plugins without SPA build output
+        run: uv run --python 3.10 pytest -q --ignore=tests/test_webui_spa.py
 
+  webui-quality:
+    name: WebUI quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install dependencies
+        run: npm ci
       - name: Test
-        run: uv run --python 3.10 pytest -q
+        run: npm test -- --run
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: Upload WebUI dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-dist
+          path: webui/dist
+          if-no-files-found: error
+          retention-days: 3
 
-      - name: Lint
-        run: uv run --python 3.10 ruff check src tests tools/rpg_module_editor
+  migration-check:
+    name: Migration check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Validate migration graph
+        run: uv run --python 3.10 nb orm heads
+      - name: Apply migrations on a clean SQLite database
+        run: uv run --python 3.10 nb orm upgrade heads
+      - name: Detect model/migration drift
+        run: uv run --python 3.10 nb orm check
 
-      - name: Type check
-        run: uv run --python 3.10 pyright src tools/rpg_module_editor
-
-      - name: Compile
-        run: uv run --python 3.10 python -m compileall -q src tools/rpg_module_editor
-
+  plugin-smoke:
+    name: Plugin smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
       - name: Load configured plugins
         shell: bash
         run: |
@@ -53,6 +187,7 @@ jobs:
           nonebot.load_from_toml("pyproject.toml")
           required = (
               "yawn_core",
+              "yawn_core:yawn_agent",
               "yawn_core:yawn_rpg",
               "yawn_core:yawn_werewolf",
               "yawn_core:yawn_fanqie",
@@ -61,3 +196,31 @@ jobs:
           if missing:
               raise SystemExit(f"missing configured plugins: {', '.join(missing)}")
           PY
+
+  webui-spa-integration:
+    name: WebUI SPA integration
+    needs: webui-quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: webui/dist
+      - name: Assert frontend artifact exists
+        run: test -f webui/dist/index.html
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Test SPA serving contract
+        run: uv run --python 3.10 pytest -q tests/test_webui_spa.py

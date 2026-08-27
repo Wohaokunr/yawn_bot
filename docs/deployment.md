@@ -50,7 +50,8 @@ CI 和维护检查需要 `dev`、`tools` 两组依赖。
 
 ### 3.1 Core / Agent 管理 WebUI
 
-WebUI 与 Bot 共用同一个 FastAPI 进程，默认关闭。需要管理台时：
+WebUI 与 Bot 共用同一个 FastAPI 进程，默认关闭。`webui/dist/` 是可再生构建产物，
+不提交到 Git；clean checkout 和普通后端/API 测试都不依赖它。需要管理台时：
 
 1. 在 `webui/` 执行 `npm ci` 和 `npm run build`，确认生成 `webui/dist/`。
 2. 设置 `WEBUI_ENABLED=true` 和随机生成的 `WEBUI_ADMIN_TOKEN`（至少 32 个字符）。
@@ -61,6 +62,12 @@ WebUI 与 Bot 共用同一个 FastAPI 进程，默认关闭。需要管理台时
    回环/内网调试。
 4. 首次启用包含 WebUI 审计表的新版本时，备份 SQLite/WAL/SHM 后由维护者执行
    `uv run nb orm upgrade heads`。
+
+CI 的 `webui-quality` job 会执行 `npm ci → test → typecheck → build`，再把生成的
+`webui/dist/` 上传为短期 artifact；后续 SPA 集成测试下载该 artifact 后验证
+FastAPI 的 `/webui` fallback 和静态资源服务。生产发布可以复用同一构建步骤，但不要
+把 dist 回提交到源码仓库。`WEBUI_ENABLED=true` 时若缺少 `dist/index.html`，启动检查会
+直接失败并提示先构建前端。
 
 WebUI 只使用单运维 Token，不接管 QQ 登录或 OneBot Token。会话使用 HttpOnly、
 SameSite 严格 Cookie 和 CSRF Header；管理台不展示 Agent 原始群消息正文。WebSocket

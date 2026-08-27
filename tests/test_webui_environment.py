@@ -235,7 +235,7 @@ def test_environment_routes_require_csrf_and_report_conflicts(
     monkeypatch.setattr(auth.config, "webui_cookie_secure", False)
     auth.reset_login_failures_for_tests()
     app = FastAPI()
-    app_module.register(app)
+    app_module.register(app, include_spa=False)
     client = TestClient(app)
     login = client.post("/webui/api/v1/auth/login", json={"token": "x" * 40})
     csrf = login.json()["data"]["csrfToken"]
