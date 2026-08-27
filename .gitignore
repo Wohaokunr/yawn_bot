@@ -10,6 +10,9 @@
 *.pem
 *.key
 
+# Maintainer-only deployment state. Public deployment templates live outside this tree.
+/deploy/private/
+
 # Python / uv / test / type-check caches
 __pycache__/
 *.py[cod]
