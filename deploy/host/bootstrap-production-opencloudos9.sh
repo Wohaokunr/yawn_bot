@@ -10,6 +10,30 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+if [[ -z "$GITHUB_DEPLOY_PUBLIC_KEY" ]]; then
+  cat >&2 <<'MSG'
+error: GITHUB_DEPLOY_PUBLIC_KEY is required for production CD.
+
+Pass the public key to the bootstrap process itself, for example:
+  GITHUB_DEPLOY_PUBLIC_KEY='ssh-ed25519 AAAA... github-actions-yawnbot' \
+    bash deploy/host/bootstrap-production-opencloudos9.sh
+
+Or export it before invoking bash:
+  export GITHUB_DEPLOY_PUBLIC_KEY='ssh-ed25519 AAAA... github-actions-yawnbot'
+  bash deploy/host/bootstrap-production-opencloudos9.sh
+
+Assigning GITHUB_DEPLOY_PUBLIC_KEY on a previous line without `export` does not make it
+available to the child bash process. The bootstrap refuses to report success without the
+GitHub Actions deploy key being authorized.
+MSG
+  exit 1
+fi
+
+if [[ ! "$GITHUB_DEPLOY_PUBLIC_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]]; then
+  echo "error: GITHUB_DEPLOY_PUBLIC_KEY does not look like a supported OpenSSH public key" >&2
+  exit 1
+fi
+
 if [[ "$YAWNBOT_ROOT" != "/opt/yawnbot" ]]; then
   echo "error: production forced-command policy currently requires YAWNBOT_ROOT=/opt/yawnbot" >&2
   exit 1
@@ -45,7 +69,7 @@ if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-for command_name in docker curl flock install; do
+for command_name in docker curl flock install ssh-keygen; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "error: required command is missing: $command_name" >&2
     exit 1
@@ -106,40 +130,36 @@ if [[ -z "$home_dir" || ! -d "$home_dir" ]]; then
   exit 1
 fi
 
-if [[ -n "$GITHUB_DEPLOY_PUBLIC_KEY" ]]; then
-  if [[ ! "$GITHUB_DEPLOY_PUBLIC_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]]; then
-    echo "error: GITHUB_DEPLOY_PUBLIC_KEY does not look like a supported OpenSSH public key" >&2
-    exit 1
-  fi
+read -r key_type key_blob _ <<< "$GITHUB_DEPLOY_PUBLIC_KEY"
+install -d -m 0700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$home_dir/.ssh"
+touch "$home_dir/.ssh/authorized_keys"
+chown "$DEPLOY_USER:$DEPLOY_USER" "$home_dir/.ssh/authorized_keys"
+chmod 0600 "$home_dir/.ssh/authorized_keys"
 
-  read -r key_type key_blob _ <<< "$GITHUB_DEPLOY_PUBLIC_KEY"
-  install -d -m 0700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$home_dir/.ssh"
-  touch "$home_dir/.ssh/authorized_keys"
-  chown "$DEPLOY_USER:$DEPLOY_USER" "$home_dir/.ssh/authorized_keys"
-  chmod 0600 "$home_dir/.ssh/authorized_keys"
-
-  forced_line="restrict,command=\"/opt/yawnbot/bin/deploy-ssh-command\" $GITHUB_DEPLOY_PUBLIC_KEY"
-  if grep -Fqx "$forced_line" "$home_dir/.ssh/authorized_keys"; then
-    :
-  elif grep -Eq "(^|[[:space:]])${key_type}[[:space:]]+${key_blob}([[:space:]]|$)" "$home_dir/.ssh/authorized_keys"; then
-    echo "error: the GitHub deploy key is already authorized with different SSH options; refusing to create an ambiguous unrestricted entry" >&2
-    exit 1
-  else
-    printf '%s\n' "$forced_line" >> "$home_dir/.ssh/authorized_keys"
-  fi
+forced_line="restrict,command=\"/opt/yawnbot/bin/deploy-ssh-command\" $GITHUB_DEPLOY_PUBLIC_KEY"
+if grep -Fqx "$forced_line" "$home_dir/.ssh/authorized_keys"; then
+  :
+elif grep -Eq "(^|[[:space:]])${key_type}[[:space:]]+${key_blob}([[:space:]]|$)" "$home_dir/.ssh/authorized_keys"; then
+  echo "error: the GitHub deploy key is already authorized with different SSH options; refusing to create an ambiguous unrestricted entry" >&2
+  exit 1
+else
+  printf '%s\n' "$forced_line" >> "$home_dir/.ssh/authorized_keys"
 fi
 
 if command -v restorecon >/dev/null 2>&1; then
   restorecon -RF "$home_dir/.ssh" "$YAWNBOT_ROOT" || true
 fi
 
-if ! runuser -u "$DEPLOY_USER" -- docker info >/dev/null 2>&1; then
-  echo "error: deploy user still cannot access Docker; check docker group membership and daemon socket permissions" >&2
+if ! grep -Fqx "$forced_line" "$home_dir/.ssh/authorized_keys"; then
+  echo "error: GitHub deploy key authorization verification failed" >&2
   exit 1
 fi
 
-if [[ -z "$GITHUB_DEPLOY_PUBLIC_KEY" ]]; then
-  echo "warning: GITHUB_DEPLOY_PUBLIC_KEY was not provided; GitHub Actions SSH deployment is not authorized yet" >&2
+deploy_key_fingerprint="$(printf '%s\n' "$GITHUB_DEPLOY_PUBLIC_KEY" | ssh-keygen -lf - | awk '{print $2}')"
+
+if ! runuser -u "$DEPLOY_USER" -- docker info >/dev/null 2>&1; then
+  echo "error: deploy user still cannot access Docker; check docker group membership and daemon socket permissions" >&2
+  exit 1
 fi
 
 cat <<MSG
@@ -152,6 +172,9 @@ Installed:
   $YAWNBOT_ROOT/.env
   $YAWNBOT_ROOT/data/backups/
   $YAWNBOT_ROOT/deployments/
+
+GitHub Actions deploy key authorized for $DEPLOY_USER:
+  $deploy_key_fingerprint
 
 The release workflow passes a short-lived GitHub Actions package token over encrypted SSH stdin for each deploy, so no long-lived GHCR PAT is stored on this host.
 
