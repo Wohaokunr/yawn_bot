@@ -14,9 +14,7 @@ def _signup_commands(context: CommandContext, game: Game) -> set[str]:
     else:
         available.add("报名")
     if (
-        context.user_id == game.host_user_id
-        or context.is_group_admin
-        or context.is_superuser
+        context.can_manage_room
     ):
         available.update({"选择模组", "开始游戏", "结束游戏"})
     return available
@@ -123,11 +121,7 @@ def get_available_commands(context: CommandContext) -> frozenset[str]:
     if game is None:
         return _ENTRY_COMMANDS
 
-    privileged = (
-        context.user_id == game.host_user_id
-        or context.is_group_admin
-        or context.is_superuser
-    )
+    privileged = context.can_manage_room
     if game.phase is Phase.SIGNUP:
         if context.group_id is None:
             return frozenset({"跑团帮助"})

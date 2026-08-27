@@ -53,3 +53,11 @@ body {
 .help-title { margin-top: 5px; font-size: 18px; font-weight: 800; color: #303a53; }
 .help-summary { margin-top: 6px; font-size: 12px; line-height: 1.5; color: #8690a5; }
 .help-entry { margin-top: 8px; font-size: 12px; color: #68789f; font-weight: 700; }
+.command-heading { margin-top: 10px; }
+.command-section { margin-top: 20px; }
+.command-section-title { margin: 0 0 9px; }
+.command-list { display: flex; flex-direction: column; gap: 9px; }
+.command-item { padding: 13px 15px; border-radius: 16px; background: rgba(255,255,255,.72); border: 1px solid rgba(224,231,245,.86); }
+.command-name { font-size: 15px; line-height: 1.35; font-weight: 800; color: #34415f; }
+.command-description { margin-top: 4px; font-size: 12px; line-height: 1.55; color: #7d879e; }
+.command-aliases { margin-top: 5px; font-size: 11px; line-height: 1.45; color: #9aa3b5; }

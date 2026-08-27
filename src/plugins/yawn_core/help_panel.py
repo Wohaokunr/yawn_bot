@@ -1,11 +1,10 @@
 """渐进式帮助：先选功能分类，再展示当前场景真正可用的命令。"""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
 
-from nonebot import get_driver, logger
+from nonebot import logger
 from nonebot.adapters.onebot.v11 import (
-    GroupMessageEvent,
     Message,
     MessageEvent,
     MessageSegment,
@@ -15,24 +14,41 @@ from nonebot.params import Arg, CommandArg
 from nonebot.plugin import PluginMetadata, on_command
 from nonebot_plugin_orm import async_scoped_session
 
+from .command_access import resolve_command_access_context
 from .command_catalog import (
-    CommandContext,
+    CommandAccessContext,
     CommandSpec,
     HelpSectionKey,
     PluginCommandGroup,
     get_registered_command_groups,
     register_command_group,
 )
+from .command_definition import CommandDefinition
 from .command_ux import invalid_choice
-from .permission import get_user_feature_status, is_group_admin
-from .session_interaction import is_cancel
-from .ui.panel_renderer import HelpMenuCard, render_help_menu
+from .session_interaction import (
+    SessionIntent,
+    pass_through_new_command,
+    resolve_session_intent,
+)
+from .ui.panel_renderer import (
+    CommandItemView,
+    CommandSectionView,
+    HelpMenuCard,
+    render_command_sections,
+    render_help_menu,
+)
 
 logger.info("帮助面板模块已加载")
 
 help_cmd = on_command(
     "help",
     aliases={"帮助", "命令"},
+    priority=5,
+    block=True,
+)
+operation_cmd = on_command(
+    "操作",
+    aliases={"当前操作", "下一步"},
     priority=5,
     block=True,
 )
@@ -49,8 +65,21 @@ COMMAND_GROUP = register_command_group(
                 description="按功能分类查看当前可用命令",
                 display_level="entry",
             ),
+            CommandSpec(
+                name="操作",
+                aliases=("当前操作", "下一步"),
+                description="查看当前场景真正能执行的动作",
+                display_level="entry",
+            ),
         ),
     )
+)
+
+_ADMIN_PERMISSIONS = frozenset({"group_admin", "superuser", "room_host_or_admin"})
+_COMMAND_SECTION_ORDER = (
+    ("recommended", "推荐操作"),
+    ("common", "常用"),
+    ("admin", "管理操作"),
 )
 
 __plugin_meta__ = PluginMetadata(
@@ -129,36 +158,23 @@ HELP_SECTIONS = (
 )
 
 
-def _is_group_admin_or_su(event: MessageEvent, *, is_su: bool) -> bool:
-    """检查是否为群管理员或超级用户。"""
-
-    if is_su:
-        return True
-    return isinstance(event, GroupMessageEvent) and is_group_admin(event)
-
-
 def _command_is_visible(
     command: CommandSpec,
     *,
-    group_id: int | None,
-    enabled_features: set[str],
-    context: CommandContext,
+    context: CommandAccessContext,
 ) -> bool:
     """处理跨插件通用的权限、作用域和功能开关。"""
 
-    return not (
-        (command.scope == "group" and group_id is None)
-        or (command.scope == "private" and group_id is not None)
-        or (bool(command.feature) and command.feature not in enabled_features)
-        or (command.permission == "superuser" and not context.is_superuser)
-        or (command.permission == "group_admin" and not context.is_group_admin)
+    return context.allows(
+        scope=command.scope,
+        feature=command.feature,
+        permission=command.permission,
     )
 
 
 def _collect_visible_sections(
     *,
-    context: CommandContext,
-    enabled_features: set[str],
+    context: CommandAccessContext,
 ) -> tuple[HelpSectionView, ...]:
     """从注册表按帮助分类收集当前真正可用的命令。"""
 
@@ -175,8 +191,6 @@ def _collect_visible_sections(
                 if (command.help_section or group.help_section) == section.key
                 and _command_is_visible(
                     command,
-                    group_id=context.group_id,
-                    enabled_features=enabled_features,
                     context=context,
                 )
             )
@@ -207,24 +221,128 @@ def _build_section_menu(sections: tuple[HelpSectionView, ...]) -> str:
     return "\n".join(lines)
 
 
-def _build_section_text(view: HelpSectionView) -> str:
-    """构建单个分类的第二层命令帮助。"""
+def _command_name(command: CommandSpec) -> str:
+    if isinstance(command, CommandDefinition):
+        return command.qualified_name
+    return command.name
 
-    lines = [f"═══ {view.section.display_name} ═══"]
-    for group_index, (group, commands, hint) in enumerate(view.groups):
-        if group_index or len(view.groups) > 1:
-            lines.extend(("", f"【{group.display_name}】"))
-        for command in commands:
-            aliases = ""
-            if command.aliases:
-                alias_text = "、".join(f"/{alias}" for alias in command.aliases)
-                aliases = f"（别名：{alias_text}）"
+
+def _command_aliases(command: CommandSpec) -> tuple[str, ...]:
+    if isinstance(command, CommandDefinition):
+        return command.help_aliases
+    return command.aliases
+
+
+def _command_section_key(command: CommandSpec) -> str:
+    if command.permission in _ADMIN_PERMISSIONS:
+        return "admin"
+    if command.display_level in {"entry", "lobby", "contextual"}:
+        return "recommended"
+    return "common"
+
+
+def _build_command_sections(
+    commands: Iterable[CommandSpec],
+) -> tuple[CommandSectionView, ...]:
+    """只按命令元数据分组；可用性仍完全由命令组负责。"""
+
+    grouped: dict[str, list[CommandItemView]] = {
+        key: [] for key, _title in _COMMAND_SECTION_ORDER
+    }
+    for command in commands:
+        aliases = "、".join(f"/{alias}" for alias in _command_aliases(command))
+        grouped[_command_section_key(command)].append(
+            CommandItemView(
+                name=_command_name(command),
+                description=command.description,
+                aliases=aliases,
+            )
+        )
+    return tuple(
+        CommandSectionView(title, tuple(grouped[key]))
+        for key, title in _COMMAND_SECTION_ORDER
+        if grouped[key]
+    )
+
+
+def _view_commands(view: HelpSectionView) -> tuple[CommandSpec, ...]:
+    return tuple(
+        command for _group, commands, _hint in view.groups for command in commands
+    )
+
+
+def _view_hints(view: HelpSectionView) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(hint for _group, _commands, hint in view.groups if hint))
+
+
+def _build_grouped_command_text(
+    *,
+    title: str,
+    commands: Iterable[CommandSpec],
+    hints: Iterable[str] = (),
+    footer: str,
+) -> str:
+    lines = [f"═══ {title} ═══"]
+    for section in _build_command_sections(commands):
+        lines.extend(("", f"【{section.title}】"))
+        for command in section.commands:
+            aliases = f"（别名：{command.aliases}）" if command.aliases else ""
             description = f" — {command.description}" if command.description else ""
             lines.append(f"/{command.name}{aliases}{description}")
-        if hint:
-            lines.append(f"提示：{hint}")
-    lines.extend(("", "发送 /help 返回分类菜单。"))
+    lines.extend(f"提示：{hint}" for hint in hints)
+    lines.extend(("", footer))
     return "\n".join(lines)
+
+
+def _build_section_text(view: HelpSectionView) -> str:
+    """构建单个分类的第二层纯文本降级帮助。"""
+
+    return _build_grouped_command_text(
+        title=view.section.display_name,
+        commands=_view_commands(view),
+        hints=_view_hints(view),
+        footer="发送 /操作 查看当前动作；发送 /help 返回分类菜单。",
+    )
+
+
+def _select_operation_commands(
+    sections: tuple[HelpSectionView, ...],
+) -> tuple[CommandSpec, ...]:
+    """从已经过 ``available_commands`` 过滤的结果中挑选最短动作集。
+
+    这里仅依据稳定展示元数据决定层级，不读取任何游戏状态，避免形成新的
+    阶段判断路径。
+    """
+
+    commands = tuple(
+        command
+        for view in sections
+        for command in _view_commands(view)
+        if command.name != "操作"
+    )
+    contextual = tuple(
+        command
+        for command in commands
+        if command.display_level == "contextual"
+        and command.permission not in _ADMIN_PERMISSIONS
+    )
+    if contextual:
+        group_support = tuple(
+            command
+            for command in commands
+            if command.operation_support and command.scope != "private"
+        )
+        return (*contextual, *group_support)
+
+    lobby = tuple(command for command in commands if command.display_level == "lobby")
+    if lobby:
+        return lobby
+
+    support = tuple(command for command in commands if command.operation_support)
+    if support:
+        return support
+
+    return tuple(command for command in commands if command.display_level == "entry")
 
 
 def _normalize_topic(text: str) -> str:
@@ -257,24 +375,8 @@ async def _current_help_sections(
     event: MessageEvent,
     session: async_scoped_session,
 ) -> tuple[HelpSectionView, ...]:
-    user_id = int(event.get_user_id())
-    group_id: Optional[int] = getattr(event, "group_id", None)
-    if group_id is not None:
-        group_id = int(group_id)
-
-    is_su = str(user_id) in get_driver().config.superusers
-    statuses = await get_user_feature_status(user_id, group_id, session)
-    enabled_features = {key for key, _, enabled, _ in statuses if enabled}
-    context = CommandContext(
-        user_id=user_id,
-        group_id=group_id,
-        is_superuser=is_su,
-        is_group_admin=_is_group_admin_or_su(event, is_su=is_su),
-    )
-    return _collect_visible_sections(
-        context=context,
-        enabled_features=enabled_features,
-    )
+    context = await resolve_command_access_context(event, session)
+    return _collect_visible_sections(context=context)
 
 
 @help_cmd.handle()
@@ -313,28 +415,77 @@ async def handle_help_entry(
 @help_cmd.got("help_topic")
 async def handle_help_topic(
     event: MessageEvent,
+    matcher: Matcher,
     session: async_scoped_session,
     topic: Message = Arg("help_topic"),
 ) -> None:
     """接收首层菜单的序号/名称，并结束本次帮助会话。"""
 
     topic_text = topic.extract_plain_text().strip()
-    if is_cancel(topic_text):
+    intent = resolve_session_intent(topic_text)
+    if intent is SessionIntent.NEW_COMMAND:
+        await pass_through_new_command(matcher, topic_text)
+    if intent in {SessionIntent.EXIT, SessionIntent.BACK}:
         await help_cmd.finish("已退出帮助。")
 
     sections = await _current_help_sections(event, session)
+    if intent is SessionIntent.MENU:
+        await help_cmd.reject_arg("help_topic", _build_section_menu(sections))
     view = _resolve_section(topic_text, sections)
     if view is None:
         await help_cmd.reject_arg(
             "help_topic",
             invalid_choice(valid=f"1-{len(sections)} 或分类名称"),
         )
-    await help_cmd.finish(_build_section_text(view))
+    command_sections = _build_command_sections(_view_commands(view))
+    help_image = await render_command_sections(
+        title=view.section.display_name,
+        subtitle="只展示你在当前场景真正能使用的命令。",
+        sections=command_sections,
+        note="；".join(_view_hints(view)) or None,
+    )
+    if help_image is None:
+        await help_cmd.finish(_build_section_text(view))
+    await help_cmd.finish(
+        MessageSegment.image(help_image) + "\n发送 /操作 查看当前动作"
+    )
+
+
+@operation_cmd.handle()
+async def handle_operation(
+    event: MessageEvent,
+    session: async_scoped_session,
+) -> None:
+    """显示当前上下文最值得执行的动作，不另做游戏状态判断。"""
+
+    sections = await _current_help_sections(event, session)
+    commands = _select_operation_commands(sections)
+    if not commands:
+        await operation_cmd.finish("当前没有可执行的操作。发送 /help 查看帮助。")
+
+    operation_image = await render_command_sections(
+        title="当前可做什么",
+        subtitle="已按当前会话、身份、阶段和权限筛选。",
+        sections=_build_command_sections(commands),
+    )
+    if operation_image is None:
+        await operation_cmd.finish(
+            _build_grouped_command_text(
+                title="当前可做什么",
+                commands=commands,
+                footer="发送 /help 查看完整帮助。",
+            )
+        )
+    await operation_cmd.finish(
+        MessageSegment.image(operation_image) + "\n发送 /help 查看完整帮助"
+    )
 
 
 __all__ = [
     "HELP_SECTIONS",
     "handle_help_entry",
     "handle_help_topic",
+    "handle_operation",
     "help_cmd",
+    "operation_cmd",
 ]

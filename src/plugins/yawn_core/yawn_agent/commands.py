@@ -8,19 +8,29 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
 from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, CommandArg
-from nonebot.plugin import on_command
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from ..command_definition import build_matcher  # noqa: TID252
+from ..command_ux import (
+    permission_required,
+    scope_required,
+    temporary_failure,
+    validation_failed,
+)
+from .command_definitions import COMMAND_BY_NAME
 from ..permission import is_group_admin, require_feature
 from ..session_interaction import (
     SessionChoice,
+    SessionIntent,
     confirmation_matches,
     format_change_preview,
     is_cancel,
+    pass_through_new_command,
     parse_toggle,
     resolve_choice,
+    resolve_session_intent,
 )
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy
 from ..data_models.group_agent_config import GroupAgentConfig
@@ -42,15 +52,15 @@ from .persona import (
 
 # 命令元数据由包级 __init__ 注册到 command_catalog。
 
-agent_command = on_command("群聊Agent", aliases={"群AI"}, priority=5, block=True)
-agent_settings = on_command("Agent设置", priority=5, block=True)
-agent_status = on_command("Agent状态", priority=5, block=True)
-agent_memory = on_command("Agent记忆", priority=5, block=True)
-agent_profile = on_command("Agent画像", priority=5, block=True)
-agent_clear = on_command("Agent清理", priority=5, block=True)
-agent_export = on_command("Agent导出", priority=5, block=True)
-agent_persona = on_command("Agent人设", priority=5, block=True)
-agent_privacy = on_command("Agent隐私", priority=5, block=True)
+agent_command = build_matcher(COMMAND_BY_NAME["群聊Agent"])
+agent_settings = build_matcher(COMMAND_BY_NAME["Agent设置"])
+agent_status = build_matcher(COMMAND_BY_NAME["Agent状态"])
+agent_memory = build_matcher(COMMAND_BY_NAME["Agent记忆"])
+agent_profile = build_matcher(COMMAND_BY_NAME["Agent画像"])
+agent_clear = build_matcher(COMMAND_BY_NAME["Agent清理"])
+agent_export = build_matcher(COMMAND_BY_NAME["Agent导出"])
+agent_persona = build_matcher(COMMAND_BY_NAME["Agent人设"])
+agent_privacy = build_matcher(COMMAND_BY_NAME["Agent隐私"])
 
 # /Agent设置 的交互字段。业务边界留在命令模块，共享 helper 只负责会话输入约定。
 _AGENT_SETTING_CHOICES = (
@@ -190,7 +200,7 @@ def _build_agent_settings_menu(config: GroupAgentConfig) -> str:
         lines.append(
             f"{index}. {choice.label}：{_format_agent_setting_value(choice.key, value)}"
         )
-    lines.extend(("", "回复序号或名称选择要修改的项目；发送「取消」退出。"))
+    lines.extend(("", "回复序号或名称选择；「菜单」重新显示，「取消」退出。"))
     return "\n".join(lines)
 
 
@@ -208,7 +218,7 @@ def _build_persona_menu(config: GroupAgentConfig) -> str:
     lines = [_build_persona_text(config), "", "选择要编辑的字段："]
     for index, choice in enumerate(_PERSONA_CHOICES, start=1):
         lines.append(f"{index}. {choice.label}")
-    lines.append("回复序号或字段名称；发送「取消」退出。")
+    lines.append("回复序号或字段名称；「菜单」重新显示，「取消」退出。")
     return "\n".join(lines)
 
 
@@ -232,14 +242,20 @@ async def handle_agent_command(
     args: Message = CommandArg(),
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_command.finish("请在群聊中使用")
+        await agent_command.finish(
+            scope_required("群聊 Agent 管理", "群聊", "请在目标群发送 /群聊Agent")
+        )
     dbg(
         f"群 {event.group_id} 命令 /群聊Agent: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /群聊Agent 拒绝: 非群管理")
-        await agent_command.finish("群聊 Agent 仅限群主或管理员管理")
+        await agent_command.finish(
+            permission_required(
+                "群聊 Agent 管理", "群主或群管理员", "请群管理员执行此操作"
+            )
+        )
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
         # 并发创建竞态的输方在对方事务未提交时可能读到空。
@@ -280,14 +296,20 @@ async def handle_agent_settings(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_settings.finish("请在群聊中使用")
+        await agent_settings.finish(
+            scope_required("Agent 设置", "群聊", "请在目标群发送 /Agent设置")
+        )
     dbg(
         f"群 {event.group_id} 命令 /Agent设置: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /Agent设置 拒绝: 非群管理")
-        await agent_settings.finish("群聊 Agent 设置仅限群主或管理员")
+        await agent_settings.finish(
+            permission_required(
+                "Agent 设置", "群主或群管理员", "请群管理员执行此操作"
+            )
+        )
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
         await agent_settings.finish("Agent 配置暂时不可用，请稍后重试")
@@ -331,7 +353,7 @@ async def handle_agent_settings(
         current = _format_agent_setting_value(key, getattr(config, key))
         await agent_settings.send(
             f"{_AGENT_SETTING_LABELS[key]}\n当前：{current}\n"
-            f"{_agent_setting_value_prompt(key)}；发送「取消」退出。"
+            f"{_agent_setting_value_prompt(key)}；发送「返回」回菜单，「取消」退出。"
         )
         return
 
@@ -349,9 +371,16 @@ async def handle_agent_settings_input(
     session: async_scoped_session,
     choice: str = ArgPlainText("agent_settings_input"),
 ) -> None:
+    intent = resolve_session_intent(choice)
+    if intent is SessionIntent.NEW_COMMAND:
+        await pass_through_new_command(matcher, choice)
     if not isinstance(event, GroupMessageEvent) or not is_group_admin(event):
-        await agent_settings.finish("当前已无权继续修改 Agent 设置")
-    if is_cancel(choice):
+        await agent_settings.finish(
+            permission_required(
+                "Agent 设置", "群主或群管理员", "重新进入时会再次检查权限"
+            )
+        )
+    if intent is SessionIntent.EXIT:
         await agent_settings.finish("已取消 Agent 设置。")
 
     config = await get_or_create_config(session, int(event.group_id))
@@ -359,12 +388,26 @@ async def handle_agent_settings_input(
         await agent_settings.finish("Agent 配置暂时不可用，请稍后重试")
 
     step = str(matcher.state.get("agent_settings_step") or "select")
+    if intent is SessionIntent.MENU:
+        await agent_settings.reject_arg(
+            "agent_settings_input", _build_agent_settings_menu(config)
+        )
+    if intent is SessionIntent.BACK:
+        if step == "select":
+            await agent_settings.finish("已退出 Agent 设置。")
+        matcher.state["agent_settings_step"] = "select"
+        matcher.state.pop("agent_settings_key", None)
+        await agent_settings.reject_arg(
+            "agent_settings_input", _build_agent_settings_menu(config)
+        )
     if step == "select":
         key = resolve_choice(choice, _AGENT_SETTING_CHOICES)
         if key is None:
             await agent_settings.reject_arg(
                 "agent_settings_input",
-                "没有这个设置项，请重新选择。\n\n" + _build_agent_settings_menu(config),
+                validation_failed("没有这个设置项", "回复菜单中的序号或名称")
+                + "\n\n"
+                + _build_agent_settings_menu(config),
             )
             return
         matcher.state["agent_settings_key"] = key
@@ -373,7 +416,7 @@ async def handle_agent_settings_input(
         await agent_settings.reject_arg(
             "agent_settings_input",
             f"已选择：{_AGENT_SETTING_LABELS[key]}\n当前：{current}\n"
-            f"{_agent_setting_value_prompt(key)}；发送「取消」退出。",
+            f"{_agent_setting_value_prompt(key)}；发送「返回」回菜单，「取消」退出。",
         )
         return
 
@@ -390,7 +433,7 @@ async def handle_agent_settings_input(
     except ValueError as exc:
         await agent_settings.reject_arg(
             "agent_settings_input",
-            f"{exc}\n{_agent_setting_value_prompt(key)}；发送「取消」退出。",
+            validation_failed(str(exc), _agent_setting_value_prompt(key)),
         )
         return
 
@@ -418,7 +461,7 @@ async def handle_agent_memory(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_memory.finish("请在群聊中使用")
+        await agent_memory.finish(scope_required("Agent 记忆查看", "群聊", "请在目标群发送 /Agent记忆"))
     dbg(f"群 {event.group_id} 命令 /Agent记忆: user={event.get_user_id()}")
     rows = await list_memories(session, int(event.group_id))
     dbg(f"群 {event.group_id} /Agent记忆 查询到 {len(rows)} 条记忆")
@@ -436,7 +479,7 @@ async def handle_agent_status(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_status.finish("请在群聊中使用")
+        await agent_status.finish(scope_required("Agent 状态查看", "群聊", "请在目标群发送 /Agent状态"))
     dbg(f"群 {event.group_id} 命令 /Agent状态: user={event.get_user_id()}")
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
@@ -462,7 +505,7 @@ async def handle_agent_profile(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_profile.finish("请在群聊中使用")
+        await agent_profile.finish(scope_required("Agent 画像查看", "群聊", "请在目标群发送 /Agent画像"))
     dbg(
         f"群 {event.group_id} 命令 /Agent画像: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
@@ -507,7 +550,7 @@ async def handle_agent_clear(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_clear.finish("请在群聊中使用")
+        await agent_clear.finish(scope_required("Agent 记忆清理", "群聊", "请在目标群发送 /Agent清理"))
     dbg(
         f"群 {event.group_id} 命令 /Agent清理: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
@@ -553,7 +596,7 @@ async def handle_agent_export(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_export.finish("请在群聊中使用")
+        await agent_export.finish(scope_required("Agent 记忆导出", "群聊", "请在目标群发送 /Agent导出"))
     dbg(f"群 {event.group_id} 命令 /Agent导出: user={event.get_user_id()}")
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /Agent导出 拒绝: 非群管理")
@@ -593,14 +636,20 @@ async def handle_agent_persona(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_persona.finish("请在群聊中使用")
+        await agent_persona.finish(
+            scope_required("Agent 人设管理", "群聊", "请在目标群发送 /Agent人设")
+        )
     dbg(
         f"群 {event.group_id} 命令 /Agent人设: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
     if not is_group_admin(event):
         dbg(f"群 {event.group_id} /Agent人设 拒绝: 非群管理")
-        await agent_persona.finish("Agent 人设仅限群主或管理员管理")
+        await agent_persona.finish(
+            permission_required(
+                "Agent 人设管理", "群主或群管理员", "请群管理员执行此操作"
+            )
+        )
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
         await agent_persona.finish("Agent 配置暂时不可用，请稍后重试")
@@ -671,7 +720,7 @@ async def handle_agent_persona(
                 current = resolve_persona(config)[key]
                 await agent_persona.send(
                     f"已选择：{_PERSONA_LABELS[key]}\n当前：{current}\n"
-                    f"请输入新的内容（最多 {MAX_FIELD_LENGTH} 字符）；发送「取消」退出。"
+                    f"请输入新的内容（最多 {MAX_FIELD_LENGTH} 字符）；发送「返回」回菜单，「取消」退出。"
                 )
             return
         await agent_persona.finish(
@@ -690,22 +739,45 @@ async def handle_agent_persona_input(
     session: async_scoped_session,
     value: str = ArgPlainText("agent_persona_input"),
 ) -> None:
+    intent = resolve_session_intent(value)
+    if intent is SessionIntent.NEW_COMMAND:
+        await pass_through_new_command(matcher, value)
     if not isinstance(event, GroupMessageEvent) or not is_group_admin(event):
-        await agent_persona.finish("当前已无权继续修改 Agent 人设")
-    if is_cancel(value):
+        await agent_persona.finish(
+            permission_required(
+                "Agent 人设修改", "群主或群管理员", "重新进入时会再次检查权限"
+            )
+        )
+    if intent is SessionIntent.EXIT:
         await agent_persona.finish("已取消 Agent 人设修改。")
 
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
         await agent_persona.finish("Agent 配置暂时不可用，请稍后重试")
     step = str(matcher.state.get("agent_persona_step") or "select")
+    if intent is SessionIntent.MENU:
+        await agent_persona.reject_arg(
+            "agent_persona_input", _build_persona_menu(config)
+        )
+    if intent is SessionIntent.BACK:
+        if step == "select":
+            await agent_persona.finish("已退出 Agent 人设修改。")
+        matcher.state["agent_persona_step"] = "select"
+        matcher.state.pop("agent_persona_key", None)
+        matcher.state.pop("agent_persona_pending", None)
+        matcher.state.pop("agent_persona_before", None)
+        await agent_persona.reject_arg(
+            "agent_persona_input", _build_persona_menu(config)
+        )
 
     if step == "select":
         key = resolve_choice(value, _PERSONA_CHOICES)
         if key is None:
             await agent_persona.reject_arg(
                 "agent_persona_input",
-                "没有这个字段，请重新选择。\n\n" + _build_persona_menu(config),
+                validation_failed("没有这个字段", "回复菜单中的序号或字段名称")
+                + "\n\n"
+                + _build_persona_menu(config),
             )
             return
         matcher.state["agent_persona_key"] = key
@@ -723,7 +795,7 @@ async def handle_agent_persona_input(
         await agent_persona.reject_arg(
             "agent_persona_input",
             f"已选择：{_PERSONA_LABELS[key]}\n当前：{current}\n"
-            f"请输入新的内容（最多 {MAX_FIELD_LENGTH} 字符）；发送「取消」退出。",
+            f"请输入新的内容（最多 {MAX_FIELD_LENGTH} 字符）；发送「返回」回菜单，「取消」退出。",
         )
         return
 
@@ -732,13 +804,17 @@ async def handle_agent_persona_input(
         cleaned_source = " ".join(value.strip().split())
         if not cleaned_source:
             await agent_persona.reject_arg(
-                "agent_persona_input", "内容不能为空，请重新输入；或发送「取消」。"
+                "agent_persona_input",
+                validation_failed("内容不能为空", "输入人设内容"),
             )
             return
         if len(cleaned_source) > MAX_FIELD_LENGTH:
             await agent_persona.reject_arg(
                 "agent_persona_input",
-                f"内容过长，最多 {MAX_FIELD_LENGTH} 字符，请缩短后重试。",
+                validation_failed(
+                    f"内容超过 {MAX_FIELD_LENGTH} 字符",
+                    f"缩短到 {MAX_FIELD_LENGTH} 字符以内",
+                ),
             )
             return
         try:
@@ -767,7 +843,9 @@ async def handle_agent_persona_input(
     if not confirmation_matches(value, _PERSONA_CONFIRM_PHRASE):
         await agent_persona.reject_arg(
             "agent_persona_input",
-            f"如要保存，请完整输入「{_PERSONA_CONFIRM_PHRASE}」；或发送「取消」。",
+            validation_failed(
+                "确认短语不匹配", f"完整输入「{_PERSONA_CONFIRM_PHRASE}」"
+            ),
         )
         return
 
@@ -810,7 +888,7 @@ async def handle_agent_privacy(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_privacy.finish("请在群聊中使用")
+        await agent_privacy.finish(scope_required("Agent 隐私设置", "群聊", "请在目标群发送 /Agent隐私"))
     action = args.extract_plain_text().strip().lower()
     dbg(
         f"群 {event.group_id} 命令 /Agent隐私: user={event.get_user_id()} action={action!r}"
@@ -861,7 +939,7 @@ async def handle_agent_privacy_input(
     value: str = ArgPlainText("agent_privacy_input"),
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_privacy.finish("请在群聊中使用")
+        await agent_privacy.finish(scope_required("Agent 隐私设置", "群聊", "请在目标群发送 /Agent隐私"))
     if is_cancel(value):
         await agent_privacy.finish("已取消隐私设置。")
 

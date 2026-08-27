@@ -1,8 +1,8 @@
 """HTMLKit renderers for lightweight QQ visual cards.
 
-This module contains presentation only. Business queries and matcher state stay in
-``panel.py`` / ``help_panel.py``. Rendering failures are intentionally converted to
-``None`` so callers can fall back to plain text.
+This module contains presentation only. Business queries and navigation state stay in
+``panel_data.py`` / ``panel_menu.py`` / ``help_panel.py``. Rendering failures are
+intentionally converted to ``None`` so callers can fall back to plain text.
 """
 
 from __future__ import annotations
@@ -52,6 +52,19 @@ class HelpMenuCard:
     entrypoint: str
 
 
+@dataclass(frozen=True, slots=True)
+class CommandItemView:
+    name: str
+    description: str
+    aliases: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSectionView:
+    title: str
+    commands: tuple[CommandItemView, ...]
+
+
 async def _render(
     template_name: str,
     context: dict[str, Any],
@@ -99,11 +112,35 @@ async def render_help_menu(cards: tuple[HelpMenuCard, ...]) -> bytes | None:
     )
 
 
+async def render_command_sections(
+    *,
+    title: str,
+    subtitle: str,
+    sections: tuple[CommandSectionView, ...],
+    note: str | None = None,
+) -> bytes | None:
+    """Render grouped command cards for help details and ``/操作``."""
+
+    return await _render(
+        "command_panel.html",
+        {
+            "title": title,
+            "subtitle": subtitle,
+            "sections": sections,
+            "note": note,
+        },
+        width=760,
+    )
+
+
 __all__ = [
+    "CommandItemView",
+    "CommandSectionView",
     "HelpMenuCard",
     "PanelFeature",
     "PanelStat",
     "PersonalPanelView",
+    "render_command_sections",
     "render_help_menu",
     "render_personal_panel",
 ]

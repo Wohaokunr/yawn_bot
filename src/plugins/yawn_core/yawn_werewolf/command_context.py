@@ -27,9 +27,7 @@ def _signup_commands(context: CommandContext, game: Game) -> set[str]:
     available = {"查看报名"}
     available.add("退报名" if context.user_id in game.signup_user_ids else "报名")
     if (
-        context.user_id == game.host_user_id
-        or context.is_group_admin
-        or context.is_superuser
+        context.can_manage_room
     ):
         available.update({"板子", "开始游戏", "结束游戏", "添加AI", "移除AI"})
     return available
@@ -113,9 +111,7 @@ def get_available_commands(context: CommandContext) -> frozenset[str]:
     if context.group_id is not None:
         available.add("狼人状态")
         if (
-            context.user_id == game.host_user_id
-            or context.is_group_admin
-            or context.is_superuser
+            context.can_manage_room
         ):
             available.add("结束游戏")
     elif player is not None:
