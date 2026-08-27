@@ -18,6 +18,19 @@ _groups: dict[int, _Lease] = {}
 _users: dict[int, _Lease] = {}
 
 
+def active_game_kind(group_id: int) -> GameKind | None:
+    """返回本群当前占用的玩法；没有活跃玩法时返回 ``None``。"""
+
+    lease = _groups.get(group_id)
+    return lease.kind if lease is not None else None
+
+
+def group_has_game(kind: GameKind, group_id: int) -> bool:
+    """判断本群当前是否由指定玩法占用，供共享命令路由使用。"""
+
+    return active_game_kind(group_id) == kind
+
+
 def reserve_game(kind: GameKind, group_id: int, host_user_id: int) -> bool:
     """原子登记一局玩法，并占用群组与房主。"""
     if group_id in _groups or host_user_id in _users:

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <main class="shell">
+    <div class="content">
+      <div class="eyebrow">{{ panel.accent_note }}</div>
+      <section class="hero">
+        <div class="avatar-wrap">
+          <div class="avatar-fallback">{{ panel.nickname[:1] or 'Y' }}</div>
+          {% if panel.avatar_url %}<img class="avatar" src="{{ panel.avatar_url }}" onerror="this.style.display='none'" />{% endif %}
+        </div>
+        <div class="hero-main">
+          <h1 class="name">{{ panel.nickname }}</h1>
+          <div class="subtitle">{{ panel.subtitle }}</div>
+          <div class="badge">{{ panel.mode_label }}</div>
+        </div>
+      </section>
+
+      <div class="section-title">概览</div>
+      <section class="stats">
+        {% for item in panel.stats %}
+        <div class="stat">
+          <div class="stat-label">{{ item.label }}</div>
+          <div class="stat-value">{{ item.value }}</div>
+          {% if item.hint %}<div class="stat-hint">{{ item.hint }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </section>
+
+      {% if panel.features %}
+      <div class="section-title">功能状态</div>
+      <section class="features">
+        {% for feature in panel.features %}
+        <div class="feature {{ 'on' if feature.enabled else 'off' }}">
+          <span class="dot"></span>{{ feature.name }} · {{ '开启' if feature.enabled else '关闭' }}
+        </div>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if panel.actions %}
+      <div class="actions">{{ panel.actions | join('　') }}</div>
+      {% endif %}
+      <div class="footer"><span>最近活跃 {{ panel.last_active }}</span><span>QQ {{ panel.user_id }}</span></div>
+    </div>
+  </main>
+</body>
+</html>

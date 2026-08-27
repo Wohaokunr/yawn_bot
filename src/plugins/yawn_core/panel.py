@@ -15,6 +15,7 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     Message,
     MessageEvent,
+    MessageSegment,
 )
 from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, CommandArg
@@ -25,6 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
+from .command_ux import invalid_choice
 from .data_models.bot_user import BotUser
 from .data_models.chat_message import ChatMessage
 from .data_models.chat_session import ChatSession
@@ -39,6 +41,13 @@ from .permission import (
     is_group_admin,
     list_features,
     resolve_feature_key,
+)
+from .session_interaction import is_back, is_exit
+from .ui.panel_renderer import (
+    PanelFeature,
+    PanelStat,
+    PersonalPanelView,
+    render_personal_panel,
 )
 
 if TYPE_CHECKING:
@@ -289,7 +298,7 @@ async def _build_group_personal_panel(
 
     lines.append("──────────────")
     lines.append("输入「功能 <序号>」查看详情")
-    lines.append("输入「取消」退出")
+    lines.append("输入「0 / 取消 / 退出」结束")
     return "\n".join(lines)
 
 
@@ -341,8 +350,131 @@ async def _build_private_main_panel(
     lines.append(f"1. 我的群聊 ({group_count or 0}个群)")
     lines.append(f"2. 对话管理 ({chat_count or 0}个对话)")
     lines.append("──────────────")
-    lines.append("输入序号进入 | 输入「取消」退出")
+    lines.append("输入序号进入 | 0 / 取消 / 退出")
     return "\n".join(lines)
+
+
+async def _count_user_ai_sessions(
+    session: async_scoped_session,
+    user_id: int,
+    *,
+    group_id: int | None = None,
+) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(ChatSession)
+        .where(
+            ChatSession.user_id == user_id,
+            ChatSession.is_deleted == False,  # noqa: E712
+        )
+    )
+    if group_id is not None:
+        stmt = stmt.where(ChatSession.group_id == group_id)
+    return int(await session.scalar(stmt) or 0)
+
+
+async def _build_group_personal_view(
+    session: async_scoped_session,
+    user_id: int,
+    group_id: int,
+    group_name: Optional[str],
+) -> PersonalPanelView:
+    bot_user = await session.get(BotUser, user_id)
+    ug = await session.get(UserGroup, (group_id, user_id))
+    cu = await session.get(CheckinUser, (group_id, user_id))
+    statuses = await get_user_feature_status(user_id, group_id, session)
+    group_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(UserGroup)
+            .where(UserGroup.user_id == user_id)
+        )
+        or 0
+    )
+    ai_count = await _count_user_ai_sessions(session, user_id, group_id=group_id)
+    nickname = (bot_user.nickname if bot_user else None) or f"QQ {user_id}"
+    last_active = ug.last_seen_at if ug and ug.last_seen_at else (
+        bot_user.last_interaction_at if bot_user else None
+    )
+    return PersonalPanelView(
+        user_id=user_id,
+        nickname=nickname,
+        mode_label="群聊模式",
+        subtitle=group_name or f"群 {group_id}",
+        last_active=_fmt_time(last_active),
+        avatar_url=f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640",
+        stats=(
+            PanelStat("累计签到", f"{cu.total_days if cu else 0} 天"),
+            PanelStat("积分", str(cu.points if cu else 0)),
+            PanelStat("活跃群", f"{group_count} 个"),
+            PanelStat("AI 对话", f"{ai_count} 个", "当前群"),
+            PanelStat("群经验", str(ug.exp if ug else 0)),
+            PanelStat("金币", str(ug.coins if ug else 0)),
+        ),
+        features=tuple(
+            PanelFeature(display, enabled, source)
+            for _key, display, enabled, source in statuses[:6]
+        ),
+        actions=("功能 <序号> 查看详情", "0 退出"),
+    )
+
+
+async def _build_private_personal_view(
+    session: async_scoped_session,
+    user_id: int,
+) -> PersonalPanelView:
+    bot_user = await session.get(BotUser, user_id)
+    total_days = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(CheckinUser.total_days), 0)).where(
+                CheckinUser.user_id == user_id
+            )
+        )
+        or 0
+    )
+    total_points = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(CheckinUser.points), 0)).where(
+                CheckinUser.user_id == user_id
+            )
+        )
+        or 0
+    )
+    group_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(UserGroup)
+            .where(UserGroup.user_id == user_id)
+        )
+        or 0
+    )
+    ai_count = await _count_user_ai_sessions(session, user_id)
+    statuses = await get_user_feature_status(user_id, None, session)
+    nickname = (bot_user.nickname if bot_user else None) or f"QQ {user_id}"
+    return PersonalPanelView(
+        user_id=user_id,
+        nickname=nickname,
+        mode_label="个人模式",
+        subtitle="你的 YawnBot 使用概览",
+        last_active=_fmt_time(bot_user.last_interaction_at if bot_user else None),
+        avatar_url=f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640",
+        stats=(
+            PanelStat("累计签到", f"{total_days} 天"),
+            PanelStat("总积分", str(total_points)),
+            PanelStat("活跃群", f"{group_count} 个"),
+            PanelStat("AI 对话", f"{ai_count} 个"),
+            PanelStat("好感度", str(bot_user.affinity if bot_user else 0)),
+            PanelStat(
+                "首次互动",
+                _fmt_time(bot_user.first_interaction_at if bot_user else None),
+            ),
+        ),
+        features=tuple(
+            PanelFeature(display, enabled, source)
+            for _key, display, enabled, source in statuses[:6]
+        ),
+        actions=("1 我的群聊", "2 对话管理", "0 退出"),
+    )
 
 
 def _build_group_list_text(
@@ -530,6 +662,7 @@ async def handle_panel_entry(
 ) -> None:
     """面板入口：根据消息类型构建对应面板。"""
     user_id = int(event.get_user_id())
+    fallback_group: tuple[int, Optional[str]] | None = None
 
     if isinstance(event, GroupMessageEvent):
         # 群聊模式：展示群内个人数据
@@ -541,21 +674,36 @@ async def handle_panel_entry(
         if grp:
             group_name = grp.group_name
 
-        panel_text = await _build_group_personal_panel(
+        panel_view = await _build_group_personal_view(
             session, user_id, group_id, group_name
         )
+        fallback_group = (group_id, group_name)
         matcher.state["mode"] = "group"
         matcher.state["group_id"] = group_id
         matcher.state["view"] = "main"
     else:
         # 私聊模式：展示全量数据 + 菜单
-        panel_text = await _build_private_main_panel(session, user_id)
+        panel_view = await _build_private_personal_view(session, user_id)
         matcher.state["mode"] = "private"
         matcher.state["view"] = "main"
 
     matcher.state["user_id"] = user_id
-    # 先发送面板内容，再进入 got 等待输入
-    await panel_cmd.send(panel_text)
+    # 首屏优先用 HTMLKit 卡片；渲染失败时保持原纯文本路径可用。
+    panel_image = await render_personal_panel(panel_view)
+    if panel_image is None:
+        if fallback_group is None:
+            panel_text = await _build_private_main_panel(session, user_id)
+        else:
+            fallback_group_id, fallback_group_name = fallback_group
+            panel_text = await _build_group_personal_panel(
+                session,
+                user_id,
+                fallback_group_id,
+                fallback_group_name,
+            )
+        await panel_cmd.send(panel_text)
+    else:
+        await panel_cmd.send(MessageSegment.image(panel_image))
 
     # 若命令自带参数，跳过 got 询问
     arg_text = args.extract_plain_text().strip()
@@ -565,7 +713,7 @@ async def handle_panel_entry(
 
 @panel_cmd.got(
     "panel_choice",
-    prompt="请输入操作，或发送「取消」退出",
+    prompt="请输入操作；0 / 取消 / 退出可结束，返回可退回上一级",
 )
 async def handle_panel_choice(
     bot: Bot,
@@ -580,12 +728,14 @@ async def handle_panel_choice(
     """
     text = choice.strip()
 
-    if text in ("取消", "退出", "q"):
+    if is_exit(text):
         await panel_cmd.finish("已退出面板，下次再见~")
 
     mode: str = matcher.state.get("mode", "group")
 
     if mode == "group":
+        if is_back(text):
+            await panel_cmd.finish("已退出面板，下次再见~")
         await _handle_group_panel(matcher, session, text)
     else:
         await _handle_private_panel(bot, matcher, session, text)
@@ -641,6 +791,9 @@ async def _handle_private_panel(
 ) -> None:
     """私聊面板交互：多层级视图状态机。"""
     view: str = matcher.state.get("view", "main")
+
+    if view == "main" and is_back(text):
+        await panel_cmd.finish("已退出面板，下次再见~")
 
     if view == "main":
         await _private_view_main(bot, matcher, session, text)
@@ -717,7 +870,7 @@ async def _private_view_main(
     else:
         await panel_cmd.reject_arg(
             "panel_choice",
-            "请输入 1 或 2 选择功能，或「取消」退出",
+            invalid_choice(valid="1 或 2（0 可退出）"),
         )
 
 
@@ -727,7 +880,7 @@ async def _private_view_groups(
     text: str,
 ) -> None:
     """群聊列表视图：选择群查看详情或返回。"""
-    if text == "返回":
+    if is_back(text):
         user_id: int = matcher.state["user_id"]
         panel_text = await _build_private_main_panel(session, user_id)
         matcher.state["view"] = "main"
@@ -762,7 +915,7 @@ async def _private_view_group_detail(
     text: str,
 ) -> None:
     """群详情视图：返回群列表。"""
-    if text == "返回":
+    if is_back(text):
         groups: list[dict] = matcher.state["groups"]
         matcher.state["view"] = "groups"
         await panel_cmd.reject_arg(
@@ -784,7 +937,7 @@ async def _private_view_chat_list(
     """对话列表视图：查看详情、删除对话、返回。"""
     user_id: int = matcher.state["user_id"]
 
-    if text == "返回":
+    if is_back(text):
         # 重建主菜单
         sessions = await _get_user_sessions(session, user_id)
         matcher.state["sessions"] = sessions
@@ -861,7 +1014,7 @@ async def _private_view_chat_detail(
     """对话详情视图：删除消息、返回列表。"""
     user_id: int = matcher.state["user_id"]
 
-    if text == "返回":
+    if is_back(text):
         sessions = await _get_user_sessions(session, user_id)
         matcher.state["sessions"] = sessions
         matcher.state["view"] = "chat_list"
@@ -959,7 +1112,7 @@ async def handle_group_admin_entry(
 
 @group_admin_cmd.got(
     "admin_choice",
-    prompt="请输入操作，或发送「取消」退出",
+    prompt="请输入操作；0 / 取消 / 退出可结束，返回可退回上一级",
 )
 async def handle_group_admin_choice(
     bot: Bot,
@@ -974,12 +1127,15 @@ async def handle_group_admin_choice(
     """
     text = choice.strip()
 
-    if text in ("取消", "退出", "q"):
+    if is_exit(text):
         await group_admin_cmd.finish("已退出群管理面板")
 
     view: str = matcher.state.get("view", "main")
     group_id: int = matcher.state["group_id"]
     group_name: Optional[str] = matcher.state.get("group_name")
+
+    if view == "main" and is_back(text):
+        await group_admin_cmd.finish("已退出群管理面板")
 
     if view == "user_feature":
         await _admin_view_user_feature(
@@ -1072,7 +1228,7 @@ async def _admin_view_user_feature(  # noqa: PLR0913, PLR0917
     """用户功能管理子视图。"""
     target_uid: int = matcher.state["target_user_id"]
 
-    if text == "返回":
+    if is_back(text):
         matcher.state["view"] = "main"
         matcher.state.pop("target_user_id", None)
         panel_text = await _build_admin_panel(session, bot, group_id, group_name)
