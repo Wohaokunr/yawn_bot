@@ -4,8 +4,6 @@ set -euo pipefail
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 YAWNBOT_ROOT="${YAWNBOT_ROOT:-/opt/yawnbot}"
 GITHUB_DEPLOY_PUBLIC_KEY="${GITHUB_DEPLOY_PUBLIC_KEY:-}"
-GHCR_USERNAME="${GHCR_USERNAME:-}"
-GHCR_TOKEN="${GHCR_TOKEN:-}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "error: run this script as root from the Tencent Cloud console/VNC session" >&2
@@ -135,17 +133,6 @@ if command -v restorecon >/dev/null 2>&1; then
   restorecon -RF "$home_dir/.ssh" "$YAWNBOT_ROOT" || true
 fi
 
-if [[ -n "$GHCR_USERNAME" || -n "$GHCR_TOKEN" ]]; then
-  if [[ -z "$GHCR_USERNAME" || -z "$GHCR_TOKEN" ]]; then
-    echo "error: GHCR_USERNAME and GHCR_TOKEN must be provided together" >&2
-    exit 1
-  fi
-  install -d -m 0700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$home_dir/.docker"
-  printf '%s' "$GHCR_TOKEN" | runuser -u "$DEPLOY_USER" -- \
-    docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin >/dev/null
-  chmod 0600 "$home_dir/.docker/config.json"
-fi
-
 if ! runuser -u "$DEPLOY_USER" -- docker info >/dev/null 2>&1; then
   echo "error: deploy user still cannot access Docker; check docker group membership and daemon socket permissions" >&2
   exit 1
@@ -153,9 +140,6 @@ fi
 
 if [[ -z "$GITHUB_DEPLOY_PUBLIC_KEY" ]]; then
   echo "warning: GITHUB_DEPLOY_PUBLIC_KEY was not provided; GitHub Actions SSH deployment is not authorized yet" >&2
-fi
-if [[ -z "$GHCR_TOKEN" ]]; then
-  echo "warning: GHCR credentials were not provided; private GHCR images cannot be pulled until deploy has docker login credentials" >&2
 fi
 
 cat <<MSG
@@ -168,6 +152,8 @@ Installed:
   $YAWNBOT_ROOT/.env
   $YAWNBOT_ROOT/data/backups/
   $YAWNBOT_ROOT/deployments/
+
+The release workflow passes a short-lived GitHub Actions package token over encrypted SSH stdin for each deploy, so no long-lived GHCR PAT is stored on this host.
 
 Next checks:
   sudo -u $DEPLOY_USER docker info
