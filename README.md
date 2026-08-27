@@ -1,115 +1,294 @@
 # YawnBot
 
-YawnBot 是基于 NoneBot2 与 OneBot V11 的 QQ 机器人。`yawn_core` 提供统一的
-权限、帮助、管理、签到、好友审批、定时提醒和 AI 对话能力，并加载可选的
-跑团、狼人杀和番茄小说子插件。
+YawnBot 是一个基于 **NoneBot2 + OneBot V11** 的 QQ 机器人项目，包含群聊 Agent、RPG 跑团、狼人杀、番茄小说下载、签到/提醒、权限与管理 WebUI 等能力。项目使用 SQLite 持久化业务数据，并保持与具体 QQ 协议实现解耦：NapCat、Lagrange 等只需要按 OneBot V11 接入即可。
 
-## 当前能力
+> 新用户推荐直接使用 Docker Compose。Docker 构建会自动完成 WebUI 前端构建、Python 锁定依赖安装和 Playwright Chromium 安装，不要求宿主机提前准备 Node/npm 或浏览器运行时。
 
-- 平台：三级功能开关、统一帮助/管理面板、用户与群活跃记录、定时提醒。
-- RPG：渐进式新手引导、团队线索板、联合推理、YAML 模组、Textual 编辑器和确定性降级。
-- 狼人杀：四种板子、完整昼夜流程、AI 玩家、安全超时与托管。
-- 番茄小说：按书名/作者模糊搜索、浏览公开阅读榜/新书榜或输入链接/book ID 选择章节，后台生成 UTF-8 TXT，成品私发；WebUI 提供同能力的选书、任务提交与管理页面。
-- 持久化：SQLite + nonebot-plugin-orm，保存平台数据、局末摘要和番茄任务断点；正文只短期落盘。
-- 局后回放：RPG/狼人杀从结构化事件日志重建公开视角；参与者可在私聊查看自己的过滤视角。
+## 主要能力
 
-当前游戏房间、队列和局内状态只存在单进程内存中。项目不支持多实例共同消费同一
-群的游戏动作，也不能在进程重启后恢复未结束的游戏。
+| 模块 | 能力 |
+| --- | --- |
+| Core | 权限、帮助、签到、好友审批、定时提醒、用户/群活跃记录、运行指标 |
+| 群聊 Agent | 多轮群聊、主动发言、短会话、记忆/画像/关系、OneBot 复合消息、表情包与媒体能力 |
+| RPG | YAML 模组、角色创建、探索/战斗、AI KP/NPC、联合推理、事件日志与回放 |
+| 狼人杀 | 多板子、昼夜流程、AI 玩家、安全超时与托管 |
+| 番茄小说 | 公开免费内容搜索、榜单、章节任务、TXT 生成与发送 |
+| WebUI | 运行概览、环境/Agent 管理、调试、游戏管理、访客只读群视图 |
 
-## 环境要求
+## 架构
 
-- Python 3.10 及以上（`pyproject.toml` 当前允许 `<4.0`）
-- [uv](https://docs.astral.sh/uv/)
-- OneBot V11 实现（反向 WebSocket 或正向 WebSocket 均可）
-- 可选：OpenAI 兼容的模型服务
-
-## 快速开始
-
-```bash
-git clone <repository-url>
-cd YawnBot
-uv sync --all-groups --locked
+```text
+NapCat / Lagrange / 其他 OneBot V11 实现
+                │
+                │ WebSocket / HTTP
+                ▼
+        ┌──────────────────┐
+        │     YawnBot      │
+        │ NoneBot2/FastAPI │
+        ├──────────────────┤
+        │ Core / Agent     │
+        │ RPG / Werewolf   │
+        │ Fanqie / WebUI   │
+        └────────┬─────────┘
+                 │
+                 ▼
+          SQLite + data/
 ```
 
-复制 `.env.example` 为 `.env`，至少确认 `SUPERUSERS` 和 OneBot 连接方式。项目默认
-使用反向 WebSocket，OneBot 实现应连接：
+YawnBot 不把 QQ 客户端实现打进自身镜像，也不要求某个固定 OneBot 实现。
+
+---
+
+## Docker 快速启动（推荐）
+
+### 1. 前置条件
+
+只需要：
+
+- Git
+- Docker Engine / Docker Desktop
+- Docker Compose v2
+- 一个可用的 OneBot V11 实现
+
+### 2. Clone 与最小配置
+
+```bash
+git clone https://github.com/Wohaokunr/yawn_bot.git
+cd yawn_bot
+cp .env.example .env
+```
+
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/Wohaokunr/yawn_bot.git
+cd yawn_bot
+Copy-Item .env.example .env
+```
+
+打开 `.env`，至少修改：
+
+```dotenv
+SUPERUSERS=["你的QQ号"]
+ONEBOT_V11_ACCESS_TOKEN=换成随机且独立的Token
+```
+
+首次部署不要求 AI Key；最小模板已默认关闭 RPG/狼人杀 AI。
+
+### 3. 一条命令构建
+
+```bash
+docker compose build
+```
+
+构建阶段会自动：
+
+- `npm ci && npm run build` 生成 WebUI；
+- 使用 `uv.lock` 安装 Python 依赖；
+- 安装 Playwright Chromium 与所需系统库；
+- 只把运行期文件放进最终镜像。
+
+### 4. 一条命令启动
+
+```bash
+docker compose up -d
+```
+
+检查状态：
+
+```bash
+docker compose ps
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8080/healthz
+```
+
+应返回类似：
+
+```json
+{"status":"ok","service":"yawnbot","subplugins":{"loaded":4,"missing":0,"failed":0}}
+```
+
+Compose 使用 named volume 持久化 `/app/data`。容器启动时会先同步镜像内 canonical ORM migration，再自动执行 `nb orm upgrade heads`，因此新镜像不会被旧数据卷中的 migration 文件遮住。
+
+停止：
+
+```bash
+docker compose down
+```
+
+不要在需要保留数据时使用 `docker compose down -v`。
+
+---
+
+## OneBot V11 怎么接
+
+默认是 **反向 WebSocket**：让 NapCat、Lagrange 或其他 OneBot V11 实现主动连接 YawnBot。
+
+原生部署：
 
 ```text
 ws://127.0.0.1:8080/onebot/v11/ws
 ```
 
-正向 WebSocket/HTTP 连接还需启用对应的 NoneBot driver mixin，示例见
-`.env.example`。
+Docker 部署、OneBot 实现在宿主机时：
 
-首次部署或拉取含迁移的版本后，先停止 Bot 并备份数据库，再由维护者手动应用全部
-迁移分支：
-
-```bash
-uv run nb orm heads
-uv run nb orm upgrade heads
-uv run nb orm current
+```text
+ws://<Docker宿主机地址>:8080/onebot/v11/ws
 ```
 
-启动机器人：
+如果 OneBot 实现和 YawnBot 在同一个 Docker network，可使用服务名：
+
+```text
+ws://yawnbot:8080/onebot/v11/ws
+```
+
+OneBot 端的 access token 必须与 `.env` 中 `ONEBOT_V11_ACCESS_TOKEN` 一致。
+
+也支持正向 WebSocket / HTTP API，配置见 [Core、OneBot 与存储配置](docs/configuration/core.md)。
+
+---
+
+## WebUI
+
+WebUI 默认关闭。Docker 镜像已经包含构建好的前端，只需要在 `.env` 增加：
+
+```dotenv
+WEBUI_ENABLED=true
+WEBUI_ADMIN_TOKEN=至少32字符的高熵随机Token
+```
+
+本机访问：
+
+```text
+http://127.0.0.1:8080/webui
+```
+
+公网部署必须通过 HTTPS 反向代理，并设置：
+
+```dotenv
+WEBUI_COOKIE_SECURE=true
+```
+
+详细说明见 [WebUI 配置](docs/configuration/webui.md)。
+
+---
+
+## 原生 Windows / Linux 部署
+
+Docker 是推荐路径；需要直接在宿主机运行时，至少安装：
+
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/)
+- OneBot V11 实现
+- 可选：Node/npm（只在启用 WebUI 时需要）
+- 可选：Playwright Chromium（只在使用番茄搜索时需要）
+
+安装锁定依赖：
+
+```bash
+uv sync --locked
+```
+
+复制并修改最小配置：
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+首次部署/升级数据库：
+
+```bash
+uv run nb orm upgrade heads
+```
+
+启用 WebUI 时：
+
+```bash
+cd webui
+npm ci
+npm run build
+cd ..
+```
+
+需要番茄关键词搜索时：
+
+```bash
+uv run playwright install chromium
+```
+
+启动：
 
 ```bash
 uv run nb run
 ```
 
-开发时可使用 `uv run nb run --reload`。完整的生产部署、迁移和备份说明见
-[部署与维护](docs/deployment.md)。
+启动阶段会直接报告子插件加载状态。WebUI 已开启但前端缺失会快速失败；番茄搜索缺少 Chromium 会在启动日志给出安装命令。
 
-## AI 配置
+---
 
-`AI_API_KEY` 可选。未配置时机器人仍可启动：
+## AI
 
-- 私聊 AI 对话会提示服务未配置。
-- 狼人杀 AI 无法请求模型时按现有安全策略托管，不会阻塞游戏。
-- RPG 建议同时设置 `RPG_AI_ENABLED=false`，明确使用关键词检定和固定文案的
-  确定性模式。
-
-启用 AI 时设置：
+AI 是可选能力。需要 Agent 高级对话、AI KP/NPC 或狼人杀 AI 时，再配置 OpenAI-compatible 服务：
 
 ```dotenv
 AI_API_KEY=your-api-key
 AI_BASE_URL=https://your-openai-compatible-endpoint/v1
 AI_MODEL=your-model
+RPG_AI_ENABLED=true
+WW_AI_ENABLED=true
 ```
 
-不要提交真实密钥；`.env` 已被 Git 忽略。
+多 Provider、default/light/vision 模型档位、推理策略与 Agent 路由见 [AI 与 Agent 配置](docs/configuration/ai-agent.md)。
 
-## RPG 模组
+---
 
-模组位于 `src/plugins/yawn_core/yawn_rpg/modules/`。编辑器和校验器命令：
+## 常见问题
 
-```bash
-uv run python -m tools.rpg_module_editor
-uv run python -m tools.rpg_module_editor --check \
-  src/plugins/yawn_core/yawn_rpg/modules/before_tide_departs.yaml
-```
+**启动后 QQ 没上线？**  `/healthz` 只证明 YawnBot HTTP 进程正常。继续检查 OneBot 实现是否在线、反向 WS 地址和 token 是否一致。
 
-玩家命令与隐私规则见 [RPG 新手与联合推理指南](docs/rpg-gameplay-guide.md)。
+**WebUI 404 / 启动报前端缺失？** Docker 路径会自动构建前端。原生部署需在 `webui/` 执行 `npm ci && npm run build`。
 
-打开编辑器后切换到“试玩”页（也可按 `F6`），可以选择当前草稿或已保存文件，
-填写固定 `seed` 和目标结局，然后查看可复现的动作轨迹与 JSON。试玩器在后台运行，
-不会启动 NoneBot、ORM 或 LLM；命令行也可以单独运行：
+**番茄搜索提示浏览器不存在？** 原生部署执行 `uv run playwright install chromium`；Docker 镜像已自动包含 Chromium。
 
-```bash
-uv run python -m tools.rpg_playtest MODULE.yaml \
-  --seed SEED --ending ENDING_ID [--players N] [--json]
-```
+**没有 AI Key 能不能跑？** 可以。最小模板默认 `RPG_AI_ENABLED=false`、`WW_AI_ENABLED=false`，Core 与大部分非 AI 功能仍可启动。
 
-模组格式说明见
-[`src/plugins/yawn_core/yawn_rpg/modules/README.md`](src/plugins/yawn_core/yawn_rpg/modules/README.md)。
+**为什么不能开多个 YawnBot 实例共同处理同一个群？** 当前 RPG/狼人杀局内状态仍以单进程为主，多实例房间所有权、租约和 fencing token 尚未完成。生产环境保持单实例。
 
-## 开发检查
+---
+
+## 配置与运维文档
+
+- [配置总览](docs/configuration/README.md)
+- [Core、OneBot 与存储](docs/configuration/core.md)
+- [AI 与 Agent](docs/configuration/ai-agent.md)
+- [WebUI](docs/configuration/webui.md)
+- [番茄、RPG 与狼人杀](docs/configuration/fanqie-games.md)
+- [生产部署、升级、备份与回滚](docs/deployment.md)
+- [Repository hygiene](docs/repository-hygiene.md)
+- [运行指标](docs/metrics.md)
+- [RPG 新手与联合推理](docs/rpg-gameplay-guide.md)
+- [番茄来源与使用边界](docs/fanqie-notice.md)
+
+## 开发
+
+常用质量门槛：
 
 ```bash
 python tools/repo_guard.py
-uv run pytest -q --ignore=tests/test_webui_spa.py
-uv run ruff check src tests tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
-uv run pyright src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
-uv run python -m compileall -q src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+uv run pytest -q
+uv run ruff check src tests tools
+uv run pyright src tools
+uv run python -m compileall -q src tools
 git diff --check
 
 cd webui
@@ -119,33 +298,23 @@ npm run typecheck
 npm run build
 ```
 
-正式插件发现冒烟检查：
+插件发现冒烟检查：
 
 ```bash
 uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_agent','yawn_core:yawn_rpg','yawn_core:yawn_werewolf','yawn_core:yawn_fanqie'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
 ```
 
-CI 将门槛拆成独立并行 job：repository hygiene、Python lint/typecheck/tests、
-WebUI quality、migration check 和 plugin smoke。WebUI build 产物不进入 Git，CI 会把
-`webui/dist` 作为 artifact 传给单独的 SPA 集成测试。规则详见
-[Repository hygiene](docs/repository-hygiene.md)。
-
 ## 代码结构
 
 ```text
-src/plugins/yawn_core/                 平台插件与共享基础能力
-  data_models/                         平台 ORM 模型
-  yawn_rpg/                            RPG 引擎、模组与测试
-  yawn_werewolf/                       狼人杀引擎与 AI 驱动
-  yawn_fanqie/                         番茄公开小说 provider、任务与 TXT 投递
-tools/rpg_module_editor/               Textual 模组编辑器
-tools/rpg_playtest/                    固定 seed 的离线 RPG 试玩器
-tools/repo_guard.py                     Git 仓库卫生门槛
-tests/                                 跨模块与回归测试
-data/nonebot_plugin_orm/migrations/    受版本控制的 canonical 迁移
-webui/                                 React/Vite 管理台源码（dist 不入库）
-docs/                                  部署说明与架构图
+src/plugins/yawn_core/                 Core 与业务子插件
+data/nonebot_plugin_orm/migrations/    受版本控制的 canonical ORM migration
+webui/                                 React / Vite 管理台源码
+deploy/                                容器启动脚本
+docs/configuration/                    分主题配置参考
+docs/deployment.md                     生产升级、备份、迁移、回滚与安全
+tools/                                 开发/维护工具
+tests/                                 回归测试
 ```
 
-`.qoder/repowiki` 是历史生成文档，可能滞后；涉及配置、路径和行为时以源码、
-本 README 与 `docs/` 为准。
+`webui/dist/`、数据库、浏览器 profile、媒体缓存、虚拟环境和工具私有状态都属于可再生或运行时数据，不应提交到 Git。
