@@ -195,6 +195,9 @@ jobs:
     if: ${{ !contains(needs.release.outputs.version, '-') || (github.event_name == 'workflow_dispatch' && inputs.deploy_production) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
     environment:
       name: production
     concurrency:
@@ -220,6 +223,8 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ needs.release.outputs.image }}
           DIGEST: ${{ needs.release.outputs.digest }}
           VERSION: ${{ needs.release.outputs.version }}
@@ -228,10 +233,13 @@ jobs:
           set -euo pipefail
           test -n "$DEPLOY_HOST"
           test -n "$DEPLOY_USER"
+          test -n "$GHCR_USERNAME"
+          test -n "$GHCR_TOKEN"
           test -n "$DIGEST"
-          ssh -i ~/.ssh/yawnbot-deploy \
-            -o BatchMode=yes \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT"
+          printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
+            ssh -i ~/.ssh/yawnbot-deploy \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
