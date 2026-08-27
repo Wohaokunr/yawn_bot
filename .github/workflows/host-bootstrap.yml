@@ -1,0 +1,33 @@
+name: Host bootstrap scripts
+
+on:
+  push:
+    paths:
+      - "deploy/host/**"
+      - ".github/workflows/host-bootstrap.yml"
+  pull_request:
+    paths:
+      - "deploy/host/**"
+      - ".github/workflows/host-bootstrap.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate OpenCloudOS host scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        shell: bash
+        run: bash -n deploy/host/*.sh
+      - name: Ensure no maintainer private state is tracked
+        shell: bash
+        run: |
+          if git ls-files 'deploy/private/**' | grep -q .; then
+            echo '::error::deploy/private must never be tracked'
+            exit 1
+          fi
