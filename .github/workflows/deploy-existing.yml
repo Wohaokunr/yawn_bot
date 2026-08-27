@@ -20,7 +20,7 @@ jobs:
   deploy-production:
     name: Deploy existing release to production
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     environment:
       name: production
     concurrency:
@@ -115,10 +115,14 @@ jobs:
           test -n "$GHCR_TOKEN"
           test -n "$DIGEST"
 
+          echo "Starting production deployment. Slow first-time image pulls are expected on low-bandwidth hosts."
           printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
-            ssh -vvv -i ~/.ssh/yawnbot-deploy \
+            ssh -vv -i ~/.ssh/yawnbot-deploy \
               -o BatchMode=yes \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
