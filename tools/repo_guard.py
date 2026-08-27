@@ -1,4 +1,4 @@
-# ruff: noqa: PLR0911,T201
+# ruff: noqa: C901,PLR0911,T201
 """Fail CI when generated/runtime/private files enter the Git index.
 
 This guard intentionally checks Git-tracked files instead of the whole working tree, so
@@ -42,9 +42,39 @@ _CACHE_PARTS = frozenset(
         "htmlcov",
         "ms-playwright",
         "playwright-report",
+        "release-out",
+        "release-stage",
         "test-results",
     }
 )
+_BROWSER_RUNTIME_PARTS = frozenset(
+    {
+        "browser-data",
+        "browser-profile",
+        "browser_data",
+        "browser_profile",
+        "chrome-profile",
+        "chrome_profile",
+        "chromium-profile",
+        "chromium_profile",
+        "playwright-browsers",
+        "playwright_browsers",
+        "user-data-dir",
+        "user_data_dir",
+    }
+)
+_RUNTIME_MEDIA_PARTS = frozenset(
+    {
+        "download-cache",
+        "download_cache",
+        "downloads",
+        "media-cache",
+        "media_cache",
+        "runtime-media",
+        "runtime_media",
+    }
+)
+_SYSTEM_NAMES = frozenset({".ds_store", "desktop.ini", "ehthumbs.db", "thumbs.db"})
 _RUNTIME_SUFFIXES = (
     ".bak",
     ".db",
@@ -133,6 +163,12 @@ def path_violation(path: str) -> str | None:
         return "developer-tool private state"
     if any(part in _CACHE_PARTS for part in parts):
         return "generated cache/test output"
+    if any(part in _BROWSER_RUNTIME_PARTS for part in parts):
+        return "browser profile/runtime state"
+    if any(part in _RUNTIME_MEDIA_PARTS for part in parts):
+        return "runtime media/download cache"
+    if name in _SYSTEM_NAMES:
+        return "operating-system metadata"
     if name.endswith(("-wal", "-shm")) or name.endswith(_RUNTIME_SUFFIXES):
         return "runtime/generated file"
     return None

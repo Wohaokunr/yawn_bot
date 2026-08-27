@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -33,6 +36,9 @@ jobs:
       - name: Reject generated, runtime, secret or oversized tracked files
         run: python tools/repo_guard.py
 
+      - name: Fresh-checkout repository-content test
+        run: python tools/repository_content_test.py
+
   python-lint:
     name: Python lint
     runs-on: ubuntu-latest
@@ -54,11 +60,13 @@ jobs:
       - name: Ruff
         run: >-
           uv run --python 3.10 ruff check
-          src tests tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+          src tests tools/rpg_module_editor tools/rpg_playtest
+          tools/repo_guard.py tools/repository_content_test.py
       - name: Compile Python sources
         run: >-
           uv run --python 3.10 python -m compileall -q
-          src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+          src tools/rpg_module_editor tools/rpg_playtest
+          tools/repo_guard.py tools/repository_content_test.py
 
   python-typecheck:
     name: Python typecheck
@@ -81,7 +89,8 @@ jobs:
       - name: Pyright
         run: >-
           uv run --python 3.10 pyright
-          src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+          src tools/rpg_module_editor tools/rpg_playtest
+          tools/repo_guard.py tools/repository_content_test.py
 
   python-tests:
     name: Python tests
@@ -224,6 +233,110 @@ jobs:
         run: uv sync --all-groups --locked --python 3.10
       - name: Test SPA serving contract
         run: uv run --python 3.10 pytest -q tests/test_webui_spa.py
+
+  clean-install-smoke:
+    name: Fresh checkout clean-install smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Assert pristine checkout content
+        run: python tools/repository_content_test.py
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install Python dependencies from lockfile without shared cache
+        run: uv sync --no-cache --all-groups --locked --python 3.10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install WebUI dependencies from lockfile
+        working-directory: webui
+        env:
+          npm_config_cache: ${{ runner.temp }}/npm-clean-install-cache
+        run: npm ci --prefer-online
+      - name: Build WebUI from source
+        working-directory: webui
+        run: npm run build
+
+      - name: Prepare minimal runtime configuration
+        shell: bash
+        run: |
+          cp .env.example .env
+          cat >> .env <<'EOF'
+          WEBUI_ENABLED=true
+          WEBUI_ADMIN_TOKEN=example-clean-install-token-0123456789abcdef
+          EOF
+
+      - name: Initialize clean SQLite schema
+        run: uv run --python 3.10 nb orm upgrade heads
+
+      - name: Load all required production plugins
+        shell: bash
+        run: |
+          uv run --python 3.10 python - <<'PY'
+          import nonebot
+
+          nonebot.init()
+          nonebot.load_from_toml("pyproject.toml")
+          required = (
+              "yawn_core",
+              "yawn_core:yawn_agent",
+              "yawn_core:yawn_rpg",
+              "yawn_core:yawn_werewolf",
+              "yawn_core:yawn_fanqie",
+          )
+          missing = [name for name in required if nonebot.get_plugin(name) is None]
+          if missing:
+              raise SystemExit(f"missing configured plugins: {', '.join(missing)}")
+          PY
+
+      - name: Start application and probe health/WebUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP}/yawnbot-clean-install.log"
+          uv run --python 3.10 nb run >"$log_file" 2>&1 &
+          app_pid=$!
+
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for _ in {1..60}; do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat "$log_file"
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+                --output "${RUNNER_TEMP}/healthz.json" \
+                http://127.0.0.1:8080/healthz \
+              && curl --fail --silent --show-error \
+                --output "${RUNNER_TEMP}/webui.html" \
+                http://127.0.0.1:8080/webui; then
+              grep -Eqi '<!doctype html|<html' "${RUNNER_TEMP}/webui.html"
+              cat "${RUNNER_TEMP}/healthz.json"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat "$log_file"
+          exit 1
 
   docker-deploy-smoke:
     name: Docker clean-deploy smoke

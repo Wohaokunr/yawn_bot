@@ -279,6 +279,18 @@ WW_AI_ENABLED=true
 - [RPG 新手与联合推理](docs/rpg-gameplay-guide.md)
 - [番茄来源与使用边界](docs/fanqie-notice.md)
 
+## Release 与可部署产物
+
+正式发布由 `.github/workflows/release.yml` 完成，不从开发机上传 `dist` 或本地构建目录。
+
+- 推送 `vX.Y.Z` Tag，或在 GitHub Actions 手动触发 `Release` 并填写版本号；
+- Release 会先重新执行完整 CI，包括 fresh-checkout clean-install smoke 和 Docker clean-deploy smoke；
+- 通过后从新的 GitHub Actions checkout 重新构建 WebUI 和 Docker 镜像；
+- 镜像发布到 `ghcr.io/wohaokunr/yawn_bot:<version>`，同时保留 `sha-<commit>` 标签；
+- GitHub Release 附带 `yawnbot-<version>-deploy.tar.gz`、镜像 digest 文件和 `SHA256SUMS.txt`。
+
+当前做到 **Continuous Delivery**：自动产出可部署镜像/包，但不会自动 SSH 到任何生产机。以后确定生产环境后，应追加受 GitHub Environment 审批与保护规则约束的 Deploy job。
+
 ## 开发
 
 常用质量门槛：
