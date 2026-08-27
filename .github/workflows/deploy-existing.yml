@@ -12,6 +12,9 @@ permissions:
   contents: read
   packages: read
 
+env:
+  DEPLOY_SSH_KEY_FINGERPRINT: SHA256:PcrAC+GXFS9bBSuK/JLSF602EVaIS2+X2cunjeR2pUY
+
 jobs:
   deploy-production:
     name: Deploy existing release to production
@@ -71,7 +74,7 @@ jobs:
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "Deploying existing immutable release $VERSION ($digest)"
 
-      - name: Configure deployment SSH identity
+      - name: Configure and verify deployment SSH identity
         shell: bash
         env:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
@@ -84,6 +87,14 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/yawnbot-deploy
           printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/yawnbot-deploy ~/.ssh/known_hosts
+
+          actual_fingerprint="$(ssh-keygen -yf ~/.ssh/yawnbot-deploy | ssh-keygen -lf - -E sha256 | awk '{print $2}')"
+          echo "GitHub deployment key fingerprint: $actual_fingerprint"
+          echo "Expected server-authorized fingerprint: $DEPLOY_SSH_KEY_FINGERPRINT"
+          if [[ "$actual_fingerprint" != "$DEPLOY_SSH_KEY_FINGERPRINT" ]]; then
+            echo "::error::DEPLOY_SSH_PRIVATE_KEY does not match the public key installed for the deploy user. Expected $DEPLOY_SSH_KEY_FINGERPRINT, got $actual_fingerprint"
+            exit 1
+          fi
 
       - name: Deploy immutable release image
         shell: bash
@@ -109,5 +120,6 @@ jobs:
               -o BatchMode=yes \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
+              -o LogLevel=VERBOSE \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
