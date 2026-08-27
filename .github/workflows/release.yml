@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gates:
+    name: Re-run release quality gates
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build and publish release
+    needs: quality-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate release version
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="${{ inputs.version }}"
+          fi
+
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release version must look like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/$version" >/dev/null; then
+            tag_sha="$(git rev-list -n 1 "$version")"
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "::error::Tag $version already exists at $tag_sha, not $GITHUB_SHA"
+              exit 1
+            fi
+          fi
+
+          repo_lower="${GITHUB_REPOSITORY,,}"
+          short_sha="${GITHUB_SHA:0:12}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$repo_lower" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Re-check release checkout content
+        run: python tools/repository_content_test.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build WebUI for deployment package
+        working-directory: webui
+        env:
+          npm_config_cache: ${{ runner.temp }}/npm-release-cache
+        run: |
+          npm ci --prefer-online
+          npm run build
+
+      - name: Assemble versioned deployment package
+        shell: bash
+        env:
+          VERSION: ${{ steps.release_meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          package_root="release-stage/yawnbot-${VERSION}"
+          mkdir -p "$package_root" release-out
+
+          git archive HEAD | tar -x -C "$package_root"
+          mkdir -p "$package_root/webui/dist"
+          cp -a webui/dist/. "$package_root/webui/dist/"
+          printf '%s\n' "$VERSION" > "$package_root/VERSION"
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("release-stage") / f"yawnbot-{os.environ['VERSION']}"
+          manifest = {
+              "version": os.environ["VERSION"],
+              "commit": os.environ["GITHUB_SHA"],
+              "source": os.environ["GITHUB_REPOSITORY"],
+              "webui_prebuilt": True,
+              "release_builder": "github-actions-clean-checkout",
+          }
+          (root / "release-manifest.json").write_text(
+              json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          tar --sort=name \
+              --mtime="@${source_date_epoch}" \
+              --owner=0 --group=0 --numeric-owner \
+              -cf - -C release-stage "yawnbot-${VERSION}" \
+            | gzip -n > "release-out/yawnbot-${VERSION}-deploy.tar.gz"
+
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish versioned Docker image
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}
+            ${{ steps.release_meta.outputs.image }}:sha-${{ steps.release_meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release_meta.outputs.version }}
+
+      - name: Record image digest and checksums
+        shell: bash
+        env:
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          IMAGE: ${{ steps.release_meta.outputs.image }}
+          DIGEST: ${{ steps.docker_build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cat > "release-out/yawnbot-${VERSION}-image.txt" <<EOF
+          image=${IMAGE}:${VERSION}
+          digest=${DIGEST}
+          commit=${GITHUB_SHA}
+          EOF
+          (
+            cd release-out
+            sha256sum \
+              "yawnbot-${VERSION}-deploy.tar.gz" \
+              "yawnbot-${VERSION}-image.txt" \
+              > SHA256SUMS.txt
+          )
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: YawnBot ${{ steps.release_meta.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(steps.release_meta.outputs.version, '-') }}
+          fail_on_unmatched_files: true
+          body: |
+            Docker image: `${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}`
+
+            This release was rebuilt from a clean GitHub Actions checkout after all CI gates passed.
+          files: |
+            release-out/yawnbot-${{ steps.release_meta.outputs.version }}-deploy.tar.gz
+            release-out/yawnbot-${{ steps.release_meta.outputs.version }}-image.txt
+            release-out/SHA256SUMS.txt

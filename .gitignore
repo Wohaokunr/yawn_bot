@@ -103,6 +103,8 @@ docs/_build/
 doc/_build/
 target/
 downloads/
+release-out/
+release-stage/
 
 # Re-apply generated-file rules after the migration allowlist above. Git's later
 # negation can otherwise make caches nested under the tracked migration tree visible.
