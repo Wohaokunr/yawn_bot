@@ -14,7 +14,6 @@ from nonebot import (
     get_driver,
     get_plugin_config,
     logger,
-    on_command,
     on_message,
 )
 from nonebot.adapters.onebot.v11 import (
@@ -30,16 +29,15 @@ from nonebot.rule import Rule
 from nonebot_plugin_orm import async_scoped_session, get_session
 from sqlalchemy import select
 
-from ..game_command_routing import (  # noqa: TID252
-    game_context_rule,
-    no_active_game_rule,
-)
+from ..command_definition import build_matcher  # noqa: TID252
+from ..command_ux import command_failure  # noqa: TID252
 from ..permission import (  # noqa: TID252
     check_feature_permission,
     is_group_admin,
     require_feature,
 )
 from . import ai_player, api, engine
+from .command_definitions import COMMAND_BY_NAME
 from .config import Config
 from .dsl import _DM_HINT, parse_dm_action
 from .models import WerewolfPlayer
@@ -320,12 +318,7 @@ def _sender_display(event: GroupMessageEvent) -> str:
 
 # ── 开局与报名 ────────────────────────────────────────────
 
-wolf_open = on_command(
-    "狼人杀",
-    aliases={"开狼", "来把狼人杀"},
-    priority=5,
-    block=True,
-)
+wolf_open = build_matcher(COMMAND_BY_NAME["狼人杀"])
 
 
 @wolf_open.handle()
@@ -338,16 +331,34 @@ async def handle_open(
     group_id = int(event.group_id)
     user_id = int(event.get_user_id())
     if get_game(group_id) is not None:
-        await wolf_open.finish("本群已经有正在进行的狼人杀对局~")
+        await wolf_open.finish(
+            command_failure(
+                "狼人杀房间未创建",
+                "本群狼人杀正在进行",
+                "/狼人状态 查看进度 · /操作 查看当前可做操作",
+            )
+        )
     if game_of_user(user_id) is not None:
-        await wolf_open.finish("你已经在其他对局中，无法开房~")
+        await wolf_open.finish(
+            command_failure(
+                "狼人杀房间未创建",
+                "你已经参加其他对局",
+                "先结束或退出当前对局，再重新开房",
+            )
+        )
     game = create_game(
         group_id,
         user_id,
         queue_max=config.ww_action_queue_max,
     )
     if game is None:
-        await wolf_open.finish("开房失败，请稍后重试")
+        await wolf_open.finish(
+            command_failure(
+                "狼人杀房间创建失败",
+                "群或账号刚被其他玩法占用",
+                "/狼人状态 查看当前对局，结束后再重试",
+            )
+        )
     # 注入收到本事件的 Bot：多机器人在线时 nonebot.get_bot() 会抛
     # ValueError，引擎不能依赖它选连接（见 engine.run_game）
     game.bot = bot
@@ -358,13 +369,7 @@ async def handle_open(
     await wolf_open.finish(f"狼人杀房间已创建，房主已自动报名~\n{hint}".rstrip())
 
 
-signup_cmd = on_command(
-    "报名",
-    aliases={"上车", "加一"},
-    rule=game_context_rule("werewolf"),
-    priority=5,
-    block=True,
-)
+signup_cmd = build_matcher(COMMAND_BY_NAME["报名"])
 
 
 @signup_cmd.handle()
@@ -397,13 +402,7 @@ async def handle_signup(
     await signup_cmd.finish(response)
 
 
-leave_cmd = on_command(
-    "退报名",
-    aliases={"下车"},
-    rule=game_context_rule("werewolf"),
-    priority=5,
-    block=True,
-)
+leave_cmd = build_matcher(COMMAND_BY_NAME["退报名"])
 
 
 @leave_cmd.handle()
@@ -434,13 +433,7 @@ async def handle_leave(
     await leave_cmd.finish("已退出报名~")
 
 
-view_cmd = on_command(
-    "查看报名",
-    aliases={"报名情况"},
-    rule=game_context_rule("werewolf"),
-    priority=5,
-    block=True,
-)
+view_cmd = build_matcher(COMMAND_BY_NAME["查看报名"])
 
 
 @view_cmd.handle()
@@ -468,12 +461,7 @@ async def handle_view(
     await view_cmd.finish("\n".join(lines))
 
 
-status_cmd = on_command(
-    "狼人状态",
-    aliases={"狼局状态", "狼人进度"},
-    priority=5,
-    block=True,
-)
+status_cmd = build_matcher(COMMAND_BY_NAME["狼人状态"])
 
 
 @status_cmd.handle()
@@ -488,12 +476,7 @@ async def handle_status(
     await status_cmd.finish(format_game_status(game))
 
 
-board_cmd = on_command(
-    "板子",
-    aliases={"选板子", "换板子"},
-    priority=5,
-    block=True,
-)
+board_cmd = build_matcher(COMMAND_BY_NAME["板子"])
 
 
 @board_cmd.handle()
@@ -540,12 +523,7 @@ async def handle_board(
     )
 
 
-add_ai_cmd = on_command(
-    "添加AI",
-    aliases={"加AI", "补人"},
-    priority=5,
-    block=True,
-)
+add_ai_cmd = build_matcher(COMMAND_BY_NAME["添加AI"])
 
 
 @add_ai_cmd.handle()
@@ -592,12 +570,7 @@ async def handle_add_ai(  # noqa: C901
     )
 
 
-remove_ai_cmd = on_command(
-    "移除AI",
-    aliases={"减AI"},
-    priority=5,
-    block=True,
-)
+remove_ai_cmd = build_matcher(COMMAND_BY_NAME["移除AI"])
 
 
 @remove_ai_cmd.handle()
@@ -636,13 +609,7 @@ async def handle_remove_ai(
     )
 
 
-start_cmd = on_command(
-    "开始游戏",
-    aliases={"发车"},
-    rule=game_context_rule("werewolf"),
-    priority=5,
-    block=True,
-)
+start_cmd = build_matcher(COMMAND_BY_NAME["开始游戏"])
 
 
 @start_cmd.handle()
@@ -692,13 +659,7 @@ async def handle_start(
     await start_cmd.finish("已请求开始游戏~")
 
 
-end_cmd = on_command(
-    "结束游戏",
-    aliases={"解散狼局"},
-    rule=game_context_rule("werewolf"),
-    priority=5,
-    block=True,
-)
+end_cmd = build_matcher(COMMAND_BY_NAME["结束游戏"])
 
 
 @end_cmd.handle()
@@ -728,31 +689,9 @@ async def handle_end(
     await end_cmd.finish("对局已结束")
 
 
-recovery_cmd = on_command(
-    "解散狼局",
-    rule=no_active_game_rule(),
-    priority=5,
-    block=True,
-)
-
-
-@recovery_cmd.handle()
-async def handle_recovery(
-    bot: Bot,
-    event: GroupMessageEvent,
-    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
-) -> None:
-    """无活跃玩法时保留显式的狼人杀禁言恢复入口。"""
-    user_id = int(event.get_user_id())
-    if not (is_group_admin(event) or _is_su(user_id)):
-        await recovery_cmd.finish("本群当前没有狼人杀对局")
-    await api.unban_all_members(bot, int(event.group_id))
-    await recovery_cmd.finish("已执行恢复操作：关闭全员禁言并解禁全体群成员")
-
-
 # ── 报名阶段私聊命令（选身份）────────────────────────────
 
-wish_cmd = on_command("选身份", aliases={"想要"}, priority=5, block=True)
+wish_cmd = build_matcher(COMMAND_BY_NAME["选身份"])
 
 
 @wish_cmd.handle()
@@ -799,7 +738,7 @@ async def handle_wish(
     )
 
 
-unwish_cmd = on_command("取消选身份", aliases={"不选了"}, priority=5, block=True)
+unwish_cmd = build_matcher(COMMAND_BY_NAME["取消选身份"])
 
 
 @unwish_cmd.handle()
@@ -821,12 +760,7 @@ async def handle_unwish(
 
 # ── 身份卡补发（仅私聊）───────────────────────────────────
 
-identity_cmd = on_command(
-    "身份",
-    aliases={"重发身份卡"},
-    priority=5,
-    block=True,
-)
+identity_cmd = build_matcher(COMMAND_BY_NAME["身份"])
 
 
 @identity_cmd.handle()
@@ -864,12 +798,7 @@ async def handle_identity(
 
 # ── 仅私聊的特殊夜间行动命令 ──────────────────────────────
 
-choose_owner_cmd = on_command(
-    "认主",
-    aliases={"选主"},
-    priority=5,
-    block=True,
-)
+choose_owner_cmd = build_matcher(COMMAND_BY_NAME["认主"])
 
 
 @choose_owner_cmd.handle()
@@ -898,12 +827,7 @@ async def handle_choose_owner(
     )
 
 
-silence_cmd = on_command(
-    "禁言",
-    aliases={"禁票"},
-    priority=5,
-    block=True,
-)
+silence_cmd = build_matcher(COMMAND_BY_NAME["禁言"])
 
 
 @silence_cmd.handle()
@@ -934,7 +858,7 @@ async def handle_silence(
 
 # ── 夜间私聊命令 ──────────────────────────────────────────
 
-kill_cmd = on_command("刀", aliases={"狼刀"}, priority=5, block=True)
+kill_cmd = build_matcher(COMMAND_BY_NAME["刀"])
 
 
 @kill_cmd.handle()
@@ -959,7 +883,7 @@ async def handle_kill(
     )
 
 
-check_cmd = on_command("查验", aliases={"验"}, priority=5, block=True)
+check_cmd = build_matcher(COMMAND_BY_NAME["查验"])
 
 
 @check_cmd.handle()
@@ -984,7 +908,7 @@ async def handle_check(
     )
 
 
-save_cmd = on_command("救", priority=5, block=True)
+save_cmd = build_matcher(COMMAND_BY_NAME["救"])
 
 
 @save_cmd.handle()
@@ -1005,7 +929,7 @@ async def handle_save(
     )
 
 
-poison_cmd = on_command("毒", priority=5, block=True)
+poison_cmd = build_matcher(COMMAND_BY_NAME["毒"])
 
 
 @poison_cmd.handle()
@@ -1030,7 +954,7 @@ async def handle_poison(
     )
 
 
-shoot_cmd = on_command("开枪", aliases={"带"}, priority=5, block=True)
+shoot_cmd = build_matcher(COMMAND_BY_NAME["开枪"])
 
 
 @shoot_cmd.handle()
@@ -1055,12 +979,7 @@ async def handle_shoot(
     )
 
 
-no_shoot_cmd = on_command(
-    "不开枪",
-    aliases={"压枪"},
-    priority=5,
-    block=True,
-)
+no_shoot_cmd = build_matcher(COMMAND_BY_NAME["不开枪"])
 
 
 @no_shoot_cmd.handle()
@@ -1083,7 +1002,7 @@ async def handle_no_shoot(
 
 # ── 白天群命令 ────────────────────────────────────────────
 
-run_cmd = on_command("上警", aliases={"竞选"}, priority=5, block=True)
+run_cmd = build_matcher(COMMAND_BY_NAME["上警"])
 
 
 @run_cmd.handle()
@@ -1104,7 +1023,7 @@ async def handle_run(
     )
 
 
-withdraw_cmd = on_command("退水", priority=5, block=True)
+withdraw_cmd = build_matcher(COMMAND_BY_NAME["退水"])
 
 
 @withdraw_cmd.handle()
@@ -1126,7 +1045,7 @@ async def handle_withdraw(
     )
 
 
-order_cmd = on_command("排序", priority=5, block=True)
+order_cmd = build_matcher(COMMAND_BY_NAME["排序"])
 
 
 @order_cmd.handle()
@@ -1159,7 +1078,7 @@ async def handle_order(
     )
 
 
-pass_badge_cmd = on_command("移交警徽", priority=5, block=True)
+pass_badge_cmd = build_matcher(COMMAND_BY_NAME["移交警徽"])
 
 
 @pass_badge_cmd.handle()
@@ -1184,7 +1103,7 @@ async def handle_pass_badge(
     )
 
 
-tear_badge_cmd = on_command("撕警徽", priority=5, block=True)
+tear_badge_cmd = build_matcher(COMMAND_BY_NAME["撕警徽"])
 
 
 @tear_badge_cmd.handle()
@@ -1205,7 +1124,7 @@ async def handle_tear_badge(
     )
 
 
-detonate_cmd = on_command("自爆", priority=5, block=True)
+detonate_cmd = build_matcher(COMMAND_BY_NAME["自爆"])
 
 
 @detonate_cmd.handle()
@@ -1226,7 +1145,7 @@ async def handle_detonate(
     )
 
 
-duel_cmd = on_command("决斗", priority=5, block=True)
+duel_cmd = build_matcher(COMMAND_BY_NAME["决斗"])
 
 
 @duel_cmd.handle()
@@ -1251,7 +1170,7 @@ async def handle_duel(
     )
 
 
-vote_cmd = on_command("投票", aliases={"票"}, priority=5, block=True)
+vote_cmd = build_matcher(COMMAND_BY_NAME["投票"])
 
 
 @vote_cmd.handle()
@@ -1274,7 +1193,7 @@ async def handle_vote(
     )
 
 
-abstain_cmd = on_command("弃票", priority=5, block=True)
+abstain_cmd = build_matcher(COMMAND_BY_NAME["弃票"])
 
 
 @abstain_cmd.handle()
@@ -1293,7 +1212,7 @@ async def handle_abstain(
     )
 
 
-skip_cmd = on_command("过", priority=5, block=True)
+skip_cmd = build_matcher(COMMAND_BY_NAME["过"])
 
 
 @skip_cmd.handle()
@@ -1433,12 +1352,7 @@ async def handle_game_speech(event: GroupMessageEvent) -> None:
 
 # ── 战绩 ──────────────────────────────────────────────────
 
-record_cmd = on_command(
-    "战绩",
-    aliases={"狼人战绩"},
-    priority=5,
-    block=True,
-)
+record_cmd = build_matcher(COMMAND_BY_NAME["战绩"])
 
 
 @record_cmd.handle()

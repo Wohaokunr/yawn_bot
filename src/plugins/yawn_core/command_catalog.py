@@ -6,6 +6,8 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Literal
 
+from .command_access import CommandAccessContext
+
 CommandScope = Literal["all", "group", "private"]
 CommandDisplayLevel = Literal[
     "entry",
@@ -31,14 +33,7 @@ CommandPermission = Literal[
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class CommandContext:
-    """帮助请求的只读上下文；游戏插件据此查询自己的当前状态。"""
-
-    user_id: int
-    group_id: int | None
-    is_superuser: bool = False
-    is_group_admin: bool = False
+CommandContext = CommandAccessContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,10 +48,11 @@ class CommandSpec:
     permission: CommandPermission = "everyone"
     display_level: CommandDisplayLevel = "entry"
     help_section: HelpSectionKey | None = None
+    operation_support: bool = False
 
 
-CommandAvailability = Callable[[CommandContext], Collection[str]]
-CommandHelpHint = Callable[[CommandContext], str | None]
+CommandAvailability = Callable[[CommandAccessContext], Collection[str]]
+CommandHelpHint = Callable[[CommandAccessContext], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +74,9 @@ class PluginCommandGroup:
         if self.entrypoint not in names:
             raise ValueError("命令组主入口未登记为命令")
 
-    def available_commands(self, context: CommandContext) -> tuple[CommandSpec, ...]:
+    def available_commands(
+        self, context: CommandAccessContext
+    ) -> tuple[CommandSpec, ...]:
         """按插件自己的状态判断保留当前真正可用的命令。"""
 
         if self.get_available_commands is None:
@@ -86,7 +84,7 @@ class PluginCommandGroup:
         available = frozenset(self.get_available_commands(context))
         return tuple(command for command in self.commands if command.name in available)
 
-    def help_hint(self, context: CommandContext) -> str | None:
+    def help_hint(self, context: CommandAccessContext) -> str | None:
         """返回插件根据当前状态提供的一句操作提示。"""
 
         if self.get_help_hint is None:

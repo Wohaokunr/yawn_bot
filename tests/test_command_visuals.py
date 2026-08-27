@@ -71,6 +71,39 @@ async def test_help_home_htmlkit_renders_png(visual_modules: SimpleNamespace) ->
 
 
 @pytest.mark.asyncio
+async def test_help_detail_htmlkit_renders_grouped_commands(
+    visual_modules: SimpleNamespace,
+) -> None:
+    renderer = visual_modules.renderer
+    sections = (
+        renderer.CommandSectionView(
+            "推荐操作",
+            (
+                renderer.CommandItemView(
+                    "狼人杀 查验",
+                    "预言家夜晚私聊查验目标",
+                    "/查验、/验",
+                ),
+            ),
+        ),
+        renderer.CommandSectionView(
+            "常用",
+            (renderer.CommandItemView("狼人杀 状态", "查看当前公开进度"),),
+        ),
+    )
+
+    data = await renderer.render_command_sections(
+        title="狼人杀",
+        subtitle="只展示当前可用命令。",
+        sections=sections,
+        note="夜间行动请在私聊中完成。",
+    )
+
+    assert data is not None
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
 async def test_renderer_failure_returns_none_for_text_fallback(
     visual_modules: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,

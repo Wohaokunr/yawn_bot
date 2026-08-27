@@ -48,11 +48,38 @@ def test_session_helpers_are_small_and_strict(session_modules: SimpleNamespace) 
     assert helpers.is_back("back") is True
     assert helpers.is_exit("返回") is False
     assert helpers.is_exit("退出") is True
+    assert helpers.resolve_session_intent("菜单") is helpers.SessionIntent.MENU
+    assert helpers.resolve_session_intent("返回") is helpers.SessionIntent.BACK
+    assert helpers.resolve_session_intent("/help") is helpers.SessionIntent.NEW_COMMAND
+    assert helpers.resolve_session_intent("普通输入") is helpers.SessionIntent.INPUT
+    assert helpers.is_new_command(" /Agent状态") is True
+    assert helpers.is_new_command("功能 1") is False
     assert helpers.parse_toggle("开启") is True
     assert helpers.parse_toggle("off") is False
     assert helpers.parse_toggle("随便") is None
     assert helpers.confirmation_matches("确认清理", "确认清理") is True
     assert helpers.confirmation_matches("确认", "确认清理") is False
+
+
+@pytest.mark.asyncio
+async def test_session_releases_block_for_new_command(
+    session_modules: SimpleNamespace,
+) -> None:
+    helpers = session_modules.helpers
+
+    class FinishedError(Exception):
+        pass
+
+    class FakeMatcher:
+        block = True
+
+        async def finish(self) -> None:
+            raise FinishedError
+
+    matcher = FakeMatcher()
+    with pytest.raises(FinishedError):
+        await helpers.pass_through_new_command(matcher, "/Agent状态")
+    assert matcher.block is False
 
 
 def test_agent_setting_parser_rejects_invalid_values(

@@ -16,7 +16,6 @@ from nonebot import (
     get_driver,
     get_plugin_config,
     logger,
-    on_command,
     on_message,
 )
 from nonebot.adapters.onebot.v11 import (
@@ -29,8 +28,13 @@ from nonebot.params import CommandArg
 from nonebot.rule import Rule
 from nonebot_plugin_orm import get_session
 
+from ..command_definition import build_matcher  # noqa: TID252
+from ..command_ux import (  # noqa: TID252
+    command_failure,
+    permission_required,
+    temporary_failure,
+)
 from ..event_log import record_game_event  # noqa: TID252
-from ..game_command_routing import game_context_rule  # noqa: TID252
 from ..permission import (  # noqa: TID252
     check_feature_permission,
     is_group_admin,
@@ -38,6 +42,7 @@ from ..permission import (  # noqa: TID252
 )
 from . import engine
 from .charsheet import SKILLS
+from .command_definitions import COMMAND_BY_NAME
 from .config import Config
 from .dsl import _DM_HINT, parse_card_action
 from .module_schema import list_modules
@@ -60,9 +65,7 @@ if TYPE_CHECKING:
 config = get_plugin_config(Config)
 
 
-tutorial_help_cmd = on_command(
-    "跑团帮助", aliases={"TRPG帮助"}, priority=5, block=True
-)
+tutorial_help_cmd = build_matcher(COMMAND_BY_NAME["跑团帮助"])
 
 
 @tutorial_help_cmd.handle()
@@ -89,7 +92,7 @@ async def handle_tutorial_help(
     await tutorial_help_cmd.finish(help_text(topic))
 
 
-skip_tutorial_cmd = on_command("跳过引导", priority=5, block=True)
+skip_tutorial_cmd = build_matcher(COMMAND_BY_NAME["跳过引导"])
 
 
 @skip_tutorial_cmd.handle()
@@ -113,7 +116,7 @@ async def handle_skip_tutorial(
     await skip_tutorial_cmd.finish("已停止自动新手提示；仍可随时使用 /跑团帮助。")
 
 
-reset_tutorial_cmd = on_command("重新引导", priority=5, block=True)
+reset_tutorial_cmd = build_matcher(COMMAND_BY_NAME["重新引导"])
 
 
 @reset_tutorial_cmd.handle()
@@ -201,12 +204,7 @@ def _signup_cap(game_module_max: int | None) -> int:
 
 # ── 开房与报名 ────────────────────────────────────────────
 
-rpg_open = on_command(
-    "跑团",
-    aliases={"开团", "TRPG"},
-    priority=5,
-    block=True,
-)
+rpg_open = build_matcher(COMMAND_BY_NAME["跑团"])
 
 
 @rpg_open.handle()
@@ -218,29 +216,48 @@ async def handle_open(
     group_id = int(event.group_id)
     user_id = int(event.get_user_id())
     if get_game(group_id) is not None:
-        await rpg_open.finish("本群已经有正在进行的跑团~")
+        await rpg_open.finish(
+            command_failure(
+                "跑团房间未创建",
+                "本群跑团正在进行",
+                "/局面 查看进度 · /操作 查看当前可做操作",
+            )
+        )
     if game_of_user(user_id) is not None:
-        await rpg_open.finish("你已经在其他对局中，无法开房~")
+        await rpg_open.finish(
+            command_failure(
+                "跑团房间未创建",
+                "你已经参加其他对局",
+                "先结束或退出当前对局，再重新开团",
+            )
+        )
     if not list_modules():
-        await rpg_open.finish("当前没有可用的剧本模组，无法开团~")
+        await rpg_open.finish(
+            command_failure(
+                "跑团房间未创建",
+                "当前没有可用剧本模组",
+                "请管理员安装模组后重试",
+            )
+        )
     try:
         get_bot()
     except ValueError:
-        await rpg_open.finish("机器人连接未就绪，请稍后重试~")
+        await rpg_open.finish(temporary_failure("跑团房间创建", "机器人连接恢复后重试"))
     game = create_game(group_id, user_id, queue_max=config.rpg_action_queue_max)
     if game is None:
-        await rpg_open.finish("开房失败，请稍后重试")
+        await rpg_open.finish(
+            command_failure(
+                "跑团房间创建失败",
+                "群或账号刚被其他玩法占用",
+                "/局面 查看当前对局，结束后再重试",
+            )
+        )
     game.worker = asyncio.create_task(engine.run_game(game))
     logger.info(f"跑团群 {group_id} 由 {user_id} 开房")
     await rpg_open.finish("跑团房间已创建，房主已自动报名~")
 
 
-module_list_cmd = on_command(
-    "模组列表",
-    aliases={"模组"},
-    priority=5,
-    block=True,
-)
+module_list_cmd = build_matcher(COMMAND_BY_NAME["模组列表"])
 
 
 @module_list_cmd.handle()
@@ -251,12 +268,7 @@ async def handle_module_list(
     await module_list_cmd.finish(engine.module_list_text())
 
 
-select_module_cmd = on_command(
-    "选择模组",
-    aliases={"选模组"},
-    priority=5,
-    block=True,
-)
+select_module_cmd = build_matcher(COMMAND_BY_NAME["选择模组"])
 
 
 @select_module_cmd.handle()
@@ -271,7 +283,11 @@ async def handle_select_module(
         await select_module_cmd.finish("本群当前没有报名中的跑团")
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
-        await select_module_cmd.finish("只有房主、群管理员或超管可以选择模组~")
+        await select_module_cmd.finish(
+            permission_required(
+                "选择模组", "房主、群管理员或超级用户", "请房主或群管理员执行"
+            )
+        )
     text = str(arg).strip()
     if not text:
         await select_module_cmd.finish("格式：/选择模组 N（发送 /模组列表 查看）")
@@ -298,13 +314,7 @@ async def handle_select_module(
     await select_module_cmd.finish(error)
 
 
-signup_cmd = on_command(
-    "报名",
-    aliases={"上车", "加一"},
-    rule=game_context_rule("rpg"),
-    priority=5,
-    block=True,
-)
+signup_cmd = build_matcher(COMMAND_BY_NAME["报名"])
 
 
 @signup_cmd.handle()
@@ -323,13 +333,7 @@ async def handle_signup(
     await signup_cmd.finish(error or "报名申请已提交，系统将按顺序处理~")
 
 
-leave_cmd = on_command(
-    "退报名",
-    aliases={"下车"},
-    rule=game_context_rule("rpg"),
-    priority=5,
-    block=True,
-)
+leave_cmd = build_matcher(COMMAND_BY_NAME["退报名"])
 
 
 @leave_cmd.handle()
@@ -346,13 +350,7 @@ async def handle_leave(
     await leave_cmd.finish(error or "退报名申请已提交，系统将按顺序处理~")
 
 
-view_cmd = on_command(
-    "查看报名",
-    aliases={"报名情况"},
-    rule=game_context_rule("rpg"),
-    priority=5,
-    block=True,
-)
+view_cmd = build_matcher(COMMAND_BY_NAME["查看报名"])
 
 
 @view_cmd.handle()
@@ -378,13 +376,7 @@ async def handle_view(
     await view_cmd.finish("\n".join(lines))
 
 
-situation_cmd = on_command(
-    "局面",
-    aliases={"当前局面", "跑团状态"},
-    rule=game_context_rule("rpg"),
-    priority=5,
-    block=True,
-)
+situation_cmd = build_matcher(COMMAND_BY_NAME["局面"])
 
 
 @situation_cmd.handle()
@@ -405,13 +397,7 @@ async def handle_situation(
     await situation_cmd.finish(public_text)
 
 
-start_cmd = on_command(
-    "开始游戏",
-    aliases={"发车"},
-    rule=game_context_rule("rpg"),
-    priority=5,
-    block=True,
-)
+start_cmd = build_matcher(COMMAND_BY_NAME["开始游戏"])
 
 
 @start_cmd.handle()
@@ -444,13 +430,7 @@ async def handle_start(
     await start_cmd.finish("已请求开始游戏~")
 
 
-end_cmd = on_command(
-    "结束游戏",
-    aliases={"解散团"},
-    rule=game_context_rule("rpg"),
-    priority=5,
-    block=True,
-)
+end_cmd = build_matcher(COMMAND_BY_NAME["结束游戏"])
 
 
 @end_cmd.handle()
@@ -474,7 +454,7 @@ async def handle_end(
 
 # ── 局内群命令 ────────────────────────────────────────────
 
-check_cmd = on_command("检定", aliases={"rc"}, priority=5, block=True)
+check_cmd = build_matcher(COMMAND_BY_NAME["检定"])
 
 
 @check_cmd.handle()
@@ -499,7 +479,7 @@ async def handle_check(
     await check_cmd.finish(error)
 
 
-attack_cmd = on_command("攻击", aliases={"打"}, priority=5, block=True)
+attack_cmd = build_matcher(COMMAND_BY_NAME["攻击"])
 
 
 @attack_cmd.handle()
@@ -525,7 +505,7 @@ async def handle_attack(
     await attack_cmd.finish(error)
 
 
-move_cmd = on_command("前往", aliases={"去"}, priority=5, block=True)
+move_cmd = build_matcher(COMMAND_BY_NAME["前往"])
 
 
 @move_cmd.handle()
@@ -550,7 +530,7 @@ async def handle_move(
     await move_cmd.finish(error)
 
 
-time_cmd = on_command("时间", aliases={"时辰"}, priority=5, block=True)
+time_cmd = build_matcher(COMMAND_BY_NAME["时间"])
 
 
 @time_cmd.handle()
@@ -565,7 +545,7 @@ async def handle_time(
     await time_cmd.finish(f"现在是 {engine.format_clock(game)}")
 
 
-wait_cmd = on_command("等待", aliases={"休息"}, priority=5, block=True)
+wait_cmd = build_matcher(COMMAND_BY_NAME["等待"])
 
 
 @wait_cmd.handle()
@@ -596,7 +576,7 @@ async def handle_wait(
     await wait_cmd.finish(error)
 
 
-status_cmd = on_command("状态", aliases={"我的状态"}, priority=5, block=True)
+status_cmd = build_matcher(COMMAND_BY_NAME["状态"])
 
 
 @status_cmd.handle()
@@ -624,7 +604,7 @@ async def handle_status(
     await status_cmd.finish("\n".join(lines))
 
 
-skill_cmd = on_command("技能", aliases={"技能列表"}, priority=5, block=True)
+skill_cmd = build_matcher(COMMAND_BY_NAME["技能"])
 
 
 @skill_cmd.handle()
@@ -646,7 +626,7 @@ async def handle_skills(
     await skill_cmd.finish("\n".join(lines))
 
 
-clue_cmd = on_command("线索", aliases={"已发现线索"}, priority=5, block=True)
+clue_cmd = build_matcher(COMMAND_BY_NAME["线索"])
 
 
 @clue_cmd.handle()
@@ -696,7 +676,7 @@ async def handle_clues(
     await clue_cmd.finish(message)
 
 
-assist_cmd = on_command("协助", aliases={"帮忙"}, priority=5, block=True)
+assist_cmd = build_matcher(COMMAND_BY_NAME["协助"])
 
 
 @assist_cmd.handle()
@@ -727,9 +707,9 @@ async def handle_assist(
     await assist_cmd.finish(error)
 
 
-share_clue_cmd = on_command("分享线索", aliases={"公开线索"}, priority=5, block=True)
+share_clue_cmd = build_matcher(COMMAND_BY_NAME["分享线索"])
 
-clue_board_cmd = on_command("线索板", aliases={"证据板"}, priority=5, block=True)
+clue_board_cmd = build_matcher(COMMAND_BY_NAME["线索板"])
 
 
 @clue_board_cmd.handle()
@@ -766,7 +746,7 @@ async def handle_share_clue(
     await share_clue_cmd.finish(error)
 
 
-deduction_cmd = on_command("推理", aliases={"联合推理"}, priority=5, block=True)
+deduction_cmd = build_matcher(COMMAND_BY_NAME["推理"])
 
 
 @deduction_cmd.handle()
@@ -791,7 +771,7 @@ async def handle_deduction(
     await deduction_cmd.finish(error)
 
 
-confirm_deduction_cmd = on_command("赞成推理", priority=5, block=True)
+confirm_deduction_cmd = build_matcher(COMMAND_BY_NAME["赞成推理"])
 
 
 @confirm_deduction_cmd.handle()
@@ -811,7 +791,7 @@ async def handle_confirm_deduction(
     await confirm_deduction_cmd.finish(error)
 
 
-withdraw_deduction_cmd = on_command("撤回推理", priority=5, block=True)
+withdraw_deduction_cmd = build_matcher(COMMAND_BY_NAME["撤回推理"])
 
 
 @withdraw_deduction_cmd.handle()
@@ -831,7 +811,7 @@ async def handle_withdraw_deduction(
     await withdraw_deduction_cmd.finish(error)
 
 
-share_fact_cmd = on_command("分享情报", aliases={"公开情报"}, priority=5, block=True)
+share_fact_cmd = build_matcher(COMMAND_BY_NAME["分享情报"])
 
 
 @share_fact_cmd.handle()
@@ -862,7 +842,7 @@ async def handle_share_fact(
     await share_fact_cmd.finish(error)
 
 
-pass_turn_cmd = on_command("跳过", aliases={"结束行动"}, priority=5, block=True)
+pass_turn_cmd = build_matcher(COMMAND_BY_NAME["跳过"])
 
 
 @pass_turn_cmd.handle()

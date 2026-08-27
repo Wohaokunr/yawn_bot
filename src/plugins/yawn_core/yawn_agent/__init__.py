@@ -7,7 +7,8 @@
 
 from nonebot.plugin import PluginMetadata
 
-from ..command_catalog import CommandSpec, PluginCommandGroup, register_command_group
+from ..command_catalog import PluginCommandGroup, register_command_group
+from .command_definitions import COMMAND_DEFINITIONS
 from . import (
     agent,
     capabilities,
@@ -32,75 +33,7 @@ COMMAND_GROUP = register_command_group(
         display_name="群聊 Agent",
         entrypoint="群聊Agent",
         help_section="agent",
-        commands=(
-            CommandSpec(
-                name="群聊Agent",
-                aliases=("群AI",),
-                description="群聊 Agent 开关与概况",
-                feature="group_agent",
-                scope="group",
-                permission="group_admin",
-            ),
-            CommandSpec(
-                name="Agent状态",
-                description="查看群聊 Agent 当前状态",
-                feature="group_agent",
-                scope="group",
-            ),
-            CommandSpec(
-                name="Agent记忆",
-                description="查看已沉淀的群记忆",
-                feature="group_agent",
-                scope="group",
-                display_level="advanced",
-            ),
-            CommandSpec(
-                name="Agent画像",
-                description="查看群成员人物画像",
-                feature="group_agent",
-                scope="group",
-                display_level="advanced",
-            ),
-            CommandSpec(
-                name="Agent隐私",
-                description="退出或恢复本群 Agent 记忆",
-                feature="group_agent",
-                scope="group",
-                display_level="advanced",
-            ),
-            CommandSpec(
-                name="Agent设置",
-                description="设置暖场概率、插话概率、冷却、媒体缓存等参数",
-                feature="group_agent",
-                scope="group",
-                permission="group_admin",
-                display_level="advanced",
-            ),
-            CommandSpec(
-                name="Agent清理",
-                description="清空本群 Agent 记忆",
-                feature="group_agent",
-                scope="group",
-                permission="group_admin",
-                display_level="advanced",
-            ),
-            CommandSpec(
-                name="Agent导出",
-                description="导出本群 Agent 记忆数据",
-                feature="group_agent",
-                scope="group",
-                permission="group_admin",
-                display_level="advanced",
-            ),
-            CommandSpec(
-                name="Agent人设",
-                description="查看或设置群级人设",
-                feature="group_agent",
-                scope="group",
-                permission="group_admin",
-                display_level="advanced",
-            ),
-        ),
+        commands=COMMAND_DEFINITIONS,
     )
 )
 

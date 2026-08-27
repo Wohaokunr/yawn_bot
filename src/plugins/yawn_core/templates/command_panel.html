@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <main class="shell">
+    <div class="content">
+      <div class="eyebrow">YawnBot · Commands</div>
+      <h1 class="name command-heading">{{ title }}</h1>
+      <div class="subtitle">{{ subtitle }}</div>
+      {% for section in sections %}
+      <section class="command-section">
+        <div class="section-title command-section-title">{{ section.title }}</div>
+        <div class="command-list">
+          {% for command in section.commands %}
+          <div class="command-item">
+            <div class="command-name">/{{ command.name }}</div>
+            {% if command.description %}
+            <div class="command-description">{{ command.description }}</div>
+            {% endif %}
+            {% if command.aliases %}
+            <div class="command-aliases">别名：{{ command.aliases }}</div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% endfor %}
+      {% if note %}
+      <div class="actions">{{ note }}</div>
+      {% endif %}
+    </div>
+  </main>
+</body>
+</html>

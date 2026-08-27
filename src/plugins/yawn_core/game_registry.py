@@ -12,6 +12,17 @@ GameKind = Literal["rpg", "werewolf"]
 class _Lease:
     kind: GameKind
     group_id: int
+    host_user_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class GameAccess:
+    """当前用户所处玩法的通用访问快照。"""
+
+    kind: GameKind
+    group_id: int
+    is_room_host: bool
+    is_player: bool
 
 
 _groups: dict[int, _Lease] = {}
@@ -25,6 +36,20 @@ def active_game_kind(group_id: int) -> GameKind | None:
     return lease.kind if lease is not None else None
 
 
+def resolve_game_access(group_id: int | None, user_id: int) -> GameAccess | None:
+    """解析当前玩法、房主与参与者身份，不读取具体玩法内部状态。"""
+
+    lease = _groups.get(group_id) if group_id is not None else _users.get(user_id)
+    if lease is None:
+        return None
+    return GameAccess(
+        kind=lease.kind,
+        group_id=lease.group_id,
+        is_room_host=lease.host_user_id == user_id,
+        is_player=_users.get(user_id) == lease,
+    )
+
+
 def group_has_game(kind: GameKind, group_id: int) -> bool:
     """判断本群当前是否由指定玩法占用，供共享命令路由使用。"""
 
@@ -35,7 +60,7 @@ def reserve_game(kind: GameKind, group_id: int, host_user_id: int) -> bool:
     """原子登记一局玩法，并占用群组与房主。"""
     if group_id in _groups or host_user_id in _users:
         return False
-    lease = _Lease(kind, group_id)
+    lease = _Lease(kind, group_id, host_user_id)
     _groups[group_id] = lease
     _users[host_user_id] = lease
     return True

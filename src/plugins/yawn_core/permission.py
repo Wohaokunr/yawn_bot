@@ -11,6 +11,7 @@ from nonebot.permission import SUPERUSER
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .command_ux import command_failure
 from .data_models.global_user_feature import GlobalUserFeature
 from .data_models.group_feature import GroupFeature
 from .data_models.user_feature import UserFeature
@@ -164,7 +165,19 @@ def require_feature(feature: str) -> Dependent:
         if not allowed:
             display = get_feature_display(feature)
             logger.info(f"用户 {user_id} 尝试使用功能「{display}」但权限不足")
-            await matcher.finish(MessageSegment.text(f"功能「{display}」当前未开启哦~"))
+            await matcher.finish(
+                MessageSegment.text(
+                    command_failure(
+                        f"功能「{display}」未执行",
+                        "当前会话未开启此功能",
+                        (
+                            "联系群管理员开启后重试"
+                            if group_id is not None
+                            else "联系机器人管理员开启后重试"
+                        ),
+                    )
+                )
+            )
 
     return Depends(_checker)
 
