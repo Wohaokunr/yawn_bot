@@ -1,8 +1,8 @@
+name: yawnbot
+
 services:
   yawnbot:
-    build:
-      context: .
-    image: yawnbot:local
+    image: "${YAWNBOT_IMAGE:?YAWNBOT_IMAGE must be an immutable digest reference}"
     restart: unless-stopped
     env_file:
       - .env
@@ -10,11 +10,11 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       LOCALSTORE_USE_CWD: "true"
-      YAWNBOT_AUTO_MIGRATE: "${YAWNBOT_AUTO_MIGRATE:-true}"
+      YAWNBOT_AUTO_MIGRATE: "false"
     ports:
-      - "${YAWNBOT_PORT:-8080}:8080"
+      - "127.0.0.1:${YAWNBOT_PORT:-8080}:8080"
     volumes:
-      - yawnbot-data:/app/data
+      - ./data:/app/data
     networks:
       - yawnbot-internal
     healthcheck:
@@ -28,9 +28,7 @@ services:
       start_period: 30s
       retries: 3
 
-volumes:
-  yawnbot-data:
-
 networks:
   yawnbot-internal:
+    external: true
     name: yawnbot-internal

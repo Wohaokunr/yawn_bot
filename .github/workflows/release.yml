@@ -22,6 +22,11 @@ jobs:
   release:
     name: Build and publish release
     needs: quality-gates
+    outputs:
+      version: ${{ steps.release_meta.outputs.version }}
+      image: ${{ steps.release_meta.outputs.image }}
+      digest: ${{ steps.docker_build.outputs.digest }}
+      commit: ${{ github.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -178,3 +183,48 @@ jobs:
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-deploy.tar.gz
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-image.txt
             release-out/SHA256SUMS.txt
+
+  deploy-production:
+    name: Deploy production
+    needs: release
+    if: ${{ !contains(needs.release.outputs.version, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+    concurrency:
+      group: yawnbot-production
+      cancel-in-progress: false
+    steps:
+      - name: Configure deployment SSH identity
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/yawnbot-deploy
+          printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/yawnbot-deploy ~/.ssh/known_hosts
+
+      - name: Deploy immutable release image
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          IMAGE: ${{ needs.release.outputs.image }}
+          DIGEST: ${{ needs.release.outputs.digest }}
+          VERSION: ${{ needs.release.outputs.version }}
+          COMMIT: ${{ needs.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DIGEST"
+          ssh -i ~/.ssh/yawnbot-deploy \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT"
