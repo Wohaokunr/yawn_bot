@@ -36,8 +36,8 @@ from .config import API_PATH, BASE_PATH, COOKIE_NAME, DIST_DIR
 from .environment_routes import router as environment_router
 from .fanqie import router as fanqie_router
 from .games import router as games_router
-from .guest_access_routes import router as guest_access_router
 from .groups import router as groups_router
+from .guest_access_routes import router as guest_access_router
 from .hub import hub
 from .overview_routes import router as overview_router
 from .rpg_modules import router as rpg_modules_router
@@ -115,7 +115,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
         return await request_validation_exception_handler(request, exc)
 
 
-def register(app: FastAPI) -> None:
+def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(auth_router)
     app.include_router(overview_router)
     app.include_router(environment_router)
@@ -201,25 +201,30 @@ def register(app: FastAPI) -> None:
         finally:
             hub.disconnect(websocket)
 
-    assets = DIST_DIR / "assets"
-    if assets.is_dir():
-        app.mount(
-            f"{BASE_PATH}/assets",
-            StaticFiles(directory=assets),
-            name="yawn-webui-assets",
-        )
+    if include_spa:
+        assets = DIST_DIR / "assets"
+        if assets.is_dir():
+            app.mount(
+                f"{BASE_PATH}/assets",
+                StaticFiles(directory=assets),
+                name="yawn-webui-assets",
+            )
 
-    index = DIST_DIR / "index.html"
+        index = DIST_DIR / "index.html"
 
-    @app.get(BASE_PATH, include_in_schema=False)
-    @app.get(f"{BASE_PATH}/{{spa_path:path}}", include_in_schema=False)
-    async def spa(spa_path: str = "") -> FileResponse:
-        if spa_path.startswith("api/"):
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "接口不存在")
-        requested = (DIST_DIR / spa_path).resolve()
-        if spa_path and DIST_DIR.resolve() in requested.parents and requested.is_file():
-            return FileResponse(requested)
-        return FileResponse(index)
+        @app.get(BASE_PATH, include_in_schema=False)
+        @app.get(f"{BASE_PATH}/{{spa_path:path}}", include_in_schema=False)
+        async def spa(spa_path: str = "") -> FileResponse:
+            if spa_path.startswith("api/"):
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "接口不存在")
+            requested = (DIST_DIR / spa_path).resolve()
+            if (
+                spa_path
+                and DIST_DIR.resolve() in requested.parents
+                and requested.is_file()
+            ):
+                return FileResponse(requested)
+            return FileResponse(index)
 
     _register_exception_handlers(app)
 

@@ -53,7 +53,7 @@ def _webui_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def webui_client() -> TestClient:
     app = FastAPI()
-    app_module.register(app)
+    app_module.register(app, include_spa=False)
     client = TestClient(app)
     response = client.post("/webui/api/v1/auth/login", json={"token": "x" * 40})
     assert response.status_code == 200  # noqa: PLR2004

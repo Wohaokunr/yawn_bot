@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from nonebot import logger
 
@@ -89,6 +89,11 @@ _Labels = tuple[tuple[str, str], ...]
 _PhaseKey = tuple[str, str]
 
 
+class _AiHealthState(TypedDict):
+    consecutiveFailures: int
+    lastFailureOutcome: str | None
+
+
 @dataclass
 class _Histogram:
     """固定 bucket 的累积前计数。"""
@@ -118,7 +123,7 @@ _histograms: dict[str, dict[_Labels, _Histogram]] = {}
 _AI_ACTIVE_FAILURE_OUTCOMES = frozenset(
     {"error", "timeout", "empty", "unsupported_multimodal"}
 )
-_ai_health: dict[str, dict[str, object]] = {}
+_ai_health: dict[str, _AiHealthState] = {}
 # key 只在内存中保存，避免把 game_id 放入公开指标标签。
 _phase_starts: dict[_PhaseKey, tuple[str, float]] = {}
 

@@ -105,20 +105,30 @@ uv run python -m tools.rpg_playtest MODULE.yaml \
 ## 开发检查
 
 ```bash
-uv run pytest -q
-uv run ruff check src tests tools/rpg_module_editor tools/rpg_playtest
-uv run pyright src tools/rpg_module_editor tools/rpg_playtest
-uv run python -m compileall -q src tools/rpg_module_editor tools/rpg_playtest
+python tools/repo_guard.py
+uv run pytest -q --ignore=tests/test_webui_spa.py
+uv run ruff check src tests tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+uv run pyright src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
+uv run python -m compileall -q src tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py
 git diff --check
+
+cd webui
+npm ci
+npm test -- --run
+npm run typecheck
+npm run build
 ```
 
 正式插件发现冒烟检查：
 
 ```bash
-uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_rpg','yawn_core:yawn_werewolf','yawn_core:yawn_fanqie'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
+uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproject.toml'); required=('yawn_core','yawn_core:yawn_agent','yawn_core:yawn_rpg','yawn_core:yawn_werewolf','yawn_core:yawn_fanqie'); missing=[name for name in required if nonebot.get_plugin(name) is None]; assert not missing, missing"
 ```
 
-CI 在 Python 3.10 上执行相同的测试、静态检查、字节码编译和插件加载检查。
+CI 将门槛拆成独立并行 job：repository hygiene、Python lint/typecheck/tests、
+WebUI quality、migration check 和 plugin smoke。WebUI build 产物不进入 Git，CI 会把
+`webui/dist` 作为 artifact 传给单独的 SPA 集成测试。规则详见
+[Repository hygiene](docs/repository-hygiene.md)。
 
 ## 代码结构
 
@@ -129,9 +139,11 @@ src/plugins/yawn_core/                 平台插件与共享基础能力
   yawn_werewolf/                       狼人杀引擎与 AI 驱动
   yawn_fanqie/                         番茄公开小说 provider、任务与 TXT 投递
 tools/rpg_module_editor/               Textual 模组编辑器
+tools/rpg_playtest/                    固定 seed 的离线 RPG 试玩器
+tools/repo_guard.py                     Git 仓库卫生门槛
 tests/                                 跨模块与回归测试
 data/nonebot_plugin_orm/migrations/    受版本控制的 canonical 迁移
-migrations/versions/                   ORM CLI 同步/生成迁移时使用的工作目录
+webui/                                 React/Vite 管理台源码（dist 不入库）
 docs/                                  部署说明与架构图
 ```
 
