@@ -21,9 +21,12 @@ _PYTHON_LICENSE_OVERRIDES = {
 }
 
 _REVIEWED_COPYLEFT = {
-    "nonebot-plugin-htmlkit": "0.1.0rc5",
-    "certifi": "2026.7.22",
-    "tqdm": "4.70.0",
+    "nonebot-plugin-htmlkit": (
+        "0.1.0rc5",
+        ("MIT AND LGPL-3.0-or-later",),
+    ),
+    "certifi": ("2026.7.22", ("MPL", "Mozilla Public License")),
+    "tqdm": ("4.70.0", ("MPL", "Mozilla Public License")),
 }
 
 _RESTRICTIVE_RE = re.compile(
@@ -92,11 +95,24 @@ def _audit_python() -> int:
             failures.append(f"{name}=={version}: restrictive license {raw_license!r}")
             continue
         if _WEAK_COPYLEFT_RE.search(raw_license):
-            reviewed_version = _REVIEWED_COPYLEFT.get(normalized)
+            review = _REVIEWED_COPYLEFT.get(normalized)
+            if review is None:
+                failures.append(
+                    f"{name}=={version}: copyleft license {raw_license!r} has not "
+                    "been reviewed"
+                )
+                continue
+            reviewed_version, expected_fragments = review
             if reviewed_version != version:
                 failures.append(
                     f"{name}=={version}: copyleft license {raw_license!r} has not "
                     "been reviewed for this version"
+                )
+                continue
+            if not any(fragment.lower() in raw_license.lower() for fragment in expected_fragments):
+                failures.append(
+                    f"{name}=={version}: reviewed license expression changed to "
+                    f"{raw_license!r}"
                 )
             continue
         if _GPL_RE.search(raw_license):
