@@ -40,7 +40,9 @@ python tools/repository_content_test.py
 python tools/history_secret_audit.py
 ```
 
-也可以在 GitHub Actions 手工执行 **Open-source audit** workflow。该 workflow 使用 `fetch-depth: 0` 并额外抓取所有远端 branches/tags。
+也可以在 GitHub Actions 手工执行 **Open-source audit** workflow。该 workflow 只做当前树检查与全历史只读审计，不执行历史重写，也不监听已经完成的开源准备阶段分支。
+
+需要验证历史清洗方案时，单独手工执行 **History rewrite dry-run**，或修改历史审计/重写工具的 PR 时让它自动运行。该 workflow 只在 Runner 的一次性 mirror 中执行 `git-filter-repo`，不会 push 远端 refs。
 
 扫描命中真实凭据时：
 
@@ -53,6 +55,8 @@ python tools/history_secret_audit.py
 7. 只有扫描通过后才能继续公开。
 
 扫描命中历史数据库、NapCat/QQ 登录态、浏览器 profile 等私人运行时文件时，即使没有检测到格式化 secret，也应按潜在隐私数据处理并从公开历史删除。
+
+实际远端重写必须遵循 [`docs/history-rewrite-runbook.md`](history-rewrite-runbook.md)：先建立并验证仓库外/offline mirror 或 bundle，再 force-update refs。不得把包含待删除私人历史的回滚包放进本仓库、GitHub Release、Issue/PR 附件或 Actions artifact。
 
 ## 4. Actions 历史与 artifact 检查（阻断项）
 
@@ -87,7 +91,7 @@ Apache-2.0 只覆盖 YawnBot Contributors 有权许可的仓库内容，不会�
 
 当前仓库检索未发现直接跟踪的 `.ttf`、`.svg` 或 `.webp` 文件；`.png/.jpg` 文本检索命中主要来自测试字符串。这个结果只用于缩小复核范围，**不能替代对实际 tracked tree 和依赖许可证的最终审计**。
 
-Python/npm 依赖仍按各自许可证发布，不因 YawnBot 使用 Apache-2.0 而改变。若项目未来 vendoring 第三方源码或静态资源，需要同步维护 NOTICE/third-party attribution。
+WebUI 通过 `@fontsource/zcool-kuaile` 再分发 ZCOOL KuaiLe 字体；其 OFL-1.1 copyright/license 文本已记录在 `THIRD_PARTY_NOTICES.md`，并随 Docker runtime image 一起复制。Python/npm 其他依赖仍按各自许可证发布，不因 YawnBot 使用 Apache-2.0 而改变。若项目未来 vendoring 第三方源码或静态资源，需要同步维护 NOTICE/third-party attribution。
 
 ## 6. 社区治理文件（阻断项）
 
@@ -112,6 +116,8 @@ CODE_OF_CONDUCT.md
 
 CI 已包含 fresh-checkout 和 Docker clean-deploy smoke；切换 public 前仍建议从一台没有 YawnBot 开发状态的新环境按 README 操作一次。
 
+### 源码构建路径
+
 至少验证：
 
 ```bash
@@ -125,28 +131,59 @@ docker compose ps
 curl --fail http://127.0.0.1:8080/healthz
 ```
 
+### 公共 Release 镜像路径
+
+还要验证普通用户不需要本地构建即可启动已发布 GHCR 镜像：
+
+```bash
+export YAWNBOT_IMAGE='ghcr.io/wohaokunr/yawn_bot@sha256:<release-digest>'
+docker compose -f deploy/docker/compose.release.yaml pull
+docker compose -f deploy/docker/compose.release.yaml up -d
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+详细步骤见 [公共 Docker / GHCR 部署](public-docker-deployment.md)。正式公开后确认 GHCR package visibility 允许匿名/普通用户拉取公开 Release 镜像。
+
 验收条件：
 
 - 不依赖维护者电脑上的 `.env`、npm/uv cache、数据库或浏览器 profile；
 - 空 SQLite 能迁移到 heads；
-- WebUI 构建来自仓库源码；
+- WebUI 构建来自仓库源码或已发布 GitHub Actions 镜像；
 - 没有 AI Key 时仍能按最小配置启动；
 - 文档能够让陌生用户理解 OneBot V11 仍需要单独实现；
+- 源码 Compose 与 Release Compose 都使用持久 data volume；
 - `docker compose down` 后 named volume 数据保持存在。
 
 ## 8. 开源当天顺序
 
 1. 合并开源准备 PR；
 2. 主分支 CI 全绿；
-3. 手工运行 `Open-source audit` 并确认全历史通过；
+3. 完成正式 Git 历史清洗并重新手工运行 `Open-source audit`，确认全历史通过；
 4. 完成 Actions logs/artifacts 人工审计；
 5. 完成第三方素材/许可证审计；
-6. 在干净环境完成 README clean-deploy；
-7. 打一个开源前稳定 Release，并确认现有生产自动部署成功；
+6. 在干净环境分别完成 README 源码 clean-deploy 和公共 GHCR Release Compose 验收；
+7. 打一个**不跳过 quality gates** 的开源前稳定 Release，并确认现有生产自动部署成功；
 8. 再把 repository visibility 切换为 public；
 9. 切换后检查 GitHub Community Standards、Issue Forms、Security 页面与 GHCR package visibility。
 
-## 9. 明确不在第一阶段做的事情
+## 9. 三条部署路径的边界
+
+开源后保持三条互不覆盖的部署路径：
+
+```text
+compose.yaml
+  -> 开发者 / 源码构建 / CI clean-deploy
+
+deploy/docker/compose.release.yaml
+  -> 普通公共用户 / GHCR 已发布镜像
+
+deploy/production/compose.yaml
+  -> 维护者自己的生产服务器 / 不可变 digest + 受限 CD
+```
+
+公共 Compose 不使用 production Environment，不需要服务器 SSH secrets，也不会改变 `/opt/yawnbot` 控制面。维护者生产服务器即使 GHCR package 变为 public，也继续保持现有 digest、认证、备份、migration 与 forced-command SSH 逻辑。
+
+## 10. 明确不在第一次开源前强制重构的事项
 
 为了降低生产风险，第一次开源不以以下重构作为前置条件：
 

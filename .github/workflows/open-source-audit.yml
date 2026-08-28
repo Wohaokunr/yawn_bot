@@ -2,14 +2,22 @@ name: Open-source audit
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "chore/open-source-readiness-phase1"
 
 permissions:
   contents: read
 
 jobs:
+  current-tree-audit:
+    name: Current tree audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repository hygiene
+        run: python tools/repo_guard.py
+      - name: Repository content contract
+        run: python tools/repository_content_test.py
+
   history-audit:
     name: Reachable Git history audit
     runs-on: ubuntu-latest
@@ -22,82 +30,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --force --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
-      - name: Audit all reachable blobs
-        run: python tools/history_secret_audit.py
-
-  rewrite-dry-run:
-    name: History rewrite dry-run
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Fetch all branches, tags and pull refs
-        shell: bash
-        run: |
-          set -euo pipefail
           git fetch --force --prune origin \
             '+refs/heads/*:refs/remotes/origin/*' \
-            '+refs/tags/*:refs/tags/*' \
-            '+refs/pull/*/head:refs/pull/*/head'
-      - name: Install git-filter-repo
-        run: python -m pip install --disable-pip-version-check 'git-filter-repo>=2.47'
-      - name: Rewrite history locally only
-        shell: bash
-        run: |
-          set -euo pipefail
-          git filter-repo \
-            --force \
-            --sensitive-data-removal \
-            --invert-paths \
-            --path .env.dev \
-            --path .env.prod \
-            --path .qoder/ \
-            --path .zcode/ \
-            --path .vs/ \
-            --path .vscode/ \
-            --path .claude/ \
-            --path .idea/ \
-            --path .mimosa/ \
-            --path '%SystemDrive%/' \
-            --path data/yawn_core/ \
-            --path data/nonebot_plugin_orm/db.sqlite3 \
-            --path data/nonebot_plugin_orm/db.sqlite3-wal \
-            --path data/nonebot_plugin_orm/db.sqlite3-shm \
-            --path data/nonebot_plugin_orm/db.sqlite3-journal \
-            --path deploy/napcat/data/ \
-            --path src/plugins/yawn_core/ai_call.py \
-            2>&1 | tee "$RUNNER_TEMP/filter-repo.log"
-      - name: Report rewrite impact without secret values
-        shell: bash
-        run: |
-          set -euo pipefail
-          changed_refs=.git/filter-repo/changed-refs
-          test -s "$changed_refs"
-          echo "Affected pull request refs:"
-          grep '^refs/pull/.*/head$' "$changed_refs" || true
-          affected_prs="$(grep -c '^refs/pull/.*/head$' "$changed_refs" || true)"
-          echo "affected_pr_count=$affected_prs"
-          echo "First changed commit summary:"
-          grep -A8 'First Changed Commit' "$RUNNER_TEMP/filter-repo.log" || true
-      - name: Audit rewritten history
+            '+refs/tags/*:refs/tags/*'
+      - name: Audit all reachable blobs
         run: python tools/history_secret_audit.py
-      - name: Confirm source migrations remain
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -d data/nonebot_plugin_orm/migrations
-          test -n "$(find data/nonebot_plugin_orm/migrations -type f -print -quit)"
-
-  current-tree-audit:
-    name: Current tree audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Repository hygiene
-        run: python tools/repo_guard.py
-      - name: Repository content contract
-        run: python tools/repository_content_test.py

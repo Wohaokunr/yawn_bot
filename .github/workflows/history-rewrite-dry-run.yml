@@ -1,14 +1,12 @@
 name: History rewrite dry-run
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "tools/history_secret_audit.py"
       - "tools/history_rewrite_plan.py"
       - ".github/workflows/history-rewrite-dry-run.yml"
-  push:
-    branches:
-      - "chore/open-source-history-cleanup-phase2"
 
 permissions:
   contents: read

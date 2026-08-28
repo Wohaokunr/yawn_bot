@@ -18,6 +18,8 @@ _REQUIRED_OPEN_SOURCE_FILES = (
     ".github/ISSUE_TEMPLATE/feature_request.yml",
     ".github/ISSUE_TEMPLATE/deployment_help.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
+    "deploy/docker/compose.release.yaml",
+    "docs/public-docker-deployment.md",
 )
 
 
@@ -29,6 +31,35 @@ def _git(root: Path, *args: str) -> str:
         text=True,
     )
     return completed.stdout
+
+
+def _validate_public_release_compose(root: Path) -> list[str]:
+    path = root / "deploy" / "docker" / "compose.release.yaml"
+    if not path.is_file():
+        return []
+
+    content = path.read_text(encoding="utf-8")
+    required_fragments = (
+        'image: "${YAWNBOT_IMAGE:?',
+        "../../.env",
+        "yawnbot-data:/app/data",
+        "name: yawnbot-internal",
+        "/healthz",
+    )
+    violations = [
+        (
+            "deploy/docker/compose.release.yaml: missing required fragment "
+            f"{fragment!r}"
+        )
+        for fragment in required_fragments
+        if fragment not in content
+    ]
+    if "build:" in content:
+        violations.append(
+            "deploy/docker/compose.release.yaml: public release path must pull a "
+            "published image, not build source"
+        )
+    return violations
 
 
 def main() -> int:
@@ -53,16 +84,23 @@ def main() -> int:
         if not (root / path).is_file()
     ]
     if missing:
-        print("Required open-source community files are missing:")
+        print("Required open-source/public-deployment files are missing:")
         for path in missing:
             print(f"  - {path}")
+        return 1
+
+    public_compose_violations = _validate_public_release_compose(root)
+    if public_compose_violations:
+        print("Public release Compose contract violations detected:")
+        for violation in public_compose_violations:
+            print(f"  - {violation}")
         return 1
 
     tracked_count = len(_git(root, "ls-files").splitlines())
     print(
         "Repository content OK: "
-        f"{tracked_count} tracked files, required community files present, and no "
-        "runtime/generated/private checkout state."
+        f"{tracked_count} tracked files, required community/public-deployment files "
+        "present, and no runtime/generated/private checkout state."
     )
     return 0
 
