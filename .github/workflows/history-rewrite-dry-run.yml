@@ -45,19 +45,25 @@ jobs:
 
       - name: Rewrite disposable mirror
         shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          before_tree="$(git rev-parse HEAD^{tree})"
+          target_branch="${PR_HEAD_REF:-$PUSH_REF_NAME}"
+          before_tree="$(git rev-parse "refs/remotes/origin/${target_branch}^{tree}")"
+
           git clone --mirror "$GITHUB_WORKSPACE" "$RUNNER_TEMP/yawnbot-rewrite.git"
           cd "$RUNNER_TEMP/yawnbot-rewrite.git"
           git filter-repo --force --invert-paths \
             --paths-from-file "$RUNNER_TEMP/history-rewrite-paths.txt"
-          after_tree="$(git rev-parse HEAD^{tree})"
+
+          after_tree="$(git rev-parse "refs/heads/${target_branch}^{tree}")"
           if [[ "$before_tree" != "$after_tree" ]]; then
-            echo "::error::History rewrite changed the current source tree"
+            echo "::error::History rewrite changed the current branch source tree"
             exit 1
           fi
-          echo "Current source tree is byte-identical after history rewrite."
+          echo "Current branch source tree is byte-identical after history rewrite."
 
       - name: Re-run full history audit on rewritten mirror
         shell: bash
@@ -72,7 +78,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/yawnbot-rewrite.git"
           for ref in \
-            refs/remotes/origin/main \
+            refs/heads/main \
             refs/tags/v0.1.0-rc.1 \
             refs/tags/v0.1.0-rc.2 \
             refs/tags/v0.1.0-rc.3 \
