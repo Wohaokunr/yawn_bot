@@ -1,0 +1,99 @@
+name: Deployment help
+description: Docker、OneBot、NapCat、WebUI、migration 等部署问题
+title: "[Deploy] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本模板用于公开部署支持，不用于 YawnBot 维护者自己的生产服务器。请不要粘贴真实 `.env`、SSH 私钥、QQ 登录态或 Token。
+
+  - type: dropdown
+    id: method
+    attributes:
+      label: 部署方式
+      options:
+        - Docker Compose（源码构建）
+        - GitHub Release / GHCR 镜像
+        - 原生 Windows
+        - 原生 Linux
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: YawnBot 版本
+      placeholder: v0.1.0 / commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: 系统与 Docker/Python 版本
+      placeholder: Ubuntu 24.04 + Docker 28 / Windows 11 + Python 3.12
+    validations:
+      required: true
+
+  - type: input
+    id: onebot
+    attributes:
+      label: OneBot 实现与版本
+      placeholder: NapCat 4.x / Lagrange / 尚未配置
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题阶段
+      options:
+        - clone / 下载
+        - .env 配置
+        - Docker build / pull
+        - 容器启动
+        - SQLite / ORM migration
+        - OneBot WebSocket
+        - NapCat 登录或配置
+        - WebUI
+        - AI Provider
+        - 升级 / 回滚
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: 执行过的命令
+      description: 请把域名、IP、用户名等按需脱敏，绝不要包含密码或 Token。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: 错误与日志
+      description: 粘贴最相关部分并脱敏。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 已尝试的排查
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我没有粘贴 `.env` 全文、Token、Cookie、API Key、SSH 私钥、QQ 登录态或数据库。
+          required: true
+        - label: 我理解公开 Issue 中的内容在仓库开源后任何人都可能看到。
+          required: true
