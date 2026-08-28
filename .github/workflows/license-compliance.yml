@@ -1,0 +1,63 @@
+name: License compliance
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "THIRD_PARTY_NOTICES.md"
+      - "third_party_licenses/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "deploy/docker/playwright-version.txt"
+      - ".github/workflows/license-compliance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-license-payload:
+    name: Runtime license payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build --tag yawnbot:license-audit .
+      - name: Verify top-level notices and LGPL/GPL texts
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            test -f /app/LICENSE
+            test -f /app/THIRD_PARTY_NOTICES.md
+            test -f /app/third_party_licenses/README.md
+            test -f /app/third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt
+            test -f /app/third_party_licenses/nonebot-plugin-htmlkit-MIT.txt
+            test -f /app/third_party_licenses/litehtml-BSD-3-Clause.txt
+            test -f /app/third_party_licenses/GPL-3.0.txt
+            test -f /app/third_party_licenses/LGPL-3.0.txt
+            test -s /app/third_party_licenses/GPL-3.0.txt
+            test -s /app/third_party_licenses/LGPL-3.0.txt
+          '
+      - name: Verify Python redistribution metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            test -n "$(find /app/.venv -type f -path "*/nonebot_plugin_htmlkit/core*.so" -print -quit)"
+            test -n "$(find /app/.venv -type f -path "*text_unidecode-*.dist-info/*" \( -iname "LICENSE*" -o -iname "COPYING*" \) -print -quit)"
+            test -n "$(find /app/.venv -type f -path "*certifi-*.dist-info/*" \( -iname "LICENSE*" -o -iname "COPYING*" \) -print -quit)"
+            test -n "$(find /app/.venv -type f -path "*tqdm-*.dist-info/*" \( -iname "LICENSE*" -o -iname "COPYING*" \) -print -quit)"
+          '
+      - name: Verify browser payload notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            test -n "$(find /ms-playwright -type f -name "LICENSE.headless_shell" -print -quit)"
+            test -n "$(find /ms-playwright -type f -name "COPYING.LGPLv2.1" -print -quit)"
+          '
