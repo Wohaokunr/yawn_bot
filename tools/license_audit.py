@@ -30,16 +30,26 @@ _REVIEWED_COPYLEFT = {
 }
 
 _RESTRICTIVE_RE = re.compile(
-    r"(?i)(AGPL|Affero|SSPL|Server Side Public|Business Source|BUSL|"
-    r"Commons Clause|Non[- ]?Commercial|Proprietary)"
+    r"(?i)(\bAGPL(?:[-v]?\d+(?:\.\d+)?)?\b|\bAffero\b|"
+    r"\bSSPL(?:[-v]?\d+(?:\.\d+)?)?\b|Server Side Public|Business Source|"
+    r"\bBUSL(?:[-v]?\d+(?:\.\d+)?)?\b|Commons Clause|Non[- ]?Commercial|"
+    r"\bProprietary\b)"
 )
 _WEAK_COPYLEFT_RE = re.compile(
-    r"(?i)(LGPL|Lesser General Public|MPL|Mozilla Public|EPL|Eclipse Public|CDDL)"
+    r"(?i)(\bLGPL(?:[-v]?\d+(?:\.\d+)?)?(?:-or-later|-only)?\b|"
+    r"Lesser General Public|\bMPL(?:[-v]?\d+(?:\.\d+)?)?\b|Mozilla Public|"
+    r"\bEPL(?:[-v]?\d+(?:\.\d+)?)?\b|Eclipse Public|"
+    r"\bCDDL(?:[-v]?\d+(?:\.\d+)?)?\b)"
 )
-_GPL_RE = re.compile(r"(?i)(?<!L)GPL|GNU General Public License")
+_GPL_RE = re.compile(
+    r"(?i)((?<!L)\bGPL(?:[-v]?\d+(?:\.\d+)?)?(?:-or-later|-only)?\b|"
+    r"GNU General Public License)"
+)
 _PERMISSIVE_RE = re.compile(
-    r"(?i)(MIT|BSD|Apache|ISC|PSF|Python Software Foundation|Artistic|Unlicense|"
-    r"Public Domain|Zlib|Boost Software License|OFL|Open Font License)"
+    r"(?i)(\bMIT(?:-0)?\b|\bBSD(?:-[0-9]-Clause)?\b|\bApache(?:-2\.0)?\b|"
+    r"\bISC\b|\bPSF(?:-2\.0)?\b|Python Software Foundation|Artistic|Unlicense|"
+    r"Public Domain|\bZlib\b|Boost Software License|\bOFL(?:-1\.1)?\b|"
+    r"Open Font License)"
 )
 
 
@@ -109,7 +119,10 @@ def _audit_python() -> int:
                     "been reviewed for this version"
                 )
                 continue
-            if not any(fragment.lower() in raw_license.lower() for fragment in expected_fragments):
+            if not any(
+                fragment.lower() in raw_license.lower()
+                for fragment in expected_fragments
+            ):
                 failures.append(
                     f"{name}=={version}: reviewed license expression changed to "
                     f"{raw_license!r}"
