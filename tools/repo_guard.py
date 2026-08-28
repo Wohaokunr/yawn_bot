@@ -93,22 +93,26 @@ _RUNTIME_SUFFIXES = (
 )
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("private key", re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
-    ("OpenAI-style API key", re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("OpenAI-style API key", re.compile(rb"\bsk-[A-Za-z0-9_.-]{20,}\b")),
+    ("tp-style API token", re.compile(rb"\btp-[A-Za-z0-9_-]{24,}\b")),
     ("GitHub fine-grained token", re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
     ("GitHub classic token", re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
     ("AWS access key", re.compile(rb"\bAKIA[0-9A-Z]{16}\b")),
 )
 _ASSIGNMENT_PATTERN = re.compile(
-    rb"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b"
-    rb"\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{24,})"
+    rb"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|"
+    rb"webui_admin_token|onebot_v11_access_token|deploy_ssh_private_key)\b"
+    rb"[ \t]*[:=][ \t]*[\"']?([A-Za-z0-9_./+=-]{24,})"
 )
 _PLACEHOLDER_MARKERS = (
     b"change-me",
     b"changeme",
+    b"dummy",
     b"example",
     b"placeholder",
     b"replace-me",
     b"replace_me",
+    b"test-token",
     b"your-",
     b"your_",
 )
