@@ -35,6 +35,14 @@ def _git(*args: str) -> str:
     ).stdout
 
 
+def _git_bytes_local(*args: str) -> bytes:
+    return subprocess.run(
+        ("git", *args),
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
 def _is_placeholder(value: bytes) -> bool:
     normalized = value.strip().strip(b"\"'").lower()
     if not normalized:
@@ -44,30 +52,46 @@ def _is_placeholder(value: bytes) -> bool:
     return any(marker in normalized for marker in _PLACEHOLDER_MARKERS)
 
 
+def _all_historical_file_paths() -> set[str]:
+    """Return every file path present in every commit reachable through --all.
+
+    ``git rev-list --objects`` associates an object with a path hint, but one blob
+    can have appeared under several historical paths and not every path is
+    guaranteed to be emitted. For a destructive rewrite we need path-complete
+    enumeration, so inspect each reachable commit tree explicitly instead.
+    """
+
+    paths: set[str] = set()
+    commits = _git("rev-list", "--all").splitlines()
+    for commit in commits:
+        raw = _git_bytes_local("ls-tree", "-r", "--name-only", "-z", commit)
+        for item in raw.split(b"\0"):
+            if not item:
+                continue
+            paths.add(item.decode("utf-8", errors="surrogateescape").replace("\\", "/"))
+    return paths
+
+
 def build_plan() -> tuple[list[str], dict[str, int], list[bytes]]:
     reasons: Counter[str] = Counter()
     paths: set[str] = set()
     replacements: set[bytes] = set()
+
+    # Discover removal paths from commit trees, not from object path hints. This
+    # guarantees that a runtime file reused/renamed across commits is not missed.
+    for path in _all_historical_file_paths():
+        reason = _sensitive_path_reason(path)
+        if reason is None:
+            continue
+        paths.add(path)
+        reasons[reason] += 1
+
+    # Content redaction still operates on unique reachable blobs for efficiency.
     paths_by_oid = _reachable_objects()
     metadata = _object_meta(list(paths_by_oid))
-
-    # rev-list --objects includes commit/tree objects as well as blobs. Feeding a
-    # directory-tree path such as ``data/nonebot_plugin_orm`` to git-filter-repo
-    # would remove the whole subtree and could destroy legitimate migrations.
-    # Only blob paths are exact file-removal candidates.
-    for oid, observed_paths in paths_by_oid.items():
+    for oid in paths_by_oid:
         object_type, size = metadata.get(oid, ("", 0))
-        if object_type != "blob":
-            continue
-
-        for path in observed_paths:
-            reason = _sensitive_path_reason(path)
-            if reason is None:
-                continue
-            paths.add(path)
-            reasons[reason] += 1
-
-        if size > DEFAULT_MAX_BLOB_SIZE:
+        if object_type != "blob" or size > DEFAULT_MAX_BLOB_SIZE:
             continue
         data = _git_bytes("cat-file", "blob", oid)
 
@@ -93,7 +117,12 @@ def build_plan() -> tuple[list[str], dict[str, int], list[bytes]]:
 
 
 def _paths_at_ref(ref: str) -> set[str]:
-    return set(_git("ls-tree", "-r", "--name-only", ref).splitlines())
+    raw = _git_bytes_local("ls-tree", "-r", "--name-only", "-z", ref)
+    return {
+        item.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for item in raw.split(b"\0")
+        if item
+    }
 
 
 def main() -> int:
