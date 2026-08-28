@@ -3,6 +3,7 @@ set -euo pipefail
 
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 YAWNBOT_ROOT="${YAWNBOT_ROOT:-/opt/yawnbot}"
+YAWNBOT_RUNTIME_UID="${YAWNBOT_RUNTIME_UID:-10001}"
 GITHUB_DEPLOY_PUBLIC_KEY="${GITHUB_DEPLOY_PUBLIC_KEY:-}"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -36,6 +37,10 @@ fi
 
 if [[ "$YAWNBOT_ROOT" != "/opt/yawnbot" ]]; then
   echo "error: production forced-command policy currently requires YAWNBOT_ROOT=/opt/yawnbot" >&2
+  exit 1
+fi
+if [[ ! "$YAWNBOT_RUNTIME_UID" =~ ^[0-9]+$ ]] || [[ "$YAWNBOT_RUNTIME_UID" -eq 0 ]]; then
+  echo "error: YAWNBOT_RUNTIME_UID must be a non-zero numeric UID" >&2
   exit 1
 fi
 
@@ -90,9 +95,19 @@ fi
 install -d -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$YAWNBOT_ROOT"
 install -d -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$YAWNBOT_ROOT/bin" \
-  "$YAWNBOT_ROOT/data" \
-  "$YAWNBOT_ROOT/data/backups" \
   "$YAWNBOT_ROOT/deployments"
+
+# The production image runs as the non-root `yawnbot` user (UID 10001 by
+# default). A bind mount keeps host ownership, so data owned only by the SSH
+# deploy user makes the container entrypoint fail before ORM migrations start.
+# Keep deploy as the group for host-side maintenance while making the runtime
+# UID the owner. Re-running bootstrap also repairs an existing data tree.
+install -d -m 2770 -o "$YAWNBOT_RUNTIME_UID" -g "$DEPLOY_USER" \
+  "$YAWNBOT_ROOT/data" \
+  "$YAWNBOT_ROOT/data/backups"
+chown -R --no-dereference "$YAWNBOT_RUNTIME_UID:$DEPLOY_USER" "$YAWNBOT_ROOT/data"
+chmod -R u+rwX,g+rwX,o-rwx "$YAWNBOT_ROOT/data"
+find "$YAWNBOT_ROOT/data" -xdev -type d -exec chmod g+s {} +
 
 install -m 0644 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/compose.yaml" "$YAWNBOT_ROOT/compose.yaml"
@@ -170,7 +185,7 @@ Installed:
   $YAWNBOT_ROOT/bin/deploy-release
   $YAWNBOT_ROOT/bin/deploy-ssh-command
   $YAWNBOT_ROOT/.env
-  $YAWNBOT_ROOT/data/backups/
+  $YAWNBOT_ROOT/data/backups/ (owner UID $YAWNBOT_RUNTIME_UID, group $DEPLOY_USER)
   $YAWNBOT_ROOT/deployments/
 
 GitHub Actions deploy key authorized for $DEPLOY_USER:
