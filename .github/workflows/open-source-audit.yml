@@ -2,6 +2,9 @@ name: Open-source audit
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "chore/open-source-readiness-phase1"
 
 permissions:
   contents: read
