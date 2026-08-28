@@ -14,7 +14,11 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
-from history_secret_audit import _reachable_objects, _sensitive_path_reason
+from history_secret_audit import (
+    _object_meta,
+    _reachable_objects,
+    _sensitive_path_reason,
+)
 
 
 def _git(*args: str) -> str:
@@ -29,7 +33,17 @@ def _git(*args: str) -> str:
 def build_plan() -> tuple[list[str], dict[str, int]]:
     reasons: Counter[str] = Counter()
     paths: set[str] = set()
-    for observed_paths in _reachable_objects().values():
+    paths_by_oid = _reachable_objects()
+    metadata = _object_meta(list(paths_by_oid))
+
+    # rev-list --objects includes commit/tree objects as well as blobs. Feeding a
+    # directory-tree path such as ``data/nonebot_plugin_orm`` to git-filter-repo
+    # would remove the whole subtree and could destroy legitimate migrations.
+    # Only blob paths are exact file-removal candidates.
+    for oid, observed_paths in paths_by_oid.items():
+        object_type, _size = metadata.get(oid, ("", 0))
+        if object_type != "blob":
+            continue
         for path in observed_paths:
             reason = _sensitive_path_reason(path)
             if reason is None:
