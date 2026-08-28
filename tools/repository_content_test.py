@@ -39,7 +39,6 @@ def _validate_public_release_compose(root: Path) -> list[str]:
         return []
 
     content = path.read_text(encoding="utf-8")
-    violations: list[str] = []
     required_fragments = (
         'image: "${YAWNBOT_IMAGE:?',
         "../../.env",
@@ -47,14 +46,18 @@ def _validate_public_release_compose(root: Path) -> list[str]:
         "name: yawnbot-internal",
         "/healthz",
     )
-    for fragment in required_fragments:
-        if fragment not in content:
-            violations.append(
-                f"deploy/docker/compose.release.yaml: missing required fragment {fragment!r}"
-            )
+    violations = [
+        (
+            "deploy/docker/compose.release.yaml: missing required fragment "
+            f"{fragment!r}"
+        )
+        for fragment in required_fragments
+        if fragment not in content
+    ]
     if "build:" in content:
         violations.append(
-            "deploy/docker/compose.release.yaml: public release path must pull a published image, not build source"
+            "deploy/docker/compose.release.yaml: public release path must pull a "
+            "published image, not build source"
         )
     return violations
 
