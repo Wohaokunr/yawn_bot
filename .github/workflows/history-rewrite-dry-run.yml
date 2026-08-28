@@ -32,16 +32,16 @@ jobs:
       - name: Install git-filter-repo
         run: python -m pip install --disable-pip-version-check git-filter-repo
 
-      - name: Build exact rewrite plan
+      - name: Build disposable publishable-ref mirror
         shell: bash
         run: |
           set -euo pipefail
-          python tools/history_rewrite_plan.py \
-            --paths-out "$RUNNER_TEMP/history-rewrite-paths.txt" \
-            --manifest-out "$RUNNER_TEMP/history-rewrite-manifest.json"
-          test -s "$RUNNER_TEMP/history-rewrite-paths.txt"
+          git init --bare "$RUNNER_TEMP/yawnbot-rewrite.git"
+          git -C "$RUNNER_TEMP/yawnbot-rewrite.git" fetch "$GITHUB_WORKSPACE" \
+            '+refs/remotes/origin/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
 
-      - name: Rewrite disposable mirror
+      - name: Build exact rewrite plan from publishable refs
         shell: bash
         env:
           PR_HEAD_REF: ${{ github.head_ref }}
@@ -49,14 +49,31 @@ jobs:
         run: |
           set -euo pipefail
           target_branch="${PR_HEAD_REF:-$PUSH_REF_NAME}"
-          before_ref="refs/remotes/origin/${target_branch}"
+          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
+          python "$GITHUB_WORKSPACE/tools/history_rewrite_plan.py" \
+            --current-ref "refs/heads/${target_branch}" \
+            --paths-out "$RUNNER_TEMP/history-rewrite-paths.txt" \
+            --replacements-out "$RUNNER_TEMP/history-rewrite-replacements.txt" \
+            --manifest-out "$RUNNER_TEMP/history-rewrite-manifest.json"
+          test -s "$RUNNER_TEMP/history-rewrite-paths.txt"
+          test -s "$RUNNER_TEMP/history-rewrite-replacements.txt"
+
+      - name: Rewrite disposable publishable-ref mirror
+        shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          target_branch="${PR_HEAD_REF:-$PUSH_REF_NAME}"
+          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
+          before_ref="refs/heads/${target_branch}"
           before_tree="$(git rev-parse "${before_ref}^{tree}")"
           git ls-tree -r "$before_ref" > "$RUNNER_TEMP/tree-before.txt"
 
-          git clone --mirror "$GITHUB_WORKSPACE" "$RUNNER_TEMP/yawnbot-rewrite.git"
-          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
           git filter-repo --force --invert-paths \
-            --paths-from-file "$RUNNER_TEMP/history-rewrite-paths.txt"
+            --paths-from-file "$RUNNER_TEMP/history-rewrite-paths.txt" \
+            --replace-text "$RUNNER_TEMP/history-rewrite-replacements.txt"
 
           after_ref="refs/heads/${target_branch}"
           after_tree="$(git rev-parse "${after_ref}^{tree}")"
