@@ -43,6 +43,13 @@ _ASSIGNMENT_PATTERN = re.compile(
     rb"\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{24,})"
 )
 
+_ENV_LINE_PATTERN = re.compile(
+    rb"(?m)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$"
+)
+_ENV_SECRET_KEY_PATTERN = re.compile(
+    rb"(?i)(?:^|_)(?:api_?key|key|token|secret|password|cookie|dsn)$"
+)
+
 _PLACEHOLDER_MARKERS = (
     b"change-me",
     b"changeme",
@@ -123,6 +130,14 @@ def _object_meta(oids: list[str]) -> dict[str, tuple[str, int]]:
     return result
 
 
+def _is_environment_path(path: str) -> bool:
+    normalized = path.lower()
+    name = PurePosixPath(normalized).name
+    return normalized == ".env" or (
+        name.startswith(".env.") and name != ".env.example"
+    )
+
+
 def _sensitive_path_reason(path: str) -> str | None:
     normalized = path.lower()
     path_parts = tuple(part.lower() for part in PurePosixPath(normalized).parts)
@@ -132,9 +147,7 @@ def _sensitive_path_reason(path: str) -> str | None:
         return "Windows system cache tree existed in reachable history"
     if any(part in _PRIVATE_PATH_PARTS for part in path_parts):
         return "developer-tool private state existed in reachable history"
-    if normalized == ".env" or (
-        name.startswith(".env.") and name != ".env.example"
-    ):
+    if _is_environment_path(path):
         return "environment file existed in reachable history"
     if name.endswith(("-wal", "-shm")) or name.endswith(_SENSITIVE_SUFFIXES):
         return "database/key-like file existed in reachable history"
@@ -157,6 +170,30 @@ def _sensitive_path_reason(path: str) -> str | None:
     ):
         return "runtime data existed in reachable history"
     return None
+
+
+def _looks_like_placeholder(value: bytes) -> bool:
+    normalized = value.strip().strip(b"\"'").lower()
+    if not normalized:
+        return True
+    if normalized.startswith((b"${", b"$")):
+        return True
+    return any(marker in normalized for marker in _PLACEHOLDER_MARKERS)
+
+
+def _environment_secret_keys(data: bytes) -> list[str]:
+    """Return only sensitive variable names; never return their values."""
+
+    keys: list[str] = []
+    for match in _ENV_LINE_PATTERN.finditer(data):
+        key = match.group(1)
+        value = match.group(2)
+        if not _ENV_SECRET_KEY_PATTERN.search(key):
+            continue
+        if _looks_like_placeholder(value):
+            continue
+        keys.append(key.decode("ascii", errors="replace"))
+    return sorted(set(keys))
 
 
 def _secret_findings(data: bytes) -> list[str]:
@@ -187,6 +224,14 @@ def audit(max_blob_size: int) -> list[str]:
         if size > max_blob_size:
             continue
         data = _git("cat-file", "blob", oid)
+
+        if any(_is_environment_path(path) for path in paths):
+            for key in _environment_secret_keys(data):
+                findings.append(
+                    f"{oid[:12]} historical environment file: "
+                    f"non-placeholder value for sensitive key {key}"
+                )
+
         secret_labels = _secret_findings(data)
         if not secret_labels:
             continue
