@@ -7,9 +7,18 @@ version=${2:-}
 commit=${3:-}
 auth_mode=${4:-}
 keep_backups=${YAWNBOT_BACKUP_KEEP:-10}
+pull_attempts=${YAWNBOT_PULL_ATTEMPTS:-3}
+pull_timeout_seconds=${YAWNBOT_PULL_TIMEOUT_SECONDS:-1500}
+pull_retry_delay_seconds=${YAWNBOT_PULL_RETRY_DELAY_SECONDS:-15}
+pull_heartbeat_seconds=${YAWNBOT_PULL_HEARTBEAT_SECONDS:-30}
 docker_config_dir=""
+pull_heartbeat_pid=""
 
 cleanup() {
+    if [ -n "$pull_heartbeat_pid" ]; then
+        kill "$pull_heartbeat_pid" 2>/dev/null || true
+        wait "$pull_heartbeat_pid" 2>/dev/null || true
+    fi
     if [ -n "$docker_config_dir" ] && [ -d "$docker_config_dir" ]; then
         rm -rf "$docker_config_dir"
     fi
@@ -56,6 +65,54 @@ flock -n 9 || { echo "another production deployment is running" >&2; exit 3; }
 
 compose() {
     docker compose --env-file "$root/image.env" -f "$root/compose.yaml" "$@"
+}
+
+pull_image() {
+    attempt=1
+    while [ "$attempt" -le "$pull_attempts" ]; do
+        echo "pulling immutable image (attempt $attempt/$pull_attempts): $image"
+        pull_started_at=$(date +%s)
+        (
+            while :; do
+                sleep "$pull_heartbeat_seconds" || exit 0
+                now=$(date +%s)
+                elapsed=$((now - pull_started_at))
+                echo "image pull still running (attempt $attempt/$pull_attempts, elapsed ${elapsed}s)"
+            done
+        ) &
+        pull_heartbeat_pid=$!
+
+        pull_status=0
+        timeout --foreground "$pull_timeout_seconds" docker pull "$image" || pull_status=$?
+
+        kill "$pull_heartbeat_pid" 2>/dev/null || true
+        wait "$pull_heartbeat_pid" 2>/dev/null || true
+        pull_heartbeat_pid=""
+
+        if [ "$pull_status" -eq 0 ]; then
+            docker image inspect "$image" >/dev/null 2>&1 || {
+                echo "docker pull reported success but immutable image is not present: $image" >&2
+                return 1
+            }
+            echo "immutable image pull completed: $image"
+            return 0
+        fi
+
+        if [ "$pull_status" -eq 124 ]; then
+            echo "image pull attempt $attempt timed out after ${pull_timeout_seconds}s" >&2
+        else
+            echo "image pull attempt $attempt failed with exit code $pull_status" >&2
+        fi
+
+        if [ "$attempt" -ge "$pull_attempts" ]; then
+            echo "image pull failed after $pull_attempts attempts" >&2
+            return "$pull_status"
+        fi
+
+        echo "retrying image pull in ${pull_retry_delay_seconds}s; completed layers remain cached"
+        sleep "$pull_retry_delay_seconds"
+        attempt=$((attempt + 1))
+    done
 }
 
 container=$(docker ps -aq --filter label=com.docker.compose.project=yawnbot \
@@ -116,7 +173,7 @@ PY
     fi
 fi
 
-docker pull "$image"
+pull_image
 printf 'YAWNBOT_IMAGE=%s\n' "$image" > "$root/image.env.tmp"
 chmod 600 "$root/image.env.tmp"
 mv -f "$root/image.env.tmp" "$root/image.env"
