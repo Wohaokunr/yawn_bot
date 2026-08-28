@@ -85,6 +85,11 @@ compose() {
 }
 
 pull_image() {
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        echo "immutable image already present locally; skipping registry pull: $image"
+        return 0
+    fi
+
     attempt=1
     while [ "$attempt" -le "$pull_attempts" ]; do
         echo "pulling immutable image (attempt $attempt/$pull_attempts): $image"

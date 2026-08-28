@@ -168,6 +168,30 @@ uv run nb orm revision -m "short description"
 每份 manifest 记录 previous/current image、commit SHA、DB backup、迁移前后状态、
 目标 migration heads 和部署时间。
 
+### 增量构建/拉取原则
+
+- Release BuildKit cache 持久化到 GHCR `:buildcache`，clean GitHub runner 优先复用
+  未变化的构建层，而不是每次从公网重新安装全部依赖。
+- WebUI 的 npm cache 由 `actions/setup-node` 按 `webui/package-lock.json` 复用。
+- Playwright Chromium 位于独立 `browser-runtime`；只有
+  `deploy/docker/playwright-version.txt`（必须与 `uv.lock` 中 Playwright 版本一致）
+  变化时才重新安装浏览器和对应系统依赖。
+- 生产机拉取不可变 YawnBot digest 时 Docker 自动复用已有 layer；目标 digest 已经
+  在本机时 `deploy-release` 完全跳过 registry pull。
+- NapCat/NTQQ 使用独立且版本固定的 Compose，只在首次 bootstrap 或显式修改
+  `NAPCAT_IMAGE` 时拉取/升级，不参与 YawnBot Release。
+
+生产 bootstrap 会建立 `/opt/yawnbot/onebot.env` 作为 OneBot token 的单一来源，
+并调用 NapCat bootstrap 生成 `ws://yawnbot:8080/onebot/v11/ws` 的 Reverse WebSocket
+模板。已有 NapCat 容器会优先复用其 QQ/config/plugins bind mount，避免重新登录。
+
+Release 在部署镜像前还会把一个只包含 `compose.yaml`、`deploy-release`、
+`deploy-ssh-command`、`sync-control-plane` 的小型控制面 tar 包通过受限 SSH stdin
+同步到服务器。服务器先校验 SHA-256、文件白名单、Shell/Compose 语法，再原子替换，
+因此以后部署脚本升级不需要人工登录服务器。已经运行旧版 forced-command 的服务器
+需要 **一次性重新执行最新 `bootstrap-production-opencloudos9.sh`** 来安装同步入口；
+完成这次迁移后，后续 Release 全自动维护控制面。
+
 ### 原生 Windows/Linux
 
 1. 停 Bot、备份 `data/`。

@@ -146,19 +146,27 @@ ws://<Docker宿主机地址>:8080/onebot/v11/ws
 ws://yawnbot:8080/onebot/v11/ws
 ```
 
-OneBot 端的 access token 必须与 `.env` 中 `ONEBOT_V11_ACCESS_TOKEN` 一致。
+OneBot 端的 access token 必须与 YawnBot 使用的 `ONEBOT_V11_ACCESS_TOKEN` 一致。
+手工/开发部署仍可直接写在 `.env`；生产 bootstrap 会把它迁移或自动生成到
+`/opt/yawnbot/onebot.env`，YawnBot 与 NapCat 共用这一份专用凭据文件。
 
 ### 首次启动 NapCat Docker
 
-NapCat 使用独立的 `deploy/napcat/compose.yaml`，不会进入 YawnBot 主 Compose
-的构建、启动和 CI 流程。首次部署先创建两个 Compose 共用的内部网络：
+NapCat 使用独立的 `deploy/napcat/compose.yaml`，不会进入 YawnBot Release 的
+构建、拉取和重启生命周期。生产 bootstrap 会自动安装/接管 NapCat；手工部署时
+先创建两个 Compose 共用的内部网络：
 
 ```bash
 docker network inspect yawnbot-internal >/dev/null 2>&1 || docker network create yawnbot-internal
 cd deploy/napcat
 cp .env.example .env
+python render-yawnbot-config.py --env-file ../../.env --output yawnbot-onebot.json
 docker compose up -d
 ```
+
+生产环境默认固定 `mlikiowa/napcat-docker:v4.18.19` 并使用
+`pull_policy: missing`。因此普通 YawnBot 发布不会重新下载 NapCat 镜像，也不会
+重新下载镜像内的 NTQQ；只有显式修改 `NAPCAT_IMAGE` 才升级 NapCat/NTQQ。
 
 独立 Compose 会在 `deploy/napcat/data/` 下持久化：
 
@@ -172,17 +180,32 @@ WebUI 只绑定宿主机回环地址。先建立 SSH 隧道，再打开
 `http://127.0.0.1:6099/webui` 扫码登录：
 
 ```bash
-ssh -L 6099:127.0.0.1:6099 deploy@服务器地址
+ssh -L 6099:127.0.0.1:6099 <管理账号>@服务器地址
 ```
 
-登录后新增 Reverse WebSocket：
+生产环境的 `deploy` 用户只授权给 GitHub Actions forced command，不用于人工
+Shell/端口转发；请使用单独的管理账号建立隧道。
+
+生产 bootstrap 会使用 NapCat Docker 官方 `MODE` 模板机制自动生成 Reverse
+WebSocket 配置；无需再在 WebUI 手工填写。目标固定为：
 
 ```text
 ws://yawnbot:8080/onebot/v11/ws
 ```
 
-Access Token 必须与 `.env` 中 `ONEBOT_V11_ACCESS_TOKEN` 完全一致。NapCat 与
-YawnBot 通过 `yawnbot-internal` 网络和服务名通信，无需互相配置公网地址。
+Access Token 自动来自 `/opt/yawnbot/onebot.env`。NapCat 与 YawnBot 通过
+`yawnbot-internal` 网络和服务名通信，无需互相配置公网地址。若已有 NapCat
+Compose，bootstrap 会优先复用其 QQ/config/plugins bind mount，避免丢失登录态。
+
+### 为什么常规发布不会重新下载重依赖
+
+- GitHub Release 的 BuildKit cache 持久化在 GHCR `:buildcache`；clean runner 会复用
+  未变化的 npm、Python 和镜像构建层。
+- Chromium 位于独立 `browser-runtime` 层，只由 `deploy/docker/playwright-version.txt`
+  控制；普通源码或无关 Python 依赖变化不会重装 Chromium。
+- 生产服务器按不可变 digest 拉取 YawnBot；Docker 自动复用已有 layer，并且同一
+  digest 已存在时部署脚本直接跳过 `docker pull`。
+- NapCat/NTQQ 是独立、版本固定的 Compose，不参与 YawnBot Release。
 
 也支持正向 WebSocket / HTTP API，配置见 [Core、OneBot 与存储配置](docs/configuration/core.md)。
 

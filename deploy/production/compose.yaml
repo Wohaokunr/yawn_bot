@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      - onebot.env
     environment:
       HOST: 0.0.0.0
       PORT: 8080

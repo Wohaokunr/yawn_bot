@@ -82,6 +82,7 @@ ms-playwright/
 !/data/nonebot_plugin_orm/migrations/
 !/data/nonebot_plugin_orm/migrations/**
 /deploy/napcat/data/
+/deploy/napcat/yawnbot-onebot.json
 
 # IDE / coding-agent / developer private state
 **/.qoder/

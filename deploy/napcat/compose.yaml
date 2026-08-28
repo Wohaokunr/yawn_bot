@@ -1,17 +1,22 @@
+name: napcat
+
 services:
   napcat:
-    image: mlikiowa/napcat-docker:latest
+    image: "${NAPCAT_IMAGE:-mlikiowa/napcat-docker:v4.18.19}"
+    pull_policy: missing
     restart: unless-stopped
     environment:
       NAPCAT_UID: "${NAPCAT_UID:-1000}"
       NAPCAT_GID: "${NAPCAT_GID:-1000}"
       WEBUI_TOKEN: "${NAPCAT_WEBUI_TOKEN:-napcat}"
+      MODE: yawnbot
     ports:
       - "127.0.0.1:${NAPCAT_WEBUI_PORT:-6099}:6099"
     volumes:
-      - ./data/QQ:/app/.config/QQ
-      - ./data/config:/app/napcat/config
-      - ./data/plugins:/app/napcat/plugins
+      - ${NAPCAT_QQ_DIR:-./data/QQ}:/app/.config/QQ
+      - ${NAPCAT_CONFIG_DIR:-./data/config}:/app/napcat/config
+      - ${NAPCAT_PLUGIN_DIR:-./data/plugins}:/app/napcat/plugins
+      - ./yawnbot-onebot.json:/app/templates/yawnbot.json:ro
     networks:
       - yawnbot-internal
 

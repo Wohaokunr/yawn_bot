@@ -62,7 +62,9 @@ production_dir="$repo_root/deploy/production"
 for source_file in \
   "$production_dir/compose.yaml" \
   "$production_dir/deploy-release.sh" \
-  "$production_dir/deploy-ssh-command"; do
+  "$production_dir/deploy-ssh-command" \
+  "$production_dir/sync-control-plane.sh" \
+  "$repo_root/deploy/host/bootstrap-napcat-opencloudos9.sh"; do
   if [[ ! -f "$source_file" ]]; then
     echo "error: missing repository file: $source_file" >&2
     exit 1
@@ -74,7 +76,7 @@ if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-for command_name in docker curl flock install ssh-keygen timeout; do
+for command_name in docker curl flock install python3 ssh-keygen timeout; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "error: required command is missing: $command_name" >&2
     exit 1
@@ -115,6 +117,8 @@ install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/deploy-release.sh" "$YAWNBOT_ROOT/bin/deploy-release"
 install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/deploy-ssh-command" "$YAWNBOT_ROOT/bin/deploy-ssh-command"
+install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
+  "$production_dir/sync-control-plane.sh" "$YAWNBOT_ROOT/bin/sync-control-plane"
 
 if [[ ! -e "$YAWNBOT_ROOT/.env" ]]; then
   cat > "$YAWNBOT_ROOT/.env" <<'EOF'
@@ -128,6 +132,43 @@ fi
 chown "$DEPLOY_USER:$DEPLOY_USER" "$YAWNBOT_ROOT/.env"
 chmod 0600 "$YAWNBOT_ROOT/.env"
 
+# Keep the OneBot credential in a dedicated env file so YawnBot and NapCat can
+# share exactly one source of truth without exposing unrelated AI/WebUI secrets
+# to the NapCat container. Existing .env values are migrated once; otherwise a
+# high-entropy token is generated automatically.
+if [[ ! -e "$YAWNBOT_ROOT/onebot.env" ]]; then
+  onebot_token="$(python3 - "$YAWNBOT_ROOT/.env" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+for raw_line in path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() != "ONEBOT_V11_ACCESS_TOKEN":
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    print(value)
+    break
+PY
+)"
+  if [[ -z "$onebot_token" ]]; then
+    onebot_token="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+)"
+  fi
+  printf 'ONEBOT_V11_ACCESS_TOKEN=%s\n' "$onebot_token" > "$YAWNBOT_ROOT/onebot.env"
+  unset onebot_token
+fi
+chown "$DEPLOY_USER:$DEPLOY_USER" "$YAWNBOT_ROOT/onebot.env"
+chmod 0600 "$YAWNBOT_ROOT/onebot.env"
+
 if [[ ! -e "$YAWNBOT_ROOT/image.env" ]]; then
   install -m 0600 -o "$DEPLOY_USER" -g "$DEPLOY_USER" /dev/null "$YAWNBOT_ROOT/image.env"
 else
@@ -138,6 +179,13 @@ fi
 if ! docker network inspect yawnbot-internal >/dev/null 2>&1; then
   docker network create yawnbot-internal >/dev/null
 fi
+
+case "${YAWNBOT_BOOTSTRAP_NAPCAT:-true}" in
+  1|true|TRUE|yes|YES|on|ON)
+    YAWNBOT_ROOT="$YAWNBOT_ROOT" \
+      bash "$repo_root/deploy/host/bootstrap-napcat-opencloudos9.sh"
+    ;;
+esac
 
 home_dir="$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"
 if [[ -z "$home_dir" || ! -d "$home_dir" ]]; then
@@ -184,7 +232,9 @@ Installed:
   $YAWNBOT_ROOT/compose.yaml
   $YAWNBOT_ROOT/bin/deploy-release
   $YAWNBOT_ROOT/bin/deploy-ssh-command
+  $YAWNBOT_ROOT/bin/sync-control-plane
   $YAWNBOT_ROOT/.env
+  $YAWNBOT_ROOT/onebot.env
   $YAWNBOT_ROOT/data/backups/ (owner UID $YAWNBOT_RUNTIME_UID, group $DEPLOY_USER)
   $YAWNBOT_ROOT/deployments/
 

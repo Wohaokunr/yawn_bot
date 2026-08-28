@@ -113,12 +113,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
       - name: Build WebUI for deployment package
         working-directory: webui
-        env:
-          npm_config_cache: ${{ runner.temp }}/npm-release-cache
         run: |
-          npm ci --prefer-online
+          npm ci --prefer-offline
           npm run build
 
       - name: Assemble versioned deployment package
@@ -177,6 +177,8 @@ jobs:
           push: true
           provenance: true
           sbom: true
+          cache-from: type=registry,ref=${{ steps.release_meta.outputs.image }}:buildcache
+          cache-to: type=registry,ref=${{ steps.release_meta.outputs.image }}:buildcache,mode=max
           tags: |
             ${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}
             ${{ steps.release_meta.outputs.image }}:sha-${{ steps.release_meta.outputs.short_sha }}
@@ -248,6 +250,8 @@ jobs:
       group: yawnbot-production
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure and verify deployment SSH identity
         shell: bash
         env:
@@ -270,6 +274,45 @@ jobs:
             echo "::error::DEPLOY_SSH_PRIVATE_KEY does not match the public key installed for the deploy user. Expected $DEPLOY_SSH_KEY_FINGERPRINT, got $actual_fingerprint"
             exit 1
           fi
+
+      - name: Package production control plane
+        id: control_plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/yawnbot-control-plane"
+          bundle="$RUNNER_TEMP/yawnbot-control-plane.tar.gz"
+          rm -rf "$stage" "$bundle"
+          mkdir -p "$stage"
+          cp deploy/production/compose.yaml "$stage/compose.yaml"
+          cp deploy/production/deploy-release.sh "$stage/deploy-release"
+          cp deploy/production/deploy-ssh-command "$stage/deploy-ssh-command"
+          cp deploy/production/sync-control-plane.sh "$stage/sync-control-plane"
+          tar -czf "$bundle" -C "$stage" \
+            compose.yaml deploy-release deploy-ssh-command sync-control-plane
+          sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Synchronize production control plane
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          CONTROL_PLANE_SHA256: ${{ steps.control_plane.outputs.sha256 }}
+          CONTROL_PLANE_BUNDLE: ${{ steps.control_plane.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          test -s "$CONTROL_PLANE_BUNDLE"
+          cat "$CONTROL_PLANE_BUNDLE" | \
+            ssh -i ~/.ssh/yawnbot-deploy \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "/opt/yawnbot/bin/sync-control-plane $CONTROL_PLANE_SHA256"
 
       - name: Deploy immutable release image
         shell: bash

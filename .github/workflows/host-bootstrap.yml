@@ -4,10 +4,14 @@ on:
   push:
     paths:
       - "deploy/host/**"
+      - "deploy/napcat/**"
+      - "deploy/production/**"
       - ".github/workflows/host-bootstrap.yml"
   pull_request:
     paths:
       - "deploy/host/**"
+      - "deploy/napcat/**"
+      - "deploy/production/**"
       - ".github/workflows/host-bootstrap.yml"
   workflow_dispatch:
 
@@ -23,7 +27,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Bash syntax
         shell: bash
-        run: bash -n deploy/host/*.sh
+        run: |
+          bash -n deploy/host/*.sh
+          bash -n deploy/production/deploy-release.sh
+          bash -n deploy/production/deploy-ssh-command
+          bash -n deploy/production/sync-control-plane.sh
       - name: Production bootstrap must fail closed without GitHub deploy key
         shell: bash
         run: |
