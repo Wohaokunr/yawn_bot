@@ -173,6 +173,37 @@ def test_production_ssh_entrypoints_are_crlf_safe() -> None:
     assert "legacy_forced_line=" in bootstrap
 
 
+def test_release_mirrors_production_image_to_tencent_tcr() -> None:
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    deploy_existing = (
+        REPO_ROOT / ".github" / "workflows" / "deploy-existing.yml"
+    ).read_text(encoding="utf-8")
+    deploy_script = (
+        REPO_ROOT / "deploy" / "production" / "deploy-release.sh"
+    ).read_text(encoding="utf-8")
+    forced_command = (
+        REPO_ROOT / "deploy" / "production" / "deploy-ssh-command"
+    ).read_text(encoding="utf-8")
+
+    tcr_image = "ccr.ccs.tencentyun.com/yawnbot/yawn_bot"
+    assert f"TCR_IMAGE: {tcr_image}" in release
+    assert f"TCR_IMAGE: {tcr_image}" in deploy_existing
+    assert "TCR_USERNAME: \"100025310087\"" in release
+    assert "secrets.TCR_PASSWORD" in release
+    assert "Log in to Tencent Container Registry" in release
+    assert "production_image=" in release
+    assert "production_digest=" in release
+    assert "Verify Tencent production mirror digest" in release
+    assert "registry-token-stdin" in release
+    assert "registry-token-stdin" in deploy_existing
+    assert f"{tcr_image}@sha256:*" in deploy_script
+    assert "ghcr.io/wohaokunr/yawn_bot@sha256:*" in deploy_script
+    assert 'docker login "$registry_host"' in deploy_script
+    assert "github-token-stdin|registry-token-stdin" in forced_command
+
+
 def test_generated_napcat_secret_config_is_gitignored() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "/deploy/napcat/yawnbot-onebot.json" in gitignore
