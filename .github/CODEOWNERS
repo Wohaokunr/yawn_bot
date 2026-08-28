@@ -1,0 +1,10 @@
+# Default maintainer ownership
+* @Wohaokunr
+
+# Security- and deployment-sensitive paths
+/.github/workflows/ @Wohaokunr
+/deploy/production/ @Wohaokunr
+/deploy/host/ @Wohaokunr
+/data/nonebot_plugin_orm/migrations/ @Wohaokunr
+/src/plugins/yawn_core/webui/ @Wohaokunr
+/src/plugins/yawn_core/yawn_agent/ @Wohaokunr
