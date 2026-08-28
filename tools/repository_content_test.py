@@ -85,12 +85,11 @@ def _validate_production_action_logging(root: Path) -> list[str]:
         if not path.is_file():
             continue
         content = path.read_text(encoding="utf-8")
-        for fragment in forbidden_fragments:
-            if fragment in content:
-                violations.append(
-                    f"{relative_path}: public Actions logs must not contain/use "
-                    f"{fragment!r}"
-                )
+        violations.extend(
+            f"{relative_path}: public Actions logs must not contain/use {fragment!r}"
+            for fragment in forbidden_fragments
+            if fragment in content
+        )
     return violations
 
 
