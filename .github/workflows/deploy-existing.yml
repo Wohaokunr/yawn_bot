@@ -87,7 +87,7 @@ jobs:
             }
             needs_mirror="false"
           else
-            echo "Legacy release has no TCR metadata; GitHub Actions will mirror the immutable GHCR image to Tencent TCR before deployment."
+            echo "Legacy release has no TCR metadata; GitHub Actions will stream the immutable linux/amd64 image directly from GHCR to Tencent TCR before deployment."
             production_digest=""
             needs_mirror="true"
           fi
@@ -99,21 +99,13 @@ jobs:
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "needs_mirror=$needs_mirror" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to GHCR for legacy mirror
+      - name: Install Skopeo for legacy registry copy
         if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Tencent TCR for legacy mirror
-        if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.TCR_REGISTRY }}
-          username: ${{ env.TCR_USERNAME }}
-          password: ${{ secrets.TCR_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
 
       - name: Mirror legacy release to Tencent TCR
         if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
@@ -124,22 +116,61 @@ jobs:
           SOURCE_DIGEST: ${{ steps.release_meta.outputs.source_digest }}
           VERSION: ${{ steps.release_meta.outputs.version }}
           COMMIT: ${{ steps.release_meta.outputs.commit }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
         run: |
           set -euo pipefail
+          test -n "$GHCR_USERNAME"
+          test -n "$GHCR_TOKEN"
+          test -n "$TCR_USERNAME"
+          test -n "$TCR_PASSWORD"
+
           source_ref="$SOURCE_IMAGE@$SOURCE_DIGEST"
           version_ref="$TCR_IMAGE:$VERSION"
           sha_ref="$TCR_IMAGE:sha-${COMMIT:0:12}"
+          auth_dir="$RUNNER_TEMP/skopeo-auth"
+          src_auth="$auth_dir/ghcr.json"
+          dst_auth="$auth_dir/tcr.json"
+          rm -rf "$auth_dir"
+          install -d -m 700 "$auth_dir"
+          trap 'rm -rf "$auth_dir"' EXIT
 
-          echo "Mirroring legacy immutable image from GHCR to Tencent TCR."
-          docker pull "$source_ref"
-          docker tag "$source_ref" "$version_ref"
-          docker tag "$source_ref" "$sha_ref"
+          printf '%s' "$GHCR_TOKEN" | skopeo login \
+            --authfile "$src_auth" \
+            --username "$GHCR_USERNAME" \
+            --password-stdin \
+            ghcr.io >/dev/null
+          printf '%s' "$TCR_PASSWORD" | skopeo login \
+            --authfile "$dst_auth" \
+            --username "$TCR_USERNAME" \
+            --password-stdin \
+            "$TCR_REGISTRY" >/dev/null
+          unset GHCR_TOKEN TCR_PASSWORD
 
-          push_log="$RUNNER_TEMP/tcr-push.log"
-          docker push "$version_ref" | tee "$push_log"
-          docker push "$sha_ref"
+          echo "Streaming compressed linux/amd64 blobs from GHCR directly to Tencent TCR."
+          skopeo copy \
+            --retry-times 5 \
+            --override-os linux \
+            --override-arch amd64 \
+            --src-authfile "$src_auth" \
+            --dest-authfile "$dst_auth" \
+            "docker://$source_ref" \
+            "docker://$version_ref"
 
-          digest="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' "$push_log" | tail -n 1)"
+          # The second tag is in the same TCR repository. Existing blobs are reused;
+          # this normally only publishes another manifest instead of uploading layers again.
+          skopeo copy \
+            --retry-times 5 \
+            --src-authfile "$dst_auth" \
+            --dest-authfile "$dst_auth" \
+            "docker://$version_ref" \
+            "docker://$sha_ref"
+
+          digest="$(skopeo inspect \
+            --authfile "$dst_auth" \
+            --format '{{.Digest}}' \
+            "docker://$version_ref")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo "::error::Could not resolve immutable digest after mirroring legacy release to TCR"
             exit 1
