@@ -1,0 +1,114 @@
+name: History rewrite dry-run
+
+on:
+  pull_request:
+    paths:
+      - "tools/history_secret_audit.py"
+      - "tools/history_rewrite_plan.py"
+      - ".github/workflows/history-rewrite-dry-run.yml"
+  push:
+    branches:
+      - "chore/open-source-history-cleanup-phase2"
+
+permissions:
+  contents: read
+
+jobs:
+  rewrite-dry-run:
+    name: Rewrite disposable mirror and re-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch every branch and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*'
+
+      - name: Install git-filter-repo
+        run: python -m pip install --disable-pip-version-check git-filter-repo
+
+      - name: Build disposable publishable-ref mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --bare "$RUNNER_TEMP/yawnbot-rewrite.git"
+          git -C "$RUNNER_TEMP/yawnbot-rewrite.git" fetch "$GITHUB_WORKSPACE" \
+            '+refs/remotes/origin/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
+      - name: Build exact rewrite plan from publishable refs
+        shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          target_branch="${PR_HEAD_REF:-$PUSH_REF_NAME}"
+          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
+          python "$GITHUB_WORKSPACE/tools/history_rewrite_plan.py" \
+            --current-ref "refs/heads/${target_branch}" \
+            --paths-out "$RUNNER_TEMP/history-rewrite-paths.txt" \
+            --replacements-out "$RUNNER_TEMP/history-rewrite-replacements.txt" \
+            --manifest-out "$RUNNER_TEMP/history-rewrite-manifest.json"
+          test -s "$RUNNER_TEMP/history-rewrite-paths.txt"
+          test -s "$RUNNER_TEMP/history-rewrite-replacements.txt"
+
+      - name: Rewrite disposable publishable-ref mirror
+        shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          target_branch="${PR_HEAD_REF:-$PUSH_REF_NAME}"
+          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
+          before_ref="refs/heads/${target_branch}"
+          before_tree="$(git rev-parse "${before_ref}^{tree}")"
+          git ls-tree -r "$before_ref" > "$RUNNER_TEMP/tree-before.txt"
+
+          git filter-repo --force --invert-paths \
+            --paths-from-file "$RUNNER_TEMP/history-rewrite-paths.txt" \
+            --replace-text "$RUNNER_TEMP/history-rewrite-replacements.txt"
+
+          after_ref="refs/heads/${target_branch}"
+          after_tree="$(git rev-parse "${after_ref}^{tree}")"
+          git ls-tree -r "$after_ref" > "$RUNNER_TEMP/tree-after.txt"
+          if [[ "$before_tree" != "$after_tree" ]]; then
+            echo "::error::History rewrite changed the current branch source tree"
+            echo "Only current public-candidate paths/object IDs are shown below."
+            diff -u "$RUNNER_TEMP/tree-before.txt" "$RUNNER_TEMP/tree-after.txt" || true
+            exit 1
+          fi
+          echo "Current branch source tree is byte-identical after history rewrite."
+
+      - name: Re-run full history audit on rewritten mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
+          python "$GITHUB_WORKSPACE/tools/history_secret_audit.py"
+
+      - name: Validate important refs survived
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/yawnbot-rewrite.git"
+          for ref in \
+            refs/heads/main \
+            refs/tags/v0.1.0-rc.1 \
+            refs/tags/v0.1.0-rc.2 \
+            refs/tags/v0.1.0-rc.3 \
+            refs/tags/v0.1.0-rc.4; do
+            git show-ref --verify --quiet "$ref" || {
+              echo "::error::Expected ref disappeared during rewrite: $ref"
+              exit 1
+            }
+          done
+          echo "Expected branch/tag refs survived the disposable rewrite."
