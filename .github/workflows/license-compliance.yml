@@ -10,6 +10,8 @@ on:
       - "uv.lock"
       - "deploy/docker/playwright-version.txt"
       - ".github/workflows/license-compliance.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
   workflow_dispatch:
 
 permissions:
@@ -36,12 +38,50 @@ jobs:
             test -f /app/third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt
             test -f /app/third_party_licenses/nonebot-plugin-htmlkit-MIT.txt
             test -f /app/third_party_licenses/litehtml-BSD-3-Clause.txt
+            test -f /app/third_party_licenses/nonebot-plugin-htmlkit-native-provenance.md
             test -f /app/third_party_licenses/GPL-3.0.txt
             test -f /app/third_party_licenses/LGPL-3.0.txt
             test -s /app/third_party_licenses/GPL-3.0.txt
             test -s /app/third_party_licenses/LGPL-3.0.txt
           '
-      - name: Verify Python redistribution metadata
+      - name: Verify corresponding HTMLKit source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            source=/app/third_party_sources/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz
+            test -s "$source"
+            echo "5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17  $source" | sha256sum -c -
+          '
+      - name: Verify reviewed Python redistribution metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python yawnbot:license-audit - <<'PY'
+          from importlib import metadata
+
+          expected_versions = {
+              "nonebot-plugin-htmlkit": "0.1.0rc5",
+              "text-unidecode": "1.3",
+              "nonestorage": "0.1.0",
+          }
+          for package, expected in expected_versions.items():
+              actual = metadata.version(package)
+              if actual != expected:
+                  raise SystemExit(
+                      f"{package} changed from reviewed version {expected} to {actual}; "
+                      "repeat the license/provenance review"
+                  )
+
+          htmlkit_license = metadata.metadata("nonebot-plugin-htmlkit").get("License-Expression", "")
+          if htmlkit_license != "MIT AND LGPL-3.0-or-later":
+              raise SystemExit(
+                  "nonebot-plugin-htmlkit license expression changed; repeat review: "
+                  + repr(htmlkit_license)
+              )
+          PY
+      - name: Verify Python package license files remain installed
         shell: bash
         run: |
           set -euo pipefail
