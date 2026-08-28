@@ -69,7 +69,7 @@ if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-for command_name in docker curl flock install ssh-keygen; do
+for command_name in docker curl flock install ssh-keygen timeout; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "error: required command is missing: $command_name" >&2
     exit 1
