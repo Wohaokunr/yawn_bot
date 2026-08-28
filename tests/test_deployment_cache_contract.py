@@ -156,6 +156,23 @@ def test_release_syncs_restricted_control_plane_before_deploy() -> None:
     assert "sync-control-plane.sh" in bootstrap
 
 
+def test_production_ssh_entrypoints_are_crlf_safe() -> None:
+    attributes = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    forced_command = (
+        REPO_ROOT / "deploy" / "production" / "deploy-ssh-command"
+    ).read_text(encoding="utf-8")
+    bootstrap = (
+        REPO_ROOT / "deploy" / "host" / "bootstrap-production-opencloudos9.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "*.sh text eol=lf" in attributes
+    assert "deploy/production/deploy-ssh-command text eol=lf" in attributes
+    assert 'exec /bin/sh "$@"' in forced_command
+    assert "sed -i 's/\\r$//'" in bootstrap
+    assert "/bin/sh /opt/yawnbot/bin/deploy-ssh-command" in bootstrap
+    assert "legacy_forced_line=" in bootstrap
+
+
 def test_generated_napcat_secret_config_is_gitignored() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "/deploy/napcat/yawnbot-onebot.json" in gitignore
