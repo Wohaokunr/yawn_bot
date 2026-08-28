@@ -82,7 +82,7 @@ jobs:
             --entrypoint python \
             yawnbot:license-audit \
             /tmp/license_audit.py python
-      - name: Verify Python package license files remain installed
+      - name: Verify retained Python package license files
         shell: bash
         run: |
           set -euo pipefail
@@ -90,7 +90,12 @@ jobs:
           from importlib import metadata
           from pathlib import Path
 
-          for package in ("text-unidecode", "certifi", "tqdm"):
+          # These reviewed distributions are expected to retain standalone
+          # license files in the installed wheel payload. tqdm==4.70.0 is a
+          # documented exception: its reviewed MPL-2.0 AND MIT expression is
+          # enforced by tools/license_audit.py, but the wheel has no separate
+          # LICENSE/COPYING file.
+          for package in ("text-unidecode", "certifi"):
               dist = metadata.distribution(package)
               retained = []
               for entry in dist.files or ():

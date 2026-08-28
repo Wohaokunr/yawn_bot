@@ -37,15 +37,15 @@ The HTMLKit Python MIT notice is copied in `nonebot-plugin-htmlkit-MIT.txt`. The
 
 ## Other Python dependencies
 
-Ordinary Python dependency license files remain inside their installed `*.dist-info/licenses` or equivalent package metadata directories in `/app/.venv` and are redistributed with the container image.
+Ordinary Python dependencies generally retain their license files inside installed `*.dist-info/licenses` or equivalent package metadata directories in `/app/.venv`. Exceptions where upstream wheels do not contain a standalone license file are documented explicitly in `THIRD_PARTY_NOTICES.md` and pinned by the fail-closed license audit.
 
 The current manual-review exceptions are documented in `THIRD_PARTY_NOTICES.md`:
 
 - `text-unidecode`: YawnBot uses the upstream Artistic License option rather than the alternative GPL option.
 - `cookiecutter`: scanner metadata may report `UNKNOWN`; upstream is BSD-licensed.
 - `nonestorage`: scanner metadata may report `UNKNOWN`; upstream is MIT-licensed.
-- `certifi`: MPL-2.0.
-- `tqdm`: MPL-2.0 AND MIT.
+- `certifi`: MPL-2.0 and retains a standalone license file in the installed wheel.
+- `tqdm==4.70.0`: MPL-2.0 AND MIT; its wheel has no standalone `LICENSE`/`COPYING` file, so the reviewed version/license expression is enforced by `tools/license_audit.py` and the exception is recorded in `THIRD_PARTY_NOTICES.md`.
 
 This directory is intentionally limited to components where an extra top-level notice, missing upstream wheel notice, or provenance record is useful.
 
