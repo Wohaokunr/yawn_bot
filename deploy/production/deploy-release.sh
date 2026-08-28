@@ -18,12 +18,29 @@ cleanup() {
     if [ -n "$pull_heartbeat_pid" ]; then
         kill "$pull_heartbeat_pid" 2>/dev/null || true
         wait "$pull_heartbeat_pid" 2>/dev/null || true
+        pull_heartbeat_pid=""
     fi
     if [ -n "$docker_config_dir" ] && [ -d "$docker_config_dir" ]; then
         rm -rf "$docker_config_dir"
+        docker_config_dir=""
     fi
 }
-trap cleanup EXIT HUP INT TERM
+
+handle_signal() {
+    signal=$1
+    trap - EXIT HUP INT TERM
+    cleanup
+    case "$signal" in
+        HUP) exit 129 ;;
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+    esac
+}
+
+trap cleanup EXIT
+trap 'handle_signal HUP' HUP
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
 
 case "$image" in
     ghcr.io/wohaokunr/yawn_bot@sha256:*) ;;
