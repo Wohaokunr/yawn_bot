@@ -26,6 +26,9 @@ permissions:
 
 env:
   DEPLOY_USER: deploy
+  TCR_REGISTRY: ccr.ccs.tencentyun.com
+  TCR_IMAGE: ccr.ccs.tencentyun.com/yawnbot/yawn_bot
+  TCR_USERNAME: "100025310087"
 
 jobs:
   quality-gates:
@@ -52,6 +55,8 @@ jobs:
       version: ${{ steps.release_meta.outputs.version }}
       image: ${{ steps.release_meta.outputs.image }}
       digest: ${{ steps.docker_build.outputs.digest }}
+      production_image: ${{ steps.release_meta.outputs.production_image }}
+      production_digest: ${{ steps.tcr_meta.outputs.digest }}
       commit: ${{ github.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -103,6 +108,7 @@ jobs:
           short_sha="${GITHUB_SHA:0:12}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$repo_lower" >> "$GITHUB_OUTPUT"
+          echo "production_image=$TCR_IMAGE" >> "$GITHUB_OUTPUT"
           echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
           echo "quality_gates=$quality_gates" >> "$GITHUB_OUTPUT"
 
@@ -161,12 +167,20 @@ jobs:
             | gzip -n > "release-out/yawnbot-${VERSION}-deploy.tar.gz"
 
       - uses: docker/setup-buildx-action@v3
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.TCR_REGISTRY }}
+          username: ${{ env.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
 
       - name: Build and publish versioned Docker image
         id: docker_build
@@ -181,10 +195,33 @@ jobs:
           tags: |
             ${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}
             ${{ steps.release_meta.outputs.image }}:sha-${{ steps.release_meta.outputs.short_sha }}
+            ${{ steps.release_meta.outputs.production_image }}:${{ steps.release_meta.outputs.version }}
+            ${{ steps.release_meta.outputs.production_image }}:sha-${{ steps.release_meta.outputs.short_sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.release_meta.outputs.version }}
+
+      - name: Verify Tencent production mirror digest
+        id: tcr_meta
+        shell: bash
+        env:
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          PRODUCTION_IMAGE: ${{ steps.release_meta.outputs.production_image }}
+          EXPECTED_DIGEST: ${{ steps.docker_build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="${PRODUCTION_IMAGE}:${VERSION}"
+          digest="$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::TCR did not return a valid immutable image digest"
+            exit 1
+          }
+          [[ "$digest" == "$EXPECTED_DIGEST" ]] || {
+            echo "::error::TCR mirror digest does not match the GHCR release image"
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Fetch corresponding HTMLKit source archive
         shell: bash
@@ -207,11 +244,15 @@ jobs:
           VERSION: ${{ steps.release_meta.outputs.version }}
           IMAGE: ${{ steps.release_meta.outputs.image }}
           DIGEST: ${{ steps.docker_build.outputs.digest }}
+          PRODUCTION_IMAGE: ${{ steps.release_meta.outputs.production_image }}
+          PRODUCTION_DIGEST: ${{ steps.tcr_meta.outputs.digest }}
         run: |
           set -euo pipefail
           cat > "release-out/yawnbot-${VERSION}-image.txt" <<EOF
           image=${IMAGE}:${VERSION}
           digest=${DIGEST}
+          production_image=${PRODUCTION_IMAGE}:${VERSION}
+          production_digest=${PRODUCTION_DIGEST}
           commit=${GITHUB_SHA}
           EOF
           (
@@ -233,7 +274,8 @@ jobs:
           prerelease: ${{ contains(steps.release_meta.outputs.version, '-') }}
           fail_on_unmatched_files: true
           body: |
-            Docker image: `${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}`
+            Public Docker image: `${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}`
+            Production TCR mirror: `${{ steps.release_meta.outputs.production_image }}:${{ steps.release_meta.outputs.version }}`
             Quality gates: `${{ steps.release_meta.outputs.quality_gates }}`
 
             This release was rebuilt from a clean GitHub Actions checkout. Manual runs may explicitly bypass the full CI quality gates; the status above records whether that happened.
@@ -326,24 +368,24 @@ jobs:
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "/opt/yawnbot/bin/sync-control-plane $CONTROL_PLANE_SHA256"
 
-      - name: Deploy immutable release image
+      - name: Deploy immutable release image from Tencent TCR
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ needs.release.outputs.image }}
-          DIGEST: ${{ needs.release.outputs.digest }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          IMAGE: ${{ needs.release.outputs.production_image }}
+          DIGEST: ${{ needs.release.outputs.production_digest }}
           VERSION: ${{ needs.release.outputs.version }}
           COMMIT: ${{ needs.release.outputs.commit }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_HOST"
-          test -n "$GHCR_USERNAME"
-          test -n "$GHCR_TOKEN"
+          test -n "$TCR_USERNAME"
+          test -n "$TCR_PASSWORD"
+          test -n "$IMAGE"
           test -n "$DIGEST"
-          echo "Starting production deployment. Slow or interrupted GHCR pulls are retried by the production deploy script."
-          printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
+          echo "Starting production deployment from Tencent TCR immutable image."
+          printf '%s\n%s\n' "$TCR_USERNAME" "$TCR_PASSWORD" | \
             ssh -i ~/.ssh/yawnbot-deploy \
               -o BatchMode=yes \
               -o IdentitiesOnly=yes \
@@ -352,4 +394,4 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=20 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
+              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT registry-token-stdin"
