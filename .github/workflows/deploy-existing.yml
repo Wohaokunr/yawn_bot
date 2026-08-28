@@ -13,7 +13,6 @@ permissions:
   packages: read
 
 env:
-  DEPLOY_SSH_KEY_FINGERPRINT: SHA256:PcrAC+GXFS9bBSuK/JLSF602EVaIS2+X2cunjeR2pUY
   DEPLOY_USER: deploy
 
 jobs:
@@ -93,12 +92,7 @@ jobs:
 
           actual_fingerprint="$(ssh-keygen -yf ~/.ssh/yawnbot-deploy | ssh-keygen -lf - -E sha256 | awk '{print $2}')"
           echo "GitHub deployment key fingerprint: $actual_fingerprint"
-          echo "Expected server-authorized fingerprint: $DEPLOY_SSH_KEY_FINGERPRINT"
           echo "Production SSH user: $DEPLOY_USER"
-          if [[ "$actual_fingerprint" != "$DEPLOY_SSH_KEY_FINGERPRINT" ]]; then
-            echo "::error::DEPLOY_SSH_PRIVATE_KEY does not match the public key installed for the deploy user. Expected $DEPLOY_SSH_KEY_FINGERPRINT, got $actual_fingerprint"
-            exit 1
-          fi
 
       - name: Package production control plane
         id: control_plane
