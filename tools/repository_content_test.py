@@ -9,6 +9,7 @@ from pathlib import Path
 
 _REQUIRED_OPEN_SOURCE_FILES = (
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "CODE_OF_CONDUCT.md",
@@ -20,6 +21,10 @@ _REQUIRED_OPEN_SOURCE_FILES = (
     ".github/ISSUE_TEMPLATE/config.yml",
     "deploy/docker/compose.release.yaml",
     "docs/public-docker-deployment.md",
+    "third_party_licenses/README.md",
+    "third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt",
+    "third_party_licenses/nonebot-plugin-htmlkit-MIT.txt",
+    "third_party_licenses/litehtml-BSD-3-Clause.txt",
 )
 
 
