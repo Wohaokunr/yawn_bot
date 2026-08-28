@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Wohaokunr/yawn_bot/security
+    about: 安全漏洞请优先通过 GitHub Security 私下报告，不要创建公开 Issue。
