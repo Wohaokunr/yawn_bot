@@ -42,12 +42,17 @@ WORKDIR /app
 COPY --from=python-builder /app/.venv /app/.venv
 
 COPY pyproject.toml LICENSE THIRD_PARTY_NOTICES.md ./
+COPY third_party_licenses ./third_party_licenses
 COPY src ./src
 COPY data/nonebot_plugin_orm/migrations /opt/yawnbot/migrations
 COPY --from=webui-builder /build/webui/dist ./webui/dist
 COPY deploy/docker-entrypoint.sh /usr/local/bin/yawnbot-entrypoint
 
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin yawnbot \
+RUN test -f /usr/share/common-licenses/GPL-3 \
+    && test -f /usr/share/common-licenses/LGPL-3 \
+    && cp /usr/share/common-licenses/GPL-3 /app/third_party_licenses/GPL-3.0.txt \
+    && cp /usr/share/common-licenses/LGPL-3 /app/third_party_licenses/LGPL-3.0.txt \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin yawnbot \
     && mkdir -p /app/data \
     && chown -R yawnbot:yawnbot /app /opt/yawnbot \
     && chmod +x /usr/local/bin/yawnbot-entrypoint
