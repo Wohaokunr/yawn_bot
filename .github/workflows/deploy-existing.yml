@@ -14,6 +14,8 @@ permissions:
 
 env:
   DEPLOY_USER: deploy
+  TCR_IMAGE: ccr.ccs.tencentyun.com/yawnbot/yawn_bot
+  TCR_USERNAME: "100025310087"
 
 jobs:
   deploy-production:
@@ -53,6 +55,8 @@ jobs:
 
           release_image="$(sed -n 's/^image=//p' "$meta")"
           digest="$(sed -n 's/^digest=//p' "$meta")"
+          production_release_image="$(sed -n 's/^production_image=//p' "$meta")"
+          production_digest="$(sed -n 's/^production_digest=//p' "$meta")"
           commit="$(sed -n 's/^commit=//p' "$meta")"
           expected_image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION"
 
@@ -69,12 +73,28 @@ jobs:
             exit 1
           }
 
-          image="${release_image%:$VERSION}"
+          if [[ -n "$production_release_image" || -n "$production_digest" ]]; then
+            expected_production_image="$TCR_IMAGE:$VERSION"
+            [[ "$production_release_image" == "$expected_production_image" ]] || {
+              echo "::error::Production image metadata does not match the configured Tencent TCR repository/version"
+              exit 1
+            }
+            [[ "$production_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::Production image digest is invalid"
+              exit 1
+            }
+          else
+            echo "::warning::Release predates Tencent TCR mirroring; falling back to GHCR for this deployment."
+            production_release_image="$release_image"
+            production_digest="$digest"
+          fi
+
+          production_image="${production_release_image%:$VERSION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image=$production_image" >> "$GITHUB_OUTPUT"
+          echo "digest=$production_digest" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "Deploying existing immutable release $VERSION ($digest)"
+          echo "Deploying existing immutable release $VERSION from $production_image@$production_digest"
 
       - name: Configure and verify deployment SSH identity
         shell: bash
@@ -139,6 +159,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
           IMAGE: ${{ steps.release_meta.outputs.image }}
           DIGEST: ${{ steps.release_meta.outputs.digest }}
           VERSION: ${{ steps.release_meta.outputs.version }}
@@ -146,12 +167,32 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$DEPLOY_HOST"
-          test -n "$GHCR_USERNAME"
-          test -n "$GHCR_TOKEN"
+          test -n "$IMAGE"
           test -n "$DIGEST"
 
-          echo "Starting production deployment. Slow first-time image pulls are expected on low-bandwidth hosts."
-          printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
+          case "$IMAGE" in
+            ccr.ccs.tencentyun.com/yawnbot/yawn_bot)
+              test -n "$TCR_USERNAME"
+              test -n "$TCR_PASSWORD"
+              registry_username="$TCR_USERNAME"
+              registry_password="$TCR_PASSWORD"
+              auth_mode="registry-token-stdin"
+              ;;
+            ghcr.io/wohaokunr/yawn_bot)
+              test -n "$GHCR_USERNAME"
+              test -n "$GHCR_TOKEN"
+              registry_username="$GHCR_USERNAME"
+              registry_password="$GHCR_TOKEN"
+              auth_mode="github-token-stdin"
+              ;;
+            *)
+              echo "::error::Unexpected production registry: $IMAGE"
+              exit 1
+              ;;
+          esac
+
+          echo "Starting production deployment from $IMAGE@$DIGEST"
+          printf '%s\n%s\n' "$registry_username" "$registry_password" | \
             ssh -i ~/.ssh/yawnbot-deploy \
               -o BatchMode=yes \
               -o IdentitiesOnly=yes \
@@ -160,4 +201,4 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=20 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
+              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT $auth_mode"
