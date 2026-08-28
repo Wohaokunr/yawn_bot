@@ -186,6 +186,21 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.release_meta.outputs.version }}
 
+      - name: Fetch corresponding HTMLKit source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_name="nonebot_plugin_htmlkit-0.1.0rc5.tar.gz"
+          python - <<'PY'
+          import urllib.request
+
+          urllib.request.urlretrieve(
+              "https://files.pythonhosted.org/packages/29/79/7f0b60a19132e335cb2d6ec2902e330afc97e82462dc152ae033864acf25/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz",
+              "release-out/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz",
+          )
+          PY
+          echo "5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17  release-out/${source_name}" | sha256sum -c -
+
       - name: Record image digest and checksums
         shell: bash
         env:
@@ -204,6 +219,7 @@ jobs:
             sha256sum \
               "yawnbot-${VERSION}-deploy.tar.gz" \
               "yawnbot-${VERSION}-image.txt" \
+              "nonebot_plugin_htmlkit-0.1.0rc5.tar.gz" \
               > SHA256SUMS.txt
           )
 
@@ -221,9 +237,11 @@ jobs:
             Quality gates: `${{ steps.release_meta.outputs.quality_gates }}`
 
             This release was rebuilt from a clean GitHub Actions checkout. Manual runs may explicitly bypass the full CI quality gates; the status above records whether that happened.
+            The exact upstream HTMLKit source archive corresponding to the redistributed LGPL native extension is attached to this release and covered by `SHA256SUMS.txt`.
           files: |
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-deploy.tar.gz
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-image.txt
+            release-out/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz
             release-out/SHA256SUMS.txt
 
   deploy-production:
