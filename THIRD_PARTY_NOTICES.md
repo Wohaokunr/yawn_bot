@@ -1,104 +1,73 @@
 # Third-Party Notices
 
 YawnBot includes or redistributes third-party components under their own licenses.
-This file records notices that must accompany redistributed runtime artifacts.
-Dependency metadata remains the source of truth for ordinary package dependencies.
+This file records components that need an explicit top-level redistribution notice.
+Ordinary package dependencies retain their own package metadata and license files in
+the installed runtime environment.
 
 ## ZCOOL KuaiLe
 
 The WebUI uses `@fontsource/zcool-kuaile`, which redistributes the ZCOOL KuaiLe
-font files. The following notice and license text are reproduced verbatim from
-the upstream ZCOOL KuaiLe project.
+font files.
 
-Copyright 2018 The ZCOOL KuaiLe Project Authors (https://github.com/googlefonts/zcool-kuaile)
+- Copyright: 2018 The ZCOOL KuaiLe Project Authors
+- License: SIL Open Font License 1.1
+- License copy: `third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt`
 
-This Font Software is licensed under the SIL Open Font License, Version 1.1.
-This license is copied below, and is also available with a FAQ at:
-https://openfontlicense.org
+The bundled font remains under OFL-1.1; YawnBot's Apache-2.0 license does not
+replace the font's license.
 
------------------------------------------------------------
-SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
------------------------------------------------------------
+## nonebot-plugin-htmlkit 0.1.0rc5
 
-PREAMBLE
-The goals of the Open Font License (OFL) are to stimulate worldwide
-development of collaborative font projects, to support the font creation
-efforts of academic and linguistic communities, and to provide a free and
-open framework in which fonts may be shared and improved in partnership
-with others.
+YawnBot redistributes `nonebot-plugin-htmlkit==0.1.0rc5` in its published Python
+runtime environment. Upstream documents the Python package code as MIT and the
+native `core` extension as LGPL-3.0-or-later.
 
-The OFL allows the licensed fonts to be used, studied, modified and
-redistributed freely as long as they are not sold by themselves. The
-fonts, including any derivative works, can be bundled, embedded,
-redistributed and/or sold with any software provided that any reserved
-names are not used by derivative works. The fonts and derivatives,
-however, cannot be released under any other type of license. The
-requirement for fonts to remain under this license does not apply
-to any document created using the fonts or their derivatives.
+The published wheel contains `nonebot_plugin_htmlkit/core.abi3.so`, while its
+wheel license metadata includes only the root MIT license. YawnBot therefore
+adds the missing LGPL-3.0 and GPL-3.0 license texts to the container image under
+`/app/third_party_licenses/` from Debian's standard common-license files.
 
-DEFINITIONS
-"Font Software" refers to the set of files released by the Copyright
-Holder(s) under this license and clearly marked as such. This may
-include source files, build scripts and documentation.
+- Python license copy: `third_party_licenses/nonebot-plugin-htmlkit-MIT.txt`
+- Native core license: LGPL-3.0-or-later
+- Exact upstream source archive: `nonebot_plugin_htmlkit-0.1.0rc5.tar.gz`
+- Source archive SHA256: `5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17`
+- Upstream source repository: `https://github.com/nonebot/plugin-htmlkit`
 
-"Reserved Font Name" refers to any names specified as such after the
-copyright statement(s).
+The source distribution records its litehtml submodule at commit
+`2fcc6f567cca06d6682ffab3868632c4d9fcc673`.
 
-"Original Version" refers to the collection of Font Software components as
-distributed by the Copyright Holder(s).
+## litehtml
 
-"Modified Version" refers to any derivative made by adding to, deleting,
-or substituting -- in part or in whole -- any of the components of the
-Original Version, by changing formats or by porting the Font Software to a
-new environment.
+The HTMLKit native renderer includes litehtml at the exact commit listed above.
 
-"Author" refers to any designer, engineer, programmer, technical
-writer or other person who contributed to the Font Software.
+- Copyright: 2013 Yuri Kobets (tordex)
+- License: BSD-3-Clause
+- License copy: `third_party_licenses/litehtml-BSD-3-Clause.txt`
 
-PERMISSION & CONDITIONS
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of the Font Software, to use, study, copy, merge, embed, modify,
-redistribute, and sell modified and unmodified copies of the Font
-Software, subject to the following conditions:
+## text-unidecode
 
-1) Neither the Font Software nor any of its individual components,
-in Original or Modified Versions, may be sold by itself.
+`text-unidecode` is a transitive runtime dependency. Upstream offers it under
+either GPL/GPLv2+ or the Artistic License. YawnBot redistributes the unmodified
+package under the Artistic License option supplied by upstream; the installed
+package's own license file remains in its Python distribution metadata.
 
-2) Original or Modified Versions of the Font Software may be bundled,
-redistributed and/or sold with any software, provided that each copy
-contains the above copyright notice and this license. These can be
-included either as stand-alone text files, human-readable headers or
-in the appropriate machine-readable metadata fields within text or
-binary files as long as those fields can be easily viewed by the user.
+## certifi and tqdm
 
-3) No Modified Version of the Font Software may use the Reserved Font
-Name(s) unless explicit written permission is granted by the corresponding
-Copyright Holder. This restriction only applies to the primary font name as
-presented to the users.
+These runtime packages expose MPL-related license metadata (`certifi`: MPL-2.0;
+`tqdm`: MPL-2.0 AND MIT). Their installed license files remain in the Python
+package metadata copied into `/app/.venv`. YawnBot does not modify or relicense
+those packages.
 
-4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
-Software shall not be used to promote, endorse or advertise any
-Modified Version, except to acknowledge the contribution(s) of the
-Copyright Holder(s) and the Author(s) or with their explicit written
-permission.
+## Playwright browser payload
 
-5) The Font Software, modified or unmodified, in part or in whole,
-must be distributed entirely under this license, and must not be
-distributed under any other license. The requirement for fonts to
-remain under this license does not apply to any document created
-using the Font Software.
+The runtime image contains the browser payload installed by Playwright under
+`/ms-playwright`. YawnBot does not strip the upstream license/credits files.
+The verified Playwright 1.62.0 payload includes, among other notices:
 
-TERMINATION
-This license becomes null and void if any of the above conditions are
-not met.
+- Chrome Headless Shell `LICENSE.headless_shell`
+- FFmpeg `COPYING.LGPLv2.1`
+- Widevine CDM `LICENSE`
 
-DISCLAIMER
-THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
-OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
-COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
-DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
-OTHER DEALINGS IN THE FONT SOFTWARE.
+See `third_party_licenses/README.md` for the redistribution layout and source
+traceability notes.
