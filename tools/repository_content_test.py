@@ -19,12 +19,14 @@ _REQUIRED_OPEN_SOURCE_FILES = (
     ".github/ISSUE_TEMPLATE/feature_request.yml",
     ".github/ISSUE_TEMPLATE/deployment_help.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/workflows/license-compliance.yml",
     "deploy/docker/compose.release.yaml",
     "docs/public-docker-deployment.md",
     "third_party_licenses/README.md",
     "third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt",
     "third_party_licenses/nonebot-plugin-htmlkit-MIT.txt",
     "third_party_licenses/litehtml-BSD-3-Clause.txt",
+    "third_party_licenses/nonebot-plugin-htmlkit-native-provenance.md",
 )
 
 
@@ -67,6 +69,31 @@ def _validate_public_release_compose(root: Path) -> list[str]:
     return violations
 
 
+def _validate_production_action_logging(root: Path) -> list[str]:
+    violations: list[str] = []
+    workflow_paths = (
+        ".github/workflows/release.yml",
+        ".github/workflows/deploy-existing.yml",
+    )
+    forbidden_fragments = (
+        "ssh -vv",
+        "GitHub deployment key fingerprint:",
+        "Production SSH user:",
+    )
+    for relative_path in workflow_paths:
+        path = root / relative_path
+        if not path.is_file():
+            continue
+        content = path.read_text(encoding="utf-8")
+        for fragment in forbidden_fragments:
+            if fragment in content:
+                violations.append(
+                    f"{relative_path}: public Actions logs must not contain/use "
+                    f"{fragment!r}"
+                )
+    return violations
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all").strip()
@@ -101,11 +128,19 @@ def main() -> int:
             print(f"  - {violation}")
         return 1
 
+    production_log_violations = _validate_production_action_logging(root)
+    if production_log_violations:
+        print("Production Actions log-safety violations detected:")
+        for violation in production_log_violations:
+            print(f"  - {violation}")
+        return 1
+
     tracked_count = len(_git(root, "ls-files").splitlines())
     print(
         "Repository content OK: "
         f"{tracked_count} tracked files, required community/public-deployment files "
-        "present, and no runtime/generated/private checkout state."
+        "present, production Actions logging is hardened, and no runtime/generated/"
+        "private checkout state is tracked."
     )
     return 0
 
