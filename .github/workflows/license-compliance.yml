@@ -86,13 +86,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint sh yawnbot:license-audit -c '
-            set -eu
-            test -n "$(find /app/.venv -type f -path "*/nonebot_plugin_htmlkit/core*.so" -print -quit)"
-            test -n "$(find /app/.venv -type f -path "*text_unidecode-*.dist-info/*" \( -iname "LICENSE*" -o -iname "COPYING*" \) -print -quit)"
-            test -n "$(find /app/.venv -type f -path "*certifi-*.dist-info/*" \( -iname "LICENSE*" -o -iname "COPYING*" \) -print -quit)"
-            test -n "$(find /app/.venv -type f -path "*tqdm-*.dist-info/*" \( -iname "LICENSE*" -o -iname "COPYING*" \) -print -quit)"
-          '
+          docker run --rm -i --entrypoint python yawnbot:license-audit - <<'PY'
+          from importlib import metadata
+          from pathlib import Path
+
+          for package in ("text-unidecode", "certifi", "tqdm"):
+              dist = metadata.distribution(package)
+              retained = []
+              for entry in dist.files or ():
+                  name = Path(str(entry)).name.lower()
+                  if not name.startswith(("license", "copying")):
+                      continue
+                  resolved = Path(dist.locate_file(entry))
+                  if resolved.is_file() and resolved.stat().st_size > 0:
+                      retained.append(resolved)
+              if not retained:
+                  raise SystemExit(
+                      f"{package}: installed distribution does not retain a "
+                      "LICENSE/COPYING file"
+                  )
+
+          htmlkit = metadata.distribution("nonebot-plugin-htmlkit")
+          package_root = Path(htmlkit.locate_file("nonebot_plugin_htmlkit"))
+          if not any(package_root.glob("core*.so")):
+              raise SystemExit("nonebot-plugin-htmlkit native core is missing")
+          PY
       - name: Verify browser payload notices
         shell: bash
         run: |
