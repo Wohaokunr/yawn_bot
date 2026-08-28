@@ -1,6 +1,11 @@
 # YawnBot
 
+[![CI](https://github.com/Wohaokunr/yawn_bot/actions/workflows/ci.yml/badge.svg)](https://github.com/Wohaokunr/yawn_bot/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 YawnBot 是一个基于 **NoneBot2 + OneBot V11** 的 QQ 机器人项目，包含群聊 Agent、RPG 跑团、狼人杀、番茄小说下载、签到/提醒、权限与管理 WebUI 等能力。项目使用 SQLite 持久化业务数据，并保持与具体 QQ 协议实现解耦：NapCat、Lagrange 等只需要按 OneBot V11 接入即可。
+
+> **项目状态：0.x / 快速开发中。** 在 1.0 之前，配置、数据库 migration 和部分插件内部 API 仍可能变化。生产升级前请备份 `data/` 并阅读 Release Notes。
 
 > 新用户推荐直接使用 Docker Compose。Docker 构建会自动完成 WebUI 前端构建、Python 锁定依赖安装和 Playwright Chromium 安装，不要求宿主机提前准备 Node/npm 或浏览器运行时。
 
@@ -313,7 +318,7 @@ WW_AI_ENABLED=true
 
 ## 常见问题
 
-**启动后 QQ 没上线？**  `/healthz` 只证明 YawnBot HTTP 进程正常。继续检查 OneBot 实现是否在线、反向 WS 地址和 token 是否一致。
+**启动后 QQ 没上线？** `/healthz` 只证明 YawnBot HTTP 进程正常。继续检查 OneBot 实现是否在线、反向 WS 地址和 token 是否一致。
 
 **WebUI 404 / 启动报前端缺失？** Docker 路径会自动构建前端。原生部署需在 `webui/` 执行 `npm ci && npm run build`。
 
@@ -334,6 +339,7 @@ WW_AI_ENABLED=true
 - [番茄、RPG 与狼人杀](docs/configuration/fanqie-games.md)
 - [生产部署、升级、备份与回滚](docs/deployment.md)
 - [Repository hygiene](docs/repository-hygiene.md)
+- [开源前安全与发布验收](docs/open-source-readiness.md)
 - [运行指标](docs/metrics.md)
 - [RPG 新手与联合推理](docs/rpg-gameplay-guide.md)
 - [番茄来源与使用边界](docs/fanqie-notice.md)
@@ -348,7 +354,9 @@ WW_AI_ENABLED=true
 - 镜像发布到 `ghcr.io/wohaokunr/yawn_bot:<version>`，同时保留 `sha-<commit>` 标签；
 - GitHub Release 附带 `yawnbot-<version>-deploy.tar.gz`、镜像 digest 文件和 `SHA256SUMS.txt`；
 - `deploy-production` 通过受保护的 `production` Environment，把不可变的
-  `image@sha256:digest` 交给服务器部署；业务运行时密钥始终只保存在服务器。
+  `image@sha256:digest` 交给维护者服务器；业务运行时密钥始终只保存在服务器。
+
+公开仓库的普通用户和 fork **不需要、也不应获得**维护者的 `production` Environment、SSH key 或业务运行时 secret。
 
 ## 开发
 
@@ -381,7 +389,7 @@ uv run python -c "import nonebot; nonebot.init(); nonebot.load_from_toml('pyproj
 src/plugins/yawn_core/                 Core 与业务子插件
 data/nonebot_plugin_orm/migrations/    受版本控制的 canonical ORM migration
 webui/                                 React / Vite 管理台源码
-deploy/                                容器启动脚本
+deploy/                                容器与维护者部署脚本
 docs/configuration/                    分主题配置参考
 docs/deployment.md                     生产升级、备份、迁移、回滚与安全
 tools/                                 开发/维护工具
@@ -389,3 +397,19 @@ tests/                                 回归测试
 ```
 
 `webui/dist/`、数据库、浏览器 profile、媒体缓存、虚拟环境和工具私有状态都属于可再生或运行时数据，不应提交到 Git。
+
+## 贡献
+
+欢迎 Bug 报告、部署文档改进、测试和功能 PR。开始前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。仓库提供 Bug、Feature 和 Deployment Help 三类 Issue Forms；较大的架构改动建议先建立 Issue 讨论边界和兼容性。
+
+任何贡献都不应包含真实 `.env`、Token、QQ/NapCat 登录态、数据库或用户隐私数据。
+
+## 安全
+
+不要用公开 Issue 披露可利用的安全漏洞。WebUI 鉴权、权限绕过、OneBot 未授权控制、RCE/SSRF、secret 泄露或访客跨群/隐私泄露等问题请按 [SECURITY.md](SECURITY.md) 私下报告。
+
+维护者在把仓库切换为 Public 前还会执行 `tools/history_secret_audit.py` 和 [开源前安全与发布验收](docs/open-source-readiness.md)，因为仅保证当前 HEAD 干净不足以证明旧 Git 历史可以公开。
+
+## License
+
+YawnBot 自有代码与文档按 [Apache License 2.0](LICENSE) 发布。第三方依赖、外部服务和第三方素材仍受各自许可证、服务条款和版权规则约束；Apache-2.0 不会重新许可这些第三方内容。
