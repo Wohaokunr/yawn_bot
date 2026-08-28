@@ -47,7 +47,11 @@ def main() -> int:
     if guard.returncode != 0:
         return guard.returncode
 
-    missing = [path for path in _REQUIRED_OPEN_SOURCE_FILES if not (root / path).is_file()]
+    missing = [
+        path
+        for path in _REQUIRED_OPEN_SOURCE_FILES
+        if not (root / path).is_file()
+    ]
     if missing:
         print("Required open-source community files are missing:")
         for path in missing:
