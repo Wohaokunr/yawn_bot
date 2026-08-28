@@ -40,10 +40,12 @@ jobs:
           set -euo pipefail
           python tools/history_rewrite_plan.py \
             --paths-out "$RUNNER_TEMP/history-rewrite-paths.txt" \
+            --replacements-out "$RUNNER_TEMP/history-rewrite-replacements.txt" \
             --manifest-out "$RUNNER_TEMP/history-rewrite-manifest.json"
           test -s "$RUNNER_TEMP/history-rewrite-paths.txt"
+          test -s "$RUNNER_TEMP/history-rewrite-replacements.txt"
 
-      - name: Rewrite disposable mirror
+      - name: Rewrite disposable publishable-ref mirror
         shell: bash
         env:
           PR_HEAD_REF: ${{ github.head_ref }}
@@ -55,10 +57,18 @@ jobs:
           before_tree="$(git rev-parse "${before_ref}^{tree}")"
           git ls-tree -r "$before_ref" > "$RUNNER_TEMP/tree-before.txt"
 
-          git clone --mirror "$GITHUB_WORKSPACE" "$RUNNER_TEMP/yawnbot-rewrite.git"
+          # Build a bare repository containing only refs that would become public:
+          # real branches and tags. Do not preserve PR merge refs or remote-tracking
+          # helper refs, because they are not repository refs users can clone.
+          git init --bare "$RUNNER_TEMP/yawnbot-rewrite.git"
+          git -C "$RUNNER_TEMP/yawnbot-rewrite.git" fetch "$GITHUB_WORKSPACE" \
+            '+refs/remotes/origin/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
           cd "$RUNNER_TEMP/yawnbot-rewrite.git"
           git filter-repo --force --invert-paths \
-            --paths-from-file "$RUNNER_TEMP/history-rewrite-paths.txt"
+            --paths-from-file "$RUNNER_TEMP/history-rewrite-paths.txt" \
+            --replace-text "$RUNNER_TEMP/history-rewrite-replacements.txt"
 
           after_ref="refs/heads/${target_branch}"
           after_tree="$(git rev-parse "${after_ref}^{tree}")"
