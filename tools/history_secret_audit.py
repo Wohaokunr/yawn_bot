@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: T201
 """Audit every Git-reachable blob before making the repository public.
 
 This is intentionally stricter than tools/repo_guard.py. repo_guard protects the
@@ -95,7 +96,11 @@ def _object_meta(oids: list[str]) -> dict[str, tuple[str, int]]:
     if not oids:
         return {}
     payload = ("\n".join(oids) + "\n").encode()
-    output = _git("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)", input_data=payload)
+    output = _git(
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        input_data=payload,
+    )
     result: dict[str, tuple[str, int]] = {}
     for line in output.decode("ascii").splitlines():
         oid, object_type, size = line.split()
