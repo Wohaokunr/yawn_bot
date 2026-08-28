@@ -25,16 +25,26 @@ native `core` extension as LGPL-3.0-or-later.
 
 The published wheel contains `nonebot_plugin_htmlkit/core.abi3.so`, while its
 wheel license metadata includes only the root MIT license. YawnBot therefore
-adds the missing LGPL-3.0 and GPL-3.0 license texts to the container image under
+adds the LGPL-3.0 and GPL-3.0 license texts to the container image under
 `/app/third_party_licenses/` from Debian's standard common-license files.
+
+For corresponding-source availability, published YawnBot images also contain
+the exact PyPI source distribution at:
+
+`/app/third_party_sources/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz`
+
+YawnBot GitHub Releases attach the same source archive and include its digest in
+`SHA256SUMS.txt`.
 
 - Python license copy: `third_party_licenses/nonebot-plugin-htmlkit-MIT.txt`
 - Native core license: LGPL-3.0-or-later
+- Exact upstream release commit: `ff270a627280dfc4e88b38ed465dee5bdc7d984f`
 - Exact upstream source archive: `nonebot_plugin_htmlkit-0.1.0rc5.tar.gz`
 - Source archive SHA256: `5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17`
 - Upstream source repository: `https://github.com/nonebot/plugin-htmlkit`
+- Native provenance record: `third_party_licenses/nonebot-plugin-htmlkit-native-provenance.md`
 
-The source distribution records its litehtml submodule at commit
+The exact upstream release records its litehtml submodule at commit
 `2fcc6f567cca06d6682ffab3868632c4d9fcc673`.
 
 ## litehtml
@@ -58,6 +68,16 @@ These runtime packages expose MPL-related license metadata (`certifi`: MPL-2.0;
 `tqdm`: MPL-2.0 AND MIT). Their installed license files remain in the Python
 package metadata copied into `/app/.venv`. YawnBot does not modify or relicense
 those packages.
+
+## cookiecutter and nonestorage
+
+Some Python metadata scanners report these packages as `UNKNOWN`, so YawnBot
+records the manual review explicitly:
+
+- `cookiecutter`: BSD-3-Clause/BSD-family upstream licensing.
+- `nonestorage`: MIT; upstream license copyright 2024 NoneBot.
+
+Their installed package metadata remains part of the runtime environment.
 
 ## Playwright browser payload
 
