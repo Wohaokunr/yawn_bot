@@ -1,0 +1,113 @@
+name: Bug report
+description: 报告可复现的 YawnBot 功能问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告问题。请先确认日志、截图和配置中没有 Token、Cookie、API Key、QQ 登录态或其他真实凭据。安全漏洞请不要使用公开 Issue，请阅读 SECURITY.md。
+
+  - type: input
+    id: version
+    attributes:
+      label: YawnBot 版本
+      description: GitHub Release 版本或 commit SHA。
+      placeholder: v0.1.0 / abcdef123456
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式
+      options:
+        - Docker Compose（源码构建）
+        - GitHub Release / GHCR 镜像
+        - 原生 Windows
+        - 原生 Linux
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 系统环境
+      description: OS、架构；原生部署请同时提供 Python 版本。
+      placeholder: OpenCloudOS 9 x86_64 / Windows 11 + Python 3.12
+    validations:
+      required: true
+
+  - type: input
+    id: onebot
+    attributes:
+      label: OneBot 实现
+      description: 如果问题与 QQ/OneBot 无关可填写 N/A。
+      placeholder: NapCat 4.x / Lagrange / N/A
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 相关模块
+      options:
+        - Core / 指令 / 权限
+        - Agent
+        - RPG
+        - 狼人杀
+        - 番茄
+        - WebUI
+        - 数据库 / migration
+        - Docker / 部署
+        - OneBot 连接
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请提供最小、稳定的复现步骤。
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 仅粘贴必要片段；请先脱敏 Token、Cookie、QQ 号、群号、IP/域名（如不希望公开）和用户内容。
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索现有 Issue，确认不是明显重复问题。
+          required: true
+        - label: 我已经删除日志、截图和配置中的 Token、Cookie、API Key、SSH 私钥、QQ 登录态及其他真实凭据。
+          required: true
+        - label: 这不是需要私下披露的安全漏洞；安全问题我会按 SECURITY.md 报告。
+          required: true
