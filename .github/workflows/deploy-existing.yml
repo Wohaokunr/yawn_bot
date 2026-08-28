@@ -14,6 +14,9 @@ permissions:
 
 env:
   DEPLOY_USER: deploy
+  TCR_REGISTRY: ccr.ccs.tencentyun.com
+  TCR_IMAGE: ccr.ccs.tencentyun.com/yawnbot/yawn_bot
+  TCR_USERNAME: "100025310087"
 
 jobs:
   deploy-production:
@@ -53,6 +56,8 @@ jobs:
 
           release_image="$(sed -n 's/^image=//p' "$meta")"
           digest="$(sed -n 's/^digest=//p' "$meta")"
+          production_release_image="$(sed -n 's/^production_image=//p' "$meta")"
+          production_digest="$(sed -n 's/^production_digest=//p' "$meta")"
           commit="$(sed -n 's/^commit=//p' "$meta")"
           expected_image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION"
 
@@ -69,12 +74,94 @@ jobs:
             exit 1
           }
 
-          image="${release_image%:$VERSION}"
+          source_image="${release_image%:$VERSION}"
+          if [[ -n "$production_release_image" || -n "$production_digest" ]]; then
+            expected_production_image="$TCR_IMAGE:$VERSION"
+            [[ "$production_release_image" == "$expected_production_image" ]] || {
+              echo "::error::Production image metadata does not match the configured Tencent TCR repository/version"
+              exit 1
+            }
+            [[ "$production_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::Production image digest is invalid"
+              exit 1
+            }
+            needs_mirror="false"
+          else
+            echo "Legacy release has no TCR metadata; GitHub Actions will mirror the immutable GHCR image to Tencent TCR before deployment."
+            production_digest=""
+            needs_mirror="true"
+          fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "source_image=$source_image" >> "$GITHUB_OUTPUT"
+          echo "source_digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "production_digest=$production_digest" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "Deploying existing immutable release $VERSION ($digest)"
+          echo "needs_mirror=$needs_mirror" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR for legacy mirror
+        if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent TCR for legacy mirror
+        if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.TCR_REGISTRY }}
+          username: ${{ env.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Mirror legacy release to Tencent TCR
+        if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
+        id: mirror
+        shell: bash
+        env:
+          SOURCE_IMAGE: ${{ steps.release_meta.outputs.source_image }}
+          SOURCE_DIGEST: ${{ steps.release_meta.outputs.source_digest }}
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          COMMIT: ${{ steps.release_meta.outputs.commit }}
+        run: |
+          set -euo pipefail
+          source_ref="$SOURCE_IMAGE@$SOURCE_DIGEST"
+          version_ref="$TCR_IMAGE:$VERSION"
+          sha_ref="$TCR_IMAGE:sha-${COMMIT:0:12}"
+
+          echo "Mirroring legacy immutable image from GHCR to Tencent TCR."
+          docker pull "$source_ref"
+          docker tag "$source_ref" "$version_ref"
+          docker tag "$source_ref" "$sha_ref"
+
+          push_log="$RUNNER_TEMP/tcr-push.log"
+          docker push "$version_ref" | tee "$push_log"
+          docker push "$sha_ref"
+
+          digest="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' "$push_log" | tail -n 1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Could not resolve immutable digest after mirroring legacy release to TCR"
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Legacy release mirrored to $TCR_IMAGE@$digest"
+
+      - name: Select production TCR digest
+        id: production_meta
+        shell: bash
+        env:
+          RELEASE_DIGEST: ${{ steps.release_meta.outputs.production_digest }}
+          MIRROR_DIGEST: ${{ steps.mirror.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="${RELEASE_DIGEST:-$MIRROR_DIGEST}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::No valid Tencent TCR production digest is available"
+            exit 1
+          }
+          echo "image=$TCR_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Configure and verify deployment SSH identity
         shell: bash
@@ -133,25 +220,25 @@ jobs:
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "/opt/yawnbot/bin/sync-control-plane $CONTROL_PLANE_SHA256"
 
-      - name: Deploy immutable release image
+      - name: Deploy immutable release image from Tencent TCR
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ steps.release_meta.outputs.image }}
-          DIGEST: ${{ steps.release_meta.outputs.digest }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          IMAGE: ${{ steps.production_meta.outputs.image }}
+          DIGEST: ${{ steps.production_meta.outputs.digest }}
           VERSION: ${{ steps.release_meta.outputs.version }}
           COMMIT: ${{ steps.release_meta.outputs.commit }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_HOST"
-          test -n "$GHCR_USERNAME"
-          test -n "$GHCR_TOKEN"
+          test -n "$TCR_USERNAME"
+          test -n "$TCR_PASSWORD"
+          test -n "$IMAGE"
           test -n "$DIGEST"
 
-          echo "Starting production deployment. Slow first-time image pulls are expected on low-bandwidth hosts."
-          printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
+          echo "Starting production deployment from Tencent TCR: $IMAGE@$DIGEST"
+          printf '%s\n%s\n' "$TCR_USERNAME" "$TCR_PASSWORD" | \
             ssh -i ~/.ssh/yawnbot-deploy \
               -o BatchMode=yes \
               -o IdentitiesOnly=yes \
@@ -160,4 +247,4 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=20 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT github-token-stdin"
+              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT registry-token-stdin"

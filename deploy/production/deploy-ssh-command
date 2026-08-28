@@ -6,7 +6,12 @@ case "${1:-}" in
     /opt/yawnbot/bin/deploy-release)
         case "$#" in
             4) ;;
-            5) [ "$5" = github-token-stdin ] || exit 2 ;;
+            5)
+                case "$5" in
+                    github-token-stdin|registry-token-stdin) ;;
+                    *) exit 2 ;;
+                esac
+                ;;
             *) exit 2 ;;
         esac
         ;;

@@ -43,7 +43,7 @@ trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
 
 case "$image" in
-    ghcr.io/wohaokunr/yawn_bot@sha256:*) ;;
+    ghcr.io/wohaokunr/yawn_bot@sha256:*|ccr.ccs.tencentyun.com/yawnbot/yawn_bot@sha256:*) ;;
     *) echo "invalid immutable image reference: $image" >&2; exit 2 ;;
 esac
 case "$version" in
@@ -54,19 +54,41 @@ case "$commit" in
     [0-9a-f][0-9a-f]*) ;;
     *) echo "invalid commit SHA: $commit" >&2; exit 2 ;;
 esac
+
+registry_host=${image%%/*}
 case "$auth_mode" in
     "") ;;
     github-token-stdin)
-        IFS= read -r ghcr_username || { echo "missing GHCR username on stdin" >&2; exit 2; }
-        IFS= read -r ghcr_token || { echo "missing GHCR token on stdin" >&2; exit 2; }
-        [ -n "$ghcr_username" ] || { echo "empty GHCR username" >&2; exit 2; }
-        [ -n "$ghcr_token" ] || { echo "empty GHCR token" >&2; exit 2; }
+        [ "$registry_host" = "ghcr.io" ] || {
+            echo "github-token-stdin is only valid for ghcr.io" >&2
+            exit 2
+        }
+        IFS= read -r registry_username || { echo "missing registry username on stdin" >&2; exit 2; }
+        IFS= read -r registry_password || { echo "missing registry password on stdin" >&2; exit 2; }
+        [ -n "$registry_username" ] || { echo "empty registry username" >&2; exit 2; }
+        [ -n "$registry_password" ] || { echo "empty registry password" >&2; exit 2; }
         docker_config_dir=$(mktemp -d)
         chmod 700 "$docker_config_dir"
         export DOCKER_CONFIG="$docker_config_dir"
-        printf '%s' "$ghcr_token" | docker login ghcr.io \
-            --username "$ghcr_username" --password-stdin >/dev/null
-        unset ghcr_token
+        printf '%s' "$registry_password" | docker login "$registry_host" \
+            --username "$registry_username" --password-stdin >/dev/null
+        unset registry_password
+        ;;
+    registry-token-stdin)
+        case "$registry_host" in
+            ghcr.io|ccr.ccs.tencentyun.com) ;;
+            *) echo "unsupported registry host: $registry_host" >&2; exit 2 ;;
+        esac
+        IFS= read -r registry_username || { echo "missing registry username on stdin" >&2; exit 2; }
+        IFS= read -r registry_password || { echo "missing registry password on stdin" >&2; exit 2; }
+        [ -n "$registry_username" ] || { echo "empty registry username" >&2; exit 2; }
+        [ -n "$registry_password" ] || { echo "empty registry password" >&2; exit 2; }
+        docker_config_dir=$(mktemp -d)
+        chmod 700 "$docker_config_dir"
+        export DOCKER_CONFIG="$docker_config_dir"
+        printf '%s' "$registry_password" | docker login "$registry_host" \
+            --username "$registry_username" --password-stdin >/dev/null
+        unset registry_password
         ;;
     *) echo "invalid registry auth mode: $auth_mode" >&2; exit 2 ;;
 esac
