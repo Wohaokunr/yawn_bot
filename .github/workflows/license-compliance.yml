@@ -1,0 +1,142 @@
+name: License compliance
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "THIRD_PARTY_NOTICES.md"
+      - "third_party_licenses/**"
+      - "tools/license_audit.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "webui/package.json"
+      - "webui/package-lock.json"
+      - "deploy/docker/playwright-version.txt"
+      - ".github/workflows/license-compliance.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "THIRD_PARTY_NOTICES.md"
+      - "third_party_licenses/**"
+      - "tools/license_audit.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "webui/package.json"
+      - "webui/package-lock.json"
+      - "deploy/docker/playwright-version.txt"
+      - ".github/workflows/license-compliance.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-license-payload:
+    name: Python/browser runtime license payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build --tag yawnbot:license-audit .
+      - name: Verify top-level notices and LGPL/GPL texts
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            test -f /app/LICENSE
+            test -f /app/THIRD_PARTY_NOTICES.md
+            test -f /app/third_party_licenses/README.md
+            test -f /app/third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt
+            test -f /app/third_party_licenses/nonebot-plugin-htmlkit-MIT.txt
+            test -f /app/third_party_licenses/litehtml-BSD-3-Clause.txt
+            test -f /app/third_party_licenses/nonebot-plugin-htmlkit-native-provenance.md
+            test -f /app/third_party_licenses/GPL-3.0.txt
+            test -f /app/third_party_licenses/LGPL-3.0.txt
+            test -s /app/third_party_licenses/GPL-3.0.txt
+            test -s /app/third_party_licenses/LGPL-3.0.txt
+          '
+      - name: Verify corresponding HTMLKit source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            source=/app/third_party_sources/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz
+            test -s "$source"
+            echo "5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17  $source" | sha256sum -c -
+          '
+      - name: Audit all Python runtime dependency licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/tools/license_audit.py:/tmp/license_audit.py:ro" \
+            --entrypoint python \
+            yawnbot:license-audit \
+            /tmp/license_audit.py python
+      - name: Verify Python package license files remain installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -i --entrypoint python yawnbot:license-audit - <<'PY'
+          from importlib import metadata
+          from pathlib import Path
+
+          for package in ("text-unidecode", "certifi", "tqdm"):
+              dist = metadata.distribution(package)
+              retained = []
+              for entry in dist.files or ():
+                  name = Path(str(entry)).name.lower()
+                  if not name.startswith(("license", "copying")):
+                      continue
+                  resolved = Path(dist.locate_file(entry))
+                  if resolved.is_file() and resolved.stat().st_size > 0:
+                      retained.append(resolved)
+              if not retained:
+                  raise SystemExit(
+                      f"{package}: installed distribution does not retain a "
+                      "LICENSE/COPYING file"
+                  )
+
+          htmlkit = metadata.distribution("nonebot-plugin-htmlkit")
+          package_root = Path(htmlkit.locate_file("nonebot_plugin_htmlkit"))
+          if not any(package_root.glob("core*.so")):
+              raise SystemExit("nonebot-plugin-htmlkit native core is missing")
+          PY
+      - name: Verify browser payload notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+            set -eu
+            test -n "$(find /ms-playwright -type f -name "LICENSE.headless_shell" -print -quit)"
+            test -n "$(find /ms-playwright -type f -name "COPYING.LGPLv2.1" -print -quit)"
+          '
+
+  webui-runtime-licenses:
+    name: WebUI runtime licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install exact WebUI dependency tree
+        working-directory: webui
+        run: npm ci
+      - name: Reduce to production dependency tree
+        working-directory: webui
+        run: npm prune --omit=dev
+      - name: Audit all WebUI production dependency licenses
+        run: python tools/license_audit.py npm webui/node_modules
