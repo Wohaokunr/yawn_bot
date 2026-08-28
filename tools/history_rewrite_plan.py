@@ -92,6 +92,10 @@ def build_plan() -> tuple[list[str], dict[str, int], list[bytes]]:
     return sorted(paths), dict(sorted(reasons.items())), sorted(replacements)
 
 
+def _paths_at_ref(ref: str) -> set[str]:
+    return set(_git("ls-tree", "-r", "--name-only", ref).splitlines())
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -112,13 +116,18 @@ def main() -> int:
         default=Path("history-rewrite-manifest.json"),
         help="non-secret summary of the rewrite plan",
     )
+    parser.add_argument(
+        "--current-ref",
+        default="HEAD",
+        help="ref whose current source tree must not contain removal targets",
+    )
     args = parser.parse_args()
 
     paths, reasons, replacements = build_plan()
-    current_paths = set(_git("ls-files").splitlines())
+    current_paths = _paths_at_ref(args.current_ref)
     current_blockers = sorted(current_paths.intersection(paths))
     if current_blockers:
-        print("Refusing to prepare rewrite: sensitive paths still exist in HEAD:")
+        print("Refusing to prepare rewrite: sensitive paths still exist in current ref:")
         for path in current_blockers:
             print(f"  - {path}")
         return 2
@@ -131,14 +140,16 @@ def main() -> int:
         for value in replacements:
             # Scanner token/value alphabets do not contain newlines or the `==>`
             # delimiter. Never print this file: it contains historical credentials.
-            handle.write(b"literal:" + value + b"==>REMOVED-HISTORICAL-SECRET\n")
+            # Keep the replacement shorter than the high-entropy assignment gate.
+            handle.write(b"literal:" + value + b"==>REDACTED\n")
 
     manifest = {
         "path_count": len(paths),
         "replacement_count": len(replacements),
         "reason_counts": reasons,
-        "head": _git("rev-parse", "HEAD").strip(),
-        "head_tree": _git("rev-parse", "HEAD^{tree}").strip(),
+        "current_ref": args.current_ref,
+        "current_commit": _git("rev-parse", args.current_ref).strip(),
+        "current_tree": _git("rev-parse", f"{args.current_ref}^{{tree}}").strip(),
     }
     args.manifest_out.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
