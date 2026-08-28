@@ -21,7 +21,8 @@ DEFAULT_MAX_BLOB_SIZE = 2 * 1024 * 1024
 
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ("private key", re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
-    ("OpenAI-style API key", re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("OpenAI-style API key", re.compile(rb"\bsk-[A-Za-z0-9_.-]{20,}\b")),
+    ("tp-style API token", re.compile(rb"\btp-[A-Za-z0-9_-]{24,}\b")),
     ("GitHub fine-grained token", re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
     ("GitHub classic token", re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
     ("AWS access key", re.compile(rb"\bAKIA[0-9A-Z]{16}\b")),
@@ -29,18 +30,18 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
         "Cloudflare-style API token assignment",
         re.compile(
             rb"(?i)\b(?:cloudflare|cf)[_-]?(?:api[_-]?)?(?:token|key)\b"
-            rb"\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{24,})"
+            rb"[ \t]*[:=][ \t]*[\"']?([A-Za-z0-9_./+=-]{24,})"
         ),
     ),
 )
 
-# Keep this deliberately aligned with repo_guard.py. Restricting the value to
-# credential-like ASCII avoids treating long Chinese documentation examples or
-# Python expressions as a secret simply because they follow TOKEN= syntax.
+# Keep this deliberately aligned with repo_guard.py. Horizontal whitespace is
+# intentional: using \s here would let an empty KEY= line consume the next line
+# and incorrectly classify the following variable name as a credential value.
 _ASSIGNMENT_PATTERN = re.compile(
     rb"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|"
     rb"webui_admin_token|onebot_v11_access_token|deploy_ssh_private_key)\b"
-    rb"\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{24,})"
+    rb"[ \t]*[:=][ \t]*[\"']?([A-Za-z0-9_./+=-]{24,})"
 )
 
 _ENV_LINE_PATTERN = re.compile(
