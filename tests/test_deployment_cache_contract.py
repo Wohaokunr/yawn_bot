@@ -190,7 +190,7 @@ def test_release_mirrors_production_image_to_tencent_tcr() -> None:
     tcr_image = "ccr.ccs.tencentyun.com/yawnbot/yawn_bot"
     assert f"TCR_IMAGE: {tcr_image}" in release
     assert f"TCR_IMAGE: {tcr_image}" in deploy_existing
-    assert "TCR_USERNAME: \"100025310087\"" in release
+    assert 'TCR_USERNAME: "100025310087"' in release
     assert "secrets.TCR_PASSWORD" in release
     assert "Log in to Tencent Container Registry" in release
     assert "production_image=" in release
