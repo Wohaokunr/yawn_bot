@@ -38,7 +38,7 @@ _WEAK_COPYLEFT_RE = re.compile(
 )
 _GPL_RE = re.compile(r"(?i)(?<!L)GPL|GNU General Public License")
 _PERMISSIVE_RE = re.compile(
-    r"(?i)(MIT|BSD|Apache|ISC|PSF|Python Software Foundation|Unlicense|"
+    r"(?i)(MIT|BSD|Apache|ISC|PSF|Python Software Foundation|Artistic|Unlicense|"
     r"Public Domain|Zlib|Boost Software License|OFL|Open Font License)"
 )
 
