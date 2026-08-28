@@ -34,10 +34,13 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     ),
 )
 
+# Keep this deliberately aligned with repo_guard.py. Restricting the value to
+# credential-like ASCII avoids treating long Chinese documentation examples or
+# Python expressions as a secret simply because they follow TOKEN= syntax.
 _ASSIGNMENT_PATTERN = re.compile(
     rb"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|"
     rb"webui_admin_token|onebot_v11_access_token|deploy_ssh_private_key)\b"
-    rb"\s*[:=]\s*[\"']?([^\s\"'`]{20,})"
+    rb"\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{24,})"
 )
 
 _PLACEHOLDER_MARKERS = (
@@ -64,6 +67,18 @@ _SENSITIVE_SUFFIXES = (
     ".sqlite",
     ".sqlite3",
     ".sqlite3-journal",
+)
+
+_PRIVATE_PATH_PARTS = frozenset(
+    {
+        ".claude",
+        ".idea",
+        ".mimosa",
+        ".qoder",
+        ".vs",
+        ".vscode",
+        ".zcode",
+    }
 )
 
 
@@ -110,8 +125,13 @@ def _object_meta(oids: list[str]) -> dict[str, tuple[str, int]]:
 
 def _sensitive_path_reason(path: str) -> str | None:
     normalized = path.lower()
+    path_parts = tuple(part.lower() for part in PurePosixPath(normalized).parts)
     name = PurePosixPath(normalized).name
 
+    if normalized.startswith("%systemdrive%/"):
+        return "Windows system cache tree existed in reachable history"
+    if any(part in _PRIVATE_PATH_PARTS for part in path_parts):
+        return "developer-tool private state existed in reachable history"
     if normalized == ".env" or (
         name.startswith(".env.") and name != ".env.example"
     ):
