@@ -2,8 +2,9 @@
 
 YawnBot includes or redistributes third-party components under their own licenses.
 This file records components that need an explicit top-level redistribution notice.
-Ordinary package dependencies retain their own package metadata and license files in
-the installed runtime environment.
+Ordinary package dependencies generally retain their own package metadata and license
+files in the installed runtime environment; documented exceptions are called out
+below.
 
 ## ZCOOL KuaiLe
 
@@ -65,9 +66,18 @@ package's own license file remains in its Python distribution metadata.
 ## certifi and tqdm
 
 These runtime packages expose MPL-related license metadata (`certifi`: MPL-2.0;
-`tqdm`: MPL-2.0 AND MIT). Their installed license files remain in the Python
-package metadata copied into `/app/.venv`. YawnBot does not modify or relicense
-those packages.
+`tqdm==4.70.0`: MPL-2.0 AND MIT). YawnBot does not modify or relicense either
+package.
+
+`certifi` retains its standalone license file in the installed wheel metadata.
+The `tqdm==4.70.0` wheel does not include a separate `LICENSE`/`COPYING` file,
+but it does ship the reviewed license expression in package metadata and its
+unmodified Python sources are redistributed in `/app/.venv`. YawnBot therefore
+records this exception here and pins the reviewed `tqdm` version/license
+expression in `tools/license_audit.py`; a future version or expression change
+fails the compliance check until it is reviewed again.
+
+- tqdm upstream source: `https://github.com/tqdm/tqdm`
 
 ## cookiecutter and nonestorage
 

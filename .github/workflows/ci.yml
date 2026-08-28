@@ -15,6 +15,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  change-scope:
+    name: Change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python-tests: ${{ steps.scope.outputs.python_tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide whether full Python tests are needed
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_call" ]]; then
+            echo "python_tests=true" >> "$GITHUB_OUTPUT"
+            echo "Reusable release gate: full Python tests required."
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+            head="$PR_HEAD_SHA"
+          else
+            base="$PUSH_BEFORE_SHA"
+            head="$GITHUB_SHA"
+          fi
+
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            echo "python_tests=true" >> "$GITHUB_OUTPUT"
+            echo "No reliable base SHA: full Python tests required."
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$base" "$head")"
+          printf '%s\n' "$changed"
+
+          python_tests=false
+          while IFS= read -r path; do
+            case "$path" in
+              src/*|tests/*|data/nonebot_plugin_orm/migrations/*|pyproject.toml|uv.lock|.env.example|*.py|tools/rpg_module_editor/*|tools/rpg_playtest/*|.github/workflows/ci.yml)
+                python_tests=true
+                break
+                ;;
+            esac
+          done <<< "$changed"
+
+          echo "python_tests=$python_tests" >> "$GITHUB_OUTPUT"
+          if [[ "$python_tests" == "true" ]]; then
+            echo "Backend-relevant changes detected: full Python tests required."
+          else
+            echo "No backend-relevant changes: full Python tests skipped."
+          fi
+
   repository-hygiene:
     name: Repository hygiene
     runs-on: ubuntu-latest
@@ -94,6 +155,8 @@ jobs:
 
   python-tests:
     name: Python tests
+    needs: change-scope
+    if: ${{ needs.change-scope.outputs.python-tests == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

@@ -1,4 +1,4 @@
-name: Open-source audit
+name: History security audit
 
 on:
   workflow_dispatch:
@@ -7,17 +7,6 @@ permissions:
   contents: read
 
 jobs:
-  current-tree-audit:
-    name: Current tree audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Repository hygiene
-        run: python tools/repo_guard.py
-      - name: Repository content contract
-        run: python tools/repository_content_test.py
-
   history-audit:
     name: Reachable Git history audit
     runs-on: ubuntu-latest
