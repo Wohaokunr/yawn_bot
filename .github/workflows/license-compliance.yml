@@ -1,13 +1,32 @@
 name: License compliance
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "THIRD_PARTY_NOTICES.md"
+      - "third_party_licenses/**"
+      - "tools/license_audit.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "webui/package.json"
+      - "webui/package-lock.json"
+      - "deploy/docker/playwright-version.txt"
+      - ".github/workflows/license-compliance.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
   pull_request:
     paths:
       - "Dockerfile"
       - "THIRD_PARTY_NOTICES.md"
       - "third_party_licenses/**"
+      - "tools/license_audit.py"
       - "pyproject.toml"
       - "uv.lock"
+      - "webui/package.json"
+      - "webui/package-lock.json"
       - "deploy/docker/playwright-version.txt"
       - ".github/workflows/license-compliance.yml"
       - ".github/workflows/release.yml"
@@ -19,7 +38,7 @@ permissions:
 
 jobs:
   runtime-license-payload:
-    name: Runtime license payload
+    name: Python/browser runtime license payload
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -54,6 +73,15 @@ jobs:
             test -s "$source"
             echo "5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17  $source" | sha256sum -c -
           '
+      - name: Audit all Python runtime dependency licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/tools/license_audit.py:/tmp/license_audit.py:ro" \
+            --entrypoint python \
+            yawnbot:license-audit \
+            /tmp/license_audit.py python
       - name: Verify reviewed Python redistribution metadata
         shell: bash
         run: |
@@ -101,3 +129,23 @@ jobs:
             test -n "$(find /ms-playwright -type f -name "LICENSE.headless_shell" -print -quit)"
             test -n "$(find /ms-playwright -type f -name "COPYING.LGPLv2.1" -print -quit)"
           '
+
+  webui-runtime-licenses:
+    name: WebUI runtime licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install exact WebUI dependency tree
+        working-directory: webui
+        run: npm ci
+      - name: Reduce to production dependency tree
+        working-directory: webui
+        run: npm prune --omit=dev
+      - name: Audit all WebUI production dependency licenses
+        run: python tools/license_audit.py npm webui/node_modules
