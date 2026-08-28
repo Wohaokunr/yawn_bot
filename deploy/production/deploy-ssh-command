@@ -17,4 +17,4 @@ case "${1:-}" in
     *) exit 2 ;;
 esac
 
-exec "$@"
+exec /bin/sh "$@"

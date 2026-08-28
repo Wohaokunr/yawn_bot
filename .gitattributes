@@ -1,0 +1,6 @@
+* text=auto
+
+# Production shell entrypoints may be checked out on Windows before being
+# packaged for Linux hosts. Keep their shebangs executable by forcing LF.
+*.sh text eol=lf
+deploy/production/deploy-ssh-command text eol=lf
