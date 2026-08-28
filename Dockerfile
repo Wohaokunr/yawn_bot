@@ -41,7 +41,7 @@ WORKDIR /app
 
 COPY --from=python-builder /app/.venv /app/.venv
 
-COPY pyproject.toml ./
+COPY pyproject.toml LICENSE THIRD_PARTY_NOTICES.md ./
 COPY src ./src
 COPY data/nonebot_plugin_orm/migrations /opt/yawnbot/migrations
 COPY --from=webui-builder /build/webui/dist ./webui/dist
