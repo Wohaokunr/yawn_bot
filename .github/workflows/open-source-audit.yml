@@ -1,0 +1,35 @@
+name: Open-source audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  history-audit:
+    name: Reachable Git history audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch all remote branches and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+      - name: Audit all reachable blobs
+        run: python tools/history_secret_audit.py
+
+  current-tree-audit:
+    name: Current tree audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repository hygiene
+        run: python tools/repo_guard.py
+      - name: Repository content contract
+        run: python tools/repository_content_test.py
