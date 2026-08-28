@@ -111,6 +111,7 @@ _PLACEHOLDER_MARKERS = (
     b"example",
     b"placeholder",
     b"replace-me",
+    b"replace-with",
     b"replace_me",
     b"test-token",
     b"your-",
