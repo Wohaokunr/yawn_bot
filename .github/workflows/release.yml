@@ -265,9 +265,9 @@ jobs:
           printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/yawnbot-deploy ~/.ssh/known_hosts
 
-          actual_fingerprint="$(ssh-keygen -yf ~/.ssh/yawnbot-deploy | ssh-keygen -lf - -E sha256 | awk '{print $2}')"
-          echo "GitHub deployment key fingerprint: $actual_fingerprint"
-          echo "Production SSH user: $DEPLOY_USER"
+          # Validate both key files without printing fingerprints or host metadata.
+          ssh-keygen -yf ~/.ssh/yawnbot-deploy >/dev/null
+          ssh-keygen -lf ~/.ssh/known_hosts >/dev/null
 
       - name: Package production control plane
         id: control_plane
@@ -326,7 +326,7 @@ jobs:
           test -n "$DIGEST"
           echo "Starting production deployment. Slow or interrupted GHCR pulls are retried by the production deploy script."
           printf '%s\n%s\n' "$GHCR_USERNAME" "$GHCR_TOKEN" | \
-            ssh -vv -i ~/.ssh/yawnbot-deploy \
+            ssh -i ~/.ssh/yawnbot-deploy \
               -o BatchMode=yes \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
