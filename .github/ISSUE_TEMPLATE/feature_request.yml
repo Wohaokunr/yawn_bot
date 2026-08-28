@@ -1,0 +1,50 @@
+name: Feature request
+description: 提议新的能力、交互或工程改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量从真实使用场景描述需求。大型架构改动先讨论边界、兼容性和迁移方式，再开始实现。
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 谁在什么情况下需要这个能力？
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 当前问题
+      description: 现有功能为什么无法满足？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望行为
+      description: 描述用户可观察到的最终行为，而不只是内部实现。
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: 候选设计
+      description: 可选。若涉及数据库、权限、OneBot、WebUI 或部署，请说明兼容性影响。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索现有 Issue/PR，确认没有相同提案。
+          required: true
+        - label: 我没有在内容中提交真实 Token、Cookie、API Key 或用户隐私数据。
+          required: true
