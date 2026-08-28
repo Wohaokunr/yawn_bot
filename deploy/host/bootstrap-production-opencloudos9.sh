@@ -76,7 +76,7 @@ if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-for command_name in docker curl flock install python3 ssh-keygen timeout; do
+for command_name in docker curl flock install python3 sed ssh-keygen timeout; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "error: required command is missing: $command_name" >&2
     exit 1
@@ -119,6 +119,17 @@ install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/deploy-ssh-command" "$YAWNBOT_ROOT/bin/deploy-ssh-command"
 install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/sync-control-plane.sh" "$YAWNBOT_ROOT/bin/sync-control-plane"
+
+# A bootstrap bundle may have been produced from a Windows checkout with
+# core.autocrlf=true. Strip CR from installed shell entrypoints so Linux never
+# interprets a shebang such as /bin/sh\r as the interpreter path.
+for installed_script in \
+  "$YAWNBOT_ROOT/bin/deploy-release" \
+  "$YAWNBOT_ROOT/bin/deploy-ssh-command" \
+  "$YAWNBOT_ROOT/bin/sync-control-plane"; do
+  sed -i 's/\r$//' "$installed_script"
+  sh -n "$installed_script"
+done
 
 if [[ ! -e "$YAWNBOT_ROOT/.env" ]]; then
   cat > "$YAWNBOT_ROOT/.env" <<'EOF'
@@ -199,9 +210,19 @@ touch "$home_dir/.ssh/authorized_keys"
 chown "$DEPLOY_USER:$DEPLOY_USER" "$home_dir/.ssh/authorized_keys"
 chmod 0600 "$home_dir/.ssh/authorized_keys"
 
-forced_line="restrict,command=\"/opt/yawnbot/bin/deploy-ssh-command\" $GITHUB_DEPLOY_PUBLIC_KEY"
+legacy_forced_line="restrict,command=\"/opt/yawnbot/bin/deploy-ssh-command\" $GITHUB_DEPLOY_PUBLIC_KEY"
+forced_line="restrict,command=\"/bin/sh /opt/yawnbot/bin/deploy-ssh-command\" $GITHUB_DEPLOY_PUBLIC_KEY"
 if grep -Fqx "$forced_line" "$home_dir/.ssh/authorized_keys"; then
   :
+elif grep -Fqx "$legacy_forced_line" "$home_dir/.ssh/authorized_keys"; then
+  authorized_tmp="$(mktemp "$home_dir/.ssh/authorized_keys.XXXXXX")"
+  {
+    grep -Fvx "$legacy_forced_line" "$home_dir/.ssh/authorized_keys" || true
+    printf '%s\n' "$forced_line"
+  } > "$authorized_tmp"
+  chown "$DEPLOY_USER:$DEPLOY_USER" "$authorized_tmp"
+  chmod 0600 "$authorized_tmp"
+  mv -f "$authorized_tmp" "$home_dir/.ssh/authorized_keys"
 elif grep -Eq "(^|[[:space:]])${key_type}[[:space:]]+${key_blob}([[:space:]]|$)" "$home_dir/.ssh/authorized_keys"; then
   echo "error: the GitHub deploy key is already authorized with different SSH options; refusing to create an ambiguous unrestricted entry" >&2
   exit 1
