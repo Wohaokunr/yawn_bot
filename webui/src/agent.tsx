@@ -1576,19 +1576,26 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
   const output = debugRecord(event.output);
 
   if (event.phase === "capability") {
-    const exposed = stringArray(output.exposed_tools ?? output.tool_names);
+    const exposed = stringArray(output.selected_tools ?? output.selected_tool_names ?? output.exposed_tools ?? output.tool_names);
+    const messageSegments = stringArray(output.message_segment_types);
     const blocked = Array.isArray(output.blocked_tools)
       ? output.blocked_tools.map((item) => debugRecord(item))
       : [];
     const toolCount = traceMetric(output.tool_count, exposed.length);
+    const roundLimit = traceMetric(output.round_limit);
     return <Space orientation="vertical" size={6} style={{ width: "100%" }}>
       <Text>
         本轮向模型开放 <Text strong>{toolCount}</Text> 个工具
-        {blocked.length > 0 ? <>，另有 <Text strong>{blocked.length}</Text> 个工具未开放。</> : "。"}
+        {blocked.length > 0 ? <>，另有 <Text strong>{blocked.length}</Text> 个工具未开放</> : ""}
+        {roundLimit > 0 ? <>；模型调用最多 <Text strong>{roundLimit}</Text> 轮。</> : "。"}
       </Text>
       {exposed.length > 0 && <Space wrap size={[6, 6]}>
         <Text type="secondary">可用：</Text>
         {exposed.map((name) => <Tag color="green" key={name}>{toolDisplayName(name)}</Tag>)}
+      </Space>}
+      {messageSegments.length > 0 && exposed.includes("send_message") && <Space wrap size={[6, 6]}>
+        <Text type="secondary">本轮消息段：</Text>
+        {messageSegments.map((name) => <Tag key={name}>{SEGMENT_NAME_LABELS[name] ?? name}</Tag>)}
       </Space>}
       {blocked.length > 0 && <Space orientation="vertical" size={4} style={{ width: "100%" }}>
         <Text type="secondary">未开放：</Text>
@@ -1657,12 +1664,20 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
     const tools = stringArray(output.tool_calls);
     const action = String(output.action ?? "");
     const chars = traceMetric(output.content_chars);
+    const usage = debugRecord(output.usage);
+    const requestUsage = debugRecord(usage.request);
+    const turnUsage = debugRecord(usage.turn);
+    const hasTurnUsage = Object.keys(turnUsage).length > 0;
     return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
       <Text>
         {action ? `模型决策：${action}` : `模型返回 ${chars} 个字符`}
         {tools.length > 0 ? `，并请求调用 ${tools.length} 个工具。` : "。"}
       </Text>
       {tools.length > 0 && <Space wrap size={[6, 6]}>{tools.map((name) => <Tag color="blue" key={name}>{toolDisplayName(name)}</Tag>)}</Space>}
+      {hasTurnUsage && <Text type="secondary">
+        本次请求输入/输出：{traceMetric(requestUsage.prompt_tokens)} / {traceMetric(requestUsage.completion_tokens)} Token；
+        本回合累计输入：{traceMetric(turnUsage.prompt_tokens)}，其中缓存命中 {traceMetric(turnUsage.cached_tokens)}、未命中 {traceMetric(turnUsage.cache_miss_tokens)} Token。
+      </Text>}
       {typeof output.confidence === "number" && <Text type="secondary">决策置信度：{Math.round(output.confidence * 100)}%</Text>}
     </Space>;
   }
@@ -1811,12 +1826,18 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
 function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): React.JSX.Element {
   if (!result) return <AdminEmpty description="本次只生成提示词，没有调用模型" />;
   const decision = result.decision ? debugRecord(result.decision) : null;
+  const cacheHitRate = result.usage.promptTokens && result.usage.cachedTokens != null
+    ? `${Math.round((result.usage.cachedTokens / result.usage.promptTokens) * 100)}%`
+    : "—";
   return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
     <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
       { key: "outcome", label: "结果", children: <Tag color={result.outcome === "success" ? "green" : result.outcome === "timeout" ? "red" : "orange"}>{traceOutcomeLabel(result.outcome)}</Tag> },
       { key: "duration", label: "耗时", children: `${result.durationMs} ms` },
       { key: "finish", label: "结束原因", children: result.finishReason || "—" },
-      { key: "tokens", label: "Token", children: `${result.usage.promptTokens ?? "—"} / ${result.usage.completionTokens ?? "—"}` },
+      { key: "tokens", label: "Token（输入 / 输出）", children: `${result.usage.promptTokens ?? "—"} / ${result.usage.completionTokens ?? "—"}` },
+      { key: "cacheHit", label: "缓存命中 Token", children: result.usage.cachedTokens ?? "—" },
+      { key: "cacheMiss", label: "缓存未命中 Token", children: result.usage.cacheMissTokens ?? "—" },
+      { key: "cacheRate", label: "Prompt 缓存命中率", children: cacheHitRate },
     ]} />
     {decision && <Card size="small" title="主动发言决策"><Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
       { key: "action", label: "动作", children: debugDisplay(decision.action) },

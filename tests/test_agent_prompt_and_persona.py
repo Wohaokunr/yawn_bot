@@ -42,6 +42,20 @@ def test_persona_assignments_are_restricted_and_stable() -> None:
     assert canonical_persona(persona).startswith('{"name":"Yawn"')
 
 
+def test_prompt_persona_keeps_non_builtin_customization() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.persona import prompt_persona
+
+    rendered = prompt_persona(
+        {
+            "name": "Yawn",
+            "identity": "熟悉群聊节奏、自然简洁的普通群友",
+            "tone": "冷静专业",
+        }
+    )
+    assert '"tone":"冷静专业"' in rendered
+
+
 def test_prompt_prefix_is_stable_when_only_context_changes() -> None:
     _, _, build_messages = _load_agent_modules()
     tools = [{"type": "function", "function": {"name": "send_text"}}]
@@ -64,7 +78,7 @@ def test_prompt_prefix_is_stable_when_only_context_changes() -> None:
     assert first[2] != second[2]
 
 
-def test_prompt_lists_tool_names_without_repeating_schema() -> None:
+def test_prompt_does_not_repeat_tool_schema_or_catalog() -> None:
     _load_agent_modules()
     from src.plugins.yawn_core.yawn_agent import prompt
 
@@ -88,10 +102,60 @@ def test_prompt_lists_tool_names_without_repeating_schema() -> None:
         user_prompt="你好",
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v9"
-    assert "search_group_memory" in str(messages[0]["content"])
+    assert prompt.PROMPT_VERSION == "yawn-agent-v11"
+    assert "search_group_memory" not in str(messages[0]["content"])
     assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
     assert '"properties"' not in str(messages[0]["content"])
+
+
+def test_default_prompt_prefix_has_cost_guard() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_budget import (
+        build_context_budget,
+        estimate_tokens,
+    )
+    from src.plugins.yawn_core.yawn_agent.persona import resolve_persona
+    from src.plugins.yawn_core.yawn_agent.prompt import build_static_prefix
+
+    static = build_static_prefix(resolve_persona(None), [])
+    assert estimate_tokens(static) < 450
+
+    dialogue_budget = build_context_budget(
+        model="test",
+        completion_reserve=800,
+        target_context_limit=2400,
+    )
+    proactive_budget = build_context_budget(
+        model="test",
+        completion_reserve=800,
+        target_context_limit=1600,
+    )
+    assert dialogue_budget.context_limit == 2400
+    assert proactive_budget.context_limit == 1600
+
+
+def test_current_turn_prompt_omits_empty_defaults() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context import build_current_turn
+    from src.plugins.yawn_core.yawn_agent.prompt import render_current_turn
+
+    turn = build_current_turn(
+        message_id=None,
+        user_id=123,
+        name="测试成员",
+        role="member",
+        title=None,
+        content="你好",
+        trigger="mention",
+        received_at=None,
+    )
+    rendered = render_current_turn(turn)
+    assert '"user_id":123' in rendered
+    assert '"title"' not in rendered
+    assert '"mentions"' not in rendered
+    assert '"media"' not in rendered
+    assert '"forward_nodes"' not in rendered
+    assert '"truncated"' not in rendered
 
 
 def test_current_turn_has_priority_over_old_group_topic() -> None:
@@ -369,14 +433,17 @@ def test_context_layering_separates_slow_memories_from_volatile_block() -> None:
         "relations": ["阿眠(1) —mentions→ 小李(2)"],
     }
     messages, _ = _build_messages_layered(context, tools)
-    assert len(messages) == 4
+    assert len(messages) == 5
     stable_json = messages[1]["content"]
-    volatile_json = messages[2]["content"]
+    speaker_json = messages[2]["content"]
+    volatile_json = messages[3]["content"]
     assert "daily:2026-08-22" in stable_json
     assert "public_daily:2026-08-21" in stable_json
     assert "active_topic" not in stable_json
     assert "晚饭安排" not in volatile_json
-    assert "阿眠" in volatile_json and "mentions" in volatile_json
+    assert "阿眠" in speaker_json and "mentions" in speaker_json
+    assert "activity" not in speaker_json
+    assert "activity" in volatile_json
 
     # 同一整理窗口内新消息到达：易变层变化、稳定层字节不变，
     # 服务端前缀缓存可命中到稳定层为止。
@@ -398,6 +465,7 @@ def test_context_layering_separates_slow_memories_from_volatile_block() -> None:
     again, _ = _build_messages_layered(evolved, tools)
     assert again[1] == messages[1]
     assert again[2] != messages[2]
+    assert again[3] != messages[3]
     assert stable_context_key(context) == stable_context_key(evolved)
     assert stable_context_key(context) != stable_context_key(
         {**evolved, "group_name": "改名后的群"}
@@ -407,6 +475,140 @@ def test_context_layering_separates_slow_memories_from_volatile_block() -> None:
     stable, volatile = split_context({"active_topic": "a"})
     assert stable == {}
     assert volatile["memories"] == []
+
+
+def test_tool_bundle_does_not_change_global_or_group_cache_prefix() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.prompt import build_messages
+
+    context = {
+        "group_id": 100,
+        "group_name": "测试群",
+        "members": [{"user_id": 1, "name": "阿眠"}],
+        "activity": {"messages_5m": 1},
+        "messages": [{"user_id": 1, "text": "在吗"}],
+        "memories": [],
+        "relations": [],
+    }
+    plain, _ = build_messages(
+        persona={"name": "Yawn"}, tools=[], context=context, user_prompt="在吗"
+    )
+    send_tools = [{"type": "function", "function": {"name": "send_message"}}]
+    rich, _ = build_messages(
+        persona={"name": "Yawn"},
+        tools=send_tools,
+        context=context,
+        user_prompt="回复他",
+    )
+
+    assert plain[0] == rich[0]
+    assert plain[1] == rich[1]
+    assert plain[2] == rich[2]
+    assert any("send_message" in str(item.get("content")) for item in rich[3:-1])
+
+
+def test_activity_changes_only_realtime_layer_for_same_speaker() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.prompt import build_messages
+
+    base = {
+        "group_id": 100,
+        "group_name": "测试群",
+        "members": [{"user_id": 1, "name": "阿眠"}],
+        "memories": [
+            {
+                "type": "profile",
+                "key": "display_name",
+                "content": "阿眠",
+                "source_scope": "speaker",
+            }
+        ],
+        "relations": ["阿眠(1) —friend→ 小李(2)"],
+        "messages": [{"user_id": 1, "text": "第一条"}],
+        "activity": {"messages_5m": 1},
+    }
+    first, _ = build_messages(
+        persona={"name": "Yawn"}, tools=[], context=base, user_prompt="第一条"
+    )
+    second, _ = build_messages(
+        persona={"name": "Yawn"},
+        tools=[],
+        context={
+            **base,
+            "activity": {"messages_5m": 8},
+            "messages": [{"user_id": 1, "text": "第二条"}],
+        },
+        user_prompt="第二条",
+    )
+
+    assert first[:3] == second[:3]
+    assert first[3] != second[3]
+
+
+def test_dialogue_turn_usage_accumulates_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core import metrics
+    from src.plugins.yawn_core.yawn_agent.dialogue import _accumulate_turn_usage
+
+    recorded: list[tuple[str, str, int]] = []
+    monkeypatch.setattr(
+        metrics,
+        "record_ai_tokens",
+        lambda operation, source, value: recorded.append((operation, source, value)),
+    )
+    total: dict[str, int] = {}
+    first = _accumulate_turn_usage(
+        total,
+        SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=20,
+            cached_tokens=60,
+            cache_miss_tokens=40,
+        ),
+    )
+    second = _accumulate_turn_usage(
+        total,
+        SimpleNamespace(
+            prompt_tokens=130,
+            completion_tokens=10,
+            cached_tokens=100,
+            cache_miss_tokens=30,
+        ),
+    )
+
+    assert first["turn"]["rounds"] == 1
+    assert second["turn"] == {
+        "rounds": 2,
+        "prompt_tokens": 230,
+        "completion_tokens": 30,
+        "cached_tokens": 160,
+        "cache_miss_tokens": 70,
+    }
+    assert ("agent_dialogue_turn", "input", 130) in recorded
+    assert ("agent_dialogue_turn", "cached", 100) in recorded
+
+
+def test_intent_text_excludes_input_placeholders() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.message_parser import (
+        NormalizedMessage,
+        SegmentNode,
+    )
+
+    normalized = NormalizedMessage(
+        plain_text="@100帮我看看[图片]",
+        segments=[
+            SegmentNode("at", {"qq": "100"}, "@100"),
+            SegmentNode("text", {"text": "帮我看看"}, "帮我看看"),
+            SegmentNode("image", {"file": "x"}, "[图片]"),
+        ],
+        mentions=[100],
+        media_refs=[{"type": "image"}],
+    )
+
+    assert normalized.intent_text() == "帮我看看"
 
 
 def test_trigger_modes_distinguish_mentions_replies_and_explicit_wakeup() -> None:
@@ -566,6 +768,14 @@ def test_prompt_cache_key_includes_model_and_persona_version() -> None:
         persona={"name": "Yawn"}, tools=tools, model="advanced", persona_version=1
     ) != prompt_cache_key(
         persona={"name": "Yawn"}, tools=tools, model="ordinary", persona_version=1
+    )
+    assert prompt_cache_key(
+        persona={"name": "Yawn"}, tools=[], model="ordinary", persona_version=1
+    ) == prompt_cache_key(
+        persona={"name": "Yawn"},
+        tools=[{"type": "function", "function": {"name": "send_message"}}],
+        model="ordinary",
+        persona_version=1,
     )
 
 

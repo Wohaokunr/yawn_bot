@@ -1115,6 +1115,7 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
             prompt_tokens=120,
             completion_tokens=18,
             cached_tokens=40,
+            cache_miss_tokens=80,
             outcome="success",
             duration_ms=12.5,
         )
@@ -1168,6 +1169,7 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
     ]
     assert trial["data"]["result"]["finishReason"] == "tool_calls"
     assert trial["data"]["result"]["usage"]["cachedTokens"] == 40  # noqa: PLR2004
+    assert trial["data"]["result"]["usage"]["cacheMissTokens"] == 80  # noqa: PLR2004
     trace_events = trial["data"]["executionTrace"]["events"]
     phases = [event["phase"] for event in trace_events]
     assert phases[:4] == ["intake", "context", "capability", "prompt"]
@@ -1197,6 +1199,7 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
                 prompt_tokens=10,
                 completion_tokens=2,
                 cached_tokens=0,
+                cache_miss_tokens=10,
                 outcome="success",
                 duration_ms=20.0,
             )

@@ -301,6 +301,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 completion_reserve=max(
                     _PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)
                 ),
+                context_token_limit=1600,
             )
             trace_event(
                 "context",
@@ -686,6 +687,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 completion_reserve=max(
                     _PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)
                 ),
+                context_token_limit=1600,
             )
             trace_event(
                 "context",

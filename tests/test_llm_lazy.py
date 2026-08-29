@@ -135,7 +135,39 @@ async def test_tool_completion_result_exposes_finish_usage_and_duration(
     assert result.prompt_tokens == 120  # noqa: PLR2004
     assert result.completion_tokens == 18  # noqa: PLR2004
     assert result.cached_tokens == 40  # noqa: PLR2004
+    assert result.cache_miss_tokens == 80  # noqa: PLR2004
     assert result.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_tool_completion_result_reads_deepseek_cache_usage(
+    llm_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    class Completions:
+        async def create(self, **_kwargs: object) -> Any:
+            message = SimpleNamespace(content="命中缓存", tool_calls=[])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason="stop")],
+                usage=SimpleNamespace(
+                    prompt_tokens=120,
+                    completion_tokens=18,
+                    prompt_cache_hit_tokens=96,
+                    prompt_cache_miss_tokens=24,
+                ),
+            )
+
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    monkeypatch.setattr(llm_module, "get_client", lambda _provider="default": fake)
+
+    result = await llm_module.complete_with_tools_result(
+        [{"role": "user", "content": "hello"}], [], task="agent_dialogue"
+    )
+
+    assert result.cached_tokens == 96  # noqa: PLR2004
+    assert result.cache_miss_tokens == 24  # noqa: PLR2004
 
 
 def test_client_is_created_once_on_first_use(

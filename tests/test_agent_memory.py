@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001,ANN003,DTZ001,PLR0913,PLR2004,TRY003
+# ruff: noqa: ANN001,ANN003,DTZ005,PLR0913,PLR2004,TRY003
 """yawn_agent 记忆系统纯函数单测：相关性重排、增量合并与画像冲突。"""
 
 from __future__ import annotations
@@ -50,7 +50,9 @@ bot_group_models = importlib.import_module(
     "src.plugins.yawn_core.data_models.bot_group"
 )
 
-NOW = datetime(2026, 8, 22, 12, 0, 0)
+# Keep retention fixtures relative to the test run. A fixed 2026 date made
+# otherwise unrelated context tests start failing once their +7 day rows aged out.
+NOW = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 def _memory(
@@ -1482,9 +1484,12 @@ async def test_stable_context_layer_is_byte_stable_across_requests() -> None:
             persona={"name": "Yawn"}, tools=[], context=second, user_prompt="收到"
         )
         assert messages_a[1] == messages_b[1]
-        assert messages_a[2] != messages_b[2]
+        # v11 将成员画像/关系放在半稳定层；仅新增群消息时这一层继续
+        # 保持字节稳定，真正变化被推迟到 realtime 层。
+        assert messages_a[2] == messages_b[2]
+        assert messages_a[3] != messages_b[3]
         assert "成员们约周末爬山" in messages_a[1]["content"]
-        assert "那周六早上出发" in messages_b[2]["content"]
+        assert "那周六早上出发" in messages_b[3]["content"]
     await engine.dispose()
 
 
@@ -1587,7 +1592,7 @@ async def test_search_group_memory_reranks_substring_candidates() -> None:
         )
         outcome = await tools.execute_tool(
             "search_group_memory",
-            {"query": "爬山"},
+            {"query": "爬山", "limit": 10},
             bot=_DegradedBot(),
             group_id=100,
             session=session,

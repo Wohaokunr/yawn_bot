@@ -9,8 +9,12 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOT_ID = 100
-MEMBER_RESULT_LIMIT = 100
+MEMBER_RESULT_LIMIT = 30
 MEMBER_TOTAL = 125
+EXPANDED_MEMBER_RESULT_LIMIT = 50
+STANDARD_TOOL_ROUNDS = 2
+EXTENDED_TOOL_ROUNDS = 3
+TITLE_MEMBER_INDEX = 2
 
 
 def _load_agent_modules() -> tuple[Any, Any, Any]:
@@ -158,6 +162,132 @@ def test_tool_registry_filters_removed_tools_and_forward_capability() -> None:
     assert "send_forward" in _tool_names(tools.build_tool_schemas(forward))
 
 
+def test_dialogue_tool_policy_keeps_plain_chat_schema_free() -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    caps = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset({"send_group_msg", "get_group_member_list"}),
+    )
+
+    assert tools.select_dialogue_tool_names("今天有点困") == frozenset()
+    assert tools.select_dialogue_tool_names(
+        "今天有点困", has_reply=True, has_media=True
+    ) == frozenset()
+    assert tools.select_dialogue_tool_names(
+        "你好", has_mentions=True
+    ) == frozenset({"send_message"})
+    memory_bundle = tools.select_dialogue_tool_names("你还记得我上次说的吗")
+    assert memory_bundle == frozenset({"search_group_memory"})
+    reaction_bundle = tools.select_dialogue_tool_names("发个无语表情包")
+    assert {"send_message", "search_reactions"} <= reaction_bundle
+
+    schemas = tools.build_tool_schemas(caps, include_names=memory_bundle)
+    assert _tool_names(schemas) == {"search_group_memory"}
+
+    segment_types = tools.select_dialogue_message_segment_types(
+        "回复他一个无语表情包", has_target_mentions=True
+    )
+    assert segment_types == frozenset({"text", "reply", "at", "reaction"})
+    send_schema = tools.build_tool_schemas(
+        caps,
+        include_names={"send_message"},
+        message_segment_types={"text", "reply"},
+    )[0]
+    item_schema = send_schema["function"]["parameters"]["properties"]["segments"][
+        "items"
+    ]
+    assert item_schema["properties"]["type"]["enum"] == ["text", "reply"]
+    assert set(item_schema["properties"]) == {"type", "text", "message_id"}
+
+
+def test_dialogue_tool_round_budget_is_small_by_default() -> None:
+    _capabilities, _media, tools = _load_agent_modules()
+
+    assert tools.dialogue_tool_round_limit(frozenset()) == 1
+    assert tools.dialogue_tool_round_limit({"send_message"}) == STANDARD_TOOL_ROUNDS
+    assert (
+        tools.dialogue_tool_round_limit({"search_group_memory"})
+        == STANDARD_TOOL_ROUNDS
+    )
+    assert tools.dialogue_tool_round_limit(
+        {"search_reactions", "send_message"}
+    ) == STANDARD_TOOL_ROUNDS
+    assert tools.dialogue_tool_round_limit(
+        {
+            "search_group_memory",
+            "get_person_profile",
+            "list_user_relations",
+            "get_group_info",
+        }
+    ) == EXTENDED_TOOL_ROUNDS
+    assert (
+        tools.dialogue_tool_round_limit({"mute_member"}) == EXTENDED_TOOL_ROUNDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_read_tools_project_onebot_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset({"get_group_info", "get_group_member_info"}),
+    )
+
+    async def probe(*_args: object, **_kwargs: object) -> Any:
+        return current
+
+    class Bot:
+        async def call_api(self, action: str, **_params: Any) -> Any:
+            if action == "get_group_info":
+                return {
+                    "group_id": 1,
+                    "group_name": "测试群",
+                    "member_count": 12,
+                    "max_member_count": 200,
+                    "group_memo": "不进入模型",
+                }
+            if action == "get_group_member_info":
+                return {
+                    "user_id": 2,
+                    "nickname": "昵称",
+                    "card": "群名片",
+                    "role": "admin",
+                    "title": "管理员头衔",
+                    "join_time": 1_700_000_000,
+                    "last_sent_time": 1_800_000_000,
+                }
+            raise AssertionError(action)
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", probe)
+    group = await tools.execute_tool(
+        "get_group_info", {}, bot=Bot(), group_id=1, capabilities=current
+    )
+    member = await tools.execute_tool(
+        "get_group_member",
+        {"user_id": 2},
+        bot=Bot(),
+        group_id=1,
+        capabilities=current,
+    )
+
+    assert group["result"] == {
+        "group_id": 1,
+        "group_name": "测试群",
+        "member_count": 12,
+        "max_member_count": 200,
+    }
+    assert member["result"] == {
+        "user_id": 2,
+        "name": "群名片",
+        "role": "admin",
+        "title": "管理员头衔",
+    }
+
+
 @pytest.mark.asyncio
 async def test_list_group_members_returns_bounded_shape(
     monkeypatch: pytest.MonkeyPatch,
@@ -175,7 +305,20 @@ async def test_list_group_members_returns_bounded_shape(
     class Bot:
         async def call_api(self, action: str, **_params: Any) -> Any:
             assert action == "get_group_member_list"
-            return [{"user_id": index} for index in range(MEMBER_TOTAL)]
+            return [
+                {
+                    "user_id": index,
+                    "nickname": f"成员{index}",
+                    "card": f"群名片{index}" if index % 2 == 0 else "",
+                    "role": "admin" if index == 1 else "member",
+                    "title": "活跃成员" if index == TITLE_MEMBER_INDEX else "",
+                    "join_time": 1_700_000_000,
+                    "last_sent_time": 1_800_000_000,
+                    "level": "99",
+                    "age": 18,
+                }
+                for index in range(MEMBER_TOTAL)
+            ]
 
     monkeypatch.setattr(tools, "probe_group_capabilities", probe)
     result = await tools.execute_tool(
@@ -190,6 +333,20 @@ async def test_list_group_members_returns_bounded_shape(
     assert result["result"]["total"] == MEMBER_TOTAL
     assert result["result"]["truncated"] is True
     assert len(result["result"]["items"]) == MEMBER_RESULT_LIMIT
+    assert result["result"]["items"][0] == {
+        "user_id": 0,
+        "name": "群名片0",
+    }
+    assert "join_time" not in result["result"]["items"][0]
+
+    expanded = await tools.execute_tool(
+        "list_group_members",
+        {"limit": EXPANDED_MEMBER_RESULT_LIMIT},
+        bot=Bot(),
+        group_id=1,
+        capabilities=current,
+    )
+    assert len(expanded["result"]["items"]) == EXPANDED_MEMBER_RESULT_LIMIT
 
 
 @pytest.mark.asyncio

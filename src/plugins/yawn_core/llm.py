@@ -175,6 +175,36 @@ def _usage_value(value: object, name: str) -> object:
     return getattr(value, name, None)
 
 
+def _prompt_cache_usage(usage: object | None) -> tuple[int | None, int | None]:
+    """Return provider-reported prompt cache hit/miss token counts.
+
+    DeepSeek exposes ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``
+    directly on ``usage``. OpenAI-compatible endpoints commonly expose only
+    ``prompt_tokens_details.cached_tokens``; in that case the miss count can be
+    derived from total prompt tokens without changing billing semantics.
+    """
+
+    if usage is None:
+        return None, None
+    prompt_tokens = _usage_value(usage, "prompt_tokens")
+    deepseek_hit = _usage_value(usage, "prompt_cache_hit_tokens")
+    deepseek_miss = _usage_value(usage, "prompt_cache_miss_tokens")
+    if isinstance(deepseek_hit, int) or isinstance(deepseek_miss, int):
+        return (
+            int(deepseek_hit) if isinstance(deepseek_hit, int) else None,
+            int(deepseek_miss) if isinstance(deepseek_miss, int) else None,
+        )
+    details = _usage_value(usage, "prompt_tokens_details")
+    cached = _usage_value(details, "cached_tokens") if details else None
+    hit = int(cached) if isinstance(cached, int) else None
+    miss = (
+        max(int(prompt_tokens) - hit, 0)
+        if isinstance(prompt_tokens, int) and hit is not None
+        else None
+    )
+    return hit, miss
+
+
 def _record_ai_usage(operation: str, response: object) -> None:
     """记录兼容端点可选的 usage；字段缺失时保持静默。"""
 
@@ -186,12 +216,12 @@ def _record_ai_usage(operation: str, response: object) -> None:
             return
         prompt_tokens = _usage_value(usage, "prompt_tokens")
         completion_tokens = _usage_value(usage, "completion_tokens")
-        details = _usage_value(usage, "prompt_tokens_details")
-        cached_tokens = _usage_value(details, "cached_tokens") if details else None
+        cached_tokens, cache_miss_tokens = _prompt_cache_usage(usage)
         for source, value in (
             ("input", prompt_tokens),
             ("output", completion_tokens),
             ("cached", cached_tokens),
+            ("cache_miss", cache_miss_tokens),
         ):
             if isinstance(value, int) and value > 0:
                 record_ai_tokens(operation, source, value)
@@ -465,6 +495,7 @@ class LLMToolCompletionResult:
     prompt_tokens: int | None
     completion_tokens: int | None
     cached_tokens: int | None
+    cache_miss_tokens: int | None
     outcome: str
     duration_ms: float
 
@@ -478,7 +509,7 @@ def _tool_completion_result(
     started: float,
 ) -> LLMToolCompletionResult:
     usage = _usage_value(response, "usage") if response is not None else None
-    details = _usage_value(usage, "prompt_tokens_details") if usage is not None else None
+    cached_tokens, cache_miss_tokens = _prompt_cache_usage(usage)
 
     def optional_int(value: object) -> int | None:
         return int(value) if isinstance(value, int) else None
@@ -488,7 +519,8 @@ def _tool_completion_result(
         finish_reason=str(finish_reason) if finish_reason is not None else None,
         prompt_tokens=optional_int(_usage_value(usage, "prompt_tokens")),
         completion_tokens=optional_int(_usage_value(usage, "completion_tokens")),
-        cached_tokens=optional_int(_usage_value(details, "cached_tokens")),
+        cached_tokens=cached_tokens,
+        cache_miss_tokens=cache_miss_tokens,
         outcome=outcome,
         duration_ms=max(time.perf_counter() - started, 0.0) * 1000,
     )

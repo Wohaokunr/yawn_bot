@@ -112,13 +112,19 @@ def build_context_budget(
     *,
     model: str | None = None,
     completion_reserve: int = 2048,
+    target_context_limit: int | None = None,
 ) -> ContextBudget:
     window = model_context_window(model)
     reserve = max(256, min(int(completion_reserve), max(256, window // 2)))
     prompt_limit = max(2048, window - reserve - _SAFETY_RESERVE)
     # context 只是完整 Prompt 的一部分；system/persona/tool schema/current_turn
     # 必须留空间。
-    context_limit = max(1200, min(8000, int(prompt_limit * 0.58)))
+    default_context_limit = max(1200, min(8000, int(prompt_limit * 0.58)))
+    context_limit = (
+        max(1600, min(int(target_context_limit), default_context_limit))
+        if target_context_limit is not None
+        else default_context_limit
+    )
     history = max(500, int(context_limit * 0.34))
     memory = max(500, int(context_limit * 0.38))
     members = max(160, int(context_limit * 0.10))
@@ -216,8 +222,13 @@ def pack_context(
     relations: Sequence[str],
     model: str | None = None,
     completion_reserve: int = 2048,
+    target_context_limit: int | None = None,
 ) -> ContextPack:
-    budget = build_context_budget(model=model, completion_reserve=completion_reserve)
+    budget = build_context_budget(
+        model=model,
+        completion_reserve=completion_reserve,
+        target_context_limit=target_context_limit,
+    )
     packed_messages, history_used, history_dropped = _pack_mappings(
         messages,
         budget=budget.history_limit,

@@ -21,6 +21,7 @@ EXPECTED_SUCCESS_REQUESTS = 2
 EXPECTED_INPUT_TOKENS = 240
 EXPECTED_OUTPUT_TOKENS = 40
 EXPECTED_CACHED_TOKENS = 160
+EXPECTED_CACHE_MISS_TOKENS = 80
 
 
 @pytest.fixture(scope="module")
@@ -480,3 +481,8 @@ async def test_llm_latency_timeout_and_degradation_metrics(
         "yawnbot_ai_tokens_total",
         {"operation": "core_chat", "source": "cached"},
     ) == EXPECTED_CACHED_TOKENS
+    assert _counter(
+        snapshot,
+        "yawnbot_ai_tokens_total",
+        {"operation": "core_chat", "source": "cache_miss"},
+    ) == EXPECTED_CACHE_MISS_TOKENS

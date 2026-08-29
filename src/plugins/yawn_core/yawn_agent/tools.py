@@ -44,6 +44,14 @@ from .reactions import search_reactions
 
 MAX_TOOL_ROUNDS = 4
 MAX_FILE_BYTES = 32 * 1024 * 1024
+DEFAULT_MEMBER_TOOL_LIMIT = 30
+MAX_MEMBER_TOOL_LIMIT = 50
+DEFAULT_PROFILE_TOOL_LIMIT = 6
+MAX_PROFILE_TOOL_LIMIT = 10
+DEFAULT_MEMORY_TOOL_LIMIT = 6
+MAX_MEMORY_TOOL_LIMIT = 10
+DEFAULT_RELATION_TOOL_LIMIT = 12
+MAX_RELATION_TOOL_LIMIT = 20
 _FILE_ROOT = Path(os.environ.get("AGENT_FILE_ROOT", "data/agent_files")).resolve()
 _ALLOWED_FILE_HOSTS = frozenset(
     host.strip().lower()
@@ -94,6 +102,24 @@ _MESSAGE_SEGMENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_MESSAGE_SEGMENT_FIELDS: dict[str, frozenset[str]] = {
+    "text": frozenset({"text"}),
+    "reply": frozenset({"message_id"}),
+    "at": frozenset({"user_id"}),
+    "face": frozenset({"id"}),
+    "reaction": frozenset({"reaction_id"}),
+    "image": frozenset({"file"}),
+    "record": frozenset({"file"}),
+    "video": frozenset({"file"}),
+    "rps": frozenset(),
+    "dice": frozenset(),
+    "poke": frozenset({"poke_type", "poke_id"}),
+    "share": frozenset({"url", "title", "content"}),
+    "contact": frozenset({"contact_type", "id"}),
+    "location": frozenset({"latitude", "longitude", "title", "content"}),
+    "music": frozenset({"provider", "id"}),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class _ToolDefinition:
@@ -131,26 +157,35 @@ _TOOL_DEFINITIONS = (
     ),
     _ToolDefinition(
         "list_group_members",
-        "读取群成员列表（最多返回100人）",
-        {},
+        "读取群成员列表（默认30人，最多50人）",
+        {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
         actions=("get_group_member_list",),
     ),
     _ToolDefinition(
         "search_group_memory",
-        "搜索当前群已沉淀的记忆",
-        {"query": {"type": "string", "minLength": 1, "maxLength": 120}},
+        "搜索当前群已沉淀的记忆（默认6条，最多10条）",
+        {
+            "query": {"type": "string", "minLength": 1, "maxLength": 120},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
         required=("query",),
     ),
     _ToolDefinition(
         "get_person_profile",
-        "读取群内人物画像",
-        {"user_id": {"type": "integer"}},
+        "读取群内人物画像（默认6条，最多10条）",
+        {
+            "user_id": {"type": "integer"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
         required=("user_id",),
     ),
     _ToolDefinition(
         "list_user_relations",
-        "查询群内某成员的全部已知关系",
-        {"user_id": {"type": "integer"}},
+        "查询群内某成员的已知关系（默认12条，最多20条）",
+        {
+            "user_id": {"type": "integer"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        },
         required=("user_id",),
     ),
     _ToolDefinition(
@@ -276,6 +311,153 @@ _PRIVILEGED_TOOLS = frozenset(
 )
 _MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 
+_MESSAGE_TOOL_HINTS = (
+    "回复",
+    "引用",
+    "艾特",
+    "表情",
+    "图片",
+    "发图",
+    "语音",
+    "视频",
+    "骰子",
+    "猜拳",
+    "戳一戳",
+    "poke",
+    "分享",
+    "链接",
+    "名片",
+    "位置",
+    "定位",
+    "音乐",
+    "歌曲",
+)
+_REACTION_TOOL_HINTS = ("表情包", "reaction", "无语", "吃瓜", "震惊")
+_MEMORY_SEARCH_HINTS = ("记得", "记忆", "之前", "以前", "上次")
+_PROFILE_TOOL_HINTS = ("画像", "人物资料", "个人资料", "关系", "认识")
+_GROUP_TOOL_HINTS = ("群信息", "群资料", "群成员", "成员列表", "管理员", "群主", "头衔")
+_RELATION_WRITE_HINTS = (
+    "记录关系",
+    "记住关系",
+    "我们是",
+    "是我朋友",
+    "是我对象",
+    "是我同事",
+    "是我同学",
+    "是我搭子",
+    "是我死党",
+    "是我伴侣",
+)
+
+
+def select_dialogue_tool_names(
+    text: str | None,
+    *,
+    has_reply: bool = False,
+    has_mentions: bool = False,
+    has_media: bool = False,
+    allow_admin_tools: bool = False,
+) -> frozenset[str]:
+    """Select a small deterministic tool bundle for one dialogue turn.
+
+    Most QQ chat turns only need a direct text response. Sending the complete
+    schema catalog on every request costs thousands of input tokens and also
+    reduces the cached-prefix share. Tool bundles are intentionally keyword-
+    based rather than LLM-classified so selecting them has zero AI cost.
+    """
+
+    normalized = str(text or "").strip().casefold()
+    selected: set[str] = set()
+    if has_mentions or any(
+        hint.casefold() in normalized for hint in _MESSAGE_TOOL_HINTS
+    ):
+        selected.add("send_message")
+    if any(hint.casefold() in normalized for hint in _REACTION_TOOL_HINTS):
+        selected.update(("search_reactions", "send_message"))
+    if "合并转发" in normalized or "转发" in normalized:
+        selected.add("send_forward")
+    if any(hint in normalized for hint in _MEMORY_SEARCH_HINTS):
+        selected.add("search_group_memory")
+    if any(hint in normalized for hint in _PROFILE_TOOL_HINTS):
+        selected.update(("get_person_profile", "list_user_relations"))
+    if any(hint in normalized for hint in _GROUP_TOOL_HINTS):
+        selected.update(("get_group_info", "get_group_member", "list_group_members"))
+    if any(hint in normalized for hint in _RELATION_WRITE_HINTS):
+        selected.add("record_user_relation")
+    if allow_admin_tools:
+        if "禁言" in normalized:
+            selected.add("mute_member")
+        if "公告" in normalized:
+            selected.add("create_group_announcement")
+        if "群文件" in normalized or "发文件" in normalized or "发送文件" in normalized:
+            selected.add("send_file")
+    return frozenset(selected)
+
+
+def select_dialogue_message_segment_types(
+    text: str | None,
+    *,
+    has_target_mentions: bool = False,
+) -> frozenset[str]:
+    """Select the smallest outbound message vocabulary needed this turn."""
+
+    normalized = str(text or "").strip().casefold()
+    selected: set[str] = {"text"}
+    if "回复" in normalized or "引用" in normalized:
+        selected.add("reply")
+    if has_target_mentions or "艾特" in normalized:
+        selected.add("at")
+    if "表情包" in normalized or "reaction" in normalized or any(
+        hint in normalized for hint in ("无语", "吃瓜", "震惊")
+    ):
+        selected.add("reaction")
+    elif "表情" in normalized:
+        selected.add("face")
+    if "图片" in normalized or "发图" in normalized:
+        selected.add("image")
+    if "语音" in normalized:
+        selected.add("record")
+    if "视频" in normalized:
+        selected.add("video")
+    if "骰子" in normalized:
+        selected.add("dice")
+    if "猜拳" in normalized:
+        selected.add("rps")
+    if "戳一戳" in normalized or "poke" in normalized:
+        selected.add("poke")
+    if "分享" in normalized or "链接" in normalized:
+        selected.add("share")
+    if "名片" in normalized:
+        selected.add("contact")
+    if "位置" in normalized or "定位" in normalized:
+        selected.add("location")
+    if "音乐" in normalized or "歌曲" in normalized:
+        selected.add("music")
+    return frozenset(selected)
+
+
+def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
+    """Return a bounded LLM round budget for the selected tool bundle.
+
+    A plain response needs one model call. Direct message tools also need only
+    one call because a successful visible send ends the turn. Read/search
+    tools need one additional call to turn their result into a reply. Only
+    genuinely mixed or privileged bundles may use a third round; four rounds
+    remain an absolute compatibility ceiling rather than the normal path.
+    """
+
+    names = frozenset(tool_names)
+    if not names:
+        return 1
+    if names <= _MESSAGE_SEND_TOOLS:
+        return 2
+    if names & _PRIVILEGED_TOOLS:
+        return min(MAX_TOOL_ROUNDS, 3)
+    non_send = names - _MESSAGE_SEND_TOOLS
+    if len(non_send) <= 2:
+        return 2
+    return min(MAX_TOOL_ROUNDS, 3)
+
 
 def _max_tool_permission_level(
     *, allow_admin_tools: bool, max_permission_level: str | None
@@ -328,6 +510,8 @@ def build_tool_schemas(
     segment_capabilities: MessageSegmentCapabilities | None = None,
     max_permission_level: str | None = None,
     privileged_allowlist: set[str] | None = None,
+    include_names: frozenset[str] | set[str] | None = None,
+    message_segment_types: frozenset[str] | set[str] | None = None,
 ) -> list[dict[str, Any]]:
     resolved_level = _max_tool_permission_level(
         allow_admin_tools=allow_admin_tools,
@@ -335,6 +519,8 @@ def build_tool_schemas(
     )
     tools: list[dict[str, Any]] = []
     for definition in _TOOL_DEFINITIONS:
+        if include_names is not None and definition.name not in include_names:
+            continue
         exposed, reason = _tool_exposure_reason(
             definition,
             capabilities,
@@ -353,11 +539,23 @@ def build_tool_schemas(
                 if segment_capabilities is not None
                 else COMMON_MESSAGE_SEGMENTS
             )
-            properties["segments"]["items"]["properties"]["type"]["enum"] = [
+            if message_segment_types is not None:
+                exposed = frozenset(exposed) & frozenset(message_segment_types)
+            allowed_types = [
                 item
                 for item in _MESSAGE_SEGMENT_SCHEMA["properties"]["type"]["enum"]
                 if item in exposed
             ]
+            item_properties = properties["segments"]["items"]["properties"]
+            item_properties["type"]["enum"] = allowed_types
+            allowed_fields = {"type"}
+            for segment_type in allowed_types:
+                allowed_fields.update(_MESSAGE_SEGMENT_FIELDS.get(segment_type, ()))
+            properties["segments"]["items"]["properties"] = {
+                key: value
+                for key, value in item_properties.items()
+                if key in allowed_fields
+            }
         tools.append(
             {
                 "type": "function",
@@ -412,6 +610,45 @@ def tool_permission_snapshot(
             }
         )
     return rows
+
+
+def _compact_group_info(raw: Any) -> dict[str, Any]:
+    """Project OneBot group metadata to fields useful to the model."""
+
+    if not isinstance(raw, dict):
+        raise ValueError("群信息响应格式错误")
+    return {
+        key: raw[key]
+        for key in ("group_id", "group_name", "member_count", "max_member_count")
+        if raw.get(key) is not None
+    }
+
+
+def _compact_group_member(raw: Any) -> dict[str, Any]:
+    """Drop protocol/account metadata that should not enter the next prompt."""
+
+    if not isinstance(raw, dict):
+        raise ValueError("群成员信息响应格式错误")
+    user_id = raw.get("user_id")
+    name = str(raw.get("card") or raw.get("nickname") or user_id or "未知成员")[:64]
+    compact: dict[str, Any] = {"user_id": user_id, "name": name}
+    role = str(raw.get("role") or "").strip()
+    title = str(raw.get("title") or "").strip()
+    if role and role != "member":
+        compact["role"] = role
+    if title:
+        compact["title"] = title[:64]
+    return compact
+
+
+def _tool_result_limit(args: dict[str, Any], *, default: int, maximum: int) -> int:
+    try:
+        limit = int(args.get("limit") or default)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("limit 必须是整数") from exc
+    if limit < 1 or limit > maximum:
+        raise ValueError(f"limit 必须在 1~{maximum} 之间")
+    return limit
 
 
 def _jsonable(value: object) -> object:
@@ -645,22 +882,39 @@ async def execute_tool(
         )
         now = now_beijing()
         if name == "get_group_info":
-            result = await bot.call_api("get_group_info", group_id=group_id)
+            result = _compact_group_info(
+                await bot.call_api("get_group_info", group_id=group_id)
+            )
         elif name == "get_group_member":
-            result = await bot.call_api(
-                "get_group_member_info", group_id=group_id, user_id=int(args["user_id"])
+            result = _compact_group_member(
+                await bot.call_api(
+                    "get_group_member_info",
+                    group_id=group_id,
+                    user_id=int(args["user_id"]),
+                )
             )
         elif name == "list_group_members":
             members = await bot.call_api("get_group_member_list", group_id=group_id)
             if not isinstance(members, list):
                 raise ValueError("群成员列表响应格式错误")
+            limit = _tool_result_limit(
+                args, default=DEFAULT_MEMBER_TOOL_LIMIT, maximum=MAX_MEMBER_TOOL_LIMIT
+            )
+            compact_members = [
+                _compact_group_member(member)
+                for member in members
+                if isinstance(member, dict)
+            ]
             result = {
-                "items": members[:100],
+                "items": compact_members[:limit],
                 "total": len(members),
-                "truncated": len(members) > 100,
+                "truncated": len(members) > limit,
             }
         elif name == "get_person_profile":
             subject_id = int(args["user_id"])
+            limit = _tool_result_limit(
+                args, default=DEFAULT_PROFILE_TOOL_LIMIT, maximum=MAX_PROFILE_TOOL_LIMIT
+            )
             privacy = (
                 await session.get(AgentPrivacy, (group_id, subject_id))
                 if session is not None
@@ -685,7 +939,7 @@ async def execute_tool(
                             | (AgentMemory.expires_at >= now)
                         ),
                     )
-                    .limit(10)
+                    .limit(limit)
                 )
                 rows = (
                     (await session.execute(stmt)).scalars().all()
@@ -695,8 +949,8 @@ async def execute_tool(
             result = [
                 {
                     "key": row.memory_key,
-                    "content": row.content,
-                    "confidence": row.confidence,
+                    "content": str(row.content or "")[:600],
+                    "confidence": round(float(row.confidence or 0.0), 3),
                 }
                 for row in rows
             ]
@@ -704,6 +958,9 @@ async def execute_tool(
             query = str(args.get("query", "")).strip()
             if not query:
                 raise ValueError("query 不能为空")
+            limit = _tool_result_limit(
+                args, default=DEFAULT_MEMORY_TOOL_LIMIT, maximum=MAX_MEMORY_TOOL_LIMIT
+            )
             stmt = (
                 select(AgentMemory)
                 .where(
@@ -747,13 +1004,13 @@ async def execute_tool(
                 if int(row.subject_user_id or 0) not in opted_out
                 and not opted_out.intersection(set(row.related_user_ids or []))
             ]
-            rows = rank_memories(rows, [query], None, now, limit=10)
+            rows = rank_memories(rows, [query], None, now, limit=limit)
             result = [
                 {
                     "type": row.memory_type,
                     "key": row.memory_key,
-                    "content": row.content,
-                    "confidence": row.confidence,
+                    "content": str(row.content or "")[:600],
+                    "confidence": round(float(row.confidence or 0.0), 3),
                 }
                 for row in rows
             ]
@@ -761,6 +1018,11 @@ async def execute_tool(
             if session is None:
                 raise PermissionError("关系查询需要数据库会话")
             subject_id = int(args["user_id"])
+            limit = _tool_result_limit(
+                args,
+                default=DEFAULT_RELATION_TOOL_LIMIT,
+                maximum=MAX_RELATION_TOOL_LIMIT,
+            )
             member_names = {
                 int(row_user_id): str(nickname or row_user_id)
                 for row_user_id, nickname in (
@@ -797,7 +1059,7 @@ async def execute_tool(
                             ),
                         )
                         .order_by(AgentRelation.confidence.desc())
-                        .limit(30)
+                        .limit(limit)
                     )
                 )
                 .scalars()
@@ -1031,6 +1293,9 @@ __all__ = [
     "TOOL_PERMISSION_READ",
     "TOOL_PERMISSION_STATE_WRITE",
     "build_tool_schemas",
+    "dialogue_tool_round_limit",
     "execute_tool",
+    "select_dialogue_message_segment_types",
+    "select_dialogue_tool_names",
     "tool_permission_snapshot",
 ]

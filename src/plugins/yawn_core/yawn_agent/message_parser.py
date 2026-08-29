@@ -79,6 +79,21 @@ class NormalizedMessage:
             "truncated": self.truncated,
         }
 
+    def intent_text(self) -> str:
+        """Return only user-authored text segments for deterministic routing.
+
+        ``plain_text`` intentionally contains placeholders such as ``[图片]``
+        and ``@123`` for model context. Those placeholders describe the input
+        message and must not be mistaken for a request to send an image or @ a
+        member when choosing outbound tool schemas.
+        """
+
+        return "".join(
+            str(item.data.get("text") or item.text or "")
+            for item in self.segments
+            if item.type == "text"
+        ).strip()
+
     def prompt_text(self) -> str:
         """生成不会把二进制或完整 API payload 带入提示词的文本。"""
 
