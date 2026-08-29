@@ -1,0 +1,61 @@
+name: Deployment control plane
+
+on:
+  push:
+    paths:
+      - "deploy/production/**"
+      - "deploy/host/bootstrap-production-opencloudos9.sh"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
+      - ".github/workflows/deployment-control-plane.yml"
+      - "tests/test_production_deployment_scripts.py"
+      - "tests/test_deployment_cache_contract.py"
+  pull_request:
+    paths:
+      - "deploy/production/**"
+      - "deploy/host/bootstrap-production-opencloudos9.sh"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
+      - ".github/workflows/deployment-control-plane.yml"
+      - "tests/test_production_deployment_scripts.py"
+      - "tests/test_deployment_cache_contract.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-control-plane-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployment-contract:
+    name: Production deployment contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate shell entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n deploy/production/deploy-release.sh
+          sh -n deploy/production/deploy-ssh-command
+          sh -n deploy/production/sync-control-plane.sh
+          bash -n deploy/host/bootstrap-production-opencloudos9.sh
+
+      - name: Compile deployment record writer
+        run: python -m py_compile deploy/production/write-deployment-record.py
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install locked test environment
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Run production deployment regression tests
+        run: >-
+          uv run --python 3.10 pytest -q
+          tests/test_production_deployment_scripts.py
+          tests/test_deployment_cache_contract.py
