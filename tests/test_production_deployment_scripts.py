@@ -72,7 +72,7 @@ def test_deployment_record_writer_rejects_unsafe_version(tmp_path: Path) -> None
     args = _writer_args(tmp_path / "deployments")
     version_index = args.index("--release-version") + 1
     args[version_index] = "../../escape"
-    result = subprocess.run(args, capture_output=True, text=True)
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
     assert result.returncode != 0
     assert "invalid release version" in result.stderr
     assert not (tmp_path / "escape").exists()
@@ -148,7 +148,8 @@ esac
         text=True,
     )
 
-    current = json.loads((root / "deployments" / "current.json").read_text(encoding="utf-8"))
+    current_path = root / "deployments" / "current.json"
+    current = json.loads(current_path.read_text(encoding="utf-8"))
     assert current["current_image"] == image
     assert current["release_version"] == "v0.1.0-rc.8"
     assert current["migration_after"] == ["revision-after"]
@@ -186,9 +187,9 @@ def test_control_plane_upgrade_is_backward_compatible() -> None:
         assert "Package production control plane" in workflow
         assert "Synchronize production control plane" in workflow
         assert "write-deployment-record.py" in workflow
-        assert workflow.index("Synchronize control plane protocol upgrade") < workflow.index(
-            "Package production control plane"
-        )
+        protocol_sync = workflow.index("Synchronize control plane protocol upgrade")
+        final_package = workflow.index("Package production control plane")
+        assert protocol_sync < final_package
         assert workflow.index("Synchronize production control plane") < workflow.index(
             "Deploy immutable release image"
         )
