@@ -4,17 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Existing GitHub Release tag, for example v0.1.0-rc.4"
+        description: "Existing GitHub Release tag, for example v0.1.0-rc.6"
         required: true
         type: string
 
 permissions:
   contents: read
-  packages: read
 
 env:
   DEPLOY_USER: deploy
-  TCR_REGISTRY: ccr.ccs.tencentyun.com
   TCR_IMAGE: ccr.ccs.tencentyun.com/yawnbot/yawn_bot
   TCR_USERNAME: "100025310087"
 
@@ -31,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve immutable release metadata
+      - name: Resolve immutable TCR release metadata
         id: release_meta
         shell: bash
         env:
@@ -60,6 +58,7 @@ jobs:
           production_digest="$(sed -n 's/^production_digest=//p' "$meta")"
           commit="$(sed -n 's/^commit=//p' "$meta")"
           expected_image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION"
+          expected_production_image="$TCR_IMAGE:$VERSION"
 
           [[ "$release_image" == "$expected_image" ]] || {
             echo "::error::Release image metadata does not match this repository/version"
@@ -74,125 +73,25 @@ jobs:
             exit 1
           }
 
-          source_image="${release_image%:$VERSION}"
-          if [[ -n "$production_release_image" || -n "$production_digest" ]]; then
-            expected_production_image="$TCR_IMAGE:$VERSION"
-            [[ "$production_release_image" == "$expected_production_image" ]] || {
-              echo "::error::Production image metadata does not match the configured Tencent TCR repository/version"
-              exit 1
-            }
-            [[ "$production_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "::error::Production image digest is invalid"
-              exit 1
-            }
-            needs_mirror="false"
-          else
-            echo "Legacy release has no TCR metadata; GitHub Actions will stream the immutable linux/amd64 image directly from GHCR to Tencent TCR before deployment."
-            production_digest=""
-            needs_mirror="true"
+          if [[ -z "$production_release_image" || -z "$production_digest" ]]; then
+            echo "::error::This legacy release predates direct Tencent TCR publishing. Do not mirror it from GHCR. Publish a new version with the Release workflow so GitHub Actions rebuilds the image and pushes it directly to Tencent TCR."
+            exit 1
           fi
 
+          [[ "$production_release_image" == "$expected_production_image" ]] || {
+            echo "::error::Production image metadata does not match the configured Tencent TCR repository/version"
+            exit 1
+          }
+          [[ "$production_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Production image digest is invalid"
+            exit 1
+          }
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "source_image=$source_image" >> "$GITHUB_OUTPUT"
-          echo "source_digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "production_digest=$production_digest" >> "$GITHUB_OUTPUT"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "needs_mirror=$needs_mirror" >> "$GITHUB_OUTPUT"
-
-      - name: Install Skopeo for legacy registry copy
-        if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends skopeo
-
-      - name: Mirror legacy release to Tencent TCR
-        if: ${{ steps.release_meta.outputs.needs_mirror == 'true' }}
-        id: mirror
-        shell: bash
-        env:
-          SOURCE_IMAGE: ${{ steps.release_meta.outputs.source_image }}
-          SOURCE_DIGEST: ${{ steps.release_meta.outputs.source_digest }}
-          VERSION: ${{ steps.release_meta.outputs.version }}
-          COMMIT: ${{ steps.release_meta.outputs.commit }}
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$GHCR_USERNAME"
-          test -n "$GHCR_TOKEN"
-          test -n "$TCR_USERNAME"
-          test -n "$TCR_PASSWORD"
-
-          source_ref="$SOURCE_IMAGE@$SOURCE_DIGEST"
-          version_ref="$TCR_IMAGE:$VERSION"
-          sha_ref="$TCR_IMAGE:sha-${COMMIT:0:12}"
-          auth_dir="$RUNNER_TEMP/skopeo-auth"
-          src_auth="$auth_dir/ghcr.json"
-          dst_auth="$auth_dir/tcr.json"
-          rm -rf "$auth_dir"
-          install -d -m 700 "$auth_dir"
-          trap 'rm -rf "$auth_dir"' EXIT
-
-          printf '%s' "$GHCR_TOKEN" | skopeo login \
-            --authfile "$src_auth" \
-            --username "$GHCR_USERNAME" \
-            --password-stdin \
-            ghcr.io >/dev/null
-          printf '%s' "$TCR_PASSWORD" | skopeo login \
-            --authfile "$dst_auth" \
-            --username "$TCR_USERNAME" \
-            --password-stdin \
-            "$TCR_REGISTRY" >/dev/null
-          unset GHCR_TOKEN TCR_PASSWORD
-
-          echo "Streaming compressed linux/amd64 blobs from GHCR directly to Tencent TCR."
-          skopeo copy \
-            --retry-times 5 \
-            --override-os linux \
-            --override-arch amd64 \
-            --src-authfile "$src_auth" \
-            --dest-authfile "$dst_auth" \
-            "docker://$source_ref" \
-            "docker://$version_ref"
-
-          # The second tag is in the same TCR repository. Existing blobs are reused;
-          # this normally only publishes another manifest instead of uploading layers again.
-          skopeo copy \
-            --retry-times 5 \
-            --src-authfile "$dst_auth" \
-            --dest-authfile "$dst_auth" \
-            "docker://$version_ref" \
-            "docker://$sha_ref"
-
-          digest="$(skopeo inspect \
-            --authfile "$dst_auth" \
-            --format '{{.Digest}}' \
-            "docker://$version_ref")"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::Could not resolve immutable digest after mirroring legacy release to TCR"
-            exit 1
-          }
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "Legacy release mirrored to $TCR_IMAGE@$digest"
-
-      - name: Select production TCR digest
-        id: production_meta
-        shell: bash
-        env:
-          RELEASE_DIGEST: ${{ steps.release_meta.outputs.production_digest }}
-          MIRROR_DIGEST: ${{ steps.mirror.outputs.digest }}
-        run: |
-          set -euo pipefail
-          digest="${RELEASE_DIGEST:-$MIRROR_DIGEST}"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::No valid Tencent TCR production digest is available"
-            exit 1
-          }
           echo "image=$TCR_IMAGE" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "digest=$production_digest" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Using directly published Tencent TCR image: $TCR_IMAGE@$production_digest"
 
       - name: Configure and verify deployment SSH identity
         shell: bash
@@ -208,7 +107,6 @@ jobs:
           printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/yawnbot-deploy ~/.ssh/known_hosts
 
-          # Validate both key files without printing fingerprints or host metadata.
           ssh-keygen -yf ~/.ssh/yawnbot-deploy >/dev/null
           ssh-keygen -lf ~/.ssh/known_hosts >/dev/null
 
@@ -256,8 +154,8 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
-          IMAGE: ${{ steps.production_meta.outputs.image }}
-          DIGEST: ${{ steps.production_meta.outputs.digest }}
+          IMAGE: ${{ steps.release_meta.outputs.image }}
+          DIGEST: ${{ steps.release_meta.outputs.digest }}
           VERSION: ${{ steps.release_meta.outputs.version }}
           COMMIT: ${{ steps.release_meta.outputs.commit }}
         run: |
