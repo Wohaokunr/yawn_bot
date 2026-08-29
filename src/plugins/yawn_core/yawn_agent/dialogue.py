@@ -25,7 +25,7 @@ from ..data_models.user_group import UserGroup
 from ..llm import (
     LLMMultimodalUnsupportedError,
     complete,
-    complete_with_tools,
+    complete_with_tools_result,
     resolve_llm_request,
     vision_model_configured,
 )
@@ -79,7 +79,13 @@ from .prompt import (
     render_current_turn,
     stable_context_key,
 )
-from .tools import MAX_TOOL_ROUNDS, build_tool_schemas, execute_tool
+from .tools import (
+    build_tool_schemas,
+    dialogue_tool_round_limit,
+    execute_tool,
+    select_dialogue_message_segment_types,
+    select_dialogue_tool_names,
+)
 
 _GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "在吗", "在不在")
 _PROMPT_CACHE_KEYS: OrderedDict[str, None] = OrderedDict()
@@ -95,6 +101,40 @@ _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
 )
+
+
+def _accumulate_turn_usage(total: dict[str, int], result: Any) -> dict[str, Any]:
+    """累计一次用户回合内多次 LLM 请求的真实 token 用量。"""
+
+    total["rounds"] = total.get("rounds", 0) + 1
+    fields = (
+        ("prompt_tokens", "input"),
+        ("completion_tokens", "output"),
+        ("cached_tokens", "cached"),
+        ("cache_miss_tokens", "cache_miss"),
+    )
+    current: dict[str, int | None] = {}
+    try:
+        from ..metrics import record_ai_tokens
+
+        for field, source in fields:
+            raw = getattr(result, field, None)
+            value = int(raw) if isinstance(raw, int) and raw >= 0 else None
+            current[field] = value
+            if value is None:
+                continue
+            total[field] = total.get(field, 0) + value
+            if value > 0:
+                record_ai_tokens("agent_dialogue_turn", source, value)
+    except Exception:  # noqa: BLE001
+        dbg_exc("累计 Agent 回合 token 指标失败(忽略)")
+    return {
+        "request": current,
+        "turn": {
+            "rounds": total.get("rounds", 0),
+            **{field: total.get(field, 0) for field, _source in fields},
+        },
+    }
 
 
 def _visible_tool_send_ends_turn(result: dict[str, Any]) -> bool:
@@ -443,6 +483,7 @@ async def _load_context(
     budget_trace: list[dict[str, Any]] | None = None,
     context_model: str | None = None,
     completion_reserve: int = 2048,
+    context_token_limit: int | None = None,
 ) -> dict[str, Any]:
     now = now_beijing()
     context_now = reference_at or now
@@ -901,6 +942,7 @@ async def _load_context(
         relations=relations,
         model=context_model,
         completion_reserve=completion_reserve,
+        target_context_limit=context_token_limit,
     )
     messages = context_pack.messages
     members = context_pack.members
@@ -1235,6 +1277,7 @@ async def _process_group_message(
                 exclude_message_id=int(message_id) if message_id is not None else None,
                 context_model=model,
                 completion_reserve=800,
+                context_token_limit=2400,
             )
             trace_event(
                 "context",
@@ -1259,12 +1302,32 @@ async def _process_group_message(
                 f"can_manage={capabilities.can_manage} actions={len(capabilities.actions)} 个 "
                 f"发起人 {actor_user_id} 管理工具权限={allow_admin_tools}"
             )
+            has_target_mentions = any(
+                int(user_id) != int(bot_id) for user_id in normalized.mentions
+            )
+            tool_intent_text = normalized.intent_text()
+            selected_tool_names = select_dialogue_tool_names(
+                tool_intent_text,
+                has_mentions=has_target_mentions,
+                allow_admin_tools=allow_admin_tools,
+            )
+            message_segment_types = select_dialogue_message_segment_types(
+                tool_intent_text,
+                has_target_mentions=has_target_mentions,
+            )
             tools = build_tool_schemas(
                 capabilities,
                 allow_admin_tools=allow_admin_tools,
                 segment_capabilities=get_segment_capabilities(bot, group_id),
                 privileged_allowlist=set(config.tool_allowlist or []),
+                include_names=selected_tool_names,
+                message_segment_types=(
+                    message_segment_types
+                    if "send_message" in selected_tool_names
+                    else None
+                ),
             )
+            round_limit = dialogue_tool_round_limit(selected_tool_names)
             trace_event(
                 "capability",
                 "协议能力与工具权限计算",
@@ -1273,6 +1336,9 @@ async def _process_group_message(
                     "bot_can_manage": capabilities.can_manage,
                     "onebot_actions": sorted(capabilities.actions),
                     "actor_can_manage": allow_admin_tools,
+                    "round_limit": round_limit,
+                    "message_segment_types": sorted(message_segment_types),
+                    "selected_tool_names": sorted(selected_tool_names),
                     "tool_names": [
                         str(item.get("function", {}).get("name") or "")
                         for item in tools
@@ -1280,7 +1346,10 @@ async def _process_group_message(
                 },
                 duration_ms=(time.monotonic() - capability_started) * 1000,
             )
-            dbg(f"群 {group_id} 本轮可用工具 {len(tools)} 个")
+            dbg(
+                f"群 {group_id} 本轮可用工具 {len(tools)} 个,"
+                f"模型轮次上限={round_limit}"
+            )
             media_started = time.monotonic()
             media_blocks, cached_captions, media_digests = await prepare_image_inputs(
                 bot,
@@ -1396,7 +1465,8 @@ async def _process_group_message(
             fallback_attempted = False
             deadline = time.monotonic() + _MAX_TURN_SECONDS
             rounds = 0
-            while rounds < MAX_TOOL_ROUNDS:
+            turn_usage: dict[str, int] = {}
+            while rounds < round_limit:
                 if time.monotonic() > deadline:
                     dbg(
                         f"群 {group_id} 工具循环超过 {_MAX_TURN_SECONDS}s 时限,发送收尾提示"
@@ -1412,7 +1482,7 @@ async def _process_group_message(
                     return
                 llm_started = time.monotonic()
                 try:
-                    response = await complete_with_tools(  # pyright: ignore[reportArgumentType]
+                    completion = await complete_with_tools_result(  # pyright: ignore[reportArgumentType]
                         messages,  # pyright: ignore[reportArgumentType]
                         tools,  # pyright: ignore[reportArgumentType]
                         task="agent_dialogue",
@@ -1451,12 +1521,19 @@ async def _process_group_message(
                     # 多模态降级重建提示词，不占用工具轮次。
                     continue
                 rounds += 1
+                usage = _accumulate_turn_usage(turn_usage, completion)
+                response = completion.message
                 if response is None:
                     trace_event(
                         "llm",
                         "模型调用",
                         status="degraded",
-                        output={"model": model, "response": "none"},
+                        output={
+                            "model": model,
+                            "response": "none",
+                            "outcome": completion.outcome,
+                            "usage": usage,
+                        },
                         detail="LLM 返回空结果，进入确定性兜底回复",
                         duration_ms=(time.monotonic() - llm_started) * 1000,
                         round_index=rounds,
@@ -1488,12 +1565,14 @@ async def _process_group_message(
                             str(getattr(getattr(call, "function", None), "name", "") or "")
                             for call in tool_calls
                         ],
+                        "finish_reason": completion.finish_reason,
+                        "usage": usage,
                     },
                     duration_ms=(time.monotonic() - llm_started) * 1000,
                     round_index=rounds,
                 )
                 dbg(
-                    f"群 {group_id} 第 {rounds}/{MAX_TOOL_ROUNDS} 轮 LLM 响应: "
+                    f"群 {group_id} 第 {rounds}/{round_limit} 轮 LLM 响应: "
                     f"content={content!r} tool_calls={[getattr(getattr(c, 'function', None), 'name', None) for c in tool_calls]}"
                 )
                 if not tool_calls:
@@ -1705,7 +1784,7 @@ async def _process_group_message(
             # 走到这里说明所有轮次都被工具调用耗尽、始终没有最终回复。
             # 其余分支均已 return；给用户一个交代，不能静默。
             dbg(
-                f"群 {group_id} {MAX_TOOL_ROUNDS} 轮全部被工具调用耗尽,无最终回复,"
+                f"群 {group_id} {round_limit} 轮全部被工具调用耗尽,无最终回复,"
                 f"发送收尾提示;整轮耗时 {time.monotonic() - turn_started_at:.1f}s"
             )
             await _send_unless_expired(

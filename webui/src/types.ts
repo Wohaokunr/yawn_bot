@@ -381,6 +381,7 @@ export interface AgentDebugResponse {
       promptTokens: number | null;
       completionTokens: number | null;
       cachedTokens: number | null;
+      cacheMissTokens: number | null;
     };
     durationMs: number;
     decision?: Record<string, unknown>;

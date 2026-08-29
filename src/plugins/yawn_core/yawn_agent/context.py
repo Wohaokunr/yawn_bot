@@ -64,6 +64,37 @@ class CurrentTurn:
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def prompt_dict(self) -> dict[str, Any]:
+        """Sparse prompt representation; omit defaults that carry no meaning."""
+
+        payload: dict[str, Any] = {
+            "user_id": self.user_id,
+            "name": self.name,
+            "content": self.content,
+            "trigger": self.trigger,
+        }
+        if self.message_id is not None:
+            payload["message_id"] = self.message_id
+        if self.role and self.role != "member":
+            payload["role"] = self.role
+        if self.title:
+            payload["title"] = self.title
+        if self.mentions:
+            payload["mentions"] = list(self.mentions)
+        if self.reply_to:
+            payload["reply_to"] = self.reply_to
+        if self.received_at:
+            payload["received_at"] = self.received_at
+        if self.media_types:
+            payload["media_types"] = list(self.media_types)
+        if self.media:
+            payload["media"] = list(self.media)
+        if self.forward_nodes:
+            payload["forward_nodes"] = self.forward_nodes
+        if self.truncated:
+            payload["truncated"] = True
+        return payload
+
 
 def build_current_turn(
     *,
@@ -228,7 +259,16 @@ def build_context(
     coldness = coldness_score(activity, now)
     stable_members = sorted(
         [
-            {key: value for key, value in item.items() if key != "last_seen_at"}
+            {
+                "user_id": item.get("user_id"),
+                "name": item.get("name"),
+                **(
+                    {"role": item.get("role")}
+                    if item.get("role") and item.get("role") != "member"
+                    else {}
+                ),
+                **({"title": item.get("title")} if item.get("title") else {}),
+            }
             for item in members[:100]
         ],
         key=lambda item: (int(item.get("user_id") or 0), str(item.get("name") or "")),
@@ -244,6 +284,21 @@ def build_context(
             str(item.get("key") or ""),
         ),
     )
+    prompt_memories = [
+        {
+            key: item.get(key)
+            for key in (
+                "type",
+                "subject_user_id",
+                "subject_name",
+                "key",
+                "content",
+                "source_scope",
+            )
+            if item.get(key) not in (None, "", [], {})
+        }
+        for item in stable_memories
+    ]
     # 关系边由调用方渲染成可读文本行（如"小张(1) —情侣→ 小李(2)：官宣过"），
     # 顺序即注入优先级；关系随每次请求变化，属于易变层而非稳定层。
     relation_lines = list(relations[:50])
@@ -271,7 +326,7 @@ def build_context(
         },
         "members": stable_members,
         "messages": trim_context_messages(messages),
-        "memories": stable_memories,
+        "memories": prompt_memories,
         "relations": relation_lines,
     }
 

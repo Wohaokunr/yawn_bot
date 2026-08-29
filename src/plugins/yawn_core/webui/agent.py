@@ -56,7 +56,13 @@ from ..yawn_agent.memory import (
 from ..yawn_agent.persona import resolve_persona
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
-from ..yawn_agent.tools import build_tool_schemas, tool_permission_snapshot
+from ..yawn_agent.tools import (
+    build_tool_schemas,
+    dialogue_tool_round_limit,
+    select_dialogue_message_segment_types,
+    select_dialogue_tool_names,
+    tool_permission_snapshot,
+)
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
 from .hub import hub
@@ -1130,6 +1136,7 @@ def _debug_model_payload(result: Any, mode: str) -> dict[str, Any]:
             "promptTokens": result.prompt_tokens,
             "completionTokens": result.completion_tokens,
             "cachedTokens": result.cached_tokens,
+            "cacheMissTokens": result.cache_miss_tokens,
         },
         "durationMs": round(float(result.duration_ms), 1),
     }
@@ -1413,6 +1420,11 @@ async def run_agent_debug(
         capability_started = time.monotonic()
         if body.mode == "dialogue":
             privileged_allowlist = set(config.tool_allowlist or [])
+            selected_tool_names = select_dialogue_tool_names(
+                body.text,
+                allow_admin_tools=False,
+            )
+            message_segment_types = select_dialogue_message_segment_types(body.text)
             if bot is None:
                 capabilities = BotGroupCapabilities(
                     role="offline", can_manage=False, actions=frozenset()
@@ -1420,6 +1432,12 @@ async def run_agent_debug(
                 tools = build_tool_schemas(
                     capabilities,
                     privileged_allowlist=privileged_allowlist,
+                    include_names=selected_tool_names,
+                    message_segment_types=(
+                        message_segment_types
+                        if "send_message" in selected_tool_names
+                        else None
+                    ),
                 )
                 tool_permissions = tool_permission_snapshot(
                     capabilities,
@@ -1430,11 +1448,22 @@ async def run_agent_debug(
                 allow_privileged_tools = await user_can_manage_group(
                     bot, group_id, actor_user_id
                 )
+                selected_tool_names = select_dialogue_tool_names(
+                    body.text,
+                    allow_admin_tools=allow_privileged_tools,
+                )
+                message_segment_types = select_dialogue_message_segment_types(body.text)
                 tools = build_tool_schemas(
                     capabilities,
                     allow_admin_tools=allow_privileged_tools,
                     segment_capabilities=get_segment_capabilities(bot, group_id),
                     privileged_allowlist=privileged_allowlist,
+                    include_names=selected_tool_names,
+                    message_segment_types=(
+                        message_segment_types
+                        if "send_message" in selected_tool_names
+                        else None
+                    ),
                 )
                 tool_permissions = tool_permission_snapshot(
                     capabilities,
@@ -1446,6 +1475,9 @@ async def run_agent_debug(
                 "协议能力与工具权限计算",
                 output={
                     "tool_count": len(tools),
+                    "round_limit": dialogue_tool_round_limit(selected_tool_names),
+                    "message_segment_types": sorted(message_segment_types),
+                    "selected_tools": sorted(selected_tool_names),
                     "exposed_tools": [
                         item["name"] for item in tool_permissions if item.get("exposed")
                     ],
@@ -1568,6 +1600,7 @@ async def run_agent_debug(
                         "promptTokens": None,
                         "completionTokens": None,
                         "cachedTokens": None,
+                        "cacheMissTokens": None,
                     },
                     "durationMs": _DEBUG_TIMEOUT_SECONDS * 1000,
                 }

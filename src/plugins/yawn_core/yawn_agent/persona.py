@@ -29,6 +29,18 @@ PERSONA_FIELDS = (
 PERSONA_ALIASES = {"style": "speech_style", "length": "response_length"}
 MAX_FIELD_LENGTH = 240
 _LEGACY_DEFAULT_PERSONAS = frozenset({"友好、自然、简洁的群友"})
+_BUILTIN_PROMPT_BASELINE = {
+    "name": "Yawn",
+    "identity": "熟悉群聊节奏、自然简洁的普通群友",
+    "role": "普通群友",
+    "tone": "口语化、克制，不刻意热情或装熟",
+    "speech_style": "短句为主，不复述上文，不固定用反问续聊",
+    "values": "尊重事实、尊重边界、先倾听再回答",
+    "knowledge_boundary": "不知道就明确说不知道，不猜测成员隐私",
+    "emotion_baseline": "平静、友善，随对话轻微变化",
+    "response_length": "通常 1-2 句，明确的复杂问题再展开",
+    "privacy_boundary": "不公开私聊内容、隐私记忆、权限信息和工具内部结果",
+}
 
 
 class AgentPersonaDefaults(BaseModel):
@@ -126,11 +138,38 @@ def canonical_persona(persona: dict[str, str]) -> str:
     )
 
 
+def prompt_persona(persona: dict[str, str]) -> str:
+    """Serialize only persona facts that add information beyond static rules.
+
+    The system rules already define the default tone, brevity, factuality and
+    privacy boundary. Repeating all ten default fields on every request wastes
+    prompt tokens and reduces the useful cached-prefix share. Keep identity
+    fields plus any global/group deviations from the built-in prompt baseline.
+    """
+
+    compact: dict[str, str] = {}
+    for key in PERSONA_FIELDS:
+        value = _clean_value(persona.get(key, ""))
+        if not value:
+            continue
+        if key in {"name", "identity"} or value != _clean_value(
+            _BUILTIN_PROMPT_BASELINE.get(key, "")
+        ):
+            compact[key] = value
+    return json.dumps(
+        compact,
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(",", ":"),
+    )
+
+
 __all__ = [
     "PERSONA_FIELDS",
     "AgentPersonaDefaults",
     "canonical_persona",
     "defaults",
     "parse_persona_assignments",
+    "prompt_persona",
     "resolve_persona",
 ]
