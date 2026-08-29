@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -14,7 +15,9 @@ TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Write YawnBot production deployment metadata")
+    parser = argparse.ArgumentParser(
+        description="Write YawnBot production deployment metadata"
+    )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--previous-image", default="")
     parser.add_argument("--current-image", required=True)
@@ -29,15 +32,16 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _validate(args: argparse.Namespace) -> None:
+def _validation_error(args: argparse.Namespace) -> str | None:
     if not VERSION_RE.fullmatch(args.release_version):
-        raise SystemExit(f"invalid release version: {args.release_version}")
+        return f"invalid release version: {args.release_version}"
     if not COMMIT_RE.fullmatch(args.commit_sha):
-        raise SystemExit("invalid commit SHA")
+        return "invalid commit SHA"
     if not TIMESTAMP_RE.fullmatch(args.deployed_at):
-        raise SystemExit(f"invalid deployment timestamp: {args.deployed_at}")
+        return f"invalid deployment timestamp: {args.deployed_at}"
     if "\n" in args.current_image or "\r" in args.current_image:
-        raise SystemExit("invalid current image reference")
+        return "invalid current image reference"
+    return None
 
 
 def _atomic_write(path: Path, payload: str) -> None:
@@ -54,14 +58,17 @@ def _atomic_write(path: Path, payload: str) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        tmp_path.replace(path)
     finally:
         tmp_path.unlink(missing_ok=True)
 
 
 def main() -> int:
     args = _parser().parse_args()
-    _validate(args)
+    validation_error = _validation_error(args)
+    if validation_error is not None:
+        sys.stderr.write(f"{validation_error}\n")
+        return 2
 
     root = args.root
     data = {
@@ -82,7 +89,7 @@ def main() -> int:
 
     _atomic_write(record, payload)
     _atomic_write(root / "current.json", payload)
-    print(record)
+    sys.stdout.write(f"{record}\n")
     return 0
 
 
