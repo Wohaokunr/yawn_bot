@@ -43,7 +43,7 @@ trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
 
 case "$image" in
-    ghcr.io/wohaokunr/yawn_bot@sha256:*|ccr.ccs.tencentyun.com/yawnbot/yawn_bot@sha256:*) ;;
+    ghcr.io/wohaokunr/yawn_bot@sha256:*|sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:*) ;;
     *) echo "invalid immutable image reference: $image" >&2; exit 2 ;;
 esac
 case "$version" in
@@ -76,7 +76,7 @@ case "$auth_mode" in
         ;;
     registry-token-stdin)
         case "$registry_host" in
-            ghcr.io|ccr.ccs.tencentyun.com) ;;
+            ghcr.io|sgccr.ccs.tencentyun.com) ;;
             *) echo "unsupported registry host: $registry_host" >&2; exit 2 ;;
         esac
         IFS= read -r registry_username || { echo "missing registry username on stdin" >&2; exit 2; }
