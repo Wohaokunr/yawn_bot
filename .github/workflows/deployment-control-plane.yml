@@ -54,6 +54,11 @@ jobs:
         run: uv python install 3.10
       - name: Install locked test environment
         run: uv sync --all-groups --locked --python 3.10
+      - name: Lint deployment Python
+        run: >-
+          uv run --python 3.10 ruff check
+          deploy/production/write-deployment-record.py
+          tests/test_production_deployment_scripts.py
       - name: Run production deployment regression tests
         run: >-
           uv run --python 3.10 pytest -q
