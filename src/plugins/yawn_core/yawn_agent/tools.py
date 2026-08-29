@@ -351,7 +351,7 @@ _RELATION_WRITE_HINTS = (
 
 
 def select_dialogue_tool_names(
-    text: str,
+    text: str | None,
     *,
     has_reply: bool = False,
     has_mentions: bool = False,
@@ -395,7 +395,7 @@ def select_dialogue_tool_names(
 
 
 def select_dialogue_message_segment_types(
-    text: str,
+    text: str | None,
     *,
     has_target_mentions: bool = False,
 ) -> frozenset[str]:
