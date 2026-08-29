@@ -13,7 +13,7 @@ permissions:
 
 env:
   DEPLOY_USER: deploy
-  TCR_IMAGE: ccr.ccs.tencentyun.com/yawnbot/yawn_bot
+  TCR_IMAGE: sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot
   TCR_USERNAME: "100025310087"
 
 jobs:
