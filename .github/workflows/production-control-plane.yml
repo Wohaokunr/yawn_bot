@@ -1,0 +1,45 @@
+name: Production control-plane checks
+
+on:
+  push:
+    paths:
+      - "deploy/production/**"
+      - "deploy/host/bootstrap-production-opencloudos9.sh"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
+      - ".github/workflows/production-control-plane.yml"
+      - "tests/test_production_deployment_control_plane.py"
+  pull_request:
+    paths:
+      - "deploy/production/**"
+      - "deploy/host/bootstrap-production-opencloudos9.sh"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/deploy-existing.yml"
+      - ".github/workflows/production-control-plane.yml"
+      - "tests/test_production_deployment_control_plane.py"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate production deployment control plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse shell entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n deploy/production/deploy-release.sh
+          sh -n deploy/production/deploy-ssh-command
+          sh -n deploy/production/sync-control-plane.sh
+          bash -n deploy/host/bootstrap-production-opencloudos9.sh
+
+      - name: Compile deployment metadata writer
+        run: python -m py_compile deploy/production/write-deployment-record.py
+
+      - name: Exercise deployment control plane with fake Docker
+        run: python tests/test_production_deployment_control_plane.py

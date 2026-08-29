@@ -64,6 +64,7 @@ for source_file in \
   "$production_dir/deploy-release.sh" \
   "$production_dir/deploy-ssh-command" \
   "$production_dir/sync-control-plane.sh" \
+  "$production_dir/write-deployment-record.py" \
   "$repo_root/deploy/host/bootstrap-napcat-opencloudos9.sh"; do
   if [[ ! -f "$source_file" ]]; then
     echo "error: missing repository file: $source_file" >&2
@@ -119,6 +120,8 @@ install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/deploy-ssh-command" "$YAWNBOT_ROOT/bin/deploy-ssh-command"
 install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
   "$production_dir/sync-control-plane.sh" "$YAWNBOT_ROOT/bin/sync-control-plane"
+install -m 0750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" \
+  "$production_dir/write-deployment-record.py" "$YAWNBOT_ROOT/bin/write-deployment-record.py"
 
 # A bootstrap bundle may have been produced from a Windows checkout with
 # core.autocrlf=true. Strip CR from installed shell entrypoints so Linux never
@@ -130,6 +133,7 @@ for installed_script in \
   sed -i 's/\r$//' "$installed_script"
   sh -n "$installed_script"
 done
+python3 -m py_compile "$YAWNBOT_ROOT/bin/write-deployment-record.py"
 
 if [[ ! -e "$YAWNBOT_ROOT/.env" ]]; then
   cat > "$YAWNBOT_ROOT/.env" <<'EOF'
@@ -254,6 +258,7 @@ Installed:
   $YAWNBOT_ROOT/bin/deploy-release
   $YAWNBOT_ROOT/bin/deploy-ssh-command
   $YAWNBOT_ROOT/bin/sync-control-plane
+  $YAWNBOT_ROOT/bin/write-deployment-record.py
   $YAWNBOT_ROOT/.env
   $YAWNBOT_ROOT/onebot.env
   $YAWNBOT_ROOT/data/backups/ (owner UID $YAWNBOT_RUNTIME_UID, group $DEPLOY_USER)
@@ -268,6 +273,7 @@ Next checks:
   sudo -u $DEPLOY_USER docker info
   sudo -u $DEPLOY_USER test -r $YAWNBOT_ROOT/.env
   sudo -u $DEPLOY_USER test -x $YAWNBOT_ROOT/bin/deploy-release
+  sudo -u $DEPLOY_USER test -r $YAWNBOT_ROOT/bin/write-deployment-record.py
 
 Edit $YAWNBOT_ROOT/.env with the real production OneBot/WebUI/AI credentials before relying on the bot for production traffic.
 MSG

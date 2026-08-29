@@ -97,6 +97,10 @@ esac
     echo "$root/data/backups is missing; run the one-time server bootstrap" >&2
     exit 3
 }
+[ -r "$root/bin/write-deployment-record.py" ] || {
+    echo "$root/bin/write-deployment-record.py is missing; synchronize the production control plane" >&2
+    exit 3
+}
 mkdir -p "$root/deployments"
 chmod 700 "$root/deployments"
 exec 9>"$root/deploy.lock"
@@ -217,7 +221,9 @@ PY
     fi
 fi
 
+echo "[deploy:pull] start"
 pull_image
+echo "[deploy:pull] success"
 printf 'YAWNBOT_IMAGE=%s\n' "$image" > "$root/image.env.tmp"
 chmod 600 "$root/image.env.tmp"
 mv -f "$root/image.env.tmp" "$root/image.env"
@@ -226,54 +232,48 @@ if [ -n "$container" ] && [ "$(docker inspect --format '{{.State.Running}}' "$co
     docker stop "$container" >/dev/null
 fi
 
+echo "[deploy:migrate] start"
 compose run --rm --no-deps yawnbot nb orm upgrade heads
 migration_after=$(compose run --rm --no-deps yawnbot nb orm current 2>&1)
 migration_heads=$(compose run --rm --no-deps yawnbot nb orm heads 2>&1)
-compose up -d --no-deps yawnbot
+echo "[deploy:migrate] success"
 
+echo "[deploy:start] start"
+compose up -d --no-deps yawnbot
+echo "[deploy:start] success"
+
+echo "[deploy:health] waiting for http://127.0.0.1:8080/healthz"
 healthy=false
 for _ in $(seq 1 60); do
-    if curl --fail --silent --show-error "http://127.0.0.1:8080/healthz" >/dev/null; then
+    if curl --fail --silent --max-time 3 "http://127.0.0.1:8080/healthz" >/dev/null 2>&1; then
         healthy=true
         break
     fi
     sleep 2
 done
 if [ "$healthy" != "true" ]; then
+    echo "[deploy:health] failed" >&2
     compose logs --tail 200 yawnbot >&2
     echo "new image failed healthcheck; database and image were not automatically rolled back" >&2
     exit 5
 fi
+echo "[deploy:health] success"
 
-docker run --rm --entrypoint python \
-    --user "$(id -u):$(id -g)" \
-    -v "$root/deployments:/deployments" \
-    -e PREVIOUS_IMAGE="$previous_image" \
-    -e CURRENT_IMAGE="$image" \
-    -e COMMIT_SHA="$commit" \
-    -e RELEASE_VERSION="$version" \
-    -e DB_BACKUP="$backup_host_path" \
-    -e MIGRATION_BEFORE="$migration_before" \
-    -e MIGRATION_AFTER="$migration_after" \
-    -e MIGRATION_HEADS="$migration_heads" \
-    -e DEPLOYED_AT="$timestamp" \
-    "$image" -c 'import json, os, pathlib
-data={
-    "previous_image": os.environ["PREVIOUS_IMAGE"],
-    "current_image": os.environ["CURRENT_IMAGE"],
-    "commit_sha": os.environ["COMMIT_SHA"],
-    "release_version": os.environ["RELEASE_VERSION"],
-    "db_backup": os.environ["DB_BACKUP"],
-    "migration_before": os.environ["MIGRATION_BEFORE"].splitlines(),
-    "migration_after": os.environ["MIGRATION_AFTER"].splitlines(),
-    "migration_heads": os.environ["MIGRATION_HEADS"].splitlines(),
-    "deployed_at": os.environ["DEPLOYED_AT"],
-    "status": "healthy",
-}
-root=pathlib.Path("/deployments")
-record=root / f"deploy-{os.environ[\"RELEASE_VERSION\"]}-{os.environ[\"DEPLOYED_AT\"]}.json"
-payload=json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-record.write_text(payload, encoding="utf-8")
-(root / "current.json").write_text(payload, encoding="utf-8")'
+echo "[deploy:record] writing deployment metadata"
+if ! DEPLOYMENT_ROOT="$root/deployments" \
+    PREVIOUS_IMAGE="$previous_image" \
+    CURRENT_IMAGE="$image" \
+    COMMIT_SHA="$commit" \
+    RELEASE_VERSION="$version" \
+    DB_BACKUP="$backup_host_path" \
+    MIGRATION_BEFORE="$migration_before" \
+    MIGRATION_AFTER="$migration_after" \
+    MIGRATION_HEADS="$migration_heads" \
+    DEPLOYED_AT="$timestamp" \
+    python3 "$root/bin/write-deployment-record.py"; then
+    echo "[deploy:record] failed; application is healthy but deployment metadata was not written" >&2
+    exit 6
+fi
+echo "[deploy:record] success"
 
 echo "deployed $image"
