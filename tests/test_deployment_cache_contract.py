@@ -187,7 +187,7 @@ def test_release_mirrors_production_image_to_tencent_tcr() -> None:
         REPO_ROOT / "deploy" / "production" / "deploy-ssh-command"
     ).read_text(encoding="utf-8")
 
-    tcr_image = "ccr.ccs.tencentyun.com/yawnbot/yawn_bot"
+    tcr_image = "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot"
     assert f"TCR_IMAGE: {tcr_image}" in release
     assert f"TCR_IMAGE: {tcr_image}" in deploy_existing
     assert 'TCR_USERNAME: "100025310087"' in release
