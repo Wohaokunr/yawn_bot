@@ -329,6 +329,47 @@ jobs:
           ssh-keygen -yf ~/.ssh/yawnbot-deploy >/dev/null
           ssh-keygen -lf ~/.ssh/known_hosts >/dev/null
 
+      # The currently deployed synchronizer only accepts the historical four-file
+      # bundle. Upgrade it with that protocol first, then send protocol 2 below.
+      - name: Package control plane protocol upgrade
+        id: control_plane_compat
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/yawnbot-control-plane-compat"
+          bundle="$RUNNER_TEMP/yawnbot-control-plane-compat.tar.gz"
+          rm -rf "$stage" "$bundle"
+          mkdir -p "$stage"
+          cp deploy/production/compose.yaml "$stage/compose.yaml"
+          cp deploy/production/deploy-release.sh "$stage/deploy-release"
+          cp deploy/production/deploy-ssh-command "$stage/deploy-ssh-command"
+          cp deploy/production/sync-control-plane.sh "$stage/sync-control-plane"
+          tar -czf "$bundle" -C "$stage" \
+            compose.yaml deploy-release deploy-ssh-command sync-control-plane
+          sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Synchronize control plane protocol upgrade
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          CONTROL_PLANE_SHA256: ${{ steps.control_plane_compat.outputs.sha256 }}
+          CONTROL_PLANE_BUNDLE: ${{ steps.control_plane_compat.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          test -s "$CONTROL_PLANE_BUNDLE"
+          cat "$CONTROL_PLANE_BUNDLE" | \
+            ssh -i ~/.ssh/yawnbot-deploy \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "/opt/yawnbot/bin/sync-control-plane $CONTROL_PLANE_SHA256"
+
       - name: Package production control plane
         id: control_plane
         shell: bash
@@ -342,8 +383,10 @@ jobs:
           cp deploy/production/deploy-release.sh "$stage/deploy-release"
           cp deploy/production/deploy-ssh-command "$stage/deploy-ssh-command"
           cp deploy/production/sync-control-plane.sh "$stage/sync-control-plane"
+          cp deploy/production/write-deployment-record.py "$stage/write-deployment-record.py"
           tar -czf "$bundle" -C "$stage" \
-            compose.yaml deploy-release deploy-ssh-command sync-control-plane
+            compose.yaml deploy-release deploy-ssh-command sync-control-plane \
+            write-deployment-record.py
           sha256="$(sha256sum "$bundle" | awk '{print $1}')"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
           echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
