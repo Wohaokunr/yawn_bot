@@ -154,4 +154,47 @@ esac
     assert current["migration_after"] == ["revision-after"]
     assert current["migration_heads"] == ["revision-after (head)"]
     assert current["status"] == "healthy"
+    assert "[deploy:pull] success" in result.stdout
+    assert "[deploy:migrate] success" in result.stdout
+    assert "[deploy:start] success" in result.stdout
+    assert "[deploy:health] success" in result.stdout
     assert "[deploy:record] success" in result.stdout
+
+
+def test_deploy_release_no_longer_contains_broken_inline_fstring() -> None:
+    script = DEPLOY_RELEASE.read_text(encoding="utf-8")
+    assert 'os.environ[\\"RELEASE_VERSION\\"]' not in script
+    assert 'record_writer="$root/bin/write-deployment-record.py"' in script
+    assert "exit 6" in script
+
+
+def test_control_plane_upgrade_is_backward_compatible() -> None:
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    deploy_existing = (
+        REPO_ROOT / ".github" / "workflows" / "deploy-existing.yml"
+    ).read_text(encoding="utf-8")
+    sync = (DEPLOY_DIR / "sync-control-plane.sh").read_text(encoding="utf-8")
+    bootstrap = (
+        REPO_ROOT / "deploy" / "host" / "bootstrap-production-opencloudos9.sh"
+    ).read_text(encoding="utf-8")
+
+    for workflow in (release, deploy_existing):
+        assert "Package control plane protocol upgrade" in workflow
+        assert "Synchronize control plane protocol upgrade" in workflow
+        assert "Package production control plane" in workflow
+        assert "Synchronize production control plane" in workflow
+        assert "write-deployment-record.py" in workflow
+        assert workflow.index("Synchronize control plane protocol upgrade") < workflow.index(
+            "Package production control plane"
+        )
+        assert workflow.index("Synchronize production control plane") < workflow.index(
+            "Deploy immutable release image"
+        )
+
+    assert "legacy_files=" in sync
+    assert "current_files=" in sync
+    assert "write-deployment-record.py" in sync
+    assert "control-plane.protocol" in sync
+    assert "write-deployment-record.py" in bootstrap
