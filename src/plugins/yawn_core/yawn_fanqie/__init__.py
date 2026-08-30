@@ -52,7 +52,7 @@ __plugin_meta__ = PluginMetadata(
     extra={"command_group": COMMAND_GROUP},
 )
 
-config = get_plugin_config(Config)
+plugin_config = get_plugin_config(Config)
 
 logger.info("番茄小说子插件已加载")
 
@@ -75,11 +75,11 @@ async def _diagnose_playwright_chromium() -> None:
 
     try:
         async with async_playwright() as playwright:
-            endpoint = config.fanqie_browser_ws_endpoint.strip()
+            endpoint = plugin_config.fanqie_browser_ws_endpoint.strip()
             if endpoint:
                 browser = await playwright.chromium.connect(
                     endpoint,
-                    timeout=config.fanqie_browser_timeout * 1000,
+                    timeout=plugin_config.fanqie_browser_timeout * 1000,
                 )
                 await browser.close()
                 logger.info("番茄搜索 Playwright sidecar 连接正常")
