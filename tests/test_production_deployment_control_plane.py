@@ -16,6 +16,7 @@ DEPLOY_DIR = REPO_ROOT / "deploy" / "production"
 WRITER = DEPLOY_DIR / "write-deployment-record.py"
 DEPLOY_SCRIPT = DEPLOY_DIR / "deploy-release.sh"
 SYNC_SCRIPT = DEPLOY_DIR / "sync-control-plane.sh"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
 class ProductionDeploymentControlPlaneTests(unittest.TestCase):
@@ -84,6 +85,41 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
     def test_shell_entrypoints_parse(self) -> None:
         for path in (DEPLOY_SCRIPT, SYNC_SCRIPT):
             subprocess.run(["sh", "-n", str(path)], check=True)
+
+    def test_runtime_dockerfile_does_not_rechown_large_mutable_tree(self) -> None:
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        self.assertNotIn("chown -R yawnbot:yawnbot /app /opt/yawnbot", dockerfile)
+        self.assertIn(
+            "COPY --chown=10001:10001 --from=python-builder /app/.venv /app/.venv",
+            dockerfile,
+        )
+        self.assertIn("COPY --chown=10001:10001 src ./src", dockerfile)
+        self.assertIn(
+            "COPY --chown=10001:10001 data/nonebot_plugin_orm/migrations "
+            "/opt/yawnbot/migrations",
+            dockerfile,
+        )
+        self.assertIn(
+            "COPY --chown=10001:10001 --from=webui-builder /build/webui/dist "
+            "./webui/dist",
+            dockerfile,
+        )
+
+        source_copy = dockerfile.index("COPY --chown=10001:10001 src ./src")
+        self.assertNotIn("\nRUN ", dockerfile[source_copy:])
+
+    def test_image_pull_policy_is_bounded_and_emits_safe_diagnostics(self) -> None:
+        deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("YAWNBOT_PULL_TIMEOUT_SECONDS:-1200", deploy)
+        self.assertNotIn("YAWNBOT_PULL_TIMEOUT_SECONDS:-2400", deploy)
+        self.assertIn("YAWNBOT_PULL_DIAGNOSTIC_INTERVAL_SECONDS:-120", deploy)
+        self.assertIn("[deploy:pull:diag] reason=", deploy)
+        self.assertIn("registry_dns_addresses=", deploy)
+        self.assertIn("established_https_connections=", deploy)
+        self.assertIn("docker system df", deploy)
+        self.assertIn("duration ${pull_elapsed}s", deploy)
+        self.assertNotIn("[deploy:pull:diag] registry_username=", deploy)
+        self.assertNotIn("[deploy:pull:diag] registry_password=", deploy)
 
     def test_sync_control_plane_accepts_legacy_then_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
