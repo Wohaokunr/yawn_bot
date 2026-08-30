@@ -8,9 +8,10 @@ commit=${3:-}
 auth_mode=${4:-}
 keep_backups=${YAWNBOT_BACKUP_KEEP:-10}
 pull_attempts=${YAWNBOT_PULL_ATTEMPTS:-2}
-pull_timeout_seconds=${YAWNBOT_PULL_TIMEOUT_SECONDS:-2400}
+pull_timeout_seconds=${YAWNBOT_PULL_TIMEOUT_SECONDS:-1200}
 pull_retry_delay_seconds=${YAWNBOT_PULL_RETRY_DELAY_SECONDS:-15}
 pull_heartbeat_seconds=${YAWNBOT_PULL_HEARTBEAT_SECONDS:-30}
+pull_diagnostic_interval_seconds=${YAWNBOT_PULL_DIAGNOSTIC_INTERVAL_SECONDS:-120}
 docker_config_dir=""
 pull_heartbeat_pid=""
 
@@ -110,6 +111,33 @@ compose() {
     docker compose --env-file "$root/image.env" -f "$root/compose.yaml" "$@"
 }
 
+pull_diagnostics() {
+    reason=${1:-heartbeat}
+    elapsed=${2:-0}
+
+    echo "[deploy:pull:diag] reason=$reason registry=$registry_host elapsed=${elapsed}s timeout=${pull_timeout_seconds}s"
+
+    if command -v getent >/dev/null 2>&1; then
+        resolved_count=$(getent ahosts "$registry_host" 2>/dev/null \
+            | awk '{print $1}' \
+            | sort -u \
+            | wc -l \
+            | tr -d ' ')
+        echo "[deploy:pull:diag] registry_dns_addresses=${resolved_count:-0}"
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        https_connections=$(ss -H -tn state established '( dport = :443 )' 2>/dev/null \
+            | wc -l \
+            | tr -d ' ')
+        echo "[deploy:pull:diag] established_https_connections=${https_connections:-0}"
+    fi
+
+    docker system df 2>/dev/null \
+        | sed 's/^/[deploy:pull:diag] docker-df /' \
+        || true
+}
+
 pull_image() {
     if docker image inspect "$image" >/dev/null 2>&1; then
         echo "immutable image already present locally; skipping registry pull: $image"
@@ -120,18 +148,26 @@ pull_image() {
     while [ "$attempt" -le "$pull_attempts" ]; do
         echo "pulling immutable image (attempt $attempt/$pull_attempts): $image"
         pull_started_at=$(date +%s)
+        pull_diagnostics start 0
         (
+            last_diagnostic_at=$pull_started_at
             while :; do
                 sleep "$pull_heartbeat_seconds" || exit 0
                 now=$(date +%s)
                 elapsed=$((now - pull_started_at))
                 echo "image pull still running (attempt $attempt/$pull_attempts, elapsed ${elapsed}s)"
+                if [ $((now - last_diagnostic_at)) -ge "$pull_diagnostic_interval_seconds" ]; then
+                    pull_diagnostics heartbeat "$elapsed"
+                    last_diagnostic_at=$now
+                fi
             done
         ) &
         pull_heartbeat_pid=$!
 
         pull_status=0
         timeout --foreground "$pull_timeout_seconds" docker pull "$image" || pull_status=$?
+        pull_finished_at=$(date +%s)
+        pull_elapsed=$((pull_finished_at - pull_started_at))
 
         kill "$pull_heartbeat_pid" 2>/dev/null || true
         wait "$pull_heartbeat_pid" 2>/dev/null || true
@@ -140,12 +176,14 @@ pull_image() {
         if [ "$pull_status" -eq 0 ]; then
             docker image inspect "$image" >/dev/null 2>&1 || {
                 echo "docker pull reported success but immutable image is not present: $image" >&2
+                pull_diagnostics missing-image "$pull_elapsed"
                 return 1
             }
-            echo "immutable image pull completed: $image"
+            echo "immutable image pull completed: $image (duration ${pull_elapsed}s)"
             return 0
         fi
 
+        pull_diagnostics failure "$pull_elapsed"
         if [ "$pull_status" -eq 124 ]; then
             echo "image pull attempt $attempt timed out after ${pull_timeout_seconds}s" >&2
         else
