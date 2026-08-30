@@ -105,7 +105,7 @@ curl --fail http://127.0.0.1:8080/healthz
 
 ## 5. GHCR 可见性
 
-在仓库仍为 private 的开源准备阶段，GHCR package 也可能仍要求 GitHub 身份认证。正式切换 public 后，维护者需要确认 `ghcr.io/wohaokunr/yawn_bot` 的 package visibility 允许普通用户拉取公开 Release 镜像。
+`ghcr.io/wohaokunr/yawn_bot` 的 package visibility 允许普通用户拉取公开 Release 镜像。
 
 公共用户不需要、也不应获得维护者的：
 
