@@ -142,6 +142,41 @@ jobs:
             test -n "$(find /ms-playwright -type f -name "LICENSE.headless_shell" -print -quit)"
             test -n "$(find /ms-playwright -type f -name "COPYING.LGPLv2.1" -print -quit)"
           '
+      - name: Smoke Playwright server and Chromium headless shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=yawnbot-playwright-smoke
+          cleanup() {
+            docker logs "$name" 2>/dev/null || true
+            docker rm -f "$name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "$name" yawnbot-playwright:license-audit >/dev/null
+          for _ in $(seq 1 30); do
+            if [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name")" == "healthy" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name")" == "healthy" ]]
+          docker exec -i "$name" node - <<'NODE'
+          const { chromium } = require('/usr/local/lib/node_modules/playwright');
+          (async () => {
+            const browser = await chromium.connect('ws://127.0.0.1:3000/');
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            await page.goto('data:text/html,<title>sidecar-ok</title>');
+            if (await page.title() !== 'sidecar-ok') {
+              throw new Error('unexpected browser smoke title');
+            }
+            await context.close();
+            await browser.close();
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
 
   webui-runtime-licenses:
     name: WebUI runtime licenses
