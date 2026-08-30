@@ -1,7 +1,6 @@
-from __future__ import annotations
-
-# Fake protocol errors and tiny chunk sizes are intentional in this regression file.
 # ruff: noqa: E501, PLR2004, TRY003
+
+from __future__ import annotations
 
 import base64
 import importlib
