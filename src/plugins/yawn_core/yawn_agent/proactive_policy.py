@@ -271,11 +271,12 @@ def recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
 
 
 def build_user_prompt(
-    mode: str, config: GroupAgentConfig, *, turn: int | None = None
+    scene: str, config: GroupAgentConfig, *, turn: int | None = None
 ) -> str:
-    if mode == "active":
+    """Build a prompt for an internally selected participation scene."""
+    if scene == "active":
         base = _ACTIVE_INTERJECT_PROMPT
-    elif mode == "followup":
+    elif scene == "followup":
         base = _FOLLOWUP_PROMPT
     else:
         base = _WARMUP_PROMPT
@@ -303,11 +304,14 @@ def should_proactively_speak(
     *,
     rng: RandomSource | None = None,
 ) -> str | None:
-    """返回 active / warmup / None；只做策略判定，不执行副作用。"""
+    """返回内部参与场景 active / warmup / None；只做策略判定，不执行副作用。"""
 
     group_id = getattr(config, "group_id", None)
     if not config.enabled:
         dbg(f"群 {group_id} 主动发言拒绝: Agent 未启用")
+        return None
+    if not bool(getattr(config, "proactive_enabled", True)):
+        dbg(f"群 {group_id} 主动发言拒绝: 主动参与已关闭")
         return None
     if snapshot.proactive_today >= config.daily_limit:
         dbg(
@@ -335,7 +339,7 @@ def should_proactively_speak(
             probability = warmup_probability(config, idle_seconds)
             if roll < probability:
                 dbg(
-                    f"群 {group_id} 暖场模式触发: 已冷场 {idle_seconds:.0f}s "
+                    f"群 {group_id} 暖场场景触发: 已冷场 {idle_seconds:.0f}s "
                     f"roll={roll:.3f} probability={probability:.2f}"
                 )
                 return "warmup"
@@ -381,14 +385,14 @@ def should_proactively_speak(
     probability = clamp_probability(config.proactive_active_probability)
     if roll < probability:
         dbg(
-            f"群 {group_id} 插话模式触发: {'持续刷屏' if busy_flow else '自然间隙'} "
+            f"群 {group_id} 插话场景触发: {'持续刷屏' if busy_flow else '自然间隙'} "
             f"真人消息 {member_idle:.0f}s 前 roll={roll:.3f} probability={probability:.2f} "
             f"5m 真人={snapshot.member_messages_5m}/{snapshot.member_participants_5m}人 "
             f"60m 真人消息={snapshot.member_messages_60m}"
         )
         return "active"
     dbg(
-        f"群 {group_id} 插话模式骰子未中: roll={roll:.3f} probability={probability:.2f}"
+        f"群 {group_id} 插话场景骰子未中: roll={roll:.3f} probability={probability:.2f}"
     )
     return None
 

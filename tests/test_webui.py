@@ -593,6 +593,19 @@ def test_business_api_routes_only_expose_the_explicit_guest_group_get_whitelist(
         )
 
 
+
+def test_agent_config_defaults_expose_participation_capabilities() -> None:
+    result = service.serialize_agent_config(None, 100)
+
+    assert result["groupId"] == "100"
+    assert result["replyTriggerEnabled"] is True
+    assert result["explicitWakeupEnabled"] is True
+    assert result["proactiveEnabled"] is True
+    assert result["shortConversationEnabled"] is True
+    assert result["proactiveProbability"] == 0.35  # noqa: PLR2004
+    assert result["dailyLimit"] == 30  # noqa: PLR2004
+
+
 def test_agent_config_and_persona_validation() -> None:
     with pytest.raises(ValidationError):
         route_models.AgentConfigPatch.model_validate(
@@ -632,12 +645,18 @@ def test_agent_config_and_persona_validation() -> None:
     proactive_patch = route_models.AgentConfigPatch.model_validate(
         {
             "version": None,
+            "proactiveEnabled": False,
+            "explicitWakeupEnabled": False,
+            "replyTriggerEnabled": False,
             "proactiveActiveEnabled": False,
             "shortConversationEnabled": False,
             "proactiveActiveProbability": 0.1,
             "proactiveActiveWindowMinutes": 6,
         }
     )
+    assert proactive_patch.proactive_enabled is False
+    assert proactive_patch.explicit_wakeup_enabled is False
+    assert proactive_patch.reply_trigger_enabled is False
     assert proactive_patch.proactive_active_enabled is False
     assert proactive_patch.short_conversation_enabled is False
     assert proactive_patch.proactive_active_probability == 0.1  # noqa: PLR2004

@@ -5,6 +5,7 @@
 get-or-create 在 config_store.py。
 """
 
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -31,21 +32,40 @@ from .message_parser import NormalizedMessage, parse_message
 _EXPLICIT_WAKE_WORDS = ("小助手", "群聊agent", "群聊 agent", "yawn")
 
 
-def should_respond(
+@dataclass(frozen=True, slots=True)
+class TriggerDecision:
+    respond: bool
+    source: str | None
+    mentioned: bool = False
+    replied: bool = False
+    wake_word: bool = False
+
+    @property
+    def signals(self) -> dict[str, bool]:
+        return {
+            "mention": self.mentioned,
+            "reply": self.replied,
+            "wake_word": self.wake_word,
+        }
+
+
+def resolve_trigger(
     event: GroupMessageEvent,
     bot: Bot,
-    trigger_mode: str = "mention_or_proactive",
     *,
+    reply_trigger_enabled: bool = True,
+    explicit_wakeup_enabled: bool = True,
     normalized: NormalizedMessage | None = None,
-) -> bool:
-    """被 @、回复机器人或显式自然语言唤醒时响应。"""
+) -> TriggerDecision:
+    """Resolve an explicit-call decision and preserve why the Agent was triggered."""
 
     if int(event.get_user_id()) == int(bot.self_id):
-        return False
+        return TriggerDecision(respond=False, source=None)
     self_id = str(bot.self_id)
-    # 适配器的 _check_at_me/_check_reply 会把指向机器人的 @ 段(以及 reply 段)
-    # 从 event.message 移除并置 to_me,因此 to_me 必须与剩余 at 段一起判断。
-    mentioned = bool(getattr(event, "to_me", False)) or any(
+    # The adapter may consume @/reply segments and set to_me. Keep the raw @ signal
+    # separate so a reply-to-bot is reported as "reply" instead of being mislabeled as @.
+    to_me = bool(getattr(event, "to_me", False))
+    at_me = any(
         seg.type == "at" and str(seg.data.get("qq")) == self_id for seg in event.message
     )
     reply = getattr(event, "reply", None)
@@ -57,37 +77,42 @@ def should_respond(
     else:
         replied = False
     if not replied and normalized is not None and normalized.reply_chain:
-        # event.reply.sender 缺失或不可用时,用 get_msg 拉取的直接引用作者兜底;
-        # 只看第 0 层(直接引用),更深层引用不构成"回复机器人"。
         raw_reply_user = normalized.reply_chain[0].get("user_id")
         if raw_reply_user is not None:
             try:
                 replied = int(raw_reply_user) == int(bot.self_id)
             except (TypeError, ValueError):
                 replied = False
+
+    mentioned = at_me or (to_me and not replied)
     text = " ".join(event.get_plaintext().strip().lower().split())
     group_id = getattr(event, "group_id", "?")
-    # OneBot 的 at 段在 plaintext 中渲染为 @<昵称>，因此唤醒词跟随机器人昵称。
     words = _EXPLICIT_WAKE_WORDS
     nickname = str(getattr(bot, "nickname", "") or "").strip().lower()
     if nickname:
         words = (*_EXPLICIT_WAKE_WORDS, f"@{nickname}")
-    explicit = any(contains_word(text, word) for word in words)
-    dbg(
-        f"群 {group_id} 触发判定: mentioned={mentioned} replied={replied} "
-        f"explicit={explicit} trigger_mode={trigger_mode!r} 文本={text!r}"
+    wake_word = any(contains_word(text, word) for word in words)
+
+    source: str | None = None
+    if mentioned:
+        source = "mention"
+    elif reply_trigger_enabled and replied:
+        source = "reply"
+    elif explicit_wakeup_enabled and wake_word:
+        source = "wake_word"
+    decision = TriggerDecision(
+        respond=source is not None,
+        source=source,
+        mentioned=mentioned,
+        replied=replied,
+        wake_word=wake_word,
     )
-    if trigger_mode == "mention_only":
-        dbg(f"群 {group_id} mention_only 模式 → 响应={mentioned}")
-        return mentioned
-    if trigger_mode == "mention_or_reply":
-        dbg(f"群 {group_id} mention_or_reply 模式 → 响应={mentioned or replied}")
-        return mentioned or replied
-    if trigger_mode == "explicit_wakeup":
-        dbg(f"群 {group_id} explicit_wakeup 模式 → 响应={mentioned or explicit}")
-        return mentioned or explicit
-    dbg(f"群 {group_id} 默认模式 → 响应={mentioned or replied or explicit}")
-    return mentioned or replied or explicit
+    dbg(
+        f"群 {group_id} 触发判定: source={decision.source!r} mentioned={mentioned} "
+        f"replied={replied} wake_word={wake_word} reply_enabled={reply_trigger_enabled} "
+        f"wakeup_enabled={explicit_wakeup_enabled} 响应={decision.respond} 文本={text!r}"
+    )
+    return decision
 
 
 async def _persist_message(
@@ -208,20 +233,29 @@ async def handle_group_agent_message(
     )
     # _persist_message 提交后 config 属性会过期，先在提交前取出运行开关，
     # 避免异步引擎上触发同步惰性加载（MissingGreenlet）。
-    trigger_mode = config.trigger_mode
+    reply_trigger_enabled = bool(config.reply_trigger_enabled)
+    explicit_wakeup_enabled = bool(config.explicit_wakeup_enabled)
     short_conversation_enabled = bool(config.short_conversation_enabled)
     await _persist_message(bot, event, normalized, _session)
-    respond = should_respond(event, bot, trigger_mode, normalized=normalized)
+    trigger = resolve_trigger(
+        event,
+        bot,
+        reply_trigger_enabled=reply_trigger_enabled,
+        explicit_wakeup_enabled=explicit_wakeup_enabled,
+        normalized=normalized,
+    )
+    normalized.trigger_source = trigger.source
+    normalized.trigger_signals = trigger.signals
     if short_conversation_enabled:
         observe_member_message(
             int(bot.self_id),
             int(event.group_id),
             user_id=int(event.get_user_id()),
             message_id=int(getattr(event, "message_id", 0) or 0) or None,
-            explicit_trigger=respond,
+            explicit_trigger=trigger.respond,
             observed_at=now_beijing(),
         )
-    if not respond:
+    if not trigger.respond:
         return
     if not enqueue(int(event.group_id), (bot, event, normalized), int(bot.self_id)):
         logger.warning("群聊 Agent 队列已满: %s", event.group_id)
@@ -280,9 +314,10 @@ async def handle_member_notice(
 
 
 __all__ = [
+    "TriggerDecision",
     "agent_listener",
     "handle_group_agent_message",
     "member_notice",
     "process_group_message",
-    "should_respond",
+    "resolve_trigger",
 ]

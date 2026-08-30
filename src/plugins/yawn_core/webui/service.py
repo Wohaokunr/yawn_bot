@@ -35,9 +35,6 @@ from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
 from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
 
-TRIGGER_MODES = frozenset(
-    {"mention_only", "mention_or_reply", "explicit_wakeup", "mention_or_proactive"}
-)
 ADMIN_TOOLS = frozenset({"mute_member", "create_group_announcement"})
 
 
@@ -830,11 +827,39 @@ def serialize_agent_config(
     row: GroupAgentConfig | None, group_id: int
 ) -> dict[str, Any]:
     if row is None:
-        row = GroupAgentConfig(group_id=group_id)
+        # SQLAlchemy column defaults are applied on INSERT, not on plain construction.
+        # Return the real runtime defaults for a group that has no persisted config yet.
+        return {
+            "groupId": str(group_id),
+            "enabled": True,
+            "triggerMode": "mention_or_proactive",  # deprecated compatibility output
+            "replyTriggerEnabled": True,
+            "explicitWakeupEnabled": True,
+            "proactiveEnabled": True,
+            "proactiveProbability": 0.35,
+            "proactiveActiveEnabled": True,
+            "shortConversationEnabled": True,
+            "proactiveActiveProbability": 0.25,
+            "proactiveActiveWindowMinutes": 12,
+            "idleThresholdMinutes": 15,
+            "cooldownMinutes": 8,
+            "dailyLimit": 30,
+            "rawRetentionDays": 7,
+            "crossGroupVisibility": "public_summary",
+            "mediaCacheEnabled": False,
+            "adminToolDailyLimit": 30,
+            "toolAllowlist": ["mute_member", "create_group_announcement"],
+            "proactiveToday": 0,
+            "adminToolsToday": 0,
+            "version": None,
+        }
     return {
         "groupId": str(group_id),
         "enabled": row.enabled,
-        "triggerMode": row.trigger_mode,
+        "triggerMode": row.trigger_mode,  # deprecated compatibility output
+        "replyTriggerEnabled": row.reply_trigger_enabled,
+        "explicitWakeupEnabled": row.explicit_wakeup_enabled,
+        "proactiveEnabled": row.proactive_enabled,
         "proactiveProbability": row.proactive_probability,
         "proactiveActiveEnabled": row.proactive_active_enabled,
         "shortConversationEnabled": row.short_conversation_enabled,
@@ -1147,14 +1172,18 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
 
     config = await session.get(GroupAgentConfig, group_id)
     enabled = await agent_runtime_enabled(session, group_id, config=config)
-    trigger_mode = config.trigger_mode if config else "mention_or_proactive"
+    reply_trigger_enabled = bool(config.reply_trigger_enabled) if config else True
+    explicit_wakeup_enabled = bool(config.explicit_wakeup_enabled) if config else True
+    proactive_configured = bool(config.proactive_enabled) if config else True
     proactive_active_configured = (
         bool(config.proactive_active_enabled) if config else True
     )
     short_conversation_configured = (
         bool(config.short_conversation_enabled) if config else True
     )
-    proactive_active_enabled = bool(enabled and proactive_active_configured)
+    proactive_active_enabled = bool(
+        enabled and proactive_configured and proactive_active_configured
+    )
     short_conversation_enabled = bool(enabled and short_conversation_configured)
     daily_limit = int(config.daily_limit) if config else 30
     cooldown_minutes = int(config.cooldown_minutes) if config else 8
@@ -1236,14 +1265,16 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "detail": "Agent 对话任务所选 Provider 缺少可用密钥或模型。",
             }
         )
-    proactive_enabled = bool(enabled and trigger_mode == "mention_or_proactive")
+    proactive_enabled = bool(enabled and proactive_configured)
     if enabled and not proactive_enabled:
         blockers.append(
             {
-                "code": "proactive_mode_disabled",
+                "code": "proactive_disabled",
                 "severity": "info",
-                "title": "当前触发模式不包含主动发言",
-                "detail": "被动回复仍按当前触发规则工作，但定时暖场/插话不会运行。",
+                "title": "主动参与已关闭",
+                "detail": (
+                    "Agent 仍会响应明确呼叫，但不会自行暖场或加入正在进行的聊天。"
+                ),
             }
         )
     if proactive_enabled and proactive_today >= daily_limit:
@@ -1300,7 +1331,8 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
         "groupId": str(group_id),
         "effective": {
             "enabled": enabled,
-            "triggerMode": trigger_mode,
+            "replyTriggerEnabled": bool(enabled and reply_trigger_enabled),
+            "explicitWakeupEnabled": bool(enabled and explicit_wakeup_enabled),
             "proactiveEnabled": proactive_enabled,
             "proactiveActiveEnabled": proactive_active_enabled,
             "proactiveToday": proactive_today,

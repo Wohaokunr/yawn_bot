@@ -96,12 +96,63 @@ def test_agent_setting_parser_rejects_invalid_values(
         commands._parse_agent_setting_value("proactive_probability", "0.35")
         == _PROBABILITY_EXAMPLE
     )
+    assert (
+        commands._parse_agent_setting_value("participation_intensity", "平衡")
+        == "平衡"
+    )
+    assert (
+        commands._parse_agent_setting_value("participation_intensity", "high")
+        == "活跃"
+    )
     with pytest.raises(ValueError):
         commands._parse_agent_setting_value("cooldown_minutes", "-1")
     with pytest.raises(ValueError):
         commands._parse_agent_setting_value("proactive_probability", "1.5")
     with pytest.raises(ValueError):
         commands._parse_agent_setting_value("media_cache_enabled", "也许")
+
+
+def test_agent_participation_intensity_updates_both_internal_probabilities(
+    session_modules: SimpleNamespace,
+) -> None:
+    commands = session_modules.commands
+    config = SimpleNamespace(
+        proactive_probability=0.35,
+        proactive_active_probability=0.25,
+        explicit_wakeup_enabled=True,
+        reply_trigger_enabled=True,
+        short_conversation_enabled=True,
+        proactive_enabled=True,
+        proactive_active_enabled=True,
+        idle_threshold_minutes=15,
+        cooldown_minutes=8,
+        daily_limit=30,
+        media_cache_enabled=False,
+        proactive_count=0,
+        proactive_day=None,
+    )
+
+    assert (
+        commands._get_agent_setting_value(config, "participation_intensity")
+        == "平衡"
+    )
+    commands._set_agent_setting_value(config, "participation_intensity", "克制")
+    assert config.proactive_probability == pytest.approx(0.18)
+    assert config.proactive_active_probability == pytest.approx(0.10)
+    assert (
+        commands._get_agent_setting_value(config, "participation_intensity")
+        == "克制"
+    )
+
+    menu = commands._build_agent_settings_menu(config)
+    assert "参与强度" in menu
+    assert "暖场基础概率" not in menu
+    assert "加入话题概率" not in menu
+
+    summary = commands._format_agent_runtime_summary(config, runtime_enabled=True)
+    assert "参与强度：克制" in summary
+    assert "暖场概率" not in summary
+    assert "插话概率" not in summary
 
 
 @pytest.mark.asyncio

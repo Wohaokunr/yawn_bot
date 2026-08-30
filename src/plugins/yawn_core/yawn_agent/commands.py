@@ -65,38 +65,48 @@ agent_privacy = build_matcher(COMMAND_BY_NAME["Agent隐私"])
 # /Agent设置 的交互字段。业务边界留在命令模块，共享 helper 只负责会话输入约定。
 _AGENT_SETTING_CHOICES = (
     SessionChoice(
-        "proactive_probability",
-        "主动发言概率",
-        ("主动发言", "概率", "暖场概率", "probability"),
+        "explicit_wakeup_enabled",
+        "叫名唤醒",
+        ("叫名", "唤醒", "wake"),
     ),
     SessionChoice(
-        "proactive_active_enabled",
-        "插话开关",
-        ("插话", "主动插话", "active"),
-    ),
-    SessionChoice(
-        "proactive_active_probability",
-        "插话概率",
-        ("active_probability",),
+        "reply_trigger_enabled",
+        "回复触发",
+        ("回复", "回复bot", "reply"),
     ),
     SessionChoice(
         "short_conversation_enabled",
-        "短会话",
-        ("续聊", "short_conversation"),
+        "自然续聊",
+        ("续聊", "短会话", "short_conversation"),
+    ),
+    SessionChoice(
+        "proactive_enabled",
+        "主动参与",
+        ("主动", "参与", "proactive"),
+    ),
+    SessionChoice(
+        "participation_intensity",
+        "参与强度",
+        ("强度", "积极程度", "intensity"),
+    ),
+    SessionChoice(
+        "proactive_active_enabled",
+        "活跃聊天加入",
+        ("插话", "活跃参与", "active"),
     ),
     SessionChoice(
         "idle_threshold_minutes",
-        "冷场阈值",
+        "冷场判定",
         ("冷场", "idle", "idle_threshold"),
     ),
     SessionChoice(
         "cooldown_minutes",
-        "主动冷却",
+        "参与冷却",
         ("冷却", "cooldown"),
     ),
     SessionChoice(
         "daily_limit",
-        "每日上限",
+        "每日参与上限",
         ("日上限", "daily"),
     ),
     SessionChoice(
@@ -105,10 +115,32 @@ _AGENT_SETTING_CHOICES = (
         ("media_cache",),
     ),
 )
-_AGENT_SETTING_LABELS = {choice.key: choice.label for choice in _AGENT_SETTING_CHOICES}
+# Kept for direct advanced commands and backward compatibility, but hidden from the menu.
+_ADVANCED_AGENT_SETTING_CHOICES = (
+    SessionChoice(
+        "proactive_probability",
+        "暖场基础概率",
+        ("暖场概率", "probability"),
+    ),
+    SessionChoice(
+        "proactive_active_probability",
+        "加入话题概率",
+        ("插话概率", "active_probability"),
+    ),
+    SessionChoice(
+        "proactive_active_window_minutes",
+        "活跃话题窗口",
+        ("活跃窗口", "active_window"),
+    ),
+)
+_ALL_AGENT_SETTING_CHOICES = _AGENT_SETTING_CHOICES + _ADVANCED_AGENT_SETTING_CHOICES
+_AGENT_SETTING_LABELS = {choice.key: choice.label for choice in _ALL_AGENT_SETTING_CHOICES}
 _BOOL_AGENT_SETTINGS = {
-    "proactive_active_enabled",
+    "explicit_wakeup_enabled",
+    "reply_trigger_enabled",
     "short_conversation_enabled",
+    "proactive_enabled",
+    "proactive_active_enabled",
     "media_cache_enabled",
 }
 _FLOAT_AGENT_SETTINGS = {
@@ -119,6 +151,12 @@ _INT_AGENT_SETTINGS = {
     "idle_threshold_minutes": (0, 10080),
     "cooldown_minutes": (0, 10080),
     "daily_limit": (0, 10000),
+    "proactive_active_window_minutes": (1, 1440),
+}
+_PARTICIPATION_PRESETS = {
+    "克制": (0.18, 0.10),
+    "平衡": (0.35, 0.25),
+    "活跃": (0.55, 0.45),
 }
 
 _PERSONA_CHOICES = (
@@ -140,24 +178,82 @@ _PRIVACY_CONFIRM_PHRASE = "确认退出并删除"
 _CLEAR_CONFIRM_PHRASE = "确认清理"
 
 
-def _format_agent_setting_value(key: str, value: bool | float | str) -> str:
+def _participation_intensity(config: GroupAgentConfig) -> str:
+    warmup = float(config.proactive_probability)
+    interject = float(config.proactive_active_probability)
+    for label, (expected_warmup, expected_interject) in _PARTICIPATION_PRESETS.items():
+        if (
+            abs(warmup - expected_warmup) < 0.001
+            and abs(interject - expected_interject) < 0.001
+        ):
+            return label
+    return "自定义"
+
+
+def _get_agent_setting_value(
+    config: GroupAgentConfig, key: str
+) -> bool | float | int | str:
+    if key == "participation_intensity":
+        return _participation_intensity(config)
+    return getattr(config, key)
+
+
+def _set_agent_setting_value(
+    config: GroupAgentConfig, key: str, value: bool | float | str
+) -> None:
+    if key == "participation_intensity":
+        warmup, interject = _PARTICIPATION_PRESETS[str(value)]
+        config.proactive_probability = warmup
+        config.proactive_active_probability = interject
+        return
+    setattr(config, key, value)
+
+
+def _format_agent_setting_value(
+    key: str, value: bool | float | str
+) -> str:
     if key in _BOOL_AGENT_SETTINGS:
         return "开启" if bool(value) else "关闭"
+    if key == "participation_intensity":
+        return str(value)
     if key in _FLOAT_AGENT_SETTINGS:
         return f"{float(value):.0%}"
-    if key in {"idle_threshold_minutes", "cooldown_minutes"}:
+    if key in {
+        "idle_threshold_minutes",
+        "cooldown_minutes",
+        "proactive_active_window_minutes",
+    }:
         return f"{int(value)} 分钟"
     if key == "daily_limit":
         return f"{int(value)} 次/日"
     return str(value)
 
 
-def _parse_agent_setting_value(key: str, raw: str) -> bool | float | int:
+def _parse_agent_setting_value(key: str, raw: str) -> bool | float | int | str:
     if key in _BOOL_AGENT_SETTINGS:
         parsed = parse_toggle(raw)
         if parsed is None:
             raise ValueError("请输入 开 或 关")
         return parsed
+    if key == "participation_intensity":
+        aliases = {
+            "克制": "克制",
+            "低": "克制",
+            "low": "克制",
+            "restrained": "克制",
+            "平衡": "平衡",
+            "中": "平衡",
+            "medium": "平衡",
+            "balanced": "平衡",
+            "活跃": "活跃",
+            "高": "活跃",
+            "high": "活跃",
+            "active": "活跃",
+        }
+        value = aliases.get(raw.strip().casefold())
+        if value is None:
+            raise ValueError("请输入 克制、平衡 或 活跃")
+        return value
     if key in _FLOAT_AGENT_SETTINGS:
         try:
             value = float(raw)
@@ -184,24 +280,63 @@ def _parse_agent_setting_value(key: str, raw: str) -> bool | float | int:
 def _agent_setting_value_prompt(key: str) -> str:
     if key in _BOOL_AGENT_SETTINGS:
         return "请输入 开 或 关"
+    if key == "participation_intensity":
+        return "请输入 克制、平衡 或 活跃"
     if key in _FLOAT_AGENT_SETTINGS:
         return "请输入 0 到 1 之间的数字，例如 0.35"
-    if key in {"idle_threshold_minutes", "cooldown_minutes"}:
-        return "请输入分钟数（0-10080）"
+    if key in {
+        "idle_threshold_minutes",
+        "cooldown_minutes",
+        "proactive_active_window_minutes",
+    }:
+        return "请输入分钟数"
     if key == "daily_limit":
         return "请输入每日次数上限（0-10000）"
     return "请输入新的值"
 
 
 def _build_agent_settings_menu(config: GroupAgentConfig) -> str:
-    lines = ["Agent 设置", "当前配置："]
+    lines = [
+        "Agent 设置",
+        "@ Agent 始终属于明确呼叫；下面只调整额外的参与能力。",
+    ]
     for index, choice in enumerate(_AGENT_SETTING_CHOICES, start=1):
-        value = getattr(config, choice.key)
+        value = _get_agent_setting_value(config, choice.key)
         lines.append(
             f"{index}. {choice.label}：{_format_agent_setting_value(choice.key, value)}"
         )
-    lines.extend(("", "回复序号或名称选择；「菜单」重新显示，「取消」退出。"))
+    lines.extend(
+        (
+            "",
+            "回复序号或名称选择；「菜单」重新显示，「取消」退出。",
+        )
+    )
     return "\n".join(lines)
+
+
+def _format_agent_runtime_summary(
+    config: GroupAgentConfig, runtime_enabled: bool
+) -> str:
+    now = now_beijing()
+    proactive_today = (
+        int(config.proactive_count)
+        if config.proactive_day == now.strftime("%Y-%m-%d")
+        else 0
+    )
+    active_participation = (
+        "活跃聊天也可加入" if config.proactive_active_enabled else "仅在冷场时参与"
+    )
+    return (
+        f"群聊 Agent：{'开启' if runtime_enabled else '关闭'}\n"
+        f"明确呼叫：@ 始终响应；回复 Agent：{'开' if config.reply_trigger_enabled else '关'}；"
+        f"叫名唤醒：{'开' if config.explicit_wakeup_enabled else '关'}\n"
+        f"自然续聊：{'开' if config.short_conversation_enabled else '关'}；"
+        f"主动参与：{'开' if config.proactive_enabled else '关'}"
+        f"{f'（{active_participation}）' if config.proactive_enabled else ''}\n"
+        f"参与强度：{_participation_intensity(config)}；"
+        f"今日主动：{proactive_today}/{config.daily_limit}；"
+        f"参与冷却：{config.cooldown_minutes} 分钟"
+    )
 
 
 def _build_persona_text(config: GroupAgentConfig) -> str:
@@ -282,9 +417,7 @@ async def handle_agent_command(
         session, int(event.group_id), config=config
     )
     dbg(f"群 {event.group_id} /群聊Agent 查询状态: enabled={runtime_enabled}")
-    await agent_command.finish(
-        f"群聊 Agent：{'开启' if runtime_enabled else '关闭'}\n暖场概率：{config.proactive_probability:.0%}\n插话概率：{config.proactive_active_probability:.0%}\n冷场阈值：{config.idle_threshold_minutes} 分钟\n主动冷却：{config.cooldown_minutes} 分钟\n每日上限：{config.daily_limit}"
-    )
+    await agent_command.finish(_format_agent_runtime_summary(config, runtime_enabled))
 
 
 @agent_settings.handle()
@@ -317,17 +450,18 @@ async def handle_agent_settings(
     text = args.extract_plain_text().strip()
     parts = text.split()
     if len(parts) == 2:
-        key = resolve_choice(parts[0], _AGENT_SETTING_CHOICES)
+        key = resolve_choice(parts[0], _ALL_AGENT_SETTING_CHOICES)
         if key is not None:
             try:
                 value = _parse_agent_setting_value(key, parts[1])
             except ValueError as exc:
                 await agent_settings.finish(str(exc))
-            before = getattr(config, key)
-            setattr(config, key, value)
+            before = _get_agent_setting_value(config, key)
+            _set_agent_setting_value(config, key, value)
             config.updated_by = int(event.get_user_id())
             before_text = _format_agent_setting_value(key, before)
-            after_text = _format_agent_setting_value(key, value)
+            after = _get_agent_setting_value(config, key)
+            after_text = _format_agent_setting_value(key, after)
             if not await _commit(session):
                 await agent_settings.finish("操作失败，请稍后重试")
             dbg(
@@ -346,11 +480,13 @@ async def handle_agent_settings(
         await agent_settings.send(_build_agent_settings_menu(config))
         return
 
-    key = resolve_choice(text, _AGENT_SETTING_CHOICES)
+    key = resolve_choice(text, _ALL_AGENT_SETTING_CHOICES)
     if key is not None:
         matcher.state["agent_settings_step"] = "value"
         matcher.state["agent_settings_key"] = key
-        current = _format_agent_setting_value(key, getattr(config, key))
+        current = _format_agent_setting_value(
+            key, _get_agent_setting_value(config, key)
+        )
         await agent_settings.send(
             f"{_AGENT_SETTING_LABELS[key]}\n当前：{current}\n"
             f"{_agent_setting_value_prompt(key)}；发送「返回」回菜单，「取消」退出。"
@@ -358,8 +494,8 @@ async def handle_agent_settings(
         return
 
     await agent_settings.finish(
-        "快捷用法：/Agent设置 冷却 8；/Agent设置 概率 0.35；"
-        "/Agent设置 插话概率 0.25；/Agent设置 媒体缓存 开|关\n"
+        "快捷用法：/Agent设置 主动参与 开；/Agent设置 强度 平衡；"
+        "/Agent设置 叫名 开；/Agent设置 冷却 8\n"
         "不带参数可进入交互设置。"
     )
 
@@ -412,7 +548,9 @@ async def handle_agent_settings_input(
             return
         matcher.state["agent_settings_key"] = key
         matcher.state["agent_settings_step"] = "value"
-        current = _format_agent_setting_value(key, getattr(config, key))
+        current = _format_agent_setting_value(
+            key, _get_agent_setting_value(config, key)
+        )
         await agent_settings.reject_arg(
             "agent_settings_input",
             f"已选择：{_AGENT_SETTING_LABELS[key]}\n当前：{current}\n"
@@ -437,11 +575,12 @@ async def handle_agent_settings_input(
         )
         return
 
-    before = getattr(config, key)
-    setattr(config, key, value)
+    before = _get_agent_setting_value(config, key)
+    _set_agent_setting_value(config, key, value)
     config.updated_by = int(event.get_user_id())
     before_text = _format_agent_setting_value(key, before)
-    after_text = _format_agent_setting_value(key, value)
+    after = _get_agent_setting_value(config, key)
+    after_text = _format_agent_setting_value(key, after)
     if not await _commit(session):
         await agent_settings.finish("操作失败，请稍后重试")
     dbg(
@@ -479,7 +618,9 @@ async def handle_agent_status(
     _perm: None = require_feature("group_agent"),  # pyright: ignore[reportArgumentType]
 ) -> None:
     if not isinstance(event, GroupMessageEvent):
-        await agent_status.finish(scope_required("Agent 状态查看", "群聊", "请在目标群发送 /Agent状态"))
+        await agent_status.finish(
+            scope_required("Agent 状态查看", "群聊", "请在目标群发送 /Agent状态")
+        )
     dbg(f"群 {event.group_id} 命令 /Agent状态: user={event.get_user_id()}")
     config = await get_or_create_config(session, int(event.group_id))
     if config is None:
@@ -489,12 +630,11 @@ async def handle_agent_status(
     )
     dbg(
         f"群 {event.group_id} /Agent状态: enabled={runtime_enabled} "
-        f"trigger_mode={config.trigger_mode!r} probability={config.proactive_probability} "
-        f"media_cache={config.media_cache_enabled}"
+        f"reply_trigger={config.reply_trigger_enabled} wakeup={config.explicit_wakeup_enabled} "
+        f"conversation={config.short_conversation_enabled} proactive={config.proactive_enabled} "
+        f"daily_limit={config.daily_limit}"
     )
-    await agent_status.finish(
-        f"群聊 Agent：{'开启' if runtime_enabled else '关闭'}；触发：{config.trigger_mode}；主动概率：{config.proactive_probability:.0%}；媒体缓存：{'开' if config.media_cache_enabled else '关'}"
-    )
+    await agent_status.finish(_format_agent_runtime_summary(config, runtime_enabled))
 
 
 @agent_profile.handle()

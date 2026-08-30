@@ -198,20 +198,6 @@ def _current_turn_focus_ids(
     return list(dict.fromkeys(focus))
 
 
-def _current_turn_trigger(
-    event: GroupMessageEvent, bot: Bot, normalized: NormalizedMessage
-) -> str:
-    if normalized.reply_chain:
-        try:
-            if int(str(normalized.reply_chain[0].get("user_id"))) == int(bot.self_id):
-                return "reply_to_bot"
-        except (TypeError, ValueError):
-            pass
-    if bool(getattr(event, "to_me", False)) or int(bot.self_id) in normalized.mentions:
-        return "mention"
-    return "explicit_wakeup"
-
-
 def _is_recent_duplicate(
     item: object,
     input_fingerprint: str,
@@ -1396,7 +1382,7 @@ async def _process_group_message(
                 content=user_prompt,
                 mentions=normalized.mentions,
                 reply_chain=normalized.reply_chain,
-                trigger=_current_turn_trigger(event, bot, normalized),
+                trigger=normalized.trigger_source or "explicit_call",
                 received_at=now_beijing(),
                 media_refs=normalized.media_refs,
                 forward_nodes=len(normalized.forward_tree),
@@ -1812,6 +1798,7 @@ async def process_group_message(
         int(event.group_id),
         mode="dialogue",
         source="runtime",
+        trigger_source=normalized.trigger_source or "explicit_call",
         actor_user_id=int(event.get_user_id()),
         message_id=(
             int(event.message_id)
@@ -1841,6 +1828,8 @@ async def process_group_message(
         "intake",
         "消息归一化完成",
         output={
+            "trigger_source": normalized.trigger_source or "explicit_call",
+            "trigger_signals": dict(normalized.trigger_signals),
             "text_chars": len(normalized.plain_text),
             "segment_types": [item.type for item in normalized.segments],
             "media": [

@@ -29,16 +29,20 @@ class GroupAgentConfig(Model):
     persona_override: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     persona_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     persona_version: Mapped[int] = mapped_column(Integer, default=1)
+    # Legacy compatibility only. Runtime behavior is controlled by the orthogonal
+    # capability flags below; keep this field for one compatibility window.
     trigger_mode: Mapped[str] = mapped_column(
         String(24), default="mention_or_proactive"
     )
+    reply_trigger_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    explicit_wakeup_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    proactive_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     proactive_probability: Mapped[float] = mapped_column(Float, default=0.35)
     idle_threshold_minutes: Mapped[int] = mapped_column(Integer, default=15)
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=8)
     # 热闹插话：话题间隙内像真人群友一样插嘴，与冷场暖场分开配置。
     proactive_active_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    # 短会话续聊独立于主动插话开关：默认开启；迁移会按旧 trigger_mode
-    # 回填存量配置，避免 mention_only 等模式升级后意外获得连续续聊。
+    # 短会话续聊独立于主动参与能力；保留现有群的历史配置。
     short_conversation_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     proactive_active_probability: Mapped[float] = mapped_column(Float, default=0.25)
     proactive_active_window_minutes: Mapped[int] = mapped_column(Integer, default=12)
