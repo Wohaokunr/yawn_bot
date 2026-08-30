@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,10 @@ _REQUIRED_OPEN_SOURCE_FILES = (
     ".github/ISSUE_TEMPLATE/deployment_help.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
     ".github/workflows/license-compliance.yml",
+    ".github/workflows/playwright-runtime.yml",
     "deploy/docker/compose.release.yaml",
+    "deploy/docker/playwright-server.Dockerfile",
+    "deploy/docker/playwright-version.txt",
     "docs/public-docker-deployment.md",
     "third_party_licenses/README.md",
     "third_party_licenses/ZCOOL-KuaiLe-OFL-1.1.txt",
@@ -40,18 +44,35 @@ def _git(root: Path, *args: str) -> str:
     return completed.stdout
 
 
+def _expected_public_browser_image(root: Path) -> str:
+    version_path = root / "deploy" / "docker" / "playwright-version.txt"
+    dockerfile_path = root / "deploy" / "docker" / "playwright-server.Dockerfile"
+    version = version_path.read_text(encoding="utf-8").strip()
+    runtime_hash = hashlib.sha256(
+        version_path.read_bytes() + dockerfile_path.read_bytes()
+    ).hexdigest()[:16]
+    return (
+        "ghcr.io/wohaokunr/yawn_bot:"
+        f"browser-pw-{version}-{runtime_hash}"
+    )
+
+
 def _validate_public_release_compose(root: Path) -> list[str]:
     path = root / "deploy" / "docker" / "compose.release.yaml"
     if not path.is_file():
         return []
 
     content = path.read_text(encoding="utf-8")
+    expected_browser_image = _expected_public_browser_image(root)
     required_fragments = (
         'image: "${YAWNBOT_IMAGE:?',
         "../../.env",
         "yawnbot-data:/app/data",
         "name: yawnbot-internal",
         "/healthz",
+        "fanqie-browser",
+        "FANQIE_BROWSER_WS_ENDPOINT",
+        expected_browser_image,
     )
     violations = [
         (
