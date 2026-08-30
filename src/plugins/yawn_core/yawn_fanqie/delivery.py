@@ -133,7 +133,6 @@ async def send_file_to_user(
             user_id=user_id,
             file=remote_path,
             name=filename,
-            upload_file=True,
         )
         logger.debug(
             "fanqie delivery streamed private upload complete: user_id=%s",
