@@ -9,7 +9,7 @@ COPY deploy/docker/playwright-version.txt /tmp/playwright-version.txt
 RUN --mount=type=cache,target=/root/.npm \
     playwright_version="$(cat /tmp/playwright-version.txt)" \
     && npm install --global "playwright@${playwright_version}" \
-    && playwright install --with-deps chromium \
+    && playwright install --with-deps --only-shell chromium \
     && chmod -R a+rX /ms-playwright \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* /tmp/playwright-version.txt
