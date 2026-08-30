@@ -33,6 +33,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCALSTORE_USE_CWD=true
 WORKDIR /app
 
+# HTMLKit uses Fontconfig at runtime. The slim base image has no CJK font, so
+# visual cards such as /help would render Chinese text as missing glyphs.
+# WenQuanYi Micro Hei keeps the added image layer small while covering CJK.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fontconfig \
+        fonts-wqy-microhei \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
+
 # Keep ownership setup in a stable layer. Mutable source copies below use
 # COPY --chown so normal application changes do not force a recursive chown
 # over the large Python virtualenv.
