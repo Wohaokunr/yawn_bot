@@ -37,6 +37,8 @@ def main() -> None:
     data = {
         "previous_image": os.environ.get("PREVIOUS_IMAGE", ""),
         "current_image": _required_env("CURRENT_IMAGE"),
+        "previous_browser_image": os.environ.get("PREVIOUS_BROWSER_IMAGE", ""),
+        "current_browser_image": os.environ.get("CURRENT_BROWSER_IMAGE", ""),
         "commit_sha": _required_env("COMMIT_SHA"),
         "release_version": release_version,
         "db_backup": os.environ.get("DB_BACKUP", ""),
