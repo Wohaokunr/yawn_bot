@@ -47,9 +47,11 @@ jobs:
           }
           runtime_hash="$(cat deploy/docker/playwright-version.txt deploy/docker/playwright-server.Dockerfile | sha256sum | cut -c1-16)"
           repo_lower="${GITHUB_REPOSITORY,,}"
-          ref="ghcr.io/${repo_lower}:browser-pw-${playwright_version}-${runtime_hash}"
+          image="ghcr.io/${repo_lower}"
+          ref="${image}:browser-pw-${playwright_version}-${runtime_hash}"
           echo "version=$playwright_version" >> "$GITHUB_OUTPUT"
           echo "hash=$runtime_hash" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Build and publish Chromium headless runtime
@@ -61,8 +63,8 @@ jobs:
           push: true
           provenance: true
           sbom: true
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:browser-buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:browser-buildcache,mode=max
+          cache-from: type=registry,ref=${{ steps.runtime.outputs.image }}:browser-buildcache
+          cache-to: type=registry,ref=${{ steps.runtime.outputs.image }}:browser-buildcache,mode=max
           tags: ${{ steps.runtime.outputs.ref }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
