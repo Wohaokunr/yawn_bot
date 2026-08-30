@@ -1,0 +1,90 @@
+name: Playwright Chromium runtime
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/docker/playwright-version.txt"
+      - "deploy/docker/playwright-server.Dockerfile"
+      - ".github/workflows/playwright-runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: playwright-chromium-runtime
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish version-scoped Chromium runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable runtime tag
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          playwright_version="$(tr -d '\r\n' < deploy/docker/playwright-version.txt)"
+          [[ "$playwright_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Invalid Playwright version pin"
+            exit 1
+          }
+          runtime_hash="$(cat deploy/docker/playwright-version.txt deploy/docker/playwright-server.Dockerfile | sha256sum | cut -c1-16)"
+          repo_lower="${GITHUB_REPOSITORY,,}"
+          ref="ghcr.io/${repo_lower}:browser-pw-${playwright_version}-${runtime_hash}"
+          echo "version=$playwright_version" >> "$GITHUB_OUTPUT"
+          echo "hash=$runtime_hash" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish Chromium headless runtime
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/playwright-server.Dockerfile
+          push: true
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:browser-buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:browser-buildcache,mode=max
+          tags: ${{ steps.runtime.outputs.ref }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=playwright-${{ steps.runtime.outputs.version }}
+            io.yawnbot.runtime=playwright-chromium-headless
+            io.yawnbot.runtime.hash=${{ steps.runtime.outputs.hash }}
+
+      - name: Verify published immutable runtime
+        shell: bash
+        env:
+          RUNTIME_REF: ${{ steps.runtime.outputs.ref }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$RUNTIME_REF" | awk '/^Digest:/ {print $2; exit}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::GHCR did not return a valid Playwright runtime digest"
+            exit 1
+          }
+          [[ "$digest" == "$EXPECTED_DIGEST" ]] || {
+            echo "::error::Published Playwright runtime digest does not match build output"
+            exit 1
+          }
+          echo "Published $RUNTIME_REF@$digest"
