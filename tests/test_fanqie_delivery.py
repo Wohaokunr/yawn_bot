@@ -5,19 +5,19 @@ from __future__ import annotations
 import base64
 import importlib.util
 from pathlib import Path
-from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
 def delivery_module() -> ModuleType:
-    module_path = (
-        PROJECT_ROOT / "src/plugins/yawn_core/yawn_fanqie/delivery.py"
-    )
+    module_path = PROJECT_ROOT / "src/plugins/yawn_core/yawn_fanqie/delivery.py"
     spec = importlib.util.spec_from_file_location("_fanqie_delivery_unit", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("无法加载番茄小说投递模块")
