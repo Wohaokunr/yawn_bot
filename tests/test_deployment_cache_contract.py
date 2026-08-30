@@ -22,12 +22,18 @@ def test_playwright_browser_layer_is_version_scoped() -> None:
         lock,
         flags=re.MULTILINE,
     )
+    source_copy = re.search(
+        r"^COPY(?: --chown=[^ ]+)? src \./src$",
+        dockerfile,
+        flags=re.MULTILINE,
+    )
     assert match is not None
+    assert source_copy is not None
     assert pinned_version == match.group(1)
     assert "AS browser-runtime" in dockerfile
     assert "COPY deploy/docker/playwright-version.txt" in dockerfile
     assert "FROM browser-runtime AS runtime" in dockerfile
-    assert dockerfile.index("AS browser-runtime") < dockerfile.index("COPY src ./src")
+    assert dockerfile.index("AS browser-runtime") < source_copy.start()
 
 
 def test_release_exports_persistent_registry_build_cache() -> None:
