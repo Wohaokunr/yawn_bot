@@ -31,10 +31,8 @@ services:
   playwright:
     profiles:
       - fanqie-browser
-    build:
-      context: ../..
-      dockerfile: deploy/docker/playwright-server.Dockerfile
-    image: yawnbot-playwright:local
+    image: "${YAWNBOT_BROWSER_IMAGE:-ghcr.io/wohaokunr/yawn_bot:browser-pw-1.62.0-e611a498af6e84c5}"
+    pull_policy: missing
     restart: unless-stopped
     init: true
     shm_size: "512m"
