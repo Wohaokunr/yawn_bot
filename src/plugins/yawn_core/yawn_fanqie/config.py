@@ -20,6 +20,7 @@ class Config(BaseModel):
     fanqie_browser_timeout: float = Field(default=30.0, gt=0, le=120)
     fanqie_browser_headless: bool = True
     fanqie_browser_profile_dir: str = ""
+    fanqie_browser_ws_endpoint: str = ""
     fanqie_app_protocol_enabled: bool = True
     fanqie_third_party_api_base: str = "http://101.35.133.34:5000"
     fanqie_third_party_api_timeout: float = Field(default=30.0, gt=0, le=120)

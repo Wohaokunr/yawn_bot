@@ -2,7 +2,17 @@
 
 ## 番茄小说
 
-番茄子插件只处理公开且明确免费的内容。Docker 镜像会自动安装 Playwright Chromium；原生部署如果缺少 Chromium，启动日志会直接提示：
+番茄子插件只处理公开且明确免费的内容。Playwright 的 **Python 客户端属于 YawnBot 运行依赖**，但 Chromium 已从主应用镜像中拆出，不再跟随每次普通 YawnBot 发布重复分发。
+
+Docker 部署推荐使用独立 Playwright sidecar。sidecar 只存在于 Compose 内部网络，不应把 `3000` 端口发布到公网；生产发布会固定 Playwright 版本并复用同一个 Chromium runtime digest，直到 Playwright/browser runtime 输入发生变化。
+
+原生 Windows/Linux 部署仍可使用本机 Chromium。默认 headless 模式只需要 headless shell：
+
+```bash
+uv run playwright install --only-shell chromium
+```
+
+如果明确把 `FANQIE_BROWSER_HEADLESS=false` 用于本机可视化调试，则安装完整 Chromium：
 
 ```bash
 uv run playwright install chromium
@@ -30,9 +40,20 @@ FANQIE_RANK_LIMIT=10
 FANQIE_BROWSER_TIMEOUT=30
 FANQIE_BROWSER_HEADLESS=true
 FANQIE_BROWSER_PROFILE_DIR=
+FANQIE_BROWSER_WS_ENDPOINT=
 ```
 
-留空 profile dir 时使用 localstore 下的插件专用目录，不读取个人 Chrome/Edge profile，也不保存 QQ 登录态。
+留空 `FANQIE_BROWSER_WS_ENDPOINT` 时使用本机 Playwright Chromium；Docker sidecar 模式设置为内部地址 `ws://playwright:3000/`。不要把它指向不受信任的远程 Playwright 服务，因为该端点具备完整浏览器控制能力。
+
+留空 profile dir 时使用 localstore 下的插件专用目录，不读取个人 Chrome/Edge profile，也不保存 QQ 登录态。sidecar 模式会把 cookies、localStorage 与 IndexedDB 作为 Playwright `storage-state.json` 保存到同一个插件数据目录，并使用仅当前用户可读写的文件权限，以保留番茄公开页面自己的会话连续性。
+
+仓库根目录源码 Compose 和公开 Release Compose 都把浏览器作为 `fanqie-browser` profile 提供。需要番茄浏览器搜索时，设置：
+
+```dotenv
+FANQIE_BROWSER_WS_ENDPOINT=ws://playwright:3000/
+```
+
+然后以 `--profile fanqie-browser` 启动 Compose。维护者生产 CD 会自动写入该内部端点并启动对应 immutable browser image，不需要手工配置。
 
 ### 免费正文来源与回退
 
