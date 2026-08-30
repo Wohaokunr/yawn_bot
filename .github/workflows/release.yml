@@ -57,6 +57,9 @@ jobs:
       digest: ${{ steps.docker_build.outputs.digest }}
       production_image: ${{ steps.release_meta.outputs.production_image }}
       production_digest: ${{ steps.tcr_meta.outputs.digest }}
+      browser_image: ${{ steps.release_meta.outputs.production_image }}
+      browser_digest: ${{ steps.browser_final.outputs.digest }}
+      browser_tag: ${{ steps.browser_meta.outputs.tag }}
       commit: ${{ github.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -182,6 +185,73 @@ jobs:
           username: ${{ env.TCR_USERNAME }}
           password: ${{ secrets.TCR_PASSWORD }}
 
+      - name: Resolve stable Playwright Chromium runtime
+        id: browser_meta
+        shell: bash
+        env:
+          PRODUCTION_IMAGE: ${{ steps.release_meta.outputs.production_image }}
+        run: |
+          set -euo pipefail
+          playwright_version="$(tr -d '\r\n' < deploy/docker/playwright-version.txt)"
+          [[ "$playwright_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Invalid Playwright version pin"
+            exit 1
+          }
+          runtime_hash="$(cat deploy/docker/playwright-version.txt deploy/docker/playwright-server.Dockerfile | sha256sum | cut -c1-16)"
+          tag="browser-pw-${playwright_version}-${runtime_hash}"
+          ref="${PRODUCTION_IMAGE}:${tag}"
+          digest="$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)"
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            build=false
+            echo "Reusing stable Playwright Chromium runtime: $ref@$digest"
+          else
+            build=true
+            echo "Playwright Chromium runtime is not published yet: $ref"
+          fi
+          echo "version=$playwright_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish Playwright Chromium runtime
+        if: ${{ steps.browser_meta.outputs.build == 'true' }}
+        id: browser_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/playwright-server.Dockerfile
+          push: true
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ steps.release_meta.outputs.production_image }}:browser-buildcache
+          cache-to: type=registry,ref=${{ steps.release_meta.outputs.production_image }}:browser-buildcache,mode=max
+          tags: ${{ steps.browser_meta.outputs.ref }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=playwright-${{ steps.browser_meta.outputs.version }}
+            io.yawnbot.runtime=playwright-chromium
+
+      - name: Verify stable Playwright Chromium runtime digest
+        id: browser_final
+        shell: bash
+        env:
+          BROWSER_REF: ${{ steps.browser_meta.outputs.ref }}
+          EXPECTED_DIGEST: ${{ steps.browser_build.outputs.digest }}
+          WAS_BUILT: ${{ steps.browser_meta.outputs.build }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$BROWSER_REF" | awk '/^Digest:/ {print $2; exit}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::TCR did not return a valid Playwright runtime digest"
+            exit 1
+          }
+          if [[ "$WAS_BUILT" == "true" && -n "$EXPECTED_DIGEST" && "$digest" != "$EXPECTED_DIGEST" ]]; then
+            echo "::error::Published Playwright runtime digest does not match the build output"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Build and publish versioned Docker image
         id: docker_build
         uses: docker/build-push-action@v6
@@ -246,6 +316,9 @@ jobs:
           DIGEST: ${{ steps.docker_build.outputs.digest }}
           PRODUCTION_IMAGE: ${{ steps.release_meta.outputs.production_image }}
           PRODUCTION_DIGEST: ${{ steps.tcr_meta.outputs.digest }}
+          BROWSER_TAG: ${{ steps.browser_meta.outputs.tag }}
+          BROWSER_DIGEST: ${{ steps.browser_final.outputs.digest }}
+          PLAYWRIGHT_VERSION: ${{ steps.browser_meta.outputs.version }}
         run: |
           set -euo pipefail
           cat > "release-out/yawnbot-${VERSION}-image.txt" <<EOF
@@ -253,6 +326,9 @@ jobs:
           digest=${DIGEST}
           production_image=${PRODUCTION_IMAGE}:${VERSION}
           production_digest=${PRODUCTION_DIGEST}
+          production_browser_image=${PRODUCTION_IMAGE}:${BROWSER_TAG}
+          production_browser_digest=${BROWSER_DIGEST}
+          playwright_version=${PLAYWRIGHT_VERSION}
           commit=${GITHUB_SHA}
           EOF
           (
@@ -276,9 +352,10 @@ jobs:
           body: |
             Public Docker image: `${{ steps.release_meta.outputs.image }}:${{ steps.release_meta.outputs.version }}`
             Production TCR mirror: `${{ steps.release_meta.outputs.production_image }}:${{ steps.release_meta.outputs.version }}`
+            Stable Chromium runtime: `${{ steps.release_meta.outputs.production_image }}:${{ steps.browser_meta.outputs.tag }}`
             Quality gates: `${{ steps.release_meta.outputs.quality_gates }}`
-
             This release was rebuilt from a clean GitHub Actions checkout. Manual runs may explicitly bypass the full CI quality gates; the status above records whether that happened.
+            Chromium is published separately from the YawnBot application image and is reused until the pinned Playwright/browser runtime inputs change.
             The exact upstream HTMLKit source archive corresponding to the redistributed LGPL native extension is attached to this release and covered by `SHA256SUMS.txt`.
           files: |
             release-out/yawnbot-${{ steps.release_meta.outputs.version }}-deploy.tar.gz
@@ -396,6 +473,8 @@ jobs:
           TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
           IMAGE: ${{ needs.release.outputs.production_image }}
           DIGEST: ${{ needs.release.outputs.production_digest }}
+          BROWSER_IMAGE: ${{ needs.release.outputs.browser_image }}
+          BROWSER_DIGEST: ${{ needs.release.outputs.browser_digest }}
           VERSION: ${{ needs.release.outputs.version }}
           COMMIT: ${{ needs.release.outputs.commit }}
         run: |
@@ -405,7 +484,9 @@ jobs:
           test -n "$TCR_PASSWORD"
           test -n "$IMAGE"
           test -n "$DIGEST"
-          echo "Starting production deployment from Tencent TCR immutable image."
+          test -n "$BROWSER_IMAGE"
+          test -n "$BROWSER_DIGEST"
+          echo "Starting production deployment from Tencent TCR immutable application and browser images."
           printf '%s\n%s\n' "$TCR_USERNAME" "$TCR_PASSWORD" | \
             ssh -i ~/.ssh/yawnbot-deploy \
               -o BatchMode=yes \
@@ -415,4 +496,4 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=20 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT registry-token-stdin"
+              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT $BROWSER_IMAGE@$BROWSER_DIGEST registry-token-stdin"
