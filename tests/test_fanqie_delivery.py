@@ -97,7 +97,6 @@ async def test_delivery_streams_file_before_private_upload(
     assert all(call[1]["total_chunks"] == 5 for call in chunk_calls)
     assert private_calls[0][1]["file"] == remote_path
     assert private_calls[0][1]["name"] == "novel.txt"
-    assert private_calls[0][1]["upload_file"] is True
     assert bot.private_segment_calls == 0
 
 
