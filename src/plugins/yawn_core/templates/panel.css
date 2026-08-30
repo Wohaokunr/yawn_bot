@@ -3,7 +3,7 @@ html, body { margin: 0; padding: 0; background: transparent; }
 body {
   width: 720px;
   padding: 28px;
-  font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-family: "WenQuanYi Micro Hei", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   color: #263047;
 }
 .shell {
