@@ -118,11 +118,8 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
             ):
                 dbg(f"群 {config.group_id} 主动发言跳过: Agent 总开关已关闭")
                 continue
-            if config.trigger_mode != "mention_or_proactive":
-                dbg(
-                    f"群 {config.group_id} 主动发言跳过: "
-                    f"trigger_mode={config.trigger_mode!r} 不含主动模式"
-                )
+            if not config.proactive_enabled:
+                dbg(f"群 {config.group_id} 主动参与跳过: 主动参与已关闭")
                 continue
             counts = await _activity_window_counts(session, config.group_id, now)
             if counts["last_message_at"] is None:
@@ -148,17 +145,17 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                 member_messages_5m=counts["member_messages_5m"],
                 member_participants_5m=counts["member_participants_5m"],
             )
-            mode = should_proactively_speak(config, snapshot, now)
-            if mode is None:
+            scene = should_proactively_speak(config, snapshot, now)
+            if scene is None:
                 continue
             dbg(
-                f"群 {config.group_id} 入选主动发言候选(模式={mode},"
+                f"群 {config.group_id} 入选主动发言候选(场景={scene},"
                 f"今日第 {count + 1} 条)"
             )
             candidates.append(
                 {
                     "group_id": int(config.group_id),
-                    "mode": mode,
+                    "scene": scene,
                     "day_count": count,
                 }
             )
@@ -180,7 +177,7 @@ async def _apply_result(
     history_text: str | None,
     day_count: int,
     bot_id: int | None,
-    mode: str,
+    scene: str,
     reason: str,
     session_turn: int,
     target_user_id: int | None = None,
@@ -211,7 +208,7 @@ async def _apply_result(
                 actor_user_id=None,
                 tool_name="proactive_reply",
                 arguments={
-                    "mode": mode,
+                    "scene": scene,
                     "action": "speak",
                     "session_turn": session_turn,
                     "reason": reason[:240],
@@ -272,7 +269,7 @@ async def _prepare_proactive_message(
 
 async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) -> str:
     group_id = candidate["group_id"]
-    mode = candidate["mode"]
+    scene = candidate["scene"]
     primary = bots[0]
     primary_self_id = int(str(getattr(primary, "self_id", "") or 0))
     # 与对话路径(process_group_message)保持同一锁协议：上下文加载、生成、
@@ -283,9 +280,9 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             if (
                 config is None
                 or not await agent_runtime_enabled(session, group_id, config=config)
-                or config.trigger_mode != "mention_or_proactive"
+                or not config.proactive_enabled
             ):
-                dbg(f"群 {group_id} 主动发言生成中止: 配置缺失/未启用/模式不含主动")
+                dbg(f"群 {group_id} 主动发言生成中止: 配置缺失/Agent 未启用/主动参与关闭")
                 return "close"
             # 复用对话路径的相关上下文：先读有限候选池，再保留最后一个
             # 活跃对话簇，避免主动插话把整小时旧聊天与默认空元数据全量注入。
@@ -319,15 +316,15 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 persona=resolve_persona(config),
                 tools=[],
                 context=context,
-                user_prompt=_build_user_prompt(mode, config, turn=1),
+                user_prompt=_build_user_prompt(scene, config, turn=1),
             )
             trace_event(
                 "prompt",
                 "主动发言 Prompt 构建",
-                output={"message_count": len(prompt), "mode": mode},
+                output={"message_count": len(prompt), "scene": scene},
                 duration_ms=(time.monotonic() - prompt_started) * 1000,
             )
-            dbg(f"群 {group_id} 主动发言生成: 模式={mode}, 请求 LLM")
+            dbg(f"群 {group_id} 主动发言生成: 场景={scene}, 请求 LLM")
             llm_started = time.monotonic()
             raw = await _generate_proactive_reply(prompt)
             now = now_beijing()
@@ -353,7 +350,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    mode=mode,
+                    scene=scene,
                     reason="LLM 返回空内容",
                     session_turn=1,
                 )
@@ -363,7 +360,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": mode,
+                            "scene": scene,
                             "action": "error",
                             "session_turn": 1,
                             "reason": "LLM 返回空内容",
@@ -403,7 +400,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": mode,
+                            "scene": scene,
                             "action": decision.action,
                             "session_turn": 1,
                             "reason": decision.reason[:240],
@@ -422,7 +419,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    mode=mode,
+                    scene=scene,
                     reason=decision.reason,
                     session_turn=1,
                     target_user_id=decision.target_user_id,
@@ -447,7 +444,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": mode,
+                            "scene": scene,
                             "action": "wait",
                             "session_turn": 1,
                             "reason": "近期回复撞重",
@@ -464,7 +461,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    mode=mode,
+                    scene=scene,
                     reason="近期回复撞重",
                     session_turn=1,
                 )
@@ -483,7 +480,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": mode,
+                            "scene": scene,
                             "action": "wait",
                             "session_turn": 1,
                             "reason": reason[:240],
@@ -500,7 +497,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     history_text=None,
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
-                    mode=mode,
+                    scene=scene,
                     reason=reason,
                     session_turn=1,
                 )
@@ -540,7 +537,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": mode,
+                            "scene": scene,
                             "action": "send_failed",
                             "session_turn": 1,
                             "reason": "无可用机器人发送",
@@ -563,7 +560,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 history_text=history_text,
                 day_count=candidate["day_count"],
                 bot_id=sent_bot_id,
-                mode=mode,
+                scene=scene,
                 reason=decision.reason,
                 session_turn=1,
                 target_user_id=decision.target_user_id,
@@ -574,7 +571,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     sent_bot_id,
                     group_id,
                     topic=decision.topic or str(config.active_topic or ""),
-                    source=mode,
+                    source=scene,
                 )
             try:
                 await session.commit()
@@ -588,17 +585,24 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
 async def _process_candidate(candidate: dict[str, Any], bots: list[Any]) -> None:
     started = time.monotonic()
     outcome = "error"
+    scene = str(candidate.get("scene") or "")
+    trigger_source = {
+        "warmup": "proactive_warmup",
+        "active": "proactive_interject",
+    }.get(scene, "proactive_participation")
     trace = begin_execution_trace(
         int(candidate["group_id"]),
-        mode=str(candidate.get("mode") or "proactive"),
+        mode="proactive",
         source="runtime",
+        trigger_source=trigger_source,
     )
     token = bind_execution_trace(trace)
     trace_event(
         "intake",
         "主动发言候选进入执行",
         output={
-            "mode": candidate.get("mode"),
+            "trigger_source": trigger_source,
+            "scene": candidate.get("scene"),
             "day_count": candidate.get("day_count"),
         },
     )
@@ -741,7 +745,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": "followup",
+                            "scene": "followup",
                             "action": "error",
                             "session_turn": batch.bot_turns + 1,
                             "session_id": batch.session_id,
@@ -791,7 +795,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": "followup",
+                            "scene": "followup",
                             "action": action,
                             "session_turn": batch.bot_turns + 1,
                             "session_id": batch.session_id,
@@ -834,7 +838,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                         actor_user_id=None,
                         tool_name="proactive_reply",
                         arguments={
-                            "mode": "followup",
+                            "scene": "followup",
                             "action": "send_failed",
                             "session_turn": batch.bot_turns + 1,
                             "session_id": batch.session_id,
@@ -858,7 +862,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 history_text=history_text,
                 day_count=day_count,
                 bot_id=bot_id,
-                mode="followup",
+                scene="followup",
                 reason=reason,
                 session_turn=batch.bot_turns + 1,
                 target_user_id=decision.target_user_id,
@@ -887,8 +891,9 @@ async def _process_followup(batch: ConversationBatch) -> None:
     bot_id, group_id = batch.key
     trace = begin_execution_trace(
         group_id,
-        mode="followup",
+        mode="proactive",
         source="runtime",
+        trigger_source="conversation_followup",
         message_id=batch.message_ids[-1] if batch.message_ids else None,
     )
     token = bind_execution_trace(trace)
@@ -896,6 +901,8 @@ async def _process_followup(batch: ConversationBatch) -> None:
         "intake",
         "短会话合批进入执行",
         output={
+            "trigger_source": "conversation_followup",
+            "scene": "followup",
             "session_id": batch.session_id,
             "message_count": len(batch.message_ids),
             "bot_turns": batch.bot_turns,

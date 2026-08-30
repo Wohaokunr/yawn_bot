@@ -180,7 +180,7 @@ def test_current_turn_has_priority_over_old_group_topic() -> None:
                 "text": "前面问的是 Roblox",
             }
         ],
-        trigger="reply_to_bot",
+        trigger="reply",
         received_at=received_at,
     )
     messages, _ = build_messages(
@@ -611,142 +611,194 @@ def test_intent_text_excludes_input_placeholders() -> None:
     assert normalized.intent_text() == "帮我看看"
 
 
-def test_trigger_modes_distinguish_mentions_replies_and_explicit_wakeup() -> None:
+def test_trigger_metadata_is_process_only_and_not_persisted() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.message_parser import NormalizedMessage
+
+    normalized = NormalizedMessage(plain_text="hello", segments=[])
+    normalized.trigger_source = "reply"
+    normalized.trigger_signals = {"mention": False, "reply": True, "wake_word": False}
+
+    assert "trigger_source" not in normalized.as_dict()
+    assert "trigger_signals" not in normalized.as_dict()
+    assert "trigger_source" not in normalized.storage_dict()
+    assert "trigger_signals" not in normalized.storage_dict()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        SimpleNamespace(
+            to_me=True, reply=None, text="hello", reply_on=False,
+            wake_on=False, source="mention",
+        ),
+        # OneBot may set to_me for a reply; reply evidence must win that flag.
+        SimpleNamespace(
+            to_me=True, reply=100, text="继续", reply_on=True,
+            wake_on=False, source="reply",
+        ),
+        SimpleNamespace(
+            to_me=False, reply=100, text="继续", reply_on=True,
+            wake_on=False, source="reply",
+        ),
+        SimpleNamespace(
+            to_me=False, reply=100, text="继续", reply_on=False,
+            wake_on=False, source=None,
+        ),
+        SimpleNamespace(
+            to_me=False, reply=None, text="yawn 在吗", reply_on=False,
+            wake_on=True, source="wake_word",
+        ),
+        SimpleNamespace(
+            to_me=False, reply=None, text="yawn 在吗", reply_on=False,
+            wake_on=False, source=None,
+        ),
+        SimpleNamespace(
+            to_me=False, reply=300, text="普通消息", reply_on=True,
+            wake_on=True, source=None,
+        ),
+        SimpleNamespace(
+            to_me=False, reply=None, text="ordinary conversation", reply_on=True,
+            wake_on=True, source=None,
+        ),
+    ],
+)
+def test_explicit_call_trigger_matrix(case: SimpleNamespace) -> None:
     _load_agent_modules()
     from typing import cast
 
     from nonebot.adapters.onebot.v11 import Bot as OneBotBot
     from nonebot.adapters.onebot.v11 import GroupMessageEvent
 
-    from src.plugins.yawn_core.yawn_agent.agent import should_respond
+    from src.plugins.yawn_core.yawn_agent.agent import resolve_trigger
 
     class Bot:
         self_id = "100"
+        nickname = ""
 
     class Event:
         group_id = 1
         message: tuple[object, ...] = ()
-        reply = None
+
+        def __init__(self) -> None:
+            self.to_me = bool(case.to_me)
+            reply_user_id = case.reply
+            self.reply = (
+                SimpleNamespace(sender=SimpleNamespace(user_id=reply_user_id))
+                if reply_user_id is not None
+                else None
+            )
 
         def get_user_id(self) -> str:
             return "200"
 
         def get_plaintext(self) -> str:
-            return "小助手 在吗"
+            return str(case.text)
 
-    # 假对象只实现 should_respond 用到的鸭子类型接口，用 cast 满足静态检查。
-    event = cast("GroupMessageEvent", Event())
-    bot = cast("OneBotBot", Bot())
-    assert should_respond(event, bot, "explicit_wakeup")
-    assert not should_respond(event, bot, "mention_only")
+    decision = resolve_trigger(
+        cast("GroupMessageEvent", Event()),
+        cast("OneBotBot", Bot()),
+        reply_trigger_enabled=bool(case.reply_on),
+        explicit_wakeup_enabled=bool(case.wake_on),
+    )
+    expected_source = case.source
+    assert decision.respond is (expected_source is not None)
+    assert decision.source == expected_source
+    if expected_source == "reply":
+        assert decision.replied is True
+        assert decision.mentioned is False
 
 
-def test_reply_to_bot_detection_falls_back_to_reply_chain() -> None:
+def test_reply_to_bot_detection_falls_back_to_direct_reply_chain_only() -> None:
     _load_agent_modules()
     from typing import cast
 
     from nonebot.adapters.onebot.v11 import Bot as OneBotBot
     from nonebot.adapters.onebot.v11 import GroupMessageEvent
 
-    from src.plugins.yawn_core.yawn_agent.agent import should_respond
+    from src.plugins.yawn_core.yawn_agent.agent import resolve_trigger
     from src.plugins.yawn_core.yawn_agent.message_parser import NormalizedMessage
 
     class Bot:
         self_id = "100"
+        nickname = ""
 
     class Event:
         group_id = 1
         message: tuple[object, ...] = ()
         reply = None
+        to_me = False
 
         def get_user_id(self) -> str:
             return "200"
 
         def get_plaintext(self) -> str:
-            return "这句话没有唤醒词"
+            return "没有唤醒词"
 
     direct = NormalizedMessage(
-        plain_text="这句话没有唤醒词",
+        plain_text="没有唤醒词",
         segments=[],
         reply_chain=[
             {"message_id": 1, "user_id": 100, "nickname": "Yawn", "text": "机器人的话"}
         ],
     )
-    assert should_respond(
-        cast("GroupMessageEvent", Event()), cast("OneBotBot", Bot()), normalized=direct
+    direct_decision = resolve_trigger(
+        cast("GroupMessageEvent", Event()),
+        cast("OneBotBot", Bot()),
+        normalized=direct,
     )
+    assert direct_decision.respond is True
+    assert direct_decision.source == "reply"
+
+    disabled = resolve_trigger(
+        cast("GroupMessageEvent", Event()),
+        cast("OneBotBot", Bot()),
+        reply_trigger_enabled=False,
+        normalized=direct,
+    )
+    assert disabled.respond is False
+    assert disabled.source is None
+    assert disabled.replied is True
 
     deeper_only = NormalizedMessage(
-        plain_text="这句话没有唤醒词",
+        plain_text="没有唤醒词",
         segments=[],
         reply_chain=[
             {"message_id": 2, "user_id": 300, "nickname": "别人", "text": "别人的话"},
             {"message_id": 1, "user_id": 100, "nickname": "Yawn", "text": "机器人的话"},
         ],
     )
-    assert not should_respond(
+    deeper_decision = resolve_trigger(
         cast("GroupMessageEvent", Event()),
         cast("OneBotBot", Bot()),
         normalized=deeper_only,
     )
+    assert deeper_decision.respond is False
+    assert deeper_decision.source is None
 
 
-def test_mention_detection_includes_adapter_to_me_after_at_segment_removed() -> None:
+def test_bot_self_message_never_becomes_an_explicit_call() -> None:
     _load_agent_modules()
     from typing import cast
 
     from nonebot.adapters.onebot.v11 import Bot as OneBotBot
     from nonebot.adapters.onebot.v11 import GroupMessageEvent
 
-    from src.plugins.yawn_core.yawn_agent.agent import should_respond
+    from src.plugins.yawn_core.yawn_agent.agent import resolve_trigger
 
-    class Bot:
-        self_id = "100"
-
-    class Event:
-        # 适配器的 _check_at_me 会把指向机器人的 @ 段移除并置 to_me,
-        # event.message 里不再有 at 段。
-        group_id = 1
-        message: tuple[object, ...] = ()
-        reply = None
-        to_me = True
-
-        def get_user_id(self) -> str:
-            return "200"
-
-        def get_plaintext(self) -> str:
-            return "帮我看看这个"
-
-    assert should_respond(
-        cast("GroupMessageEvent", Event()), cast("OneBotBot", Bot()), "mention_only"
+    event = SimpleNamespace(
+        get_user_id=lambda: "100",
+        get_plaintext=lambda: "yawn",
+        message=(),
+        reply=None,
+        to_me=True,
     )
-
-
-def test_explicit_wakeup_does_not_match_embedded_english_syllables() -> None:
-    _load_agent_modules()
-    from typing import cast
-
-    from nonebot.adapters.onebot.v11 import Bot as OneBotBot
-    from nonebot.adapters.onebot.v11 import GroupMessageEvent
-
-    from src.plugins.yawn_core.yawn_agent.agent import should_respond
-
-    class Bot:
-        self_id = "100"
-
-    class Event:
-        message: tuple[object, ...] = ()
-        reply = None
-
-        def get_user_id(self) -> str:
-            return "200"
-
-        def get_plaintext(self) -> str:
-            return "this is an ordinary sentence"
-
-    assert not should_respond(
-        cast("GroupMessageEvent", Event()), cast("OneBotBot", Bot()), "explicit_wakeup"
+    bot = SimpleNamespace(self_id="100", nickname="Yawn")
+    decision = resolve_trigger(
+        cast("GroupMessageEvent", event), cast("OneBotBot", bot)
     )
+    assert decision.respond is False
+    assert decision.source is None
 
 
 def test_prompt_cache_key_includes_model_and_persona_version() -> None:
@@ -798,6 +850,7 @@ def _make_proactive_config(**overrides: object):
     values: dict[str, object] = {
         "group_id": 1,
         "enabled": True,
+        "proactive_enabled": True,
         "daily_limit": 30,
         "cooldown_minutes": 8,
         "idle_threshold_minutes": 15,
@@ -900,6 +953,31 @@ def test_proactive_active_mode_rejects_rushing_and_stale_gap() -> None:
         should_proactively_speak(
             make_config(proactive_active_enabled=False),
             snapshot(3),
+            now,
+            rng=_FixedRoll(0.0),
+        )
+        is None
+    )
+
+
+def test_proactive_policy_stops_when_participation_is_disabled() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    now = now_beijing()
+    snapshot = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=40),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=5,
+        last_member_message_at=now - timedelta(minutes=40),
+    )
+    assert (
+        should_proactively_speak(
+            _make_proactive_config(proactive_enabled=False),
+            snapshot,
             now,
             rng=_FixedRoll(0.0),
         )

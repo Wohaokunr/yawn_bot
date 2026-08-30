@@ -67,6 +67,9 @@ class NormalizedMessage:
     # 仅用于本进程内执行追踪；不进入 as_dict/storage_dict，因此不会形成
     # 第二份长期消息副本。
     parse_trace: list[dict[str, Any]] = field(default_factory=list)
+    # Process-only trigger metadata. It is intentionally excluded from as_dict/storage_dict.
+    trigger_source: str | None = None
+    trigger_signals: dict[str, bool] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {

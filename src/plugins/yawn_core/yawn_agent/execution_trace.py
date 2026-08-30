@@ -73,6 +73,7 @@ class ExecutionTrace:
     group_id: int
     mode: str
     source: str
+    trigger_source: str | None
     actor_user_id: int | None
     message_id: int | None
     started_at: datetime
@@ -88,6 +89,7 @@ class ExecutionTrace:
             "groupId": str(self.group_id),
             "mode": self.mode,
             "source": self.source,
+            "triggerSource": self.trigger_source,
             "actorUserId": (
                 str(self.actor_user_id) if self.actor_user_id is not None else None
             ),
@@ -167,6 +169,7 @@ def begin_execution_trace(
     *,
     mode: str,
     source: str,
+    trigger_source: str | None = None,
     actor_user_id: int | None = None,
     message_id: int | None = None,
 ) -> ExecutionTrace:
@@ -175,6 +178,7 @@ def begin_execution_trace(
         group_id=int(group_id),
         mode=mode,
         source=source,
+        trigger_source=trigger_source,
         actor_user_id=actor_user_id,
         message_id=message_id,
         started_at=now_beijing(),

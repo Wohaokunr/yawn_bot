@@ -95,7 +95,9 @@ export interface Member {
 export interface AgentConfig {
   groupId: string;
   enabled: boolean;
-  triggerMode: string;
+  replyTriggerEnabled: boolean;
+  explicitWakeupEnabled: boolean;
+  proactiveEnabled: boolean;
   proactiveProbability: number;
   proactiveActiveEnabled: boolean;
   shortConversationEnabled: boolean;
@@ -135,7 +137,8 @@ export interface AgentDiagnostics {
   groupId: string;
   effective: {
     enabled: boolean;
-    triggerMode: string;
+    replyTriggerEnabled: boolean;
+    explicitWakeupEnabled: boolean;
     proactiveEnabled: boolean;
     proactiveActiveEnabled: boolean;
     proactiveToday: number;
@@ -317,6 +320,7 @@ export interface AgentExecutionTrace {
   groupId: string;
   mode: string;
   source: "debug" | "runtime" | string;
+  triggerSource: string | null;
   actorUserId: string | null;
   messageId: string | null;
   startedAt: string;

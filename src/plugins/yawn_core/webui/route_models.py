@@ -74,6 +74,7 @@ class AgentConfigPatch(BaseModel):
 
     version: str | None
     enabled: bool | None = None
+    # Deprecated compatibility input; new clients use independent flags.
     trigger_mode: (
         Literal[
             "mention_only",
@@ -83,6 +84,13 @@ class AgentConfigPatch(BaseModel):
         ]
         | None
     ) = Field(default=None, alias="triggerMode")
+    reply_trigger_enabled: bool | None = Field(
+        default=None, alias="replyTriggerEnabled"
+    )
+    explicit_wakeup_enabled: bool | None = Field(
+        default=None, alias="explicitWakeupEnabled"
+    )
+    proactive_enabled: bool | None = Field(default=None, alias="proactiveEnabled")
     proactive_probability: float | None = Field(
         default=None, ge=0, le=1, alias="proactiveProbability"
     )

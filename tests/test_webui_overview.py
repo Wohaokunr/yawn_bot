@@ -6,6 +6,7 @@ import importlib
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import nonebot
 import pytest
@@ -347,12 +348,91 @@ async def test_agent_diagnostics_uses_runtime_defaults_without_persisted_config(
     result = await service.agent_diagnostics(FakeSession(), 100)
 
     assert result["effective"]["enabled"] is True
-    assert result["effective"]["triggerMode"] == "mention_or_proactive"
+    assert result["effective"]["replyTriggerEnabled"] is True
+    assert result["effective"]["explicitWakeupEnabled"] is True
+    assert result["effective"]["proactiveEnabled"] is True
     assert result["effective"]["dailyLimit"] == 30
     assert result["effective"]["cooldownMinutes"] == 8
     assert result["effective"]["shortConversation"]["enabled"] is True
     assert result["effective"]["shortConversation"]["active"] is False
     assert result["blockers"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_diagnostics_proactive_switch_gates_interject_subfeature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        enabled=True,
+        reply_trigger_enabled=True,
+        explicit_wakeup_enabled=True,
+        proactive_enabled=False,
+        proactive_active_enabled=True,
+        short_conversation_enabled=True,
+        daily_limit=30,
+        cooldown_minutes=8,
+        last_agent_at=None,
+        last_proactive_at=None,
+        active_topic=None,
+        media_cache_enabled=False,
+        proactive_count=0,
+        proactive_day=None,
+    )
+
+    class FakeSession:
+        async def get(self, model: object, _key: object) -> object | None:
+            if model is config_models.GroupAgentConfig:
+                return config
+            return None
+
+    async def fake_memory_status(_session: object, group_id: int) -> dict[str, object]:
+        return {
+            "groupId": str(group_id),
+            "runtimeEnabled": True,
+            "pendingMessages": 0,
+            "lastCompactedMessageId": None,
+            "lastCompactedAt": None,
+            "countsByType": {},
+            "total": 0,
+            "oldestUpdatedAt": None,
+            "newestUpdatedAt": None,
+            "rebuildRequired": False,
+            "lastAttemptAt": None,
+            "lastSuccessAt": None,
+            "lastError": None,
+            "consecutiveFailures": 0,
+            "inFlight": False,
+        }
+
+    routes = [
+        {
+            "task": task,
+            "profile": "default",
+            "provider": "default",
+            "model": "model",
+            "thinking": "auto",
+            "multimodal": "auto",
+            "configured": True,
+        }
+        for task in ("agent_dialogue", "agent_proactive", "agent_memory", "agent_image")
+    ]
+    monkeypatch.setattr(service, "agent_memory_status", fake_memory_status)
+    monkeypatch.setattr(
+        service,
+        "_llm_runtime_status",
+        lambda: {"routes": routes, "unconfiguredProviders": []},
+    )
+    monkeypatch.setattr(service, "get_bots", lambda: {"9": object()})
+    monkeypatch.setattr(
+        service, "current_conversation", lambda _bot_id, _group_id: None
+    )
+
+    result = await service.agent_diagnostics(FakeSession(), 100)
+
+    assert result["effective"]["enabled"] is True
+    assert result["effective"]["proactiveEnabled"] is False
+    assert result["effective"]["proactiveActiveEnabled"] is False
+    assert [item["code"] for item in result["blockers"]] == ["proactive_disabled"]
 
 
 @pytest.mark.asyncio

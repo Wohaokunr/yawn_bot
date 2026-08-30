@@ -31,6 +31,7 @@ def test_execution_trace_is_bounded_redacted_and_stored_per_group() -> None:
         group_id,
         mode="dialogue",
         source="runtime",
+        trigger_source="reply",
         actor_user_id=123,
         message_id=456,
     )
@@ -67,6 +68,7 @@ def test_execution_trace_is_bounded_redacted_and_stored_per_group() -> None:
     assert len(stored) == 1
     payload = stored[0]
     assert payload["source"] == "runtime"
+    assert payload["triggerSource"] == "reply"
     assert payload["messageId"] == "456"
     assert payload["durationMs"] is not None
     assert [event["phase"] for event in payload["events"]] == ["media", "outbound"]

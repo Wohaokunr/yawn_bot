@@ -187,15 +187,6 @@ const LLM_TASK_LABELS: Record<string, string> = {
   agent_image: "图片理解",
 };
 
-export function triggerModeLabel(mode: string): string {
-  return ({
-    mention_only: "仅 @",
-    mention_or_reply: "@ 或回复",
-    explicit_wakeup: "@ 或显式唤醒",
-    mention_or_proactive: "@ / 回复 / 唤醒 / 主动",
-  } as Record<string, string>)[mode] ?? mode;
-}
-
 function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const load = useCallback(
     () => api<AgentDiagnostics>(`/agent/groups/${groupId}/diagnostics`).then((r) => r.data),
@@ -230,17 +221,18 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
     >
       <Row gutter={[16, 16]}>
         <Col xs={12} md={6}><Statistic title="Agent" value={effective.enabled ? "开启" : "关闭"} /></Col>
-        <Col xs={12} md={6}><Statistic title="触发模式" value={triggerModeLabel(effective.triggerMode)} /></Col>
+        <Col xs={12} md={6}><Statistic title="叫名唤醒" value={effective.explicitWakeupEnabled ? "开启" : "关闭"} /></Col>
+        <Col xs={12} md={6}><Statistic title="主动参与" value={effective.proactiveEnabled ? "开启" : "关闭"} /></Col>
         <Col xs={12} md={6}><Statistic title="今日主动额度" value={effective.dailyRemaining} suffix={`/ ${effective.dailyLimit}`} /></Col>
         <Col xs={12} md={6}><Statistic title="主动冷却剩余" value={effective.cooldownRemainingMinutes} suffix="分钟" /></Col>
       </Row>
       <Row gutter={[16, 16]} className="section-row">
         <Col xs={24} lg={8}>
-          <Card size="small" title="主动发言">
+          <Card size="small" title="主动参与">
             <Space orientation="vertical" size={6}>
-              <Text>模式：<Tag color={effective.proactiveEnabled ? "green" : "default"}>{effective.proactiveEnabled ? "允许主动" : "仅被动"}</Tag></Text>
-              <Text>热闹插话：{effective.proactiveActiveEnabled ? "开启" : "关闭"}</Text>
-              <Text>上次主动：{formatTime(effective.lastProactiveAt)}</Text>
+              <Text>功能：<Tag color={effective.proactiveEnabled ? "green" : "default"}>{effective.proactiveEnabled ? "开启" : "关闭"}</Tag></Text>
+              <Text>活跃聊天：{effective.proactiveActiveEnabled ? "允许自然加入" : "仅冷场参与"}</Text>
+              <Text>上次参与：{formatTime(effective.lastProactiveAt)}</Text>
               <Text type="secondary">当前话题：{effective.activeTopic || "—"}</Text>
             </Space>
           </Card>
@@ -349,10 +341,28 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
   </Space>;
 }
 
+type ParticipationIntensity = "restrained" | "balanced" | "active" | "custom";
+
+const PARTICIPATION_PRESETS: Record<Exclude<ParticipationIntensity, "custom">, { warmup: number; interject: number }> = {
+  restrained: { warmup: 0.18, interject: 0.10 },
+  balanced: { warmup: 0.35, interject: 0.25 },
+  active: { warmup: 0.55, interject: 0.45 },
+};
+
+function participationIntensity(warmup: number, interject: number): ParticipationIntensity {
+  const entry = Object.entries(PARTICIPATION_PRESETS).find(([, preset]) =>
+    Math.abs(preset.warmup - warmup) < 0.001 && Math.abs(preset.interject - interject) < 0.001,
+  );
+  return (entry?.[0] as ParticipationIntensity | undefined) ?? "custom";
+}
+
 function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
   const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
   const query = useApiQuery(load, { resources: ["agent_config"] });
+  const watchedProactiveEnabled = Form.useWatch("proactiveEnabled", form) as boolean | undefined;
+  const watchedWarmupProbability = Form.useWatch("proactiveProbability", form) as number | undefined;
+  const watchedInterjectProbability = Form.useWatch("proactiveActiveProbability", form) as number | undefined;
   useUnsavedChanges(dirty);
   useEffect(() => { if (query.data) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data]);
   const save = async (values: Record<string, unknown>) => {
@@ -369,6 +379,19 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
   };
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
+  const intensity = participationIntensity(
+    watchedWarmupProbability ?? data.proactiveProbability,
+    watchedInterjectProbability ?? data.proactiveActiveProbability,
+  );
+  const setParticipationIntensity = (value: string | number): void => {
+    const preset = PARTICIPATION_PRESETS[String(value) as Exclude<ParticipationIntensity, "custom">];
+    if (!preset) return;
+    form.setFieldsValue({
+      proactiveProbability: preset.warmup,
+      proactiveActiveProbability: preset.interject,
+    });
+    setDirty(true);
+  };
   return (
     <Form
       form={form}
@@ -424,71 +447,100 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
               <div className="agent-config-section-head">
                 <div>
                   <div className="agent-config-section-kicker">CONVERSATION</div>
-                  <h3>触发与会话</h3>
-                  <p>决定什么时候响应，以及一次回复后是否继续自然续聊。</p>
+                  <h3>聊天参与</h3>
+                  <p>@ Agent 始终会回应；这里只控制额外的自然交互能力。</p>
                 </div>
               </div>
               <div className="agent-config-grid agent-config-grid-2">
-                <Form.Item name="triggerMode" label="触发模式" rules={[{ required: true }]}>
-                  <Select
-                    options={[
-                      { value: "mention_only", label: "仅 @" },
-                      { value: "mention_or_reply", label: "@ 或回复" },
-                      { value: "explicit_wakeup", label: "@ 或显式唤醒" },
-                      { value: "mention_or_proactive", label: "@ / 回复 / 唤醒 / 主动" },
-                    ]}
-                  />
-                </Form.Item>
                 <div className="agent-config-toggle-card">
                   <div>
-                    <div className="agent-config-toggle-title">短会话续聊</div>
+                    <div className="agent-config-toggle-title">叫名字也回应</div>
+                    <div className="agent-config-toggle-help">不必 @，直接叫 Agent 名字或常用唤醒词也可以开始对话。</div>
+                  </div>
+                  <Form.Item name="explicitWakeupEnabled" valuePropName="checked" noStyle>
+                    <Switch />
+                  </Form.Item>
+                </div>
+                <div className="agent-config-toggle-card">
+                  <div>
+                    <div className="agent-config-toggle-title">自然续聊</div>
                     <div className="agent-config-toggle-help">Bot 回复后，可在同一话题中继续自然接话。</div>
                   </div>
                   <Form.Item name="shortConversationEnabled" valuePropName="checked" noStyle>
                     <Switch />
                   </Form.Item>
                 </div>
+                <div className="agent-config-toggle-card agent-config-toggle-card-featured">
+                  <div>
+                    <div className="agent-config-toggle-title">主动参与群聊</div>
+                    <div className="agent-config-toggle-help">没人直接叫它时，也允许根据群聊上下文适时暖场或加入话题。</div>
+                  </div>
+                  <Form.Item name="proactiveEnabled" valuePropName="checked" noStyle>
+                    <Switch />
+                  </Form.Item>
+                </div>
               </div>
             </section>
 
-            <section className="agent-config-section liquid-glass agent-config-floating">
+            {(watchedProactiveEnabled ?? data.proactiveEnabled) && <section className="agent-config-section liquid-glass agent-config-floating">
               <div className="agent-config-section-head">
                 <div>
-                  <div className="agent-config-section-kicker">PROACTIVE</div>
-                  <h3>主动发言</h3>
-                  <p>分别控制冷场暖场和群聊活跃时的自然插话，并限制频率。</p>
+                  <div className="agent-config-section-kicker">PARTICIPATION</div>
+                  <h3>主动参与策略</h3>
+                  <p>Agent 自动根据群聊状态选择冷场暖场或加入正在进行的话题；普通配置只需要控制参与强度和边界。</p>
                 </div>
               </div>
               <div className="agent-config-toggle-card agent-config-toggle-card-featured">
                 <div>
-                  <div className="agent-config-toggle-title">热闹插话</div>
-                  <div className="agent-config-toggle-help">群里正在聊天时，允许 Agent 根据上下文自然加入话题。</div>
+                  <div className="agent-config-toggle-title">参与强度</div>
+                  <div className="agent-config-toggle-help">同时调整暖场和加入话题的积极程度，不需要分别理解两套概率。</div>
+                </div>
+                <Segmented
+                  value={intensity}
+                  onChange={setParticipationIntensity}
+                  options={[
+                    { value: "restrained", label: "克制" },
+                    { value: "balanced", label: "平衡" },
+                    { value: "active", label: "活跃" },
+                    ...(intensity === "custom" ? [{ value: "custom", label: "自定义", disabled: true }] : []),
+                  ]}
+                />
+              </div>
+              <div className="agent-config-toggle-card">
+                <div>
+                  <div className="agent-config-toggle-title">群聊活跃时也允许加入</div>
+                  <div className="agent-config-toggle-help">关闭后仍可在冷场时自然暖场，但不会加入群友正在进行的聊天。</div>
                 </div>
                 <Form.Item name="proactiveActiveEnabled" valuePropName="checked" noStyle>
                   <Switch />
                 </Form.Item>
               </div>
               <div className="agent-config-grid agent-config-grid-3">
-                <Form.Item name="proactiveProbability" label="冷场暖场概率" extra="每次满足冷场条件后的发言概率">
-                  <InputNumber min={0} max={1} step={0.05} />
-                </Form.Item>
-                <Form.Item name="proactiveActiveProbability" label="热闹插话概率" extra="活跃窗口内进入候选后的插话概率">
-                  <InputNumber min={0} max={1} step={0.02} />
-                </Form.Item>
-                <Form.Item name="proactiveActiveWindowMinutes" label="活跃窗口" extra="分钟">
-                  <InputNumber min={1} max={1440} />
-                </Form.Item>
-                <Form.Item name="idleThresholdMinutes" label="冷场阈值" extra="连续多少分钟安静后开始考虑暖场">
+                <Form.Item name="idleThresholdMinutes" label="冷场判定" extra="安静多久后才考虑主动暖场（分钟）">
                   <InputNumber min={1} max={10080} />
                 </Form.Item>
-                <Form.Item name="cooldownMinutes" label="主动冷却" extra="两次主动发言之间的最短间隔（分钟）">
+                <Form.Item name="cooldownMinutes" label="参与冷却" extra="两次主动参与之间至少间隔多少分钟">
                   <InputNumber min={0} max={10080} />
                 </Form.Item>
-                <Form.Item name="dailyLimit" label="每日主动上限" extra="达到后当天停止主动发言">
+                <Form.Item name="dailyLimit" label="每日参与上限" extra="达到后当天停止自动参与">
                   <InputNumber min={0} max={1000} />
                 </Form.Item>
               </div>
-            </section>
+              <details className="agent-debug-details">
+                <summary>精细调节（高级）</summary>
+                <div className="agent-config-grid agent-config-grid-3 section-row">
+                  <Form.Item name="proactiveProbability" label="暖场基础概率" extra="满足冷场条件后的基础概率">
+                    <InputNumber min={0} max={1} step={0.05} />
+                  </Form.Item>
+                  <Form.Item name="proactiveActiveProbability" label="加入话题概率" extra="活跃聊天进入候选后的参与概率">
+                    <InputNumber min={0} max={1} step={0.02} />
+                  </Form.Item>
+                  <Form.Item name="proactiveActiveWindowMinutes" label="活跃话题窗口" extra="最近多少分钟的真人消息算作活跃话题">
+                    <InputNumber min={1} max={1440} />
+                  </Form.Item>
+                </div>
+              </details>
+            </section>}
 
             <section className="agent-config-section liquid-glass agent-config-floating">
               <div className="agent-config-section-head">
@@ -558,8 +610,8 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
             <div className="agent-config-note-card agent-config-note-soft liquid-glass agent-config-floating">
               <div className="agent-config-note-title">推荐顺序</div>
               <ol>
-                <li>先设置触发模式</li>
-                <li>再调整主动发言频率</li>
+                <li>先选择需要的聊天参与能力</li>
+                <li>需要时再调整主动参与频率</li>
                 <li>确认记忆边界</li>
                 <li>最后开放管理工具</li>
               </ol>
@@ -1496,6 +1548,22 @@ const TRACE_MEDIA_SOURCE_LABELS: Record<string, string> = {
   forward: "合并转发",
 };
 
+const TRACE_TRIGGER_SOURCE_LABELS: Record<string, string> = {
+  mention: "@ 明确呼叫",
+  reply: "回复 Agent",
+  wake_word: "叫名 / 唤醒词",
+  explicit_call: "明确呼叫",
+  proactive_warmup: "主动参与 · 冷场暖场",
+  proactive_interject: "主动参与 · 加入话题",
+  proactive_participation: "主动参与",
+  conversation_followup: "自然续聊",
+};
+
+function triggerSourceLabel(value: unknown): string {
+  const key = String(value ?? "");
+  return TRACE_TRIGGER_SOURCE_LABELS[key] ?? (key || "—");
+}
+
 const TRACE_OUTCOME_LABELS: Record<string, string> = {
   completed: "正常完成",
   success: "成功",
@@ -1574,6 +1642,18 @@ function ToolArgumentSummary({ name, value }: { name: string; value: unknown }):
 function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][number] }): React.JSX.Element | null {
   const input = debugRecord(event.input);
   const output = debugRecord(event.output);
+
+  if (event.phase === "intake" && (output.trigger_source || output.scene)) {
+    const trigger = triggerSourceLabel(output.trigger_source);
+    const scene = String(output.scene ?? "");
+    const signals = debugRecord(output.trigger_signals);
+    const matched = Object.entries(signals).filter(([, value]) => value === true).map(([key]) => key);
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>这次执行的触发原因：<Tag color="blue">{trigger}</Tag></Text>
+      {scene && <Text type="secondary">内部参与场景：{scene === "warmup" ? "冷场暖场" : scene === "active" ? "加入活跃话题" : scene === "followup" ? "自然续聊" : scene}</Text>}
+      {matched.length > 1 && <Text type="secondary">同时检测到：{matched.join(" / ")}</Text>}
+    </Space>;
+  }
 
   if (event.phase === "capability") {
     const exposed = stringArray(output.selected_tools ?? output.selected_tool_names ?? output.exposed_tools ?? output.tool_names);
@@ -1724,7 +1804,7 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
 }
 
 function DebugToolsView({ tools, permissions }: { tools: AgentDebugResponse["tools"]; permissions: AgentDebugResponse["toolPermissions"] }): React.JSX.Element {
-  if (permissions.length === 0) return <AdminEmpty description="当前模式不使用工具权限矩阵" />;
+  if (permissions.length === 0) return <AdminEmpty description="当前调试场景不使用工具权限矩阵" />;
   const schemas = new Map<string, Record<string, unknown>>();
   tools.forEach((tool) => {
     const row = debugRecord(tool);
@@ -1785,8 +1865,9 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
   const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
   const visibleEvents = compact ? trace.events.slice(-12) : trace.events;
   return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 5 }} items={[
-      { key: "source", label: "来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 6 }} items={[
+      { key: "source", label: "执行来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
+      { key: "trigger", label: "触发原因", children: trace.triggerSource ? <Tag color="blue">{triggerSourceLabel(trace.triggerSource)}</Tag> : "—" },
       { key: "status", label: "状态", children: <Tag color={status.color}>{status.label}</Tag> },
       { key: "outcome", label: "结果", children: traceOutcomeLabel(trace.outcome) },
       { key: "duration", label: "总耗时", children: trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(1)} ms` },
@@ -1966,7 +2047,7 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
     >
       <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
         <div className="agent-debug-control-row">
-          <Text strong>运行模式</Text>
+          <Text strong>调试场景</Text>
           <Segmented block value={mode} onChange={(value) => setMode(value as AgentDebugMode)} options={AGENT_DEBUG_MODES} />
         </div>
         <div className="agent-debug-control-row">
@@ -2030,7 +2111,7 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
       {result.warnings.map((warning) => <Alert key={warning} type="warning" showIcon message={warning} />)}
       <Card title="本次调试摘要" extra={<Tag color={result.route.configured ? "green" : "red"}>{result.route.configured ? "路由可用" : "路由未配置"}</Tag>}>
         <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
-          { key: "mode", label: "模式", children: AGENT_DEBUG_MODES.find((item) => item.value === result.mode)?.label ?? result.mode },
+          { key: "mode", label: "调试场景", children: AGENT_DEBUG_MODES.find((item) => item.value === result.mode)?.label ?? result.mode },
           { key: "prompt", label: "Prompt 版本", children: result.promptVersion },
           { key: "provider", label: "Provider", children: result.route.provider || "—" },
           { key: "model", label: "模型", children: result.route.model || "—" },

@@ -224,7 +224,35 @@ async def patch_agent_config(
             row = GroupAgentConfig(group_id=group_id)
             db.add(row)
         updates = body.model_dump(exclude_unset=True, exclude={"version"})
-        if not updates:
+        legacy_mode = updates.pop("trigger_mode", None)
+        if legacy_mode is not None:
+            legacy_flags = {
+                "mention_only": {
+                    "reply_trigger_enabled": False,
+                    "explicit_wakeup_enabled": False,
+                    "proactive_enabled": False,
+                },
+                "mention_or_reply": {
+                    "reply_trigger_enabled": True,
+                    "explicit_wakeup_enabled": False,
+                    "proactive_enabled": False,
+                },
+                "explicit_wakeup": {
+                    "reply_trigger_enabled": False,
+                    "explicit_wakeup_enabled": True,
+                    "proactive_enabled": False,
+                },
+                "mention_or_proactive": {
+                    "reply_trigger_enabled": True,
+                    "explicit_wakeup_enabled": True,
+                    "proactive_enabled": True,
+                },
+            }[legacy_mode]
+            # Explicit new fields win when old and new clients mix payloads.
+            for field, value in legacy_flags.items():
+                updates.setdefault(field, value)
+            row.trigger_mode = legacy_mode
+        if not updates and legacy_mode is None:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, "没有可更新的字段"
             )
