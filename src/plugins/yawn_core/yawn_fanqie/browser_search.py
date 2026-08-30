@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -271,10 +272,8 @@ async def _open_browser_session(
         )
     except Exception as exc:
         if browser is not None:
-            try:
+            with suppress(Exception):
                 await browser.close()
-            except Exception:
-                pass
         raise BrowserSearchError(
             "无法连接番茄搜索 Playwright 服务，请检查 sidecar 状态和 Playwright 版本"
         ) from exc
@@ -311,7 +310,7 @@ async def _close_browser_session(session: _BrowserSession) -> None:
                 )
 
 
-async def _search_page_snapshot(
+async def _search_page_snapshot(  # noqa: PLR0913
     keyword: str,
     *,
     query_type: str,
@@ -402,7 +401,7 @@ def _resolve_profile_dir(configured: str | None) -> Path:
     return path.resolve()
 
 
-async def search_page_snapshot(
+async def search_page_snapshot(  # noqa: PLR0913
     keyword: str,
     *,
     query_type: str,
