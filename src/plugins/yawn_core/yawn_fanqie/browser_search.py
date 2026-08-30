@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -100,7 +101,9 @@ def _page_url(keyword: str) -> str:
 
 
 def _normalize_ws_endpoint(value: str | None) -> str:
-    endpoint = (value or "").strip()
+    if value is None:
+        value = os.environ.get("FANQIE_BROWSER_WS_ENDPOINT", "")
+    endpoint = value.strip()
     if not endpoint:
         return ""
     parsed = urlparse(endpoint)
