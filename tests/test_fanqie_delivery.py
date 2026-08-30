@@ -3,28 +3,27 @@
 from __future__ import annotations
 
 import base64
-import importlib
-import sys
+import importlib.util
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-import nonebot
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
-def delivery_module() -> Any:
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
-    try:
-        nonebot.get_driver()
-    except ValueError:
-        nonebot.init()
-    if nonebot.get_plugin("yawn_core") is None:
-        nonebot.load_from_toml("pyproject.toml")
-    return importlib.import_module("src.plugins.yawn_core.yawn_fanqie.delivery")
+def delivery_module() -> ModuleType:
+    module_path = (
+        PROJECT_ROOT / "src/plugins/yawn_core/yawn_fanqie/delivery.py"
+    )
+    spec = importlib.util.spec_from_file_location("_fanqie_delivery_unit", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载番茄小说投递模块")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class _StreamBot:
@@ -71,7 +70,7 @@ class _LegacyBot:
 
 @pytest.mark.asyncio
 async def test_delivery_streams_file_before_private_upload(
-    delivery_module: Any,
+    delivery_module: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -102,7 +101,7 @@ async def test_delivery_streams_file_before_private_upload(
 
 @pytest.mark.asyncio
 async def test_delivery_accepts_nested_stream_response(
-    delivery_module: Any,
+    delivery_module: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,7 +131,7 @@ async def test_delivery_accepts_nested_stream_response(
 
 @pytest.mark.asyncio
 async def test_delivery_falls_back_for_old_protocol_implementations(
-    delivery_module: Any,
+    delivery_module: ModuleType,
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "legacy.txt"
