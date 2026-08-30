@@ -56,6 +56,8 @@ jobs:
           digest="$(sed -n 's/^digest=//p' "$meta")"
           production_release_image="$(sed -n 's/^production_image=//p' "$meta")"
           production_digest="$(sed -n 's/^production_digest=//p' "$meta")"
+          production_browser_image="$(sed -n 's/^production_browser_image=//p' "$meta")"
+          production_browser_digest="$(sed -n 's/^production_browser_digest=//p' "$meta")"
           commit="$(sed -n 's/^commit=//p' "$meta")"
           expected_image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION"
           expected_production_image="$TCR_IMAGE:$VERSION"
@@ -87,9 +89,29 @@ jobs:
             exit 1
           }
 
+          browser_image=""
+          browser_digest=""
+          if [[ -n "$production_browser_image" || -n "$production_browser_digest" ]]; then
+            [[ "$production_browser_image" == "$TCR_IMAGE":browser-pw-* ]] || {
+              echo "::error::Production browser image metadata does not match the configured Tencent TCR repository"
+              exit 1
+            }
+            [[ "$production_browser_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::Production browser image digest is invalid"
+              exit 1
+            }
+            browser_image="$TCR_IMAGE"
+            browser_digest="$production_browser_digest"
+            echo "Using stable Playwright Chromium runtime: $production_browser_image@$production_browser_digest"
+          else
+            echo "Legacy release has no separate browser runtime; using Chromium embedded in the application image."
+          fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "image=$TCR_IMAGE" >> "$GITHUB_OUTPUT"
           echo "digest=$production_digest" >> "$GITHUB_OUTPUT"
+          echo "browser_image=$browser_image" >> "$GITHUB_OUTPUT"
+          echo "browser_digest=$browser_digest" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "Using directly published Tencent TCR image: $TCR_IMAGE@$production_digest"
 
@@ -177,6 +199,8 @@ jobs:
           TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
           IMAGE: ${{ steps.release_meta.outputs.image }}
           DIGEST: ${{ steps.release_meta.outputs.digest }}
+          BROWSER_IMAGE: ${{ steps.release_meta.outputs.browser_image }}
+          BROWSER_DIGEST: ${{ steps.release_meta.outputs.browser_digest }}
           VERSION: ${{ steps.release_meta.outputs.version }}
           COMMIT: ${{ steps.release_meta.outputs.commit }}
         run: |
@@ -186,6 +210,12 @@ jobs:
           test -n "$TCR_PASSWORD"
           test -n "$IMAGE"
           test -n "$DIGEST"
+
+          if [[ -n "$BROWSER_IMAGE" && -n "$BROWSER_DIGEST" ]]; then
+            deploy_command="/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT $BROWSER_IMAGE@$BROWSER_DIGEST registry-token-stdin"
+          else
+            deploy_command="/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT registry-token-stdin"
+          fi
 
           echo "Starting production deployment from Tencent TCR: $IMAGE@$DIGEST"
           printf '%s\n%s\n' "$TCR_USERNAME" "$TCR_PASSWORD" | \
@@ -197,4 +227,4 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=20 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "/opt/yawnbot/bin/deploy-release $IMAGE@$DIGEST $VERSION $COMMIT registry-token-stdin"
+              "$deploy_command"
