@@ -45,24 +45,30 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCALSTORE_USE_CWD=true
 WORKDIR /app
 
-COPY --from=python-builder /app/.venv /app/.venv
-COPY --from=python-builder /app/third_party_sources /app/third_party_sources
+# Keep ownership setup in a stable layer. Mutable source copies below use
+# COPY --chown so normal application changes do not force a recursive chown
+# over the large Python virtualenv and browser runtime.
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin yawnbot \
+    && mkdir -p /app/data /opt/yawnbot \
+    && chown yawnbot:yawnbot /app /app/data /opt/yawnbot
 
-COPY pyproject.toml LICENSE THIRD_PARTY_NOTICES.md ./
-COPY third_party_licenses ./third_party_licenses
-COPY src ./src
-COPY data/nonebot_plugin_orm/migrations /opt/yawnbot/migrations
-COPY --from=webui-builder /build/webui/dist ./webui/dist
-COPY deploy/docker-entrypoint.sh /usr/local/bin/yawnbot-entrypoint
+COPY --chown=10001:10001 --from=python-builder /app/.venv /app/.venv
+COPY --chown=10001:10001 --from=python-builder /app/third_party_sources /app/third_party_sources
 
+COPY --chown=10001:10001 pyproject.toml LICENSE THIRD_PARTY_NOTICES.md ./
+COPY --chown=10001:10001 third_party_licenses ./third_party_licenses
+
+# System license copies are tiny and intentionally happen before mutable app
+# source layers so source-only releases do not invalidate this setup step.
 RUN test -f /usr/share/common-licenses/GPL-3 \
     && test -f /usr/share/common-licenses/LGPL-3 \
     && cp /usr/share/common-licenses/GPL-3 /app/third_party_licenses/GPL-3.0.txt \
-    && cp /usr/share/common-licenses/LGPL-3 /app/third_party_licenses/LGPL-3.0.txt \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin yawnbot \
-    && mkdir -p /app/data \
-    && chown -R yawnbot:yawnbot /app /opt/yawnbot \
-    && chmod +x /usr/local/bin/yawnbot-entrypoint
+    && cp /usr/share/common-licenses/LGPL-3 /app/third_party_licenses/LGPL-3.0.txt
+
+COPY --chown=10001:10001 src ./src
+COPY --chown=10001:10001 data/nonebot_plugin_orm/migrations /opt/yawnbot/migrations
+COPY --chown=10001:10001 --from=webui-builder /build/webui/dist ./webui/dist
+COPY --chmod=755 deploy/docker-entrypoint.sh /usr/local/bin/yawnbot-entrypoint
 
 USER yawnbot
 EXPOSE 8080
