@@ -37,8 +37,14 @@ def test_playwright_browser_runtime_is_version_scoped_sidecar() -> None:
     assert "FROM python:3.12-slim-trixie AS runtime" in app_dockerfile
 
     assert "COPY deploy/docker/playwright-version.txt" in browser_dockerfile
-    assert 'npm install --global "playwright@${playwright_version}"' in browser_dockerfile
-    assert "playwright install --with-deps chromium" in browser_dockerfile
+    assert (
+        'npm install --global "playwright@${playwright_version}"'
+        in browser_dockerfile
+    )
+    assert (
+        "playwright install --with-deps --only-shell chromium"
+        in browser_dockerfile
+    )
     assert '["playwright", "run-server", "--port", "3000"' in browser_dockerfile
 
     assert "runtime_hash=" in release
