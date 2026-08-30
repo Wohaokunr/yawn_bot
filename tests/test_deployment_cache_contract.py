@@ -10,9 +10,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_RECONNECT_INTERVAL_MS = 5000
 
 
-def test_playwright_browser_layer_is_version_scoped() -> None:
+def test_playwright_browser_runtime_is_version_scoped_sidecar() -> None:
     lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
-    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    app_dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    browser_dockerfile = (
+        REPO_ROOT / "deploy" / "docker" / "playwright-server.Dockerfile"
+    ).read_text(encoding="utf-8")
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
     pinned_version = (
         REPO_ROOT / "deploy" / "docker" / "playwright-version.txt"
     ).read_text(encoding="utf-8").strip()
@@ -22,18 +28,29 @@ def test_playwright_browser_layer_is_version_scoped() -> None:
         lock,
         flags=re.MULTILINE,
     )
-    source_copy = re.search(
-        r"^COPY(?: --chown=[^ ]+)? src \./src$",
-        dockerfile,
-        flags=re.MULTILINE,
-    )
     assert match is not None
-    assert source_copy is not None
     assert pinned_version == match.group(1)
-    assert "AS browser-runtime" in dockerfile
-    assert "COPY deploy/docker/playwright-version.txt" in dockerfile
-    assert "FROM browser-runtime AS runtime" in dockerfile
-    assert dockerfile.index("AS browser-runtime") < source_copy.start()
+
+    assert "playwright install --with-deps chromium" not in app_dockerfile
+    assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" not in app_dockerfile
+    assert "AS browser-runtime" not in app_dockerfile
+    assert "FROM python:3.12-slim-trixie AS runtime" in app_dockerfile
+
+    assert "COPY deploy/docker/playwright-version.txt" in browser_dockerfile
+    assert (
+        'npm install --global "playwright@${playwright_version}"'
+        in browser_dockerfile
+    )
+    assert (
+        "playwright install --with-deps --only-shell chromium"
+        in browser_dockerfile
+    )
+    assert '["playwright", "run-server", "--port", "3000"' in browser_dockerfile
+
+    assert "runtime_hash=" in release
+    assert 'tag="browser-pw-${playwright_version}-${runtime_hash}"' in release
+    assert "Reusing stable Playwright Chromium runtime" in release
+    assert "production_browser_digest=" in release
 
 
 def test_release_exports_persistent_registry_build_cache() -> None:
@@ -45,6 +62,7 @@ def test_release_exports_persistent_registry_build_cache() -> None:
     assert "ref=${{ steps.release_meta.outputs.image }}:buildcache" in workflow
     assert "cache-to: type=registry" in workflow
     assert "mode=max" in workflow
+    assert "browser-buildcache" in workflow
 
 
 def test_production_pull_reuses_local_immutable_image() -> None:
@@ -52,11 +70,13 @@ def test_production_pull_reuses_local_immutable_image() -> None:
         REPO_ROOT / "deploy" / "production" / "deploy-release.sh"
     ).read_text(encoding="utf-8")
 
-    local_check = 'docker image inspect "$image"'
-    remote_pull = 'docker pull "$image"'
+    local_check = 'docker image inspect "$pull_ref"'
+    remote_pull = 'docker pull "$pull_ref"'
     assert local_check in script
     assert remote_pull in script
     assert script.index(local_check) < script.index(remote_pull)
+    assert 'pull_image "$image" "application"' in script
+    assert 'pull_image "$browser_image" "browser"' in script
 
 
 def test_napcat_is_pinned_and_outside_yawnbot_release_lifecycle() -> None:
@@ -201,6 +221,8 @@ def test_release_mirrors_production_image_to_tencent_tcr() -> None:
     assert "Log in to Tencent Container Registry" in release
     assert "production_image=" in release
     assert "production_digest=" in release
+    assert "production_browser_image=" in release
+    assert "production_browser_digest=" in release
     assert "Verify Tencent production mirror digest" in release
     assert "registry-token-stdin" in release
     assert "registry-token-stdin" in deploy_existing
@@ -208,6 +230,8 @@ def test_release_mirrors_production_image_to_tencent_tcr() -> None:
     assert "ghcr.io/wohaokunr/yawn_bot@sha256:*" in deploy_script
     assert 'docker login "$registry_host"' in deploy_script
     assert "github-token-stdin|registry-token-stdin" in forced_command
+    assert "browser-pw-" in release
+    assert "production_browser_image" in deploy_existing
 
 
 def test_generated_napcat_secret_config_is_gitignored() -> None:

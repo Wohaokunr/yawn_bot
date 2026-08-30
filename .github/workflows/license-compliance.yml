@@ -14,6 +14,7 @@ on:
       - "webui/package.json"
       - "webui/package-lock.json"
       - "deploy/docker/playwright-version.txt"
+      - "deploy/docker/playwright-server.Dockerfile"
       - ".github/workflows/license-compliance.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/deploy-existing.yml"
@@ -28,6 +29,7 @@ on:
       - "webui/package.json"
       - "webui/package-lock.json"
       - "deploy/docker/playwright-version.txt"
+      - "deploy/docker/playwright-server.Dockerfile"
       - ".github/workflows/license-compliance.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/deploy-existing.yml"
@@ -38,7 +40,7 @@ permissions:
 
 jobs:
   runtime-license-payload:
-    name: Python/browser runtime license payload
+    name: Python runtime license payload
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -62,6 +64,7 @@ jobs:
             test -f /app/third_party_licenses/LGPL-3.0.txt
             test -s /app/third_party_licenses/GPL-3.0.txt
             test -s /app/third_party_licenses/LGPL-3.0.txt
+            test ! -e /ms-playwright
           '
       - name: Verify corresponding HTMLKit source payload
         shell: bash
@@ -116,15 +119,64 @@ jobs:
           if not any(package_root.glob("core*.so")):
               raise SystemExit("nonebot-plugin-htmlkit native core is missing")
           PY
-      - name: Verify browser payload notices
+
+  browser-runtime-licenses:
+    name: Playwright Chromium runtime licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Chromium sidecar image
+        run: >-
+          docker build
+          --file deploy/docker/playwright-server.Dockerfile
+          --tag yawnbot-playwright:license-audit
+          .
+      - name: Verify Playwright and Chromium license payloads
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint sh yawnbot:license-audit -c '
+          docker run --rm --entrypoint sh yawnbot-playwright:license-audit -c '
             set -eu
+            test -s /usr/local/lib/node_modules/playwright/LICENSE
             test -n "$(find /ms-playwright -type f -name "LICENSE.headless_shell" -print -quit)"
             test -n "$(find /ms-playwright -type f -name "COPYING.LGPLv2.1" -print -quit)"
           '
+      - name: Smoke Playwright server and Chromium headless shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=yawnbot-playwright-smoke
+          cleanup() {
+            docker logs "$name" 2>/dev/null || true
+            docker rm -f "$name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "$name" yawnbot-playwright:license-audit >/dev/null
+          for _ in $(seq 1 30); do
+            if [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name")" == "healthy" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name")" == "healthy" ]]
+          docker exec -i "$name" node - <<'NODE'
+          const { chromium } = require('/usr/local/lib/node_modules/playwright');
+          (async () => {
+            const browser = await chromium.connect('ws://127.0.0.1:3000/');
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            await page.goto('data:text/html,<title>sidecar-ok</title>');
+            if (await page.title() !== 'sidecar-ok') {
+              throw new Error('unexpected browser smoke title');
+            }
+            await context.close();
+            await browser.close();
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
 
   webui-runtime-licenses:
     name: WebUI runtime licenses

@@ -17,6 +17,8 @@ WRITER = DEPLOY_DIR / "write-deployment-record.py"
 DEPLOY_SCRIPT = DEPLOY_DIR / "deploy-release.sh"
 SYNC_SCRIPT = DEPLOY_DIR / "sync-control-plane.sh"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+PRODUCTION_COMPOSE = DEPLOY_DIR / "compose.yaml"
+FORCED_COMMAND = DEPLOY_DIR / "deploy-ssh-command"
 
 
 class ProductionDeploymentControlPlaneTests(unittest.TestCase):
@@ -31,6 +33,8 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
                     "DEPLOYMENT_ROOT": str(root),
                     "PREVIOUS_IMAGE": "old@example",
                     "CURRENT_IMAGE": "new@example",
+                    "PREVIOUS_BROWSER_IMAGE": "old-browser@example",
+                    "CURRENT_BROWSER_IMAGE": "new-browser@example",
                     "COMMIT_SHA": "a" * 40,
                     "RELEASE_VERSION": "v1.2.3-rc.4",
                     "DB_BACKUP": "/opt/yawnbot/data/backups/pre.sqlite3",
@@ -52,6 +56,8 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
             payload = json.loads(current.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "healthy")
             self.assertEqual(payload["release_version"], "v1.2.3-rc.4")
+            self.assertEqual(payload["current_browser_image"], "new-browser@example")
+            self.assertEqual(payload["previous_browser_image"], "old-browser@example")
             self.assertEqual(payload["migration_before"], ["old-head"])
             self.assertEqual(payload["migration_after"], ["new-head"])
             self.assertEqual(payload["migration_heads"], ["new-head (head)"])
@@ -69,9 +75,28 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         payload = json.loads(current.read_text(encoding="utf-8"))
         self.assertEqual(payload["release_version"], "v1.2.3")
         self.assertEqual(payload["current_image"], self._image_ref())
+        self.assertEqual(payload["current_browser_image"], "")
         self.assertEqual(payload["commit_sha"], "b" * 40)
         self.assertEqual(payload["migration_after"], ["migration-current"])
         self.assertEqual(payload["migration_heads"], ["migration-head (head)"])
+
+    def test_deploy_release_starts_versioned_browser_sidecar(self) -> None:
+        result, root = self._run_fake_deploy(browser=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[deploy:browser] start", result.stdout)
+        self.assertIn("[deploy:browser] healthy", result.stdout)
+        self.assertIn("browser runtime", result.stdout)
+
+        image_env = (root / "image.env").read_text(encoding="utf-8")
+        self.assertIn(f"YAWNBOT_BROWSER_IMAGE={self._browser_image_ref()}", image_env)
+        self.assertIn(
+            "FANQIE_BROWSER_WS_ENDPOINT=ws://playwright:3000/",
+            image_env,
+        )
+        payload = json.loads(
+            (root / "deployments" / "current.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload["current_browser_image"], self._browser_image_ref())
 
     def test_metadata_failure_has_distinct_exit_code_after_health_success(
         self,
@@ -83,7 +108,7 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertIn("application is healthy", result.stderr)
 
     def test_shell_entrypoints_parse(self) -> None:
-        for path in (DEPLOY_SCRIPT, SYNC_SCRIPT):
+        for path in (DEPLOY_SCRIPT, SYNC_SCRIPT, FORCED_COMMAND):
             subprocess.run(["sh", "-n", str(path)], check=True)
 
     def test_runtime_dockerfile_does_not_rechown_large_mutable_tree(self) -> None:
@@ -108,6 +133,15 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         source_copy = dockerfile.index("COPY --chown=10001:10001 src ./src")
         self.assertNotIn("\nRUN ", dockerfile[source_copy:])
 
+    def test_browser_sidecar_is_profiled_and_not_publicly_exposed(self) -> None:
+        compose = PRODUCTION_COMPOSE.read_text(encoding="utf-8")
+        self.assertIn("playwright:", compose)
+        self.assertIn("fanqie-browser", compose)
+        self.assertIn('shm_size: "512m"', compose)
+        self.assertIn('FANQIE_BROWSER_WS_ENDPOINT: "${FANQIE_BROWSER_WS_ENDPOINT:-}"', compose)
+        playwright_section = compose.split("  playwright:\n", 1)[1]
+        self.assertNotIn("ports:", playwright_section)
+
     def test_image_pull_policy_is_bounded_and_emits_safe_diagnostics(self) -> None:
         deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("YAWNBOT_PULL_TIMEOUT_SECONDS:-1200", deploy)
@@ -120,6 +154,8 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertIn("duration ${pull_elapsed}s", deploy)
         self.assertNotIn("[deploy:pull:diag] registry_username=", deploy)
         self.assertNotIn("[deploy:pull:diag] registry_password=", deploy)
+        self.assertIn('pull_image "$image" "application"', deploy)
+        self.assertIn('pull_image "$browser_image" "browser"', deploy)
 
     def test_sync_control_plane_accepts_legacy_then_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,9 +176,7 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
 
             (stage / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
             shutil.copyfile(DEPLOY_SCRIPT, stage / "deploy-release")
-            (stage / "deploy-ssh-command").write_text(
-                "#!/bin/sh\nexit 0\n", encoding="utf-8"
-            )
+            shutil.copyfile(FORCED_COMMAND, stage / "deploy-ssh-command")
             shutil.copyfile(SYNC_SCRIPT, stage / "sync-control-plane")
             shutil.copyfile(WRITER, stage / "write-deployment-record.py")
 
@@ -215,7 +249,10 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertIn("current_files=", sync)
 
     def _run_fake_deploy(
-        self, writer_source: str | None = None
+        self,
+        writer_source: str | None = None,
+        *,
+        browser: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -241,8 +278,15 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
             'case "${1:-}" in\n'
             "  ps) exit 0 ;;\n"
             "  image) exit 0 ;;\n"
+            "  inspect)\n"
+            '    case "$*" in\n'
+            "      *fake-playwright*) echo healthy ;;\n"
+            "    esac\n"
+            "    exit 0\n"
+            "    ;;\n"
             "  compose)\n"
             '    case "$*" in\n'
+            "      *'ps -q playwright'*) echo fake-playwright ;;\n"
             "      *'nb orm current'*) echo migration-current ;;\n"
             "      *'nb orm heads'*) echo 'migration-head (head)' ;;\n"
             "    esac\n"
@@ -260,14 +304,17 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         env = os.environ.copy()
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
         env["YAWNBOT_ROOT"] = str(root)
+        args = [
+            "sh",
+            str(DEPLOY_SCRIPT),
+            self._image_ref(),
+            "v1.2.3",
+            "b" * 40,
+        ]
+        if browser:
+            args.append(self._browser_image_ref())
         result = subprocess.run(
-            [
-                "sh",
-                str(DEPLOY_SCRIPT),
-                self._image_ref(),
-                "v1.2.3",
-                "b" * 40,
-            ],
+            args,
             env=env,
             text=True,
             capture_output=True,
@@ -302,6 +349,12 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
     def _image_ref() -> str:
         return (
             "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:" + "a" * 64
+        )
+
+    @staticmethod
+    def _browser_image_ref() -> str:
+        return (
+            "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:" + "c" * 64
         )
 
 

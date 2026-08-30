@@ -12,6 +12,7 @@ services:
       PORT: 8080
       LOCALSTORE_USE_CWD: "true"
       YAWNBOT_AUTO_MIGRATE: "false"
+      FANQIE_BROWSER_WS_ENDPOINT: "${FANQIE_BROWSER_WS_ENDPOINT:-}"
     ports:
       - "127.0.0.1:${YAWNBOT_PORT:-8080}:8080"
     volumes:
@@ -28,6 +29,16 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+
+  playwright:
+    image: "${YAWNBOT_BROWSER_IMAGE:-busybox:1.36}"
+    profiles:
+      - fanqie-browser
+    restart: unless-stopped
+    init: true
+    shm_size: "512m"
+    networks:
+      - yawnbot-internal
 
 networks:
   yawnbot-internal:

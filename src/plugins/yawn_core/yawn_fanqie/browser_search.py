@@ -1,10 +1,14 @@
 """Use an isolated real browser for the public Fanqie search page.
 
 The search page is responsible for running Fanqie's own security SDK and
-creating the request context required by its search endpoint.  This module
+creating the request context required by its search endpoint. This module
 only uses the plugin-owned browser context; it never reads, exports, or replays
 cookie values or security parameters, and only observes the response produced
 by the page itself.
+
+Native deployments may launch a local persistent Chromium context. Container
+production can instead connect to the version-pinned Playwright browser server
+and persist only Playwright storage state in the plugin data directory.
 """
 
 # The adapter deliberately translates several third-party browser failures into
@@ -16,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -34,6 +40,7 @@ _SEARCH_QUERY_TYPES = {"0", "1", "2"}
 _SEARCH_TAB_SELECTOR = ".search-order-tab"
 _CHALLENGE_MARKERS = ("请完成下列验证", "人机验证", "验证码")
 _PROFILE_DIR_NAME = "search-browser-profile"
+_STORAGE_STATE_NAME = "storage-state.json"
 _EMPTY_RESPONSE_RETRIES = 1
 _SESSION_COOKIE_NAMES = {"ttwid", "novel_web_id"}
 _SESSION_READY_WAIT_SECONDS = 10.0
@@ -57,12 +64,19 @@ class BrowserSearchSnapshot:
     page: str
 
 
+@dataclass(slots=True)
+class _BrowserSession:
+    context: Any
+    browser: Any | None = None
+    storage_state_path: Path | None = None
+
+
 def _load_async_playwright() -> Any:
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
         raise BrowserSearchError(
-            "未安装 Playwright，请运行 uv run playwright install chromium"
+            "未安装 Playwright Python 客户端，请重新执行 uv sync --locked"
         ) from exc
     return async_playwright
 
@@ -85,6 +99,23 @@ def _matches_search_response(response: Any, query_type: str) -> bool:
 
 def _page_url(keyword: str) -> str:
     return f"{_SEARCH_PAGE_PREFIX}{quote(keyword, safe='')}"
+
+
+def _normalize_ws_endpoint(value: str | None) -> str:
+    if value is None:
+        value = os.environ.get("FANQIE_BROWSER_WS_ENDPOINT", "")
+    endpoint = value.strip()
+    if not endpoint:
+        return ""
+    parsed = urlparse(endpoint)
+    if (
+        parsed.scheme not in {"ws", "wss"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise BrowserSearchError("番茄 Playwright 服务地址必须是无账号密码的 ws(s) URL")
+    return endpoint
 
 
 async def _read_response_payload(response: Any) -> Any:
@@ -205,17 +236,16 @@ async def _wait_for_session_cookie(context: Any, timeout_ms: float) -> None:
         await asyncio.sleep(min(0.25, remaining))
 
 
-async def _search_page_snapshot(
-    keyword: str,
+async def _open_browser_session(
+    playwright: Any,
     *,
-    query_type: str,
-    timeout: float,
+    timeout_ms: float,
     headless: bool,
-    profile_dir: str | None,
-) -> BrowserSearchSnapshot:
-    timeout_ms = timeout * 1000
-    async with _load_async_playwright()() as playwright:
-        profile_path = _resolve_profile_dir(profile_dir)
+    profile_path: Path,
+    ws_endpoint: str | None,
+) -> _BrowserSession:
+    endpoint = _normalize_ws_endpoint(ws_endpoint)
+    if not endpoint:
         try:
             context = await playwright.chromium.launch_persistent_context(
                 str(profile_path),
@@ -227,7 +257,79 @@ async def _search_page_snapshot(
             raise BrowserSearchError(
                 "无法启动番茄搜索浏览器会话，请检查 Chromium 和会话目录"
             ) from exc
+        return _BrowserSession(context=context)
 
+    browser = None
+    try:
+        browser = await playwright.chromium.connect(endpoint, timeout=timeout_ms)
+        storage_state_path = profile_path / _STORAGE_STATE_NAME
+        context = await browser.new_context(
+            locale="zh-CN",
+            viewport={"width": 1280, "height": 720},
+            storage_state=(
+                str(storage_state_path) if storage_state_path.is_file() else None
+            ),
+        )
+    except Exception as exc:
+        if browser is not None:
+            with suppress(Exception):
+                await browser.close()
+        raise BrowserSearchError(
+            "无法连接番茄搜索 Playwright 服务，请检查 sidecar 状态和 Playwright 版本"
+        ) from exc
+    return _BrowserSession(
+        context=context,
+        browser=browser,
+        storage_state_path=storage_state_path,
+    )
+
+
+async def _close_browser_session(session: _BrowserSession) -> None:
+    if session.storage_state_path is not None:
+        try:
+            await session.context.storage_state(
+                path=str(session.storage_state_path),
+                indexed_db=True,
+            )
+            session.storage_state_path.chmod(0o600)
+        except Exception:
+            logger.debug(
+                "fanqie remote browser storage state could not be persisted",
+                exc_info=True,
+            )
+    try:
+        await session.context.close()
+    finally:
+        if session.browser is not None:
+            try:
+                await session.browser.close()
+            except Exception:
+                logger.debug(
+                    "fanqie remote browser connection close failed",
+                    exc_info=True,
+                )
+
+
+async def _search_page_snapshot(  # noqa: PLR0913
+    keyword: str,
+    *,
+    query_type: str,
+    timeout: float,
+    headless: bool,
+    profile_dir: str | None,
+    ws_endpoint: str | None,
+) -> BrowserSearchSnapshot:
+    timeout_ms = timeout * 1000
+    async with _load_async_playwright()() as playwright:
+        profile_path = _resolve_profile_dir(profile_dir)
+        session = await _open_browser_session(
+            playwright,
+            timeout_ms=timeout_ms,
+            headless=headless,
+            profile_path=profile_path,
+            ws_endpoint=ws_endpoint,
+        )
+        context = session.context
         try:
             for attempt in range(_EMPTY_RESPONSE_RETRIES + 1):
                 page = await context.new_page()
@@ -277,7 +379,7 @@ async def _search_page_snapshot(
                 finally:
                     await page.close()
         finally:
-            await context.close()
+            await _close_browser_session(session)
     raise BrowserSearchError("番茄搜索未返回结果")
 
 
@@ -299,13 +401,14 @@ def _resolve_profile_dir(configured: str | None) -> Path:
     return path.resolve()
 
 
-async def search_page_snapshot(
+async def search_page_snapshot(  # noqa: PLR0913
     keyword: str,
     *,
     query_type: str,
     timeout: float,
     headless: bool,
     profile_dir: str | None = None,
+    ws_endpoint: str | None = None,
 ) -> BrowserSearchSnapshot:
     """Return the response and runtime font styles produced by the page."""
 
@@ -331,6 +434,7 @@ async def search_page_snapshot(
             timeout=timeout,
             headless=headless,
             profile_dir=profile_dir,
+            ws_endpoint=ws_endpoint,
         )
     finally:
         _SEARCH_LOCK.release()

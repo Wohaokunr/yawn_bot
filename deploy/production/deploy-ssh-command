@@ -1,16 +1,31 @@
 #!/bin/sh
 set -efu
 
+is_image_ref() {
+    case "$1" in
+        ghcr.io/wohaokunr/yawn_bot@sha256:*|sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_auth_mode() {
+    case "$1" in
+        github-token-stdin|registry-token-stdin) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 set -- ${SSH_ORIGINAL_COMMAND:-}
 case "${1:-}" in
     /opt/yawnbot/bin/deploy-release)
         case "$#" in
             4) ;;
             5)
-                case "$5" in
-                    github-token-stdin|registry-token-stdin) ;;
-                    *) exit 2 ;;
-                esac
+                is_auth_mode "$5" || is_image_ref "$5" || exit 2
+                ;;
+            6)
+                is_image_ref "$5" || exit 2
+                is_auth_mode "$6" || exit 2
                 ;;
             *) exit 2 ;;
         esac

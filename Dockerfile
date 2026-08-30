@@ -8,17 +8,6 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY webui/ ./
 RUN npm run build
 
-FROM python:3.12-slim-trixie AS browser-runtime
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-COPY deploy/docker/playwright-version.txt /tmp/playwright-version.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    playwright_version="$(cat /tmp/playwright-version.txt)" \
-    && python -m pip install "playwright==${playwright_version}" \
-    && playwright install --with-deps chromium \
-    && python -m pip uninstall -y playwright pyee greenlet \
-    && chmod -R a+rX /ms-playwright \
-    && rm -rf /var/lib/apt/lists/* /tmp/playwright-version.txt
-
 FROM python:3.12-slim-trixie AS python-builder
 COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
@@ -35,11 +24,10 @@ RUN mkdir -p /app/third_party_sources \
     && python -c "import urllib.request; urllib.request.urlretrieve('https://files.pythonhosted.org/packages/29/79/7f0b60a19132e335cb2d6ec2902e330afc97e82462dc152ae033864acf25/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz', '/app/third_party_sources/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz')" \
     && echo "5c9fc3ed1d1cbf95711006761d19e7a1dc0d0e8b7989c2e806a2bff3aeff7b17  /app/third_party_sources/nonebot_plugin_htmlkit-0.1.0rc5.tar.gz" | sha256sum -c -
 
-FROM browser-runtime AS runtime
+FROM python:3.12-slim-trixie AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}" \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     HOST=0.0.0.0 \
     PORT=8080 \
     LOCALSTORE_USE_CWD=true
@@ -47,7 +35,7 @@ WORKDIR /app
 
 # Keep ownership setup in a stable layer. Mutable source copies below use
 # COPY --chown so normal application changes do not force a recursive chown
-# over the large Python virtualenv and browser runtime.
+# over the large Python virtualenv.
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin yawnbot \
     && mkdir -p /app/data /opt/yawnbot \
     && chown yawnbot:yawnbot /app /app/data /opt/yawnbot

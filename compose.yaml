@@ -11,6 +11,7 @@ services:
       PORT: 8080
       LOCALSTORE_USE_CWD: "true"
       YAWNBOT_AUTO_MIGRATE: "${YAWNBOT_AUTO_MIGRATE:-true}"
+      FANQIE_BROWSER_WS_ENDPOINT: "${FANQIE_BROWSER_WS_ENDPOINT:-}"
     ports:
       - "${YAWNBOT_PORT:-8080}:8080"
     volumes:
@@ -27,6 +28,19 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+
+  playwright:
+    profiles:
+      - fanqie-browser
+    build:
+      context: .
+      dockerfile: deploy/docker/playwright-server.Dockerfile
+    image: yawnbot-playwright:local
+    restart: unless-stopped
+    init: true
+    shm_size: "512m"
+    networks:
+      - yawnbot-internal
 
 volumes:
   yawnbot-data:

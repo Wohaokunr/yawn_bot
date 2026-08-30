@@ -52,7 +52,7 @@ __plugin_meta__ = PluginMetadata(
     extra={"command_group": COMMAND_GROUP},
 )
 
-config = get_plugin_config(Config)
+plugin_config = get_plugin_config(Config)
 
 logger.info("番茄小说子插件已加载")
 
@@ -75,6 +75,15 @@ async def _diagnose_playwright_chromium() -> None:
 
     try:
         async with async_playwright() as playwright:
+            endpoint = plugin_config.fanqie_browser_ws_endpoint.strip()
+            if endpoint:
+                browser = await playwright.chromium.connect(
+                    endpoint,
+                    timeout=plugin_config.fanqie_browser_timeout * 1000,
+                )
+                await browser.close()
+                logger.info("番茄搜索 Playwright sidecar 连接正常")
+                return
             executable = playwright.chromium.executable_path
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"番茄搜索浏览器诊断失败：{type(exc).__name__}: {exc}")
@@ -82,7 +91,7 @@ async def _diagnose_playwright_chromium() -> None:
 
     if not _browser_executable_exists(executable):
         logger.warning(
-            "番茄搜索已启用，但 Playwright Chromium 未安装；"
-            "原生部署请执行 `uv run playwright install chromium`。"
-            "官方 Docker 镜像构建会自动安装 Chromium。"
+            "番茄搜索已启用，但本机 Playwright Chromium 未安装；"
+            "原生部署请执行 `uv run playwright install chromium`，"
+            "Docker 部署请启用 Playwright sidecar。"
         )

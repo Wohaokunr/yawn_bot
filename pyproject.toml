@@ -119,6 +119,11 @@ ignore = [
 ]
 allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "×", "｜", "＋", "－", "›", "０", "９"]
 
+[tool.ruff.lint.per-file-ignores]
+# This test asserts exact deployment YAML/shell literals; wrapping those strings
+# would make the contract harder to compare with the production files.
+"tests/test_production_deployment_control_plane.py" = ["E501"]
+
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
 
