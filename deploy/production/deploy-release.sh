@@ -5,7 +5,15 @@ root=${YAWNBOT_ROOT:-/opt/yawnbot}
 image=${1:-}
 version=${2:-}
 commit=${3:-}
-auth_mode=${4:-}
+fourth_arg=${4:-}
+fifth_arg=${5:-}
+browser_image=""
+auth_mode=""
+case "$fourth_arg" in
+    github-token-stdin|registry-token-stdin) auth_mode=$fourth_arg ;;
+    "") ;;
+    *) browser_image=$fourth_arg; auth_mode=$fifth_arg ;;
+esac
 keep_backups=${YAWNBOT_BACKUP_KEEP:-10}
 pull_attempts=${YAWNBOT_PULL_ATTEMPTS:-2}
 pull_timeout_seconds=${YAWNBOT_PULL_TIMEOUT_SECONDS:-1200}
@@ -43,10 +51,19 @@ trap 'handle_signal HUP' HUP
 trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
 
-case "$image" in
-    ghcr.io/wohaokunr/yawn_bot@sha256:*|sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:*) ;;
-    *) echo "invalid immutable image reference: $image" >&2; exit 2 ;;
-esac
+validate_image_ref() {
+    ref=$1
+    label=$2
+    case "$ref" in
+        ghcr.io/wohaokunr/yawn_bot@sha256:*|sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:*) ;;
+        *) echo "invalid immutable $label image reference: $ref" >&2; exit 2 ;;
+    esac
+}
+
+validate_image_ref "$image" "application"
+if [ -n "$browser_image" ]; then
+    validate_image_ref "$browser_image" "browser"
+fi
 case "$version" in
     v[0-9]*.[0-9]*.[0-9]*) ;;
     *) echo "invalid release version: $version" >&2; exit 2 ;;
@@ -57,6 +74,13 @@ case "$commit" in
 esac
 
 registry_host=${image%%/*}
+if [ -n "$browser_image" ]; then
+    browser_registry_host=${browser_image%%/*}
+    [ "$browser_registry_host" = "$registry_host" ] || {
+        echo "application and browser images must use the same registry host" >&2
+        exit 2
+    }
+fi
 case "$auth_mode" in
     "") ;;
     github-token-stdin)
@@ -114,11 +138,12 @@ compose() {
 pull_diagnostics() {
     reason=${1:-heartbeat}
     elapsed=${2:-0}
+    diagnostic_registry=${3:-$registry_host}
 
-    echo "[deploy:pull:diag] reason=$reason registry=$registry_host elapsed=${elapsed}s timeout=${pull_timeout_seconds}s"
+    echo "[deploy:pull:diag] reason=$reason registry=$diagnostic_registry elapsed=${elapsed}s timeout=${pull_timeout_seconds}s"
 
     if command -v getent >/dev/null 2>&1; then
-        resolved_count=$(getent ahosts "$registry_host" 2>/dev/null \
+        resolved_count=$(getent ahosts "$diagnostic_registry" 2>/dev/null \
             | awk '{print $1}' \
             | sort -u \
             | wc -l \
@@ -139,25 +164,29 @@ pull_diagnostics() {
 }
 
 pull_image() {
-    if docker image inspect "$image" >/dev/null 2>&1; then
-        echo "immutable image already present locally; skipping registry pull: $image"
+    pull_ref=$1
+    pull_label=$2
+    pull_registry=${pull_ref%%/*}
+
+    if docker image inspect "$pull_ref" >/dev/null 2>&1; then
+        echo "immutable $pull_label image already present locally; skipping registry pull: $pull_ref"
         return 0
     fi
 
     attempt=1
     while [ "$attempt" -le "$pull_attempts" ]; do
-        echo "pulling immutable image (attempt $attempt/$pull_attempts): $image"
+        echo "pulling immutable $pull_label image (attempt $attempt/$pull_attempts): $pull_ref"
         pull_started_at=$(date +%s)
-        pull_diagnostics start 0
+        pull_diagnostics "$pull_label-start" 0 "$pull_registry"
         (
             last_diagnostic_at=$pull_started_at
             while :; do
                 sleep "$pull_heartbeat_seconds" || exit 0
                 now=$(date +%s)
                 elapsed=$((now - pull_started_at))
-                echo "image pull still running (attempt $attempt/$pull_attempts, elapsed ${elapsed}s)"
+                echo "$pull_label image pull still running (attempt $attempt/$pull_attempts, elapsed ${elapsed}s)"
                 if [ $((now - last_diagnostic_at)) -ge "$pull_diagnostic_interval_seconds" ]; then
-                    pull_diagnostics heartbeat "$elapsed"
+                    pull_diagnostics "$pull_label-heartbeat" "$elapsed" "$pull_registry"
                     last_diagnostic_at=$now
                 fi
             done
@@ -165,7 +194,7 @@ pull_image() {
         pull_heartbeat_pid=$!
 
         pull_status=0
-        timeout --foreground "$pull_timeout_seconds" docker pull "$image" || pull_status=$?
+        timeout --foreground "$pull_timeout_seconds" docker pull "$pull_ref" || pull_status=$?
         pull_finished_at=$(date +%s)
         pull_elapsed=$((pull_finished_at - pull_started_at))
 
@@ -174,38 +203,68 @@ pull_image() {
         pull_heartbeat_pid=""
 
         if [ "$pull_status" -eq 0 ]; then
-            docker image inspect "$image" >/dev/null 2>&1 || {
-                echo "docker pull reported success but immutable image is not present: $image" >&2
-                pull_diagnostics missing-image "$pull_elapsed"
+            docker image inspect "$pull_ref" >/dev/null 2>&1 || {
+                echo "docker pull reported success but immutable $pull_label image is not present: $pull_ref" >&2
+                pull_diagnostics "$pull_label-missing-image" "$pull_elapsed" "$pull_registry"
                 return 1
             }
-            echo "immutable image pull completed: $image (duration ${pull_elapsed}s)"
+            echo "immutable $pull_label image pull completed: $pull_ref (duration ${pull_elapsed}s)"
             return 0
         fi
 
-        pull_diagnostics failure "$pull_elapsed"
+        pull_diagnostics "$pull_label-failure" "$pull_elapsed" "$pull_registry"
         if [ "$pull_status" -eq 124 ]; then
-            echo "image pull attempt $attempt timed out after ${pull_timeout_seconds}s" >&2
+            echo "$pull_label image pull attempt $attempt timed out after ${pull_timeout_seconds}s" >&2
         else
-            echo "image pull attempt $attempt failed with exit code $pull_status" >&2
+            echo "$pull_label image pull attempt $attempt failed with exit code $pull_status" >&2
         fi
 
         if [ "$attempt" -ge "$pull_attempts" ]; then
-            echo "image pull failed after $pull_attempts attempts" >&2
+            echo "$pull_label image pull failed after $pull_attempts attempts" >&2
             return "$pull_status"
         fi
 
-        echo "retrying image pull in ${pull_retry_delay_seconds}s; completed layers remain cached"
+        echo "retrying $pull_label image pull in ${pull_retry_delay_seconds}s; completed layers remain cached"
         sleep "$pull_retry_delay_seconds"
         attempt=$((attempt + 1))
     done
 }
 
+wait_for_browser() {
+    browser_container=$(compose --profile fanqie-browser ps -q playwright)
+    [ -n "$browser_container" ] || {
+        echo "[deploy:browser] Playwright container was not created" >&2
+        return 1
+    }
+    for _ in $(seq 1 45); do
+        browser_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$browser_container" 2>/dev/null || true)
+        case "$browser_health" in
+            healthy)
+                echo "[deploy:browser] healthy"
+                return 0
+                ;;
+            exited|dead)
+                break
+                ;;
+        esac
+        sleep 2
+    done
+    echo "[deploy:browser] failed healthcheck" >&2
+    compose --profile fanqie-browser logs --tail 100 playwright >&2 || true
+    return 1
+}
+
 container=$(docker ps -aq --filter label=com.docker.compose.project=yawnbot \
     --filter label=com.docker.compose.service=yawnbot | head -n 1)
+playwright_container=$(docker ps -aq --filter label=com.docker.compose.project=yawnbot \
+    --filter label=com.docker.compose.service=playwright | head -n 1)
 previous_image=""
+previous_browser_image=""
 if [ -n "$container" ]; then
     previous_image=$(docker inspect --format '{{.Config.Image}}' "$container")
+fi
+if [ -n "$playwright_container" ]; then
+    previous_browser_image=$(docker inspect --format '{{.Config.Image}}' "$playwright_container")
 fi
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -260,11 +319,31 @@ PY
 fi
 
 echo "[deploy:pull] start"
-pull_image
+pull_image "$image" "application"
+if [ -n "$browser_image" ]; then
+    pull_image "$browser_image" "browser"
+fi
 echo "[deploy:pull] success"
-printf 'YAWNBOT_IMAGE=%s\n' "$image" > "$root/image.env.tmp"
+{
+    printf 'YAWNBOT_IMAGE=%s\n' "$image"
+    if [ -n "$browser_image" ]; then
+        printf 'YAWNBOT_BROWSER_IMAGE=%s\n' "$browser_image"
+        printf 'FANQIE_BROWSER_WS_ENDPOINT=ws://playwright:3000/\n'
+    else
+        printf 'YAWNBOT_BROWSER_IMAGE=\n'
+        printf 'FANQIE_BROWSER_WS_ENDPOINT=\n'
+    fi
+} > "$root/image.env.tmp"
 chmod 600 "$root/image.env.tmp"
 mv -f "$root/image.env.tmp" "$root/image.env"
+
+if [ -n "$browser_image" ]; then
+    echo "[deploy:browser] start"
+    compose --profile fanqie-browser up -d --no-deps playwright
+    wait_for_browser || exit 7
+else
+    compose --profile fanqie-browser stop playwright >/dev/null 2>&1 || true
+fi
 
 if [ -n "$container" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container")" = "true" ]; then
     docker stop "$container" >/dev/null
@@ -301,6 +380,8 @@ echo "[deploy:record] writing deployment metadata"
 if ! DEPLOYMENT_ROOT="$root/deployments" \
     PREVIOUS_IMAGE="$previous_image" \
     CURRENT_IMAGE="$image" \
+    PREVIOUS_BROWSER_IMAGE="$previous_browser_image" \
+    CURRENT_BROWSER_IMAGE="$browser_image" \
     COMMIT_SHA="$commit" \
     RELEASE_VERSION="$version" \
     DB_BACKUP="$backup_host_path" \
@@ -315,3 +396,6 @@ fi
 echo "[deploy:record] success"
 
 echo "deployed $image"
+if [ -n "$browser_image" ]; then
+    echo "browser runtime $browser_image"
+fi
