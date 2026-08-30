@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 from pathlib import Path
@@ -8,6 +9,9 @@ from typing import Any
 
 import nonebot
 import pytest
+
+_REMOTE_TIMEOUT_MS = 12_000
+_PRIVATE_FILE_MODE = 0o600
 
 
 def _browser_module() -> Any:
@@ -26,9 +30,15 @@ class _FakeContext:
         self.saved_path: Path | None = None
         self.indexed_db = False
 
-    async def storage_state(self, *, path: str, indexed_db: bool) -> dict[str, object]:
+    async def storage_state(
+        self,
+        *,
+        path: str,
+        indexed_db: bool,
+    ) -> dict[str, object]:
         target = Path(path)
-        target.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+        payload = json.dumps({"cookies": [], "origins": []})
+        await asyncio.to_thread(target.write_text, payload, encoding="utf-8")
         self.saved_path = target
         self.indexed_db = indexed_db
         return {"cookies": [], "origins": []}
@@ -74,7 +84,9 @@ class _FakeChromium:
         return self.local_context
 
 
-def test_remote_endpoint_can_come_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remote_endpoint_can_come_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     browser = _browser_module()
     monkeypatch.setenv("FANQIE_BROWSER_WS_ENDPOINT", "ws://playwright:3000/")
 
@@ -93,13 +105,13 @@ async def test_remote_browser_session_persists_storage_state(tmp_path: Path) -> 
 
     session = await browser._open_browser_session(
         playwright,
-        timeout_ms=12_000,
+        timeout_ms=_REMOTE_TIMEOUT_MS,
         headless=True,
         profile_path=tmp_path,
         ws_endpoint="ws://playwright:3000/",
     )
     assert chromium.connected_endpoint == "ws://playwright:3000/"
-    assert chromium.connected_timeout == 12_000
+    assert chromium.connected_timeout == _REMOTE_TIMEOUT_MS
     assert session.browser is chromium.remote_browser
     assert chromium.remote_browser.context_kwargs is not None
     assert chromium.remote_browser.context_kwargs["storage_state"] is None
@@ -108,7 +120,7 @@ async def test_remote_browser_session_persists_storage_state(tmp_path: Path) -> 
 
     state = tmp_path / "storage-state.json"
     assert state.is_file()
-    assert state.stat().st_mode & 0o777 == 0o600
+    assert state.stat().st_mode & 0o777 == _PRIVATE_FILE_MODE
     assert chromium.remote_context.saved_path == state
     assert chromium.remote_context.indexed_db is True
     assert chromium.remote_context.closed is True
