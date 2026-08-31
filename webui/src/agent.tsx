@@ -502,6 +502,10 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
                 <span>今日管理工具</span>
                 <strong>{data.adminToolsToday}</strong>
               </div>
+              <div className="agent-config-metric">
+                <span>今日高风险工具</span>
+                <strong>{data.criticalToolsToday}</strong>
+              </div>
               <div className="agent-config-metric agent-config-metric-wide">
                 <span>配置范围</span>
                 <strong>仅当前群</strong>
@@ -668,6 +672,9 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
                 <Form.Item name="adminToolDailyLimit" label="每日特权工具上限" extra="群管理操作和群文件发送共用此额度">
                   <InputNumber min={1} max={1000} />
                 </Form.Item>
+                <Form.Item name="criticalToolDailyLimit" label="每日高风险工具上限" extra="踢人、管理员变更、全员禁言和破坏性群文件操作单独计数">
+                  <InputNumber min={1} max={100} />
+                </Form.Item>
                 <Form.Item name="toolAllowlist" label="允许的特权工具">
                   <Select
                     mode="multiple"
@@ -675,7 +682,21 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
                     options={[
                       { value: "mute_member", label: "禁言成员" },
                       { value: "create_group_announcement", label: "发布群公告" },
+                      { value: "set_essence_message", label: "设置精华消息" },
+                      { value: "remove_essence_message", label: "移出精华消息" },
+                      { value: "delete_group_notice", label: "删除群公告" },
+                      { value: "set_group_card", label: "修改群名片" },
+                      { value: "set_special_title", label: "设置专属头衔" },
+                      { value: "set_group_name", label: "修改群名称" },
+                      { value: "create_group_folder", label: "创建群文件夹" },
                       { value: "send_file", label: "发送群文件" },
+                      { value: "kick_member", label: "高风险 · 踢出成员" },
+                      { value: "set_whole_group_mute", label: "高风险 · 全员禁言" },
+                      { value: "set_group_admin", label: "高风险 · 设置管理员" },
+                      { value: "delete_group_file", label: "高风险 · 删除群文件" },
+                      { value: "move_group_file", label: "高风险 · 移动群文件" },
+                      { value: "rename_group_file", label: "高风险 · 重命名群文件" },
+                      { value: "delete_group_folder", label: "高风险 · 删除群文件夹" },
                     ]}
                   />
                 </Form.Item>
@@ -1718,13 +1739,15 @@ const TOOL_PERMISSION_LABELS: Record<string, string> = {
   state_write: "状态写入",
   message_send: "消息发送",
   privileged: "特权",
+  critical: "高风险",
 };
 
 const TOOL_PERMISSION_REASON_LABELS: Record<string, string> = {
   exposed: "已暴露",
-  permission_level: "属于特权操作，本轮没有开放",
+  permission_level: "本轮没有开放这个权限等级",
   onebot_action: "当前 OneBot 实现不支持这个操作",
   bot_not_admin: "机器人没有群管理权限",
+  bot_not_owner: "机器人不是群主，无法执行这个操作",
   actor_not_admin: "当前调用者没有群管理权限",
   not_allowlisted: "当前群没有把这个特权工具加入白名单",
 };
@@ -1733,6 +1756,9 @@ const TOOL_NAME_LABELS: Record<string, string> = {
   get_group_info: "查看群信息",
   get_group_member: "查看成员详情",
   list_group_members: "查看群成员列表",
+  get_message: "读取消息",
+  get_recent_group_messages: "读取近期群消息",
+  discover_tools: "发现可用工具",
   search_group_memory: "搜索群记忆",
   get_person_profile: "查看成员画像",
   list_user_relations: "查看成员关系",
@@ -1740,9 +1766,30 @@ const TOOL_NAME_LABELS: Record<string, string> = {
   search_reactions: "搜索表情包",
   send_message: "发送消息",
   send_forward: "发送合并转发",
+  react_to_message: "消息表情回应",
+  list_group_notices: "查看群公告",
+  list_essence_messages: "查看精华消息",
+  list_muted_members: "查看禁言列表",
+  get_group_honor: "查看群荣誉",
+  list_group_files: "查看群文件",
+  get_group_file_link: "获取群文件链接",
   mute_member: "禁言成员",
   create_group_announcement: "发布群公告",
+  set_essence_message: "设置精华消息",
+  remove_essence_message: "移出精华消息",
+  delete_group_notice: "删除群公告",
+  set_group_card: "修改群名片",
+  set_special_title: "设置专属头衔",
+  set_group_name: "修改群名称",
+  create_group_folder: "创建群文件夹",
   send_file: "发送群文件",
+  kick_member: "踢出成员",
+  set_whole_group_mute: "全员禁言",
+  set_group_admin: "设置群管理员",
+  delete_group_file: "删除群文件",
+  move_group_file: "移动群文件",
+  rename_group_file: "重命名群文件",
+  delete_group_folder: "删除群文件夹",
 };
 
 const SEGMENT_NAME_LABELS: Record<string, string> = {
@@ -2163,7 +2210,7 @@ function DebugToolsView({ tools, permissions }: { tools: AgentDebugResponse["too
           <Space wrap>
             <Text strong>{toolDisplayName(permission.name)}</Text>
             <Text type="secondary" code>{permission.name}</Text>
-            <Tag color={permission.permissionLevel === "privileged" ? "red" : permission.permissionLevel === "message_send" ? "blue" : permission.permissionLevel === "state_write" ? "orange" : "default"}>{TOOL_PERMISSION_LABELS[permission.permissionLevel] ?? permission.permissionLevel}</Tag>
+            <Tag color={permission.permissionLevel === "critical" ? "volcano" : permission.permissionLevel === "privileged" ? "red" : permission.permissionLevel === "message_send" ? "blue" : permission.permissionLevel === "state_write" ? "orange" : "default"}>{TOOL_PERMISSION_LABELS[permission.permissionLevel] ?? permission.permissionLevel}</Tag>
             <Tag color={permission.exposed ? "green" : "default"}>{TOOL_PERMISSION_REASON_LABELS[permission.reason] ?? permission.reason}</Tag>
           </Space>
           {(fn.description || row.description) ? <Text type="secondary">{debugDisplay(fn.description || row.description)}</Text> : null}

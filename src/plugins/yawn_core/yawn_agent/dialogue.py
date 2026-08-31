@@ -81,6 +81,7 @@ from .prompt import (
     stable_context_key,
 )
 from .tools import (
+    MAX_TOOL_ROUNDS,
     build_tool_schemas,
     dialogue_tool_round_limit,
     execute_tool,
@@ -1370,14 +1371,20 @@ async def _process_group_message(
                 int(user_id) != int(bot_id) for user_id in normalized.mentions
             )
             tool_intent_text = normalized.intent_text()
+            has_reply_context = bool(normalized.reply_chain)
+            has_media_context = bool(normalized.media_refs)
             selected_tool_names = select_dialogue_tool_names(
                 tool_intent_text,
+                has_reply=has_reply_context,
                 has_mentions=has_target_mentions,
+                has_media=has_media_context,
                 allow_admin_tools=allow_admin_tools,
             )
             message_segment_types = select_dialogue_message_segment_types(
                 tool_intent_text,
                 has_target_mentions=has_target_mentions,
+                has_reply=has_reply_context,
+                has_media=has_media_context,
             )
             tools = build_tool_schemas(
                 capabilities,
@@ -1407,6 +1414,10 @@ async def _process_group_message(
                         str(item.get("function", {}).get("name") or "")
                         for item in tools
                     ],
+                    "tool_schema_chars": len(
+                        json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+                    ),
+                    "tool_count": len(tools),
                 },
                 duration_ms=(time.monotonic() - capability_started) * 1000,
             )
@@ -1674,6 +1685,7 @@ async def _process_group_message(
                 }
                 messages.append(assistant)
                 round_sent_message = False
+                discovered_tool_names: set[str] = set()
                 for call in tool_calls:
                     function = getattr(call, "function", None)
                     if function is None:
@@ -1720,6 +1732,16 @@ async def _process_group_message(
                                 session=session,
                                 capabilities=capabilities,
                             )
+                    if tool_name == "discover_tools" and bool(result.get("ok")):
+                        discovery = result.get("result")
+                        discovery_rows = (
+                            discovery.get("tools", [])
+                            if isinstance(discovery, dict)
+                            else []
+                        )
+                        for item in discovery_rows:
+                            if isinstance(item, dict) and item.get("name"):
+                                discovered_tool_names.add(str(item["name"]))
                     trace_event(
                         "tool",
                         f"工具 {tool_name or '[unknown]'}",
@@ -1859,6 +1881,44 @@ async def _process_group_message(
                         # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
                         # 同时调用 send_message/send_forward 连发多条。
                         break
+                if discovered_tool_names and not round_sent_message:
+                    selected_tool_names = frozenset(
+                        set(selected_tool_names) | discovered_tool_names
+                    )
+                    tools = build_tool_schemas(
+                        capabilities,
+                        allow_admin_tools=allow_admin_tools,
+                        segment_capabilities=get_segment_capabilities(bot, group_id),
+                        privileged_allowlist=set(config.tool_allowlist or []),
+                        include_names=selected_tool_names,
+                        message_segment_types=(
+                            message_segment_types
+                            if "send_message" in selected_tool_names
+                            else None
+                        ),
+                    )
+                    loaded_names = {
+                        str(item.get("function", {}).get("name") or "")
+                        for item in tools
+                    }
+                    loaded_discoveries = sorted(
+                        name for name in discovered_tool_names if name in loaded_names
+                    )
+                    round_limit = max(
+                        round_limit,
+                        min(MAX_TOOL_ROUNDS, rounds + 2),
+                    )
+                    trace_event(
+                        "capability",
+                        "动态工具发现",
+                        output={
+                            "requested": sorted(discovered_tool_names),
+                            "loaded": loaded_discoveries,
+                            "tool_count": len(tools),
+                            "round_limit": round_limit,
+                        },
+                        round_index=rounds,
+                    )
                 if round_sent_message:
                     dbg(f"群 {group_id} 工具已发送用户可见消息,结束本轮避免重复回复")
                     return

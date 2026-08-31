@@ -1,0 +1,193 @@
+# ruff: noqa: C901,PLR0912,PLR2004
+"""Deterministic, zero-AI-cost routing from one dialogue turn to tool schemas."""
+
+from __future__ import annotations
+
+from .tool_registry import (
+    CONTROLLED_TOOLS,
+    CORE_DIALOGUE_TOOL_NAMES,
+    MESSAGE_SEND_TOOLS,
+    TOOL_DEFINITIONS,
+    TOOL_PERMISSION_CRITICAL,
+    TOOL_PERMISSION_PRIVILEGED,
+    ToolDefinition,
+)
+
+MAX_TOOL_ROUNDS = 4
+
+
+def select_dialogue_tool_names(
+    text: str | None,
+    *,
+    has_reply: bool = False,
+    has_mentions: bool = False,
+    has_media: bool = False,
+    allow_admin_tools: bool = False,
+) -> frozenset[str]:
+    """Return a compact but useful tool bundle for the current turn.
+
+    Core tools remain visible so the model is not reduced to a text-only bot.
+    Structural message signals and registry keywords expand the bundle without
+    paying for a separate classifier model call. Controlled tools are only
+    preloaded when the caller is a current group manager and the user text
+    itself contains an explicit action hint.
+    """
+
+    normalized = str(text or "").strip().casefold()
+    selected: set[str] = set(CORE_DIALOGUE_TOOL_NAMES)
+
+    if has_reply:
+        selected.update({"get_message", "react_to_message", "send_message"})
+    if has_mentions:
+        selected.update({"get_group_member", "get_person_profile", "send_message"})
+    if has_media:
+        selected.add("send_message")
+
+    for definition in TOOL_DEFINITIONS:
+        if definition.core:
+            continue
+        if definition.permission_level in {
+            TOOL_PERMISSION_PRIVILEGED,
+            TOOL_PERMISSION_CRITICAL,
+        }:
+            continue
+        if any(keyword.casefold() in normalized for keyword in definition.keywords):
+            selected.add(definition.name)
+
+    if allow_admin_tools:
+        mute_read_hints = (
+            "禁言列表",
+            "谁被禁言",
+            "谁还在禁言",
+            "谁正在禁言",
+            "查看禁言",
+            "看看禁言",
+            "禁言情况",
+        )
+        for definition in TOOL_DEFINITIONS:
+            if definition.permission_level not in {
+                TOOL_PERMISSION_PRIVILEGED,
+                TOOL_PERMISSION_CRITICAL,
+            }:
+                continue
+            if definition.name == "mute_member" and any(
+                hint in normalized for hint in mute_read_hints
+            ):
+                continue
+            if any(keyword.casefold() in normalized for keyword in definition.keywords):
+                selected.add(definition.name)
+
+    return frozenset(selected)
+
+
+def rank_discoverable_tools(
+    query: str,
+    candidates: list[ToolDefinition],
+    *,
+    family: str | None = None,
+    limit: int = 5,
+) -> list[ToolDefinition]:
+    """Rank eligible registry entries without another model call."""
+
+    normalized = str(query or "").strip().casefold()
+    family_filter = str(family or "").strip().casefold()
+    scored: list[tuple[int, str, ToolDefinition]] = []
+    for definition in candidates:
+        if not definition.discoverable or definition.name == "discover_tools":
+            continue
+        if family_filter and definition.family.casefold() != family_filter:
+            continue
+        score = 0
+        if normalized and normalized in definition.name.casefold():
+            score += 8
+        if normalized and normalized in definition.description.casefold():
+            score += 6
+        if normalized and normalized in definition.family.casefold():
+            score += 4
+        for keyword in definition.keywords:
+            folded = keyword.casefold()
+            if folded in normalized:
+                score += 5
+            elif normalized and normalized in folded:
+                score += 3
+        # A requested family is already a meaningful match; otherwise omit
+        # zero-score noise so discovery does not become a catalog dump.
+        if score > 0 or family_filter:
+            scored.append((score, definition.name, definition))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [definition for _score, _name, definition in scored[:limit]]
+
+
+def select_dialogue_message_segment_types(
+    text: str | None,
+    *,
+    has_target_mentions: bool = False,
+    has_reply: bool = False,
+    has_media: bool = False,
+) -> frozenset[str]:
+    """Select the smallest outbound segment vocabulary useful this turn."""
+
+    normalized = str(text or "").strip().casefold()
+    selected: set[str] = {"text"}
+    if has_reply or "回复" in normalized or "引用" in normalized:
+        selected.add("reply")
+    if has_target_mentions or "艾特" in normalized:
+        selected.add("at")
+    if "表情包" in normalized or "reaction" in normalized or any(
+        hint in normalized for hint in ("无语", "吃瓜", "震惊")
+    ):
+        selected.add("reaction")
+    elif "表情" in normalized:
+        selected.add("face")
+    if "图片" in normalized or "发图" in normalized:
+        selected.add("image")
+    if "语音" in normalized:
+        selected.add("record")
+    if "视频" in normalized:
+        selected.add("video")
+    if "骰子" in normalized:
+        selected.add("dice")
+    if "猜拳" in normalized:
+        selected.add("rps")
+    if "戳一戳" in normalized or "poke" in normalized:
+        selected.add("poke")
+    if "分享" in normalized or "链接" in normalized:
+        selected.add("share")
+    if "名片" in normalized:
+        selected.add("contact")
+    if "位置" in normalized or "定位" in normalized:
+        selected.add("location")
+    if "音乐" in normalized or "歌曲" in normalized:
+        selected.add("music")
+    if has_media and any(
+        hint in normalized for hint in ("原图", "这张图", "这图片", "发回来")
+    ):
+        selected.add("image")
+    return frozenset(selected)
+
+
+def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
+    """Return a bounded LLM round budget for the selected tool bundle."""
+
+    names = frozenset(tool_names)
+    if not names:
+        return 1
+    if names <= MESSAGE_SEND_TOOLS:
+        return 2
+    if "discover_tools" in names:
+        return min(MAX_TOOL_ROUNDS, 3)
+    if names & CONTROLLED_TOOLS:
+        return min(MAX_TOOL_ROUNDS, 3)
+    non_send = names - MESSAGE_SEND_TOOLS
+    if len(non_send) <= 3:
+        return 2
+    return min(MAX_TOOL_ROUNDS, 3)
+
+
+__all__ = [
+    "MAX_TOOL_ROUNDS",
+    "dialogue_tool_round_limit",
+    "rank_discoverable_tools",
+    "select_dialogue_message_segment_types",
+    "select_dialogue_tool_names",
+]

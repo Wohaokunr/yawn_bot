@@ -9,9 +9,12 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOT_ID = 100
+ACTOR_ADMIN_ID = 200
+PREEXISTING_ADMIN_TOOL_COUNT = 7
 MEMBER_RESULT_LIMIT = 30
 MEMBER_TOTAL = 125
 EXPANDED_MEMBER_RESULT_LIMIT = 50
+RECENT_MESSAGE_RESULT_LIMIT = 3
 STANDARD_TOOL_ROUNDS = 2
 EXTENDED_TOOL_ROUNDS = 3
 TITLE_MEMBER_INDEX = 2
@@ -54,6 +57,85 @@ def test_admin_tool_schemas_require_actor_management_permission() -> None:
     assert "mute_member" not in member_tools
     assert "create_group_announcement" not in member_tools
     assert {"mute_member", "create_group_announcement"} <= admin_tools
+
+
+@pytest.mark.asyncio
+async def test_group_announcement_capability_defaults_to_napcat_action() -> None:
+    capabilities, _media, _tools = _load_agent_modules()
+
+    class Bot:
+        self_id = "100"
+
+        async def call_api(self, action: str, **params: Any) -> dict[str, Any]:
+            assert action == "get_group_member_info"
+            assert int(params["user_id"]) == BOT_ID
+            return {"role": "admin"}
+
+    default_caps = await capabilities.probe_group_capabilities(
+        Bot(), 910001, refresh=True
+    )
+    assert "_send_group_notice" in default_caps.actions
+    assert "send_group_notice" not in default_caps.actions
+
+    class AliasBot(Bot):
+        supported_actions = frozenset({"get_group_member_info", "send_group_notice"})
+
+    alias_caps = await capabilities.probe_group_capabilities(
+        AliasBot(), 910002, refresh=True
+    )
+    assert "send_group_notice" in alias_caps.actions
+    assert "_send_group_notice" not in alias_caps.actions
+
+
+@pytest.mark.asyncio
+async def test_create_group_announcement_prefers_napcat_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    caps = capabilities.BotGroupCapabilities(
+        role="admin",
+        can_manage=True,
+        actions=frozenset({"send_group_notice", "_send_group_notice"}),
+    )
+
+    class Bot:
+        calls: list[tuple[str, dict[str, Any]]]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call_api(self, action: str, **params: Any) -> dict[str, Any]:
+            self.calls.append((action, params))
+            return {"ok": True}
+
+    async def probe(*_args: Any, **_kwargs: Any) -> Any:
+        return caps
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", probe)
+    monkeypatch.setattr(tools, "_check_tool_policy", noop)
+    monkeypatch.setattr(tools, "_consume_admin_quota", noop)
+    monkeypatch.setattr(tools, "_audit", noop)
+
+    bot = Bot()
+    result = await tools.execute_tool(
+        "create_group_announcement",
+        {"content": "测试公告"},
+        bot=bot,
+        group_id=802027793,
+        actor_user_id=200,
+        capabilities=caps,
+    )
+
+    assert result == {"ok": True, "result": {"ok": True}}
+    assert bot.calls == [
+        (
+            "_send_group_notice",
+            {"group_id": 802027793, "content": "测试公告"},
+        )
+    ]
 
 
 def test_tool_permission_levels_gate_side_effects_and_allowlist() -> None:
@@ -162,28 +244,38 @@ def test_tool_registry_filters_removed_tools_and_forward_capability() -> None:
     assert "send_forward" in _tool_names(tools.build_tool_schemas(forward))
 
 
-def test_dialogue_tool_policy_keeps_plain_chat_schema_free() -> None:
+def test_dialogue_tool_policy_keeps_core_bundle_available() -> None:
     capabilities, _media, tools = _load_agent_modules()
     caps = capabilities.BotGroupCapabilities(
         role="member",
         can_manage=False,
-        actions=frozenset({"send_group_msg", "get_group_member_list"}),
+        actions=frozenset(
+            {
+                "send_group_msg",
+                "get_msg",
+                "get_group_member_list",
+                "set_msg_emoji_like",
+            }
+        ),
     )
 
-    assert tools.select_dialogue_tool_names("今天有点困") == frozenset()
-    assert tools.select_dialogue_tool_names(
+    core = frozenset(
+        {"send_message", "search_group_memory", "get_message", "discover_tools"}
+    )
+    assert tools.select_dialogue_tool_names("今天有点困") == core
+    reply_bundle = tools.select_dialogue_tool_names(
         "今天有点困", has_reply=True, has_media=True
-    ) == frozenset()
-    assert tools.select_dialogue_tool_names(
-        "你好", has_mentions=True
-    ) == frozenset({"send_message"})
+    )
+    assert core | {"react_to_message"} <= reply_bundle
+    mention_bundle = tools.select_dialogue_tool_names("你好", has_mentions=True)
+    assert core | {"get_group_member", "get_person_profile"} <= mention_bundle
     memory_bundle = tools.select_dialogue_tool_names("你还记得我上次说的吗")
-    assert memory_bundle == frozenset({"search_group_memory"})
+    assert core <= memory_bundle
     reaction_bundle = tools.select_dialogue_tool_names("发个无语表情包")
     assert {"send_message", "search_reactions"} <= reaction_bundle
 
     schemas = tools.build_tool_schemas(caps, include_names=memory_bundle)
-    assert _tool_names(schemas) == {"search_group_memory"}
+    assert _tool_names(schemas) == core
 
     segment_types = tools.select_dialogue_message_segment_types(
         "回复他一个无语表情包", has_target_mentions=True
@@ -207,6 +299,10 @@ def test_dialogue_tool_round_budget_is_small_by_default() -> None:
     assert tools.dialogue_tool_round_limit(frozenset()) == 1
     assert tools.dialogue_tool_round_limit({"send_message"}) == STANDARD_TOOL_ROUNDS
     assert (
+        tools.dialogue_tool_round_limit({"discover_tools", "send_message"})
+        == EXTENDED_TOOL_ROUNDS
+    )
+    assert (
         tools.dialogue_tool_round_limit({"search_group_memory"})
         == STANDARD_TOOL_ROUNDS
     )
@@ -224,6 +320,284 @@ def test_dialogue_tool_round_budget_is_small_by_default() -> None:
     assert (
         tools.dialogue_tool_round_limit({"mute_member"}) == EXTENDED_TOOL_ROUNDS
     )
+
+
+@pytest.mark.asyncio
+async def test_discover_tools_only_returns_currently_exposable_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="admin",
+        can_manage=True,
+        actions=frozenset(
+            {
+                "get_group_member_info",
+                "get_essence_msg_list",
+                "set_essence_msg",
+                "set_group_kick",
+            }
+        ),
+    )
+
+    class Config:
+        tool_allowlist = ("set_essence_message", "kick_member")
+
+    class Session:
+        async def get(self, _model: object, _group_id: int) -> Config:
+            return Config()
+
+    class Bot:
+        async def call_api(self, action: str, **_params: Any) -> dict[str, Any]:
+            assert action == "get_group_member_info"
+            return {"role": "admin"}
+
+    async def probe(*_args: object, **_kwargs: object) -> Any:
+        return current
+
+    async def no_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", probe)
+    monkeypatch.setattr(tools, "_audit", no_audit)
+    result = await tools.execute_tool(
+        "discover_tools",
+        {"query": "精华消息"},
+        bot=Bot(),
+        group_id=1,
+        actor_user_id=ACTOR_ADMIN_ID,
+        session=Session(),
+        capabilities=current,
+    )
+
+    assert result["ok"] is True
+    discovered = {item["name"] for item in result["result"]["tools"]}
+    assert "set_essence_message" in discovered
+    # critical tools are never discoverable even if explicitly allowlisted.
+    assert "kick_member" not in discovered
+    loaded = _tool_names(
+        tools.build_tool_schemas(
+            current,
+            allow_admin_tools=True,
+            privileged_allowlist={"set_essence_message", "kick_member"},
+            include_names={"discover_tools", *discovered},
+        )
+    )
+    assert "set_essence_message" in loaded
+
+
+@pytest.mark.asyncio
+async def test_p5_essence_tool_rechecks_policy_and_current_group_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="admin",
+        can_manage=True,
+        actions=frozenset({"get_msg", "set_essence_msg"}),
+    )
+
+    class Config:
+        tool_allowlist = ("set_essence_message",)
+        tool_day = ""
+        admin_tool_count = 0
+        admin_tool_daily_limit = 30
+        critical_tool_count = 0
+        critical_tool_daily_limit = 5
+
+    config = Config()
+    config.tool_day = tools.now_beijing().strftime("%Y-%m-%d")
+
+    class Session:
+        async def get(self, _model: object, _group_id: int) -> Config:
+            return config
+
+        async def flush(self) -> None:
+            return None
+
+    class Bot:
+        self_id = "100"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def call_api(self, action: str, **params: Any) -> dict[str, Any]:
+            self.calls.append((action, params))
+            if action == "get_group_member_info":
+                return {"user_id": params["user_id"], "role": "admin"}
+            if action == "get_msg":
+                return {"message_id": params["message_id"], "group_id": 1}
+            if action == "set_essence_msg":
+                return {}
+            raise AssertionError(action)
+
+    async def no_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(tools, "_audit", no_audit)
+    bot = Bot()
+    result = await tools.execute_tool(
+        "set_essence_message",
+        {"message_id": 99},
+        bot=bot,
+        group_id=1,
+        actor_user_id=ACTOR_ADMIN_ID,
+        session=Session(),
+        capabilities=current,
+    )
+
+    assert result["ok"] is True
+    assert ("set_essence_msg", {"message_id": 99}) in bot.calls
+    assert config.admin_tool_count == 1
+
+
+@pytest.mark.asyncio
+async def test_critical_tool_rejects_background_and_uses_independent_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="admin",
+        can_manage=True,
+        actions=frozenset({"set_group_kick"}),
+    )
+
+    class Config:
+        tool_allowlist = ("kick_member",)
+        tool_day = ""
+        admin_tool_count = PREEXISTING_ADMIN_TOOL_COUNT
+        admin_tool_daily_limit = 30
+        critical_tool_count = 0
+        critical_tool_daily_limit = 2
+
+    config = Config()
+    config.tool_day = tools.now_beijing().strftime("%Y-%m-%d")
+
+    class Session:
+        async def get(self, _model: object, _group_id: int) -> Config:
+            return config
+
+        async def flush(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+    class Bot:
+        self_id = "100"
+
+        def __init__(self) -> None:
+            self.kicked = False
+
+        async def call_api(self, action: str, **params: Any) -> dict[str, Any]:
+            if action == "get_group_member_info":
+                user_id = int(params["user_id"])
+                return {
+                    "user_id": user_id,
+                    "role": (
+                        "admin"
+                        if user_id in {BOT_ID, ACTOR_ADMIN_ID}
+                        else "member"
+                    ),
+                }
+            if action == "set_group_kick":
+                self.kicked = True
+                return {}
+            raise AssertionError(action)
+
+    async def no_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(tools, "_audit", no_audit)
+    bot = Bot()
+    background = await tools.execute_tool(
+        "kick_member",
+        {"user_id": 300},
+        bot=bot,
+        group_id=1,
+        actor_user_id=None,
+        session=Session(),
+        capabilities=current,
+    )
+    assert background["ok"] is False
+    assert "管理权限" in background["error"]
+    assert bot.kicked is False
+
+    foreground = await tools.execute_tool(
+        "kick_member",
+        {"user_id": 300},
+        bot=bot,
+        group_id=1,
+        actor_user_id=ACTOR_ADMIN_ID,
+        session=Session(),
+        capabilities=current,
+    )
+    assert foreground["ok"] is True
+    assert bot.kicked is True
+    assert config.critical_tool_count == 1
+    assert config.admin_tool_count == PREEXISTING_ADMIN_TOOL_COUNT
+
+
+def test_critical_tools_require_explicit_admin_intent_and_allowlist() -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="owner",
+        can_manage=True,
+        actions=frozenset(
+            {
+                "set_group_kick",
+                "set_group_whole_ban",
+                "set_group_admin",
+                "delete_group_file",
+            }
+        ),
+    )
+
+    plain = tools.select_dialogue_tool_names("今天聊点什么", allow_admin_tools=True)
+    assert "kick_member" not in plain
+    assert "set_group_admin" not in plain
+    kick = tools.select_dialogue_tool_names("把小明踢出群", allow_admin_tools=True)
+    assert "kick_member" in kick
+
+    without_allowlist = _tool_names(
+        tools.build_tool_schemas(
+            current,
+            allow_admin_tools=True,
+            privileged_allowlist=set(),
+            include_names=kick,
+        )
+    )
+    assert "kick_member" not in without_allowlist
+    with_allowlist = _tool_names(
+        tools.build_tool_schemas(
+            current,
+            allow_admin_tools=True,
+            privileged_allowlist={"kick_member"},
+            include_names=kick,
+        )
+    )
+    assert "kick_member" in with_allowlist
+
+
+def test_registry_never_exposes_raw_or_credential_actions() -> None:
+    _capabilities, _media, tools = _load_agent_modules()
+    forbidden = {
+        "get_cookies",
+        "get_csrf_token",
+        "get_credentials",
+        "get_clientkey",
+        "get_rkey",
+        "send_packet",
+        "bot_exit",
+        "set_group_leave",
+    }
+    registered_actions = {
+        action
+        for definition in tools._TOOL_DEFINITIONS
+        for action in definition.actions
+    }
+    assert forbidden.isdisjoint(registered_actions)
+    assert "onebot_call" not in {item.name for item in tools._TOOL_DEFINITIONS}
 
 
 @pytest.mark.asyncio
@@ -286,6 +660,312 @@ async def test_group_read_tools_project_onebot_payloads(
         "role": "admin",
         "title": "管理员头衔",
     }
+
+
+def test_high_value_onebot_tools_are_routed_without_privilege_leaks() -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    caps = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset(
+            {
+                "send_group_msg",
+                "get_msg",
+                "get_group_msg_history",
+                "_get_group_notice",
+                "get_essence_msg_list",
+                "get_group_shut_list",
+                "get_group_honor_info",
+                "get_group_root_files",
+                "get_group_files_by_folder",
+                "get_group_file_url",
+                "set_msg_emoji_like",
+            }
+        ),
+    )
+
+    assert "get_recent_group_messages" in tools.select_dialogue_tool_names(
+        "刚才群里在聊什么"
+    )
+    assert "list_group_notices" in tools.select_dialogue_tool_names("看看群公告")
+    muted = tools.select_dialogue_tool_names("谁还在禁言", allow_admin_tools=True)
+    assert "list_muted_members" in muted
+    assert "mute_member" not in muted
+    mute_action = tools.select_dialogue_tool_names(
+        "把小明禁言 10 分钟", allow_admin_tools=True
+    )
+    assert "mute_member" in mute_action
+    assert "get_group_honor" in tools.select_dialogue_tool_names("这个群龙王是谁")
+    assert "list_group_files" in tools.select_dialogue_tool_names("群文件里有什么")
+    assert "get_group_file_link" in tools.select_dialogue_tool_names("给我群文件链接")
+
+    names = _tool_names(tools.build_tool_schemas(caps))
+    assert {
+        "get_message",
+        "get_recent_group_messages",
+        "list_group_notices",
+        "list_essence_messages",
+        "list_muted_members",
+        "get_group_honor",
+        "list_group_files",
+        "get_group_file_link",
+        "react_to_message",
+    } <= names
+
+
+@pytest.mark.asyncio
+async def test_new_onebot_read_tools_return_compact_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset(
+            {
+                "get_group_msg_history",
+                "_get_group_notice",
+                "get_essence_msg_list",
+                "get_group_shut_list",
+                "get_group_honor_info",
+                "get_group_root_files",
+                "get_group_files_by_folder",
+                "get_group_file_url",
+            }
+        ),
+    )
+
+    async def probe(*_args: object, **_kwargs: object) -> Any:
+        return current
+
+    class Bot:
+        async def call_api(self, action: str, **_params: Any) -> Any:  # noqa: PLR0911
+            if action == "get_group_msg_history":
+                assert _params["count"] == RECENT_MESSAGE_RESULT_LIMIT
+                return {
+                    "messages": [
+                        {
+                            "message_id": 11,
+                            "sender": {"user_id": 2, "nickname": "甲"},
+                            "message": [
+                                {"type": "text", "data": {"text": "你好"}},
+                                {
+                                    "type": "image",
+                                    "data": {"url": "https://secret.invalid/image"},
+                                },
+                            ],
+                            "raw_payload": {"should": "not leak"},
+                        }
+                    ]
+                }
+            if action == "_get_group_notice":
+                return [
+                    {
+                        "notice_id": "n1",
+                        "sender_id": 2,
+                        "publish_time": 123,
+                        "message": "公告正文",
+                        "raw": "drop-me",
+                    }
+                ]
+            if action == "get_essence_msg_list":
+                return [
+                    {
+                        "message_id": 12,
+                        "sender_id": 3,
+                        "sender_nick": "乙",
+                        "message": [{"type": "text", "data": {"text": "精华正文"}}],
+                        "raw": "drop-me",
+                    }
+                ]
+            if action == "get_group_shut_list":
+                return [
+                    {
+                        "user_id": 4,
+                        "nickname": "丙",
+                        "role": "member",
+                        "shut_up_timestamp": 456,
+                        "age": 20,
+                    }
+                ]
+            if action == "get_group_honor_info":
+                return {
+                    "group_id": 1,
+                    "current_talkative": {"user_id": 5, "nickname": "龙王"},
+                    "talkative_list": [{"user_id": 6, "nickname": "活跃"}],
+                    "raw": "drop-me",
+                }
+            if action == "get_group_root_files":
+                return {
+                    "files": [
+                        {
+                            "file_id": "f1",
+                            "file_name": "说明.pdf",
+                            "busid": 7,
+                            "file_size": 100,
+                            "local_path": "C:/secret",
+                        }
+                    ],
+                    "folders": [
+                        {"folder_id": "d1", "folder_name": "资料", "file_count": 2}
+                    ],
+                }
+            if action == "get_group_file_url":
+                return {
+                    "url": "https://example.invalid/download/f1",
+                    "token": "drop-me",
+                }
+            raise AssertionError(action)
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", probe)
+    bot = Bot()
+    history = await tools.execute_tool(
+        "get_recent_group_messages",
+        {"count": RECENT_MESSAGE_RESULT_LIMIT},
+        bot=bot,
+        group_id=1,
+        capabilities=current,
+    )
+    notices = await tools.execute_tool(
+        "list_group_notices", {}, bot=bot, group_id=1, capabilities=current
+    )
+    essence = await tools.execute_tool(
+        "list_essence_messages", {}, bot=bot, group_id=1, capabilities=current
+    )
+    muted = await tools.execute_tool(
+        "list_muted_members", {}, bot=bot, group_id=1, capabilities=current
+    )
+    honor = await tools.execute_tool(
+        "get_group_honor", {}, bot=bot, group_id=1, capabilities=current
+    )
+    files = await tools.execute_tool(
+        "list_group_files", {}, bot=bot, group_id=1, capabilities=current
+    )
+    link = await tools.execute_tool(
+        "get_group_file_link",
+        {"file_id": "f1", "busid": 7},
+        bot=bot,
+        group_id=1,
+        capabilities=current,
+    )
+
+    assert history["result"]["items"][0]["text"] == "你好[图片]"
+    assert "secret.invalid" not in str(history["result"])
+    assert notices["result"] == [
+        {"notice_id": "n1", "sender_id": 2, "publish_time": 123, "content": "公告正文"}
+    ]
+    assert essence["result"][0]["content"] == "精华正文"
+    assert muted["result"]["items"][0] == {
+        "user_id": 4,
+        "name": "丙",
+        "shut_up_timestamp": 456,
+    }
+    assert "raw" not in honor["result"]
+    assert files["result"]["files"][0] == {
+        "file_id": "f1",
+        "name": "说明.pdf",
+        "busid": 7,
+        "size": 100,
+    }
+    assert link["result"] == {
+        "file_id": "f1",
+        "url": "https://example.invalid/download/f1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_message_and_reaction_require_known_current_group_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+    current = capabilities.BotGroupCapabilities(
+        role="member",
+        can_manage=False,
+        actions=frozenset({"get_msg", "set_msg_emoji_like"}),
+    )
+
+    async def probe(*_args: object, **_kwargs: object) -> Any:
+        return current
+
+    async def no_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    class Session:
+        def __init__(self, *, known: bool) -> None:
+            self.known = known
+
+        async def scalar(self, _stmt: object) -> object | None:
+            return object() if self.known else None
+
+        async def rollback(self) -> None:
+            return None
+
+    class Bot:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def call_api(self, action: str, **params: Any) -> Any:
+            self.calls.append((action, params))
+            if action == "get_msg":
+                return {
+                    "message_id": params["message_id"],
+                    "group_id": 1,
+                    "sender": {"user_id": 9, "nickname": "消息作者"},
+                    "message": [{"type": "text", "data": {"text": "原消息"}}],
+                }
+            if action == "set_msg_emoji_like":
+                return {}
+            raise AssertionError(action)
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", probe)
+    monkeypatch.setattr(tools, "_audit", no_audit)
+    bot = Bot()
+
+    unknown = await tools.execute_tool(
+        "react_to_message",
+        {"message_id": 99, "emoji_id": "66"},
+        bot=bot,
+        group_id=1,
+        session=Session(known=False),
+        capabilities=current,
+    )
+    assert unknown["ok"] is False
+    assert "当前群近期已知消息" in unknown["error"]
+    assert bot.calls == []
+
+    known_session = Session(known=True)
+    message = await tools.execute_tool(
+        "get_message",
+        {"message_id": 99},
+        bot=bot,
+        group_id=1,
+        session=known_session,
+        capabilities=current,
+    )
+    reaction = await tools.execute_tool(
+        "react_to_message",
+        {"message_id": 99, "emoji_id": "66"},
+        bot=bot,
+        group_id=1,
+        session=known_session,
+        capabilities=current,
+    )
+
+    assert message["result"] == {
+        "message_id": 99,
+        "user_id": 9,
+        "name": "消息作者",
+        "text": "原消息",
+    }
+    assert reaction["result"] == {
+        "message_id": 99,
+        "emoji_id": "66",
+        "reacted": True,
+    }
+    assert bot.calls[-1] == (
+        "set_msg_emoji_like",
+        {"message_id": 99, "emoji_id": "66"},
+    )
 
 
 @pytest.mark.asyncio

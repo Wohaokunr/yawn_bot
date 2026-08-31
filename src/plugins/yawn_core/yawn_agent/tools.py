@@ -7,8 +7,8 @@ import contextlib
 import json
 import mimetypes
 import os
+import re
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
+from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from .capabilities import (
     BotGroupCapabilities,
@@ -41,8 +42,32 @@ from .outbound import (
     send_outbound_message,
 )
 from .reactions import search_reactions
+from .tool_registry import (
+    ADMIN_TOOLS as _ADMIN_TOOLS,
+    CONTROLLED_TOOLS as _CONTROLLED_TOOLS,
+    CRITICAL_TOOLS as _CRITICAL_TOOLS,
+    MESSAGE_SEGMENT_FIELDS as _MESSAGE_SEGMENT_FIELDS,
+    MESSAGE_SEGMENT_SCHEMA as _MESSAGE_SEGMENT_SCHEMA,
+    MESSAGE_SEND_TOOLS as _MESSAGE_SEND_TOOLS,
+    PRIVILEGED_TOOLS as _PRIVILEGED_TOOLS,
+    TOOL_BY_NAME as _TOOL_BY_NAME,
+    TOOL_DEFINITIONS as _TOOL_DEFINITIONS,
+    TOOL_PERMISSION_CRITICAL,
+    TOOL_PERMISSION_MESSAGE_SEND,
+    TOOL_PERMISSION_PRIVILEGED,
+    TOOL_PERMISSION_RANK as _TOOL_PERMISSION_RANK,
+    TOOL_PERMISSION_READ,
+    TOOL_PERMISSION_STATE_WRITE,
+    ToolDefinition as _ToolDefinition,
+)
+from .tool_router import (
+    MAX_TOOL_ROUNDS,
+    dialogue_tool_round_limit,
+    rank_discoverable_tools,
+    select_dialogue_message_segment_types,
+    select_dialogue_tool_names,
+)
 
-MAX_TOOL_ROUNDS = 4
 MAX_FILE_BYTES = 32 * 1024 * 1024
 DEFAULT_MEMBER_TOOL_LIMIT = 30
 MAX_MEMBER_TOOL_LIMIT = 50
@@ -59,412 +84,12 @@ _ALLOWED_FILE_HOSTS = frozenset(
     if host.strip()
 )
 
-_MESSAGE_SEGMENT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "type": {
-            "type": "string",
-            "enum": [
-                "text",
-                "reply",
-                "at",
-                "face",
-                "reaction",
-                "image",
-                "record",
-                "video",
-                "rps",
-                "dice",
-                "poke",
-                "share",
-                "contact",
-                "location",
-                "music",
-            ],
-        },
-        "text": {"type": "string", "maxLength": 4000},
-        "message_id": {"type": "integer"},
-        "user_id": {"type": "integer", "minimum": 1},
-        "id": {"type": "integer", "minimum": 0, "maximum": 65535},
-        "reaction_id": {"type": "string", "minLength": 1, "maxLength": 64},
-        "file": {"type": "string", "minLength": 1},
-        "poke_type": {"type": "string", "minLength": 1, "maxLength": 32},
-        "poke_id": {"type": "string", "minLength": 1, "maxLength": 32},
-        "url": {"type": "string", "minLength": 1, "maxLength": 2048},
-        "title": {"type": "string", "minLength": 1, "maxLength": 120},
-        "content": {"type": "string", "maxLength": 300},
-        "contact_type": {"type": "string", "enum": ["qq", "group"]},
-        "latitude": {"type": "number", "minimum": -90, "maximum": 90},
-        "longitude": {"type": "number", "minimum": -180, "maximum": 180},
-        "provider": {"type": "string", "enum": ["qq", "163", "xm"]},
-    },
-    "required": ["type"],
-    "additionalProperties": False,
-}
-
-_MESSAGE_SEGMENT_FIELDS: dict[str, frozenset[str]] = {
-    "text": frozenset({"text"}),
-    "reply": frozenset({"message_id"}),
-    "at": frozenset({"user_id"}),
-    "face": frozenset({"id"}),
-    "reaction": frozenset({"reaction_id"}),
-    "image": frozenset({"file"}),
-    "record": frozenset({"file"}),
-    "video": frozenset({"file"}),
-    "rps": frozenset(),
-    "dice": frozenset(),
-    "poke": frozenset({"poke_type", "poke_id"}),
-    "share": frozenset({"url", "title", "content"}),
-    "contact": frozenset({"contact_type", "id"}),
-    "location": frozenset({"latitude", "longitude", "title", "content"}),
-    "music": frozenset({"provider", "id"}),
-}
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolDefinition:
-    name: str
-    description: str
-    properties: dict[str, Any]
-    required: tuple[str, ...] = ()
-    actions: tuple[str, ...] = ()
-    admin: bool = False
-    permission_level: str = "read"
-
-
-TOOL_PERMISSION_READ = "read"
-TOOL_PERMISSION_STATE_WRITE = "state_write"
-TOOL_PERMISSION_MESSAGE_SEND = "message_send"
-TOOL_PERMISSION_PRIVILEGED = "privileged"
-_TOOL_PERMISSION_RANK = {
-    TOOL_PERMISSION_READ: 0,
-    TOOL_PERMISSION_STATE_WRITE: 1,
-    TOOL_PERMISSION_MESSAGE_SEND: 2,
-    TOOL_PERMISSION_PRIVILEGED: 3,
-}
-
-
-_TOOL_DEFINITIONS = (
-    _ToolDefinition(
-        "get_group_info", "读取当前群信息", {}, actions=("get_group_info",)
-    ),
-    _ToolDefinition(
-        "get_group_member",
-        "读取群成员角色和头衔",
-        {"user_id": {"type": "integer"}},
-        required=("user_id",),
-        actions=("get_group_member_info",),
-    ),
-    _ToolDefinition(
-        "list_group_members",
-        "读取群成员列表（默认30人，最多50人）",
-        {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
-        actions=("get_group_member_list",),
-    ),
-    _ToolDefinition(
-        "search_group_memory",
-        "搜索当前群已沉淀的记忆（默认6条，最多10条）",
-        {
-            "query": {"type": "string", "minLength": 1, "maxLength": 120},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-        },
-        required=("query",),
-    ),
-    _ToolDefinition(
-        "get_person_profile",
-        "读取群内人物画像（默认6条，最多10条）",
-        {
-            "user_id": {"type": "integer"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-        },
-        required=("user_id",),
-    ),
-    _ToolDefinition(
-        "list_user_relations",
-        "查询群内某成员的已知关系（默认12条，最多20条）",
-        {
-            "user_id": {"type": "integer"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-        },
-        required=("user_id",),
-    ),
-    _ToolDefinition(
-        "record_user_relation",
-        "记录对话中明确观察到的两位成员之间的关系",
-        {
-            "subject_user_id": {"type": "integer"},
-            "object_user_id": {"type": "integer"},
-            "type": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 32,
-                "description": "优先使用：好友/死党/情侣/伴侣/亲属/师徒/同事/同学/搭子/对立",
-            },
-            "note": {
-                "type": "string",
-                "maxLength": 200,
-                "description": "一句话关系背景，没有可省略",
-            },
-        },
-        required=("subject_user_id", "object_user_id", "type"),
-        permission_level=TOOL_PERMISSION_STATE_WRITE,
-    ),
-    _ToolDefinition(
-        "search_reactions",
-        (
-            "按情绪/场景标签搜索本地表情包库，例如无语、开心、疑惑、吃瓜、震惊。"
-            "返回 reaction_id；发送时必须使用 reaction 段，禁止猜测本地图片路径。"
-        ),
-        {
-            "query": {"type": "string", "minLength": 1, "maxLength": 80},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 8},
-        },
-        required=("query",),
-    ),
-    _ToolDefinition(
-        "send_message",
-        (
-            "发送一条结构化 QQ 群消息，可组合引用、@、文本、QQ 表情、表情包、图片、"
-            "语音、视频、猜拳、骰子和 poke。reply.message_id 必须来自当前上下文"
-            "已有消息，at.user_id 必须是当前群成员；禁止 CQ 码和 @all。"
-            "成功调用后消息已经发出，不要再用最终文本重复发送同样内容。"
-        ),
-        {
-            "segments": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": MAX_OUTBOUND_SEGMENTS,
-                "items": _MESSAGE_SEGMENT_SCHEMA,
-            }
-        },
-        required=("segments",),
-        actions=("send_group_msg",),
-        permission_level=TOOL_PERMISSION_MESSAGE_SEND,
-    ),
-    _ToolDefinition(
-        "send_forward",
-        (
-            "发送受控合并转发。message 节点只能引用当前群近期 message_id；"
-            "custom 节点只给 user_id/content，nickname 由 Python 从当前群成员解析。"
-        ),
-        {
-            "nodes": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": MAX_FORWARD_NODES,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string", "enum": ["message", "custom"]},
-                        "message_id": {"type": "integer"},
-                        "user_id": {"type": "integer", "minimum": 1},
-                        "content": {"type": "string", "minLength": 1, "maxLength": 4000},
-                    },
-                    "required": ["type"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        required=("nodes",),
-        actions=("send_group_forward_msg",),
-        permission_level=TOOL_PERMISSION_MESSAGE_SEND,
-    ),
-    _ToolDefinition(
-        "mute_member",
-        "禁言群成员",
-        {
-            "user_id": {"type": "integer"},
-            "duration": {"type": "integer", "minimum": 1, "maximum": 2592000},
-        },
-        required=("user_id", "duration"),
-        actions=("set_group_ban",),
-        admin=True,
-        permission_level=TOOL_PERMISSION_PRIVILEGED,
-    ),
-    _ToolDefinition(
-        "create_group_announcement",
-        "创建群公告",
-        {"content": {"type": "string", "maxLength": 1000}},
-        required=("content",),
-        actions=("send_group_notice", "_send_group_notice"),
-        admin=True,
-        permission_level=TOOL_PERMISSION_PRIVILEGED,
-    ),
-    _ToolDefinition(
-        "send_file",
-        "发送群文件或文档",
-        {
-            "file": {"type": "string"},
-            "name": {"type": "string", "maxLength": 128},
-        },
-        required=("file", "name"),
-        actions=("upload_group_file",),
-        permission_level=TOOL_PERMISSION_PRIVILEGED,
-    ),
-)
-_TOOL_BY_NAME = {item.name: item for item in _TOOL_DEFINITIONS}
-_ADMIN_TOOLS = frozenset(item.name for item in _TOOL_DEFINITIONS if item.admin)
-_PRIVILEGED_TOOLS = frozenset(
-    item.name
-    for item in _TOOL_DEFINITIONS
-    if item.permission_level == TOOL_PERMISSION_PRIVILEGED
-)
-_MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
-
-_MESSAGE_TOOL_HINTS = (
-    "回复",
-    "引用",
-    "艾特",
-    "表情",
-    "图片",
-    "发图",
-    "语音",
-    "视频",
-    "骰子",
-    "猜拳",
-    "戳一戳",
-    "poke",
-    "分享",
-    "链接",
-    "名片",
-    "位置",
-    "定位",
-    "音乐",
-    "歌曲",
-)
-_REACTION_TOOL_HINTS = ("表情包", "reaction", "无语", "吃瓜", "震惊")
-_MEMORY_SEARCH_HINTS = ("记得", "记忆", "之前", "以前", "上次")
-_PROFILE_TOOL_HINTS = ("画像", "人物资料", "个人资料", "关系", "认识")
-_GROUP_TOOL_HINTS = ("群信息", "群资料", "群成员", "成员列表", "管理员", "群主", "头衔")
-_RELATION_WRITE_HINTS = (
-    "记录关系",
-    "记住关系",
-    "我们是",
-    "是我朋友",
-    "是我对象",
-    "是我同事",
-    "是我同学",
-    "是我搭子",
-    "是我死党",
-    "是我伴侣",
-)
-
-
-def select_dialogue_tool_names(
-    text: str | None,
-    *,
-    has_reply: bool = False,
-    has_mentions: bool = False,
-    has_media: bool = False,
-    allow_admin_tools: bool = False,
-) -> frozenset[str]:
-    """Select a small deterministic tool bundle for one dialogue turn.
-
-    Most QQ chat turns only need a direct text response. Sending the complete
-    schema catalog on every request costs thousands of input tokens and also
-    reduces the cached-prefix share. Tool bundles are intentionally keyword-
-    based rather than LLM-classified so selecting them has zero AI cost.
-    """
-
-    normalized = str(text or "").strip().casefold()
-    selected: set[str] = set()
-    if has_mentions or any(
-        hint.casefold() in normalized for hint in _MESSAGE_TOOL_HINTS
-    ):
-        selected.add("send_message")
-    if any(hint.casefold() in normalized for hint in _REACTION_TOOL_HINTS):
-        selected.update(("search_reactions", "send_message"))
-    if "合并转发" in normalized or "转发" in normalized:
-        selected.add("send_forward")
-    if any(hint in normalized for hint in _MEMORY_SEARCH_HINTS):
-        selected.add("search_group_memory")
-    if any(hint in normalized for hint in _PROFILE_TOOL_HINTS):
-        selected.update(("get_person_profile", "list_user_relations"))
-    if any(hint in normalized for hint in _GROUP_TOOL_HINTS):
-        selected.update(("get_group_info", "get_group_member", "list_group_members"))
-    if any(hint in normalized for hint in _RELATION_WRITE_HINTS):
-        selected.add("record_user_relation")
-    if allow_admin_tools:
-        if "禁言" in normalized:
-            selected.add("mute_member")
-        if "公告" in normalized:
-            selected.add("create_group_announcement")
-        if "群文件" in normalized or "发文件" in normalized or "发送文件" in normalized:
-            selected.add("send_file")
-    return frozenset(selected)
-
-
-def select_dialogue_message_segment_types(
-    text: str | None,
-    *,
-    has_target_mentions: bool = False,
-) -> frozenset[str]:
-    """Select the smallest outbound message vocabulary needed this turn."""
-
-    normalized = str(text or "").strip().casefold()
-    selected: set[str] = {"text"}
-    if "回复" in normalized or "引用" in normalized:
-        selected.add("reply")
-    if has_target_mentions or "艾特" in normalized:
-        selected.add("at")
-    if "表情包" in normalized or "reaction" in normalized or any(
-        hint in normalized for hint in ("无语", "吃瓜", "震惊")
-    ):
-        selected.add("reaction")
-    elif "表情" in normalized:
-        selected.add("face")
-    if "图片" in normalized or "发图" in normalized:
-        selected.add("image")
-    if "语音" in normalized:
-        selected.add("record")
-    if "视频" in normalized:
-        selected.add("video")
-    if "骰子" in normalized:
-        selected.add("dice")
-    if "猜拳" in normalized:
-        selected.add("rps")
-    if "戳一戳" in normalized or "poke" in normalized:
-        selected.add("poke")
-    if "分享" in normalized or "链接" in normalized:
-        selected.add("share")
-    if "名片" in normalized:
-        selected.add("contact")
-    if "位置" in normalized or "定位" in normalized:
-        selected.add("location")
-    if "音乐" in normalized or "歌曲" in normalized:
-        selected.add("music")
-    return frozenset(selected)
-
-
-def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
-    """Return a bounded LLM round budget for the selected tool bundle.
-
-    A plain response needs one model call. Direct message tools also need only
-    one call because a successful visible send ends the turn. Read/search
-    tools need one additional call to turn their result into a reply. Only
-    genuinely mixed or privileged bundles may use a third round; four rounds
-    remain an absolute compatibility ceiling rather than the normal path.
-    """
-
-    names = frozenset(tool_names)
-    if not names:
-        return 1
-    if names <= _MESSAGE_SEND_TOOLS:
-        return 2
-    if names & _PRIVILEGED_TOOLS:
-        return min(MAX_TOOL_ROUNDS, 3)
-    non_send = names - _MESSAGE_SEND_TOOLS
-    if len(non_send) <= 2:
-        return 2
-    return min(MAX_TOOL_ROUNDS, 3)
-
-
 def _max_tool_permission_level(
     *, allow_admin_tools: bool, max_permission_level: str | None
 ) -> str:
     if max_permission_level is None:
         return (
-            TOOL_PERMISSION_PRIVILEGED
+            TOOL_PERMISSION_CRITICAL
             if allow_admin_tools
             else TOOL_PERMISSION_MESSAGE_SEND
         )
@@ -474,7 +99,7 @@ def _max_tool_permission_level(
     return normalized
 
 
-def _tool_exposure_reason(
+def _tool_exposure_reason(  # noqa: PLR0911
     definition: _ToolDefinition,
     capabilities: BotGroupCapabilities,
     *,
@@ -492,10 +117,16 @@ def _tool_exposure_reason(
         return False, "onebot_action"
     if definition.admin and not capabilities.can_manage:
         return False, "bot_not_admin"
-    if definition.permission_level == TOOL_PERMISSION_PRIVILEGED and not allow_admin_tools:
+    if definition.owner_only and capabilities.role != "owner":
+        return False, "bot_not_owner"
+    if definition.permission_level in {
+        TOOL_PERMISSION_PRIVILEGED,
+        TOOL_PERMISSION_CRITICAL,
+    } and not allow_admin_tools:
         return False, "actor_not_admin"
     if (
-        definition.permission_level == TOOL_PERMISSION_PRIVILEGED
+        definition.permission_level
+        in {TOOL_PERMISSION_PRIVILEGED, TOOL_PERMISSION_CRITICAL}
         and privileged_allowlist is not None
         and definition.name not in privileged_allowlist
     ):
@@ -641,6 +272,172 @@ def _compact_group_member(raw: Any) -> dict[str, Any]:
     return compact
 
 
+def _compact_message_text(raw: Any, *, maximum: int = 800) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    message = raw.get("message")
+    if isinstance(message, str):
+        return message[:maximum]
+    parts: list[str] = []
+    if isinstance(message, list):
+        for segment in message[:24]:
+            if not isinstance(segment, dict):
+                continue
+            segment_type = str(segment.get("type") or "").strip().lower()
+            raw_data = segment.get("data")
+            data = raw_data if isinstance(raw_data, dict) else {}
+            if segment_type == "text":
+                parts.append(str(data.get("text") or ""))
+            elif segment_type in {"image", "record", "video", "file", "face"}:
+                labels = {
+                    "image": "图片",
+                    "record": "语音",
+                    "video": "视频",
+                    "file": "文件",
+                    "face": "表情",
+                }
+                parts.append(f"[{labels[segment_type]}]")
+    text = "".join(parts).strip()
+    if not text:
+        text = str(raw.get("raw_message") or "").strip()
+        text = re.sub(r"\[CQ:([a-zA-Z0-9_-]+)[^\]]*\]", r"[\1]", text)
+    return text[:maximum]
+
+
+def _compact_onebot_message(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("消息响应格式错误")
+    raw_sender = raw.get("sender")
+    sender = raw_sender if isinstance(raw_sender, dict) else {}
+    user_id = raw.get("user_id") or sender.get("user_id")
+    compact: dict[str, Any] = {
+        "message_id": raw.get("message_id"),
+        "user_id": user_id,
+        "name": str(sender.get("card") or sender.get("nickname") or user_id or "未知成员")[:64],
+        "text": _compact_message_text(raw),
+    }
+    if raw.get("time") is not None:
+        compact["time"] = raw.get("time")
+    return {key: value for key, value in compact.items() if value not in (None, "")}
+
+
+def _compact_notice(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("群公告响应格式错误")
+    sender = raw.get("sender_id") or raw.get("user_id")
+    content = raw.get("message") or raw.get("content") or raw.get("text") or ""
+    result = {
+        "notice_id": raw.get("notice_id") or raw.get("id"),
+        "sender_id": sender,
+        "publish_time": raw.get("publish_time") or raw.get("time"),
+        "content": str(content)[:1000],
+    }
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
+def _compact_essence(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("精华消息响应格式错误")
+    content = raw.get("content")
+    if isinstance(content, str):
+        compact_content = content[:800]
+    else:
+        compact_content = _compact_message_text(raw, maximum=800)
+    result = {
+        "message_id": raw.get("message_id"),
+        "sender_id": raw.get("sender_id"),
+        "sender_name": str(raw.get("sender_nick") or raw.get("sender_name") or "")[:64],
+        "operator_id": raw.get("operator_id"),
+        "operator_name": str(raw.get("operator_nick") or raw.get("operator_name") or "")[:64],
+        "content": compact_content,
+    }
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
+def _payload_list(raw: Any, *keys: str) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        for key in keys:
+            value = raw.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _compact_group_file(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("群文件响应格式错误")
+    result = {
+        "file_id": raw.get("file_id") or raw.get("id"),
+        "name": str(raw.get("file_name") or raw.get("name") or "")[:160],
+        "busid": raw.get("busid") or raw.get("bus_id"),
+        "size": raw.get("file_size") or raw.get("size"),
+        "uploader_id": raw.get("uploader") or raw.get("uploader_id"),
+        "uploader_name": str(raw.get("uploader_name") or "")[:64],
+        "upload_time": raw.get("upload_time"),
+    }
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
+def _compact_group_folder(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("群文件夹响应格式错误")
+    result = {
+        "folder_id": raw.get("folder_id") or raw.get("id"),
+        "name": str(raw.get("folder_name") or raw.get("name") or "")[:160],
+        "file_count": raw.get("total_file_count") or raw.get("file_count"),
+    }
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
+async def _require_known_message(
+    session: Any, group_id: int, message_id: int
+) -> GroupAgentMessage:
+    if message_id == 0:
+        raise ValueError("message_id 不能为 0")
+    if session is None:
+        raise PermissionError("消息操作需要数据库会话")
+    row = await session.scalar(
+        select(GroupAgentMessage).where(
+            GroupAgentMessage.group_id == group_id,
+            GroupAgentMessage.message_id == message_id,
+            (
+                GroupAgentMessage.expires_at.is_(None)
+                | (GroupAgentMessage.expires_at >= now_beijing())
+            ),
+        )
+    )
+    if row is None:
+        raise PermissionError("message_id 必须来自当前群近期已知消息")
+    return row
+
+
+async def _require_current_group_message_api(
+    bot: Any, group_id: int, message_id: int
+) -> dict[str, Any]:
+    if message_id == 0:
+        raise ValueError("message_id 不能为 0")
+    raw = await bot.call_api("get_msg", message_id=message_id)
+    if not isinstance(raw, dict):
+        raise ValueError("无法确认消息所属群")
+    raw_group_id = raw.get("group_id")
+    if raw_group_id is None or int(raw_group_id) != int(group_id):
+        raise PermissionError("message_id 不属于当前群")
+    return raw
+
+
+async def _require_group_member_api(
+    bot: Any, group_id: int, user_id: int
+) -> dict[str, Any]:
+    raw = await bot.call_api(
+        "get_group_member_info", group_id=group_id, user_id=user_id
+    )
+    if not isinstance(raw, dict) or int(raw.get("user_id") or 0) != int(user_id):
+        raise PermissionError("目标用户不是当前群成员")
+    return raw
+
+
 def _tool_result_limit(args: dict[str, Any], *, default: int, maximum: int) -> int:
     try:
         limit = int(args.get("limit") or default)
@@ -657,6 +454,63 @@ def _jsonable(value: object) -> object:
         return value
     except (TypeError, ValueError):
         return str(value)
+
+
+async def _discover_tools_for_actor(
+    *,
+    query: str,
+    family: str | None,
+    limit: int,
+    bot: Any,
+    group_id: int,
+    actor_user_id: int | None,
+    session: Any,
+    capabilities: BotGroupCapabilities,
+) -> dict[str, Any]:
+    """Return compact summaries for currently eligible discoverable tools."""
+
+    allow_admin_tools = bool(
+        actor_user_id is not None
+        and await user_can_manage_group(bot, group_id, actor_user_id)
+    )
+    allowlist: set[str] = set()
+    if session is not None:
+        config = await session.get(GroupAgentConfig, group_id)
+        if config is not None:
+            allowlist = set(config.tool_allowlist or [])
+    resolved_level = _max_tool_permission_level(
+        allow_admin_tools=allow_admin_tools,
+        max_permission_level=None,
+    )
+    candidates: list[_ToolDefinition] = []
+    for definition in _TOOL_DEFINITIONS:
+        exposed, _reason = _tool_exposure_reason(
+            definition,
+            capabilities,
+            allow_admin_tools=allow_admin_tools,
+            max_permission_level=resolved_level,
+            privileged_allowlist=allowlist,
+        )
+        if exposed and definition.discoverable:
+            candidates.append(definition)
+    matches = rank_discoverable_tools(
+        query,
+        candidates,
+        family=family,
+        limit=limit,
+    )
+    return {
+        "tools": [
+            {
+                "name": item.name,
+                "description": item.description,
+                "family": item.family,
+                "permission": item.permission_level,
+            }
+            for item in matches
+        ],
+        "count": len(matches),
+    }
 
 
 async def _audit(
@@ -709,6 +563,9 @@ async def _check_tool_policy(
     if definition.admin and not capabilities.can_manage:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 机器人没有群管理权限")
         raise PermissionError("机器人没有群管理权限")
+    if definition.owner_only and capabilities.role != "owner":
+        dbg(f"群 {group_id} 工具策略拒绝 {name}: 机器人不是群主")
+        raise PermissionError("该工具需要机器人是群主")
     if definition.actions and not any(
         capabilities.has(action) for action in definition.actions
     ):
@@ -734,7 +591,7 @@ async def _check_tool_policy(
         if actor_member is None:
             dbg(f"群 {group_id} 工具策略拒绝 {name}: 调用者 {actor_user_id} 不是已知群成员")
             raise PermissionError("状态写入工具仅允许当前群成员触发")
-    if name in _PRIVILEGED_TOOLS and (
+    if name in _CONTROLLED_TOOLS and (
         actor_user_id is None
         or not await user_can_manage_group(bot, group_id, actor_user_id)
     ):
@@ -744,7 +601,7 @@ async def _check_tool_policy(
             if name in _ADMIN_TOOLS
             else "特权工具仅允许群主或管理员触发"
         )
-    if name not in _PRIVILEGED_TOOLS:
+    if name not in _CONTROLLED_TOOLS:
         return
     if session is None:
         # 没有会话就无法校验白名单和配额，特权工具必须拒绝。
@@ -764,20 +621,29 @@ async def _check_tool_policy(
     if config.tool_day != today:
         config.tool_day = today
         config.admin_tool_count = 0
+        config.critical_tool_count = 0
         dbg(f"群 {group_id} 管理工具配额计数按新的一天重置")
-    if config.admin_tool_count >= max(int(config.admin_tool_daily_limit), 1):
+    if name in _CRITICAL_TOOLS:
+        used = int(config.critical_tool_count or 0)
+        daily_limit = max(int(config.critical_tool_daily_limit or 0), 1)
+        quota_label = "高风险工具"
+    else:
+        used = int(config.admin_tool_count or 0)
+        daily_limit = max(int(config.admin_tool_daily_limit or 0), 1)
+        quota_label = "管理工具"
+    if used >= daily_limit:
         dbg(
-            f"群 {group_id} 工具策略拒绝 {name}: 今日配额已用尽"
-            f"({config.admin_tool_count}/{config.admin_tool_daily_limit})"
+            f"群 {group_id} 工具策略拒绝 {name}: 今日{quota_label}配额已用尽"
+            f"({used}/{daily_limit})"
         )
-        raise PermissionError("Agent 今日特权操作配额已用尽")
+        raise PermissionError(f"Agent 今日{quota_label}配额已用尽")
     dbg(f"群 {group_id} 工具策略通过: {name}")
 
 
 async def _consume_admin_quota(session: Any, group_id: int, name: str) -> None:
     """特权工具配额只在成功后消耗，失败尝试不计入。"""
 
-    if name not in _PRIVILEGED_TOOLS or session is None:
+    if name not in _CONTROLLED_TOOLS or session is None:
         return
     config = await session.get(GroupAgentConfig, group_id)
     if config is None:
@@ -786,11 +652,19 @@ async def _consume_admin_quota(session: Any, group_id: int, name: str) -> None:
     if config.tool_day != today:
         config.tool_day = today
         config.admin_tool_count = 0
-    config.admin_tool_count += 1
-    dbg(
-        f"群 {group_id} 消耗特权工具配额: {name} "
-        f"(今日已用 {config.admin_tool_count}/{config.admin_tool_daily_limit})"
-    )
+        config.critical_tool_count = 0
+    if name in _CRITICAL_TOOLS:
+        config.critical_tool_count += 1
+        dbg(
+            f"群 {group_id} 消耗高风险工具配额: {name} "
+            f"(今日已用 {config.critical_tool_count}/{config.critical_tool_daily_limit})"
+        )
+    else:
+        config.admin_tool_count += 1
+        dbg(
+            f"群 {group_id} 消耗特权工具配额: {name} "
+            f"(今日已用 {config.admin_tool_count}/{config.admin_tool_daily_limit})"
+        )
     await session.flush()
 
 
@@ -881,10 +755,167 @@ async def execute_tool(
             actor_user_id=actor_user_id,
         )
         now = now_beijing()
-        if name == "get_group_info":
+        if name == "discover_tools":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                raise ValueError("query 不能为空")
+            family = str(args.get("family") or "").strip() or None
+            limit = _tool_result_limit(args, default=5, maximum=8)
+            result = await _discover_tools_for_actor(
+                query=query,
+                family=family,
+                limit=limit,
+                bot=bot,
+                group_id=group_id,
+                actor_user_id=actor_user_id,
+                session=session,
+                capabilities=capabilities,
+            )
+        elif name == "get_group_info":
             result = _compact_group_info(
                 await bot.call_api("get_group_info", group_id=group_id)
             )
+        elif name == "get_message":
+            target_message_id = int(args["message_id"])
+            await _require_known_message(session, group_id, target_message_id)
+            raw_message = await bot.call_api("get_msg", message_id=target_message_id)
+            if (
+                isinstance(raw_message, dict)
+                and raw_message.get("group_id") is not None
+                and int(raw_message["group_id"]) != int(group_id)
+            ):
+                raise PermissionError("消息不属于当前群")
+            result = _compact_onebot_message(raw_message)
+        elif name == "get_recent_group_messages":
+            try:
+                count = int(args.get("count") or 10)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("count 必须是整数") from exc
+            if count < 1 or count > 30:
+                raise ValueError("count 必须在 1~30 之间")
+            raw_history = await bot.call_api(
+                "get_group_msg_history", group_id=group_id, count=count
+            )
+            messages = _payload_list(raw_history, "messages", "message_list", "items")
+            if (
+                not messages
+                and raw_history not in ([], {"messages": []})
+                and not isinstance(raw_history, (list, dict))
+            ):
+                raise ValueError("群历史消息响应格式错误")
+            compact_messages = [
+                _compact_onebot_message(item)
+                for item in messages[-count:]
+                if isinstance(item, dict)
+            ]
+            result = {"items": compact_messages, "count": len(compact_messages)}
+        elif name == "list_group_notices":
+            raw_notices = await bot.call_api("_get_group_notice", group_id=group_id)
+            notices = _payload_list(raw_notices, "notices", "items")
+            if isinstance(raw_notices, dict) and not notices and any(
+                key in raw_notices for key in ("notice_id", "content", "message")
+            ):
+                notices = [raw_notices]
+            result = [
+                _compact_notice(item)
+                for item in notices[:20]
+                if isinstance(item, dict)
+            ]
+        elif name == "list_essence_messages":
+            raw_essence = await bot.call_api("get_essence_msg_list", group_id=group_id)
+            essence_items = _payload_list(raw_essence, "items", "messages", "list")
+            result = [
+                _compact_essence(item)
+                for item in essence_items[:30]
+                if isinstance(item, dict)
+            ]
+        elif name == "list_muted_members":
+            limit = _tool_result_limit(args, default=30, maximum=50)
+            raw_muted = await bot.call_api("get_group_shut_list", group_id=group_id)
+            muted_items = _payload_list(raw_muted, "items", "members", "list")
+            compact_muted: list[dict[str, Any]] = []
+            for item in muted_items[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                member = _compact_group_member(item)
+                if item.get("shut_up_timestamp") is not None:
+                    member["shut_up_timestamp"] = item.get("shut_up_timestamp")
+                compact_muted.append(member)
+            result = {"items": compact_muted, "count": len(compact_muted)}
+        elif name == "get_group_honor":
+            honor_type = str(args.get("type") or "all")
+            raw_honor = await bot.call_api(
+                "get_group_honor_info", group_id=group_id, type=honor_type
+            )
+            if not isinstance(raw_honor, dict):
+                raise ValueError("群荣誉响应格式错误")
+            honor_result: dict[str, Any] = {"group_id": raw_honor.get("group_id")}
+            for key in (
+                "current_talkative",
+                "talkative_list",
+                "performer_list",
+                "legend_list",
+                "strong_newbie_list",
+                "emotion_list",
+            ):
+                value = raw_honor.get(key)
+                if isinstance(value, dict):
+                    honor_result[key] = _compact_group_member(value)
+                elif isinstance(value, list):
+                    honor_result[key] = [
+                        _compact_group_member(item)
+                        for item in value[:20]
+                        if isinstance(item, dict)
+                    ]
+            result = {
+                key: value
+                for key, value in honor_result.items()
+                if value not in (None, [], {})
+            }
+        elif name == "list_group_files":
+            limit = _tool_result_limit(args, default=20, maximum=30)
+            folder_id = str(args.get("folder_id") or "").strip()
+            if folder_id:
+                raw_files = await bot.call_api(
+                    "get_group_files_by_folder",
+                    group_id=group_id,
+                    folder_id=folder_id,
+                )
+            else:
+                raw_files = await bot.call_api("get_group_root_files", group_id=group_id)
+            files = _payload_list(raw_files, "files", "items", "file_list")
+            folders = _payload_list(raw_files, "folders", "folder_list")
+            result = {
+                "files": [
+                    _compact_group_file(item)
+                    for item in files[:limit]
+                    if isinstance(item, dict)
+                ],
+                "folders": [
+                    _compact_group_folder(item)
+                    for item in folders[:limit]
+                    if isinstance(item, dict)
+                ],
+            }
+        elif name == "get_group_file_link":
+            file_id = str(args.get("file_id") or "").strip()
+            if not file_id:
+                raise ValueError("file_id 不能为空")
+            raw_link = await bot.call_api(
+                "get_group_file_url",
+                group_id=group_id,
+                file_id=file_id,
+                busid=int(args["busid"]),
+            )
+            if isinstance(raw_link, str):
+                url = raw_link
+            elif isinstance(raw_link, dict):
+                url = str(raw_link.get("url") or raw_link.get("download_url") or "")
+            else:
+                url = ""
+            if not url:
+                raise ValueError("群文件链接响应格式错误")
+            result = {"file_id": file_id, "url": url[:2048]}
         elif name == "get_group_member":
             result = _compact_group_member(
                 await bot.call_api(
@@ -1176,6 +1207,22 @@ async def execute_tool(
             if not query:
                 raise ValueError("query 不能为空")
             result = search_reactions(query, limit=int(args.get("limit") or 5))
+        elif name == "react_to_message":
+            target_message_id = int(args["message_id"])
+            emoji_id = str(args.get("emoji_id") or "").strip()
+            if not emoji_id.isdigit():
+                raise ValueError("emoji_id 必须是数字字符串")
+            await _require_known_message(session, group_id, target_message_id)
+            await bot.call_api(
+                "set_msg_emoji_like",
+                message_id=target_message_id,
+                emoji_id=emoji_id,
+            )
+            result = {
+                "message_id": target_message_id,
+                "emoji_id": emoji_id,
+                "reacted": True,
+            }
         elif name == "send_message":
             sent = await send_outbound_message(
                 bot,
@@ -1239,13 +1286,77 @@ async def execute_tool(
                 if temporary:
                     temporary.unlink(missing_ok=True)
         elif name == "create_group_announcement":
+            # NapCat/go-cqhttp 使用 `_send_group_notice`；只有适配器明确只暴露
+            # `send_group_notice` 时才使用别名。不要在失败后自动重试另一个
+            # action，避免公告其实已创建但回执失败时产生重复公告。
             action = (
-                "send_group_notice"
-                if capabilities.has("send_group_notice")
-                else "_send_group_notice"
+                "_send_group_notice"
+                if capabilities.has("_send_group_notice")
+                else "send_group_notice"
             )
             result = await bot.call_api(
                 action, group_id=group_id, content=str(args["content"])[:1000]
+            )
+        elif name == "set_essence_message":
+            target_message_id = int(args["message_id"])
+            await _require_current_group_message_api(
+                bot, group_id, target_message_id
+            )
+            result = await bot.call_api(
+                "set_essence_msg", message_id=target_message_id
+            )
+        elif name == "remove_essence_message":
+            target_message_id = int(args["message_id"])
+            await _require_current_group_message_api(
+                bot, group_id, target_message_id
+            )
+            result = await bot.call_api(
+                "delete_essence_msg", message_id=target_message_id
+            )
+        elif name == "delete_group_notice":
+            notice_id = str(args.get("notice_id") or "").strip()
+            if not notice_id:
+                raise ValueError("notice_id 不能为空")
+            result = await bot.call_api(
+                "_del_group_notice",
+                group_id=group_id,
+                notice_id=notice_id,
+            )
+        elif name == "set_group_card":
+            user_id = int(args["user_id"])
+            await _require_group_member_api(bot, group_id, user_id)
+            result = await bot.call_api(
+                "set_group_card",
+                group_id=group_id,
+                user_id=user_id,
+                card=str(args.get("card") or "")[:80],
+            )
+        elif name == "set_special_title":
+            if capabilities.role != "owner":
+                raise PermissionError("设置专属头衔需要机器人是群主")
+            user_id = int(args["user_id"])
+            await _require_group_member_api(bot, group_id, user_id)
+            result = await bot.call_api(
+                "set_group_special_title",
+                group_id=group_id,
+                user_id=user_id,
+                special_title=str(args.get("special_title") or "")[:80],
+            )
+        elif name == "set_group_name":
+            group_name = str(args.get("group_name") or "").strip()[:100]
+            if not group_name:
+                raise ValueError("group_name 不能为空")
+            result = await bot.call_api(
+                "set_group_name", group_id=group_id, group_name=group_name
+            )
+        elif name == "create_group_folder":
+            folder_name = str(args.get("name") or "").strip()[:120]
+            if not folder_name:
+                raise ValueError("name 不能为空")
+            result = await bot.call_api(
+                "create_group_file_folder",
+                group_id=group_id,
+                name=folder_name,
             )
         elif name == "mute_member":
             user_id = int(args["user_id"])
@@ -1260,6 +1371,65 @@ async def execute_tool(
                 group_id=group_id,
                 user_id=user_id,
                 duration=max(1, min(int(args["duration"]), 2592000)),
+            )
+        elif name == "kick_member":
+            user_id = int(args["user_id"])
+            if user_id == int(getattr(bot, "self_id", 0) or 0):
+                raise PermissionError("机器人不能把自己移出群聊")
+            if not await target_can_be_muted(bot, group_id, user_id, capabilities.role):
+                raise PermissionError("机器人无权移出该成员")
+            result = await bot.call_api(
+                "set_group_kick",
+                group_id=group_id,
+                user_id=user_id,
+                reject_add_request=bool(args.get("reject_add_request", False)),
+            )
+        elif name == "set_whole_group_mute":
+            result = await bot.call_api(
+                "set_group_whole_ban",
+                group_id=group_id,
+                enable=bool(args["enable"]),
+            )
+        elif name == "set_group_admin":
+            if capabilities.role != "owner":
+                raise PermissionError("设置群管理员需要机器人是群主")
+            user_id = int(args["user_id"])
+            target = await _require_group_member_api(bot, group_id, user_id)
+            if str(target.get("role") or "member") == "owner":
+                raise PermissionError("不能修改群主的管理员状态")
+            result = await bot.call_api(
+                "set_group_admin",
+                group_id=group_id,
+                user_id=user_id,
+                enable=bool(args["enable"]),
+            )
+        elif name == "delete_group_file":
+            result = await bot.call_api(
+                "delete_group_file",
+                group_id=group_id,
+                file_id=str(args["file_id"]),
+                busid=int(args["busid"]),
+            )
+        elif name == "move_group_file":
+            result = await bot.call_api(
+                "move_group_file",
+                group_id=group_id,
+                file_id=str(args["file_id"]),
+                target_dir=str(args["target_dir"]),
+            )
+        elif name == "rename_group_file":
+            result = await bot.call_api(
+                "rename_group_file",
+                group_id=group_id,
+                file_id=str(args["file_id"]),
+                current_parent_directory=str(args["current_parent_directory"]),
+                new_name=str(args["new_name"])[:160],
+            )
+        elif name == "delete_group_folder":
+            result = await bot.call_api(
+                "delete_group_folder",
+                group_id=group_id,
+                folder_id=str(args["folder_id"]),
             )
         else:
             raise ValueError(f"未知工具: {name}")
@@ -1288,6 +1458,7 @@ async def execute_tool(
 __all__ = [
     "MAX_FORWARD_NODES",
     "MAX_TOOL_ROUNDS",
+    "TOOL_PERMISSION_CRITICAL",
     "TOOL_PERMISSION_MESSAGE_SEND",
     "TOOL_PERMISSION_PRIVILEGED",
     "TOOL_PERMISSION_READ",

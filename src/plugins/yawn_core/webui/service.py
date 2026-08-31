@@ -43,9 +43,6 @@ from ..yawn_agent.persona import (
     resolve_persona,
 )
 
-ADMIN_TOOLS = frozenset({"mute_member", "create_group_announcement"})
-
-
 # 全库约定 naive datetime 为北京时间（UTC+8），序列化时必须按此时区标注，
 # 否则前端会把库里的北京时间当作 UTC 显示，整体偏移 8 小时。
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -856,9 +853,11 @@ def serialize_agent_config(
             "crossGroupVisibility": "public_summary",
             "mediaCacheEnabled": False,
             "adminToolDailyLimit": 30,
+            "criticalToolDailyLimit": 5,
             "toolAllowlist": ["mute_member", "create_group_announcement"],
             "proactiveToday": 0,
             "adminToolsToday": 0,
+            "criticalToolsToday": 0,
             "version": None,
         }
     return {
@@ -880,9 +879,11 @@ def serialize_agent_config(
         "crossGroupVisibility": row.cross_group_visibility,
         "mediaCacheEnabled": row.media_cache_enabled,
         "adminToolDailyLimit": row.admin_tool_daily_limit,
+        "criticalToolDailyLimit": row.critical_tool_daily_limit,
         "toolAllowlist": list(row.tool_allowlist or []),
         "proactiveToday": row.proactive_count,
         "adminToolsToday": row.admin_tool_count,
+        "criticalToolsToday": row.critical_tool_count,
         "version": version(row.updated_at),
     }
 
