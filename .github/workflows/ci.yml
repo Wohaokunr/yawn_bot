@@ -20,12 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      python-tests: ${{ steps.scope.outputs.python_tests }}
+      python_fast: ${{ steps.scope.outputs.python_fast }}
+      rpg_tool_core: ${{ steps.scope.outputs.rpg_tool_core }}
+      rpg_tool_ui: ${{ steps.scope.outputs.rpg_tool_ui }}
+      rpg_playtest: ${{ steps.scope.outputs.rpg_playtest }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Decide whether full Python tests are needed
+      - name: Decide Python test suites
         id: scope
         shell: bash
         env:
@@ -36,9 +39,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          emit_all_suites() {
+            echo "python_fast=true" >> "$GITHUB_OUTPUT"
+            echo "rpg_tool_core=true" >> "$GITHUB_OUTPUT"
+            echo "rpg_tool_ui=true" >> "$GITHUB_OUTPUT"
+            echo "rpg_playtest=true" >> "$GITHUB_OUTPUT"
+          }
+
           if [[ "$EVENT_NAME" == "workflow_call" ]]; then
-            echo "python_tests=true" >> "$GITHUB_OUTPUT"
-            echo "Reusable release gate: full Python tests required."
+            emit_all_suites
+            echo "Reusable release gate: every Python test suite is required."
             exit 0
           fi
 
@@ -51,30 +61,52 @@ jobs:
           fi
 
           if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-            echo "python_tests=true" >> "$GITHUB_OUTPUT"
-            echo "No reliable base SHA: full Python tests required."
+            emit_all_suites
+            echo "No reliable base SHA: every Python test suite is required."
             exit 0
           fi
 
           changed="$(git diff --name-only "$base" "$head")"
           printf '%s\n' "$changed"
 
-          python_tests=false
+          python_fast=false
+          rpg_tool_core=false
+          rpg_tool_ui=false
+          rpg_playtest=false
+
           while IFS= read -r path; do
             case "$path" in
-              src/*|tests/*|data/nonebot_plugin_orm/migrations/*|pyproject.toml|uv.lock|.env.example|*.py|tools/rpg_module_editor/*|tools/rpg_playtest/*|.github/workflows/ci.yml)
-                python_tests=true
-                break
+              pyproject.toml|uv.lock|.github/workflows/ci.yml)
+                python_fast=true
+                rpg_tool_core=true
+                rpg_tool_ui=true
+                rpg_playtest=true
+                ;;
+              src/plugins/yawn_core/yawn_rpg/charsheet.py|src/plugins/yawn_core/yawn_rpg/dice.py|src/plugins/yawn_core/yawn_rpg/module_schema.py|src/plugins/yawn_core/yawn_rpg/modules/*)
+                python_fast=true
+                rpg_tool_core=true
+                rpg_tool_ui=true
+                rpg_playtest=true
+                ;;
+              tools/rpg_module_editor/*)
+                rpg_tool_core=true
+                rpg_tool_ui=true
+                rpg_playtest=true
+                ;;
+              tools/rpg_playtest/*)
+                rpg_playtest=true
+                ;;
+              src/*|tests/*|data/nonebot_plugin_orm/migrations/*|.env.example|*.py)
+                python_fast=true
                 ;;
             esac
           done <<< "$changed"
 
-          echo "python_tests=$python_tests" >> "$GITHUB_OUTPUT"
-          if [[ "$python_tests" == "true" ]]; then
-            echo "Backend-relevant changes detected: full Python tests required."
-          else
-            echo "No backend-relevant changes: full Python tests skipped."
-          fi
+          echo "python_fast=$python_fast" >> "$GITHUB_OUTPUT"
+          echo "rpg_tool_core=$rpg_tool_core" >> "$GITHUB_OUTPUT"
+          echo "rpg_tool_ui=$rpg_tool_ui" >> "$GITHUB_OUTPUT"
+          echo "rpg_playtest=$rpg_playtest" >> "$GITHUB_OUTPUT"
+          echo "Selected suites: python_fast=$python_fast rpg_tool_core=$rpg_tool_core rpg_tool_ui=$rpg_tool_ui rpg_playtest=$rpg_playtest"
 
   repository-hygiene:
     name: Repository hygiene
@@ -153,12 +185,12 @@ jobs:
           src tools/rpg_module_editor tools/rpg_playtest
           tools/repo_guard.py tools/repository_content_test.py
 
-  python-tests:
-    name: Python tests
+  python-fast:
+    name: Python fast tests
     needs: change-scope
-    if: ${{ needs.change-scope.outputs.python-tests == 'true' }}
+    if: ${{ needs.change-scope.outputs.python_fast == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
       ENVIRONMENT: prod
       LOCALSTORE_USE_CWD: "true"
@@ -173,8 +205,93 @@ jobs:
         run: uv python install 3.10
       - name: Install dependencies
         run: uv sync --all-groups --locked --python 3.10
-      - name: Test backend and plugins without SPA build output
-        run: uv run --python 3.10 pytest -q --ignore=tests/test_webui_spa.py
+      - name: Test runtime and plugins without SPA build output
+        run: >-
+          uv run --python 3.10 pytest -q
+          --durations=30 --durations-min=0.05
+          --ignore=tests/test_webui_spa.py
+
+  rpg-tool-core:
+    name: RPG module editor core tests
+    needs: change-scope
+    if: ${{ needs.change-scope.outputs.rpg_tool_core == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Test editor schema, validation and YAML logic
+        run: >-
+          uv run --python 3.10 pytest -q
+          --durations=30 --durations-min=0.05
+          tools/rpg_module_editor/tests/test_validate_lint.py
+          tools/rpg_module_editor/tests/test_yaml_io.py
+
+  rpg-tool-ui:
+    name: RPG module editor UI tests
+    needs: change-scope
+    if: ${{ needs.change-scope.outputs.rpg_tool_ui == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Test Textual editor integration
+        run: >-
+          uv run --python 3.10 pytest -q
+          --durations=30 --durations-min=0.05
+          tools/rpg_module_editor/tests/test_app_smoke.py
+          tools/rpg_module_editor/tests/test_playtest_tab.py
+          tools/rpg_module_editor/tests/test_responsive_references.py
+          tools/rpg_module_editor/tests/test_social_features.py
+
+  rpg-playtest-e2e:
+    name: RPG playtest regression
+    needs: change-scope
+    if: ${{ needs.change-scope.outputs.rpg_playtest == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ENVIRONMENT: prod
+      LOCALSTORE_USE_CWD: "true"
+      RPG_AI_ENABLED: "false"
+      WW_AI_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.10
+      - name: Install dependencies
+        run: uv sync --all-groups --locked --python 3.10
+      - name: Test deterministic RPG simulator and search regressions
+        run: >-
+          uv run --python 3.10 pytest -q
+          --durations=30 --durations-min=0.05
+          tools/rpg_playtest/tests
 
   webui-quality:
     name: WebUI quality
