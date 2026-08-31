@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..yawn_agent.persona import MAX_FIELD_LENGTH, PERSONA_FIELDS
+from ..yawn_agent.persona import PersonaEditorProfileV2  # noqa: TC001
 
 
 class LoginBody(BaseModel):
@@ -134,24 +134,11 @@ class AgentConfigPatch(BaseModel):
 
 
 class PersonaPatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
     version: str | None
     enabled: bool
-    overrides: dict[str, str]
-
-    @field_validator("overrides")
-    @classmethod
-    def validate_overrides(cls, value: dict[str, str]) -> dict[str, str]:
-        clean: dict[str, str] = {}
-        for key, raw in value.items():
-            if key not in PERSONA_FIELDS:
-                raise ValueError(f"不支持的人设字段：{key}")
-            text = " ".join(raw.strip().split())
-            if not text:
-                continue
-            if len(text) > MAX_FIELD_LENGTH:
-                raise ValueError(f"人设字段 {key} 最长 {MAX_FIELD_LENGTH} 字符")
-            clean[key] = text
-        return clean
+    profile: PersonaEditorProfileV2
 
 
 class AgentDebugRunBody(BaseModel):
@@ -166,6 +153,9 @@ class AgentDebugRunBody(BaseModel):
         default=None, alias="actorUserId"
     )
     run_model: bool = Field(default=False, alias="runModel")
+    persona_draft: PersonaEditorProfileV2 | None = Field(
+        default=None, alias="personaDraft"
+    )
 
     @model_validator(mode="after")
     def require_one_source(self) -> "AgentDebugRunBody":

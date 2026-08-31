@@ -53,7 +53,7 @@ from .memory import (
     record_memory_failure,
 )
 from .media import cleanup_media_cache
-from .persona import resolve_persona
+from .persona import persona_behavior, resolve_persona
 from .prompt import build_messages
 from .outbound import (
     PreparedOutboundMessage,
@@ -64,6 +64,7 @@ from .outbound import (
 )
 from .proactive_policy import (
     ProactiveDecision as _ProactiveDecision,
+    apply_persona_behavior_to_decision as _apply_persona_behavior_to_decision,
     _ACTIVE_INTERJECT_PROMPT,
     _FOLLOWUP_PROMPT,
     _JSON_PROTOCOL,
@@ -284,6 +285,12 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             ):
                 dbg(f"群 {group_id} 主动发言生成中止: 配置缺失/Agent 未启用/主动参与关闭")
                 return "close"
+            behavior = persona_behavior(config)
+            trace_event(
+                "policy",
+                "Persona 群聊行为",
+                output=behavior.as_dict(),
+            )
             # 复用对话路径的相关上下文：先读有限候选池，再保留最后一个
             # 活跃对话簇，避免主动插话把整小时旧聊天与默认空元数据全量注入。
             # 消息仍附带 minutes_ago，便于模型判断话题的新旧与节奏。
@@ -371,7 +378,9 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 )
                 await session.commit()
                 return "error"
-            decision = _decide_proactive_reply(raw)
+            decision = _apply_persona_behavior_to_decision(
+                config, _decide_proactive_reply(raw)
+            )
             trace_event(
                 "llm",
                 "主动发言决策",
@@ -572,6 +581,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     group_id,
                     topic=decision.topic or str(config.active_topic or ""),
                     source=scene,
+                    max_bot_turns=persona_behavior(config).max_followup_bot_turns,
                 )
             try:
                 await session.commit()
@@ -666,6 +676,26 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             ):
                 close_conversation(bot_id, group_id, reason="配置关闭短会话续聊")
                 return "close"
+            behavior = persona_behavior(config)
+            if batch.bot_turns >= behavior.max_followup_bot_turns:
+                close_conversation(
+                    bot_id,
+                    group_id,
+                    reason="Persona 续聊倾向已达到角色轮数上限",
+                )
+                trace_event(
+                    "policy",
+                    "Persona 续聊门槛",
+                    status="skipped",
+                    output=behavior.as_dict(),
+                    detail="当前角色不再自动延长本话题",
+                )
+                return "close"
+            trace_event(
+                "policy",
+                "Persona 群聊行为",
+                output=behavior.as_dict(),
+            )
             now = now_beijing()
             day = now.strftime("%Y-%m-%d")
             day_count = config.proactive_count if config.proactive_day == day else 0
@@ -758,7 +788,9 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 await session.commit()
                 finish_followup_evaluation(batch, "error")
                 return "error"
-            decision = _decide_proactive_reply(raw or "")
+            decision = _apply_persona_behavior_to_decision(
+                config, _decide_proactive_reply(raw or "")
+            )
             trace_event(
                 "llm",
                 "短会话决策",
@@ -874,6 +906,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 topic=decision.topic or batch.topic,
                 source="followup",
                 preserve_pending=True,
+                max_bot_turns=behavior.max_followup_bot_turns,
             )
             finish_followup_evaluation(batch, "speak")
             try:

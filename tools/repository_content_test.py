@@ -47,14 +47,21 @@ def _git(root: Path, *args: str) -> str:
 def _expected_public_browser_image(root: Path) -> str:
     version_path = root / "deploy" / "docker" / "playwright-version.txt"
     dockerfile_path = root / "deploy" / "docker" / "playwright-server.Dockerfile"
-    version = version_path.read_text(encoding="utf-8").strip()
-    runtime_hash = hashlib.sha256(
-        version_path.read_bytes() + dockerfile_path.read_bytes()
-    ).hexdigest()[:16]
-    return (
-        "ghcr.io/wohaokunr/yawn_bot:"
-        f"browser-pw-{version}-{runtime_hash}"
+    version_text = (
+        version_path.read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
     )
+    dockerfile_text = (
+        dockerfile_path.read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+    version = version_text.strip()
+    runtime_hash = hashlib.sha256(
+        version_text.encode("utf-8") + dockerfile_text.encode("utf-8")
+    ).hexdigest()[:16]
+    return f"ghcr.io/wohaokunr/yawn_bot:browser-pw-{version}-{runtime_hash}"
 
 
 def _validate_public_release_compose(root: Path) -> list[str]:
@@ -75,10 +82,7 @@ def _validate_public_release_compose(root: Path) -> list[str]:
         expected_browser_image,
     )
     violations = [
-        (
-            "deploy/docker/compose.release.yaml: missing required fragment "
-            f"{fragment!r}"
-        )
+        (f"deploy/docker/compose.release.yaml: missing required fragment {fragment!r}")
         for fragment in required_fragments
         if fragment not in content
     ]
@@ -131,9 +135,7 @@ def main() -> int:
         return guard.returncode
 
     missing = [
-        path
-        for path in _REQUIRED_OPEN_SOURCE_FILES
-        if not (root / path).is_file()
+        path for path in _REQUIRED_OPEN_SOURCE_FILES if not (root / path).is_file()
     ]
     if missing:
         print("Required open-source/public-deployment files are missing:")

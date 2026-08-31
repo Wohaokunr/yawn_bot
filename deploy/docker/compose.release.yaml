@@ -1,4 +1,4 @@
-services:
+﻿services:
   yawnbot:
     image: "${YAWNBOT_IMAGE:?Set YAWNBOT_IMAGE to a published GHCR release image, for example ghcr.io/wohaokunr/yawn_bot:v0.1.0}"
     pull_policy: always

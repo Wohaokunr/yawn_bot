@@ -26,6 +26,7 @@ from .config_store import agent_runtime_enabled, get_or_create_config
 from .context import now_beijing
 from .conversation import observe_member_message
 from .dialogue import contains_word, process_group_message
+from .emotion import update_emotion_state
 from .log import dbg, dbg_exc
 from .message_parser import NormalizedMessage, parse_message
 
@@ -236,7 +237,6 @@ async def handle_group_agent_message(
     reply_trigger_enabled = bool(config.reply_trigger_enabled)
     explicit_wakeup_enabled = bool(config.explicit_wakeup_enabled)
     short_conversation_enabled = bool(config.short_conversation_enabled)
-    await _persist_message(bot, event, normalized, _session)
     trigger = resolve_trigger(
         event,
         bot,
@@ -246,6 +246,21 @@ async def handle_group_agent_message(
     )
     normalized.trigger_source = trigger.source
     normalized.trigger_signals = trigger.signals
+    emotion_mutation = update_emotion_state(
+        config.emotion_state if isinstance(config.emotion_state, dict) else {},
+        text=normalized.intent_text(),
+        directed=trigger.respond,
+        now=now_beijing(),
+    )
+    if emotion_mutation.storage_changed:
+        config.emotion_state = emotion_mutation.state
+        signal = emotion_mutation.signal
+        dbg(
+            f"群 {event.group_id} 动态情绪更新: "
+            f"signal={signal.label if signal else 'decay'} "
+            f"directed={trigger.respond}"
+        )
+    await _persist_message(bot, event, normalized, _session)
     if short_conversation_enabled:
         observe_member_message(
             int(bot.self_id),

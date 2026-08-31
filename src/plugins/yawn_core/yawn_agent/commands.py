@@ -41,13 +41,21 @@ from .config_store import (
 )
 from .conversation import close_group_conversations
 from .context import now_beijing
+from .emotion import emotion_public_state
 from .log import dbg
 from .memory import delete_group_memories, delete_member_memories, list_memories
 from .persona import (
     MAX_FIELD_LENGTH,
-    PERSONA_FIELDS,
-    parse_persona_assignments,
-    resolve_persona,
+    PERSONA_PRESETS,
+    PersonaEditorProfileV2,
+    apply_persona_editor_profile,
+    persona_behavior,
+    persona_editor_apply_preset,
+    persona_editor_profile,
+    persona_editor_summary,
+    persona_summary,
+    persona_trait_label,
+    reset_persona,
 )
 
 # 命令元数据由包级 __init__ 注册到 command_catalog。
@@ -159,20 +167,28 @@ _PARTICIPATION_PRESETS = {
     "活跃": (0.55, 0.45),
 }
 
-_PERSONA_CHOICES = (
-    SessionChoice("name", "名称", ("名字",)),
-    SessionChoice("identity", "身份定位", ("身份",)),
-    SessionChoice("role", "群内角色", ("角色",)),
-    SessionChoice("tone", "语气", ()),
-    SessionChoice("speech_style", "表达风格", ("风格", "style")),
-    SessionChoice("values", "价值观", ()),
-    SessionChoice("knowledge_boundary", "知识边界", ("知识",)),
-    SessionChoice("emotion_baseline", "情绪基线", ("情绪",)),
-    SessionChoice("response_length", "回复长度", ("长度", "length")),
-    SessionChoice("privacy_boundary", "隐私边界", ("隐私",)),
-    SessionChoice("reset", "重置为全局默认", ("重置", "reset")),
+_PERSONA_MENU_CHOICES = (
+    SessionChoice("preset", "切换角色模板", ("模板", "角色模板")),
+    SessionChoice("style", "微调说话风格", ("风格", "说话风格")),
+    SessionChoice("social", "调整社交倾向", ("社交", "社交倾向")),
+    SessionChoice("notes", "自定义补充", ("补充", "自定义")),
+    SessionChoice("trial", "试演当前人设", ("试演", "预览")),
+    SessionChoice("reset", "恢复全局人设", ("重置", "恢复默认", "reset")),
 )
-_PERSONA_LABELS = {choice.key: choice.label for choice in _PERSONA_CHOICES}
+_PERSONA_STYLE_CHOICES = (
+    SessionChoice("warmth", "温和程度", ("温和",)),
+    SessionChoice("humor", "幽默程度", ("幽默",)),
+    SessionChoice("directness", "直接程度", ("直接",)),
+    SessionChoice("verbosity", "回复详略", ("详略", "长度")),
+    SessionChoice("expressiveness", "表现力", ("表达",)),
+)
+_PERSONA_SOCIAL_CHOICES = (
+    SessionChoice("sociability", "社交活跃度", ("活跃度",)),
+    SessionChoice("followup_tendency", "续聊倾向", ("续聊",)),
+    SessionChoice("reaction_tendency", "接梗/反应倾向", ("接梗", "反应")),
+)
+_PERSONA_TRAIT_CHOICES = _PERSONA_STYLE_CHOICES + _PERSONA_SOCIAL_CHOICES
+_PERSONA_TRAIT_LABELS = {choice.key: choice.label for choice in _PERSONA_TRAIT_CHOICES}
 _PERSONA_CONFIRM_PHRASE = "确认保存"
 _PRIVACY_CONFIRM_PHRASE = "确认退出并删除"
 _CLEAR_CONFIRM_PHRASE = "确认清理"
@@ -340,21 +356,98 @@ def _format_agent_runtime_summary(
 
 
 def _build_persona_text(config: GroupAgentConfig) -> str:
-    persona = resolve_persona(config)
-    lines = ["Agent 人设", "当前生效内容："]
-    for choice in _PERSONA_CHOICES:
-        if choice.key == "reset":
-            continue
-        lines.append(f"- {choice.label}：{persona[choice.key]}")
+    draft = persona_editor_profile(config)
+    mode = "当前群自定义" if config.persona_enabled else "跟随全局"
+    behavior = persona_behavior(config)
+    followup_text = (
+        "首轮后结束"
+        if behavior.max_followup_bot_turns <= 1
+        else f"最多再续 {behavior.max_followup_bot_turns - 1} 次"
+    )
+    reaction_text = "允许" if behavior.allow_spontaneous_reaction else "关闭"
+    emotion = emotion_public_state(
+        config.emotion_state if isinstance(config.emotion_state, dict) else {},
+        expressiveness=draft.expressiveness,
+    )
+    emotion_text = (
+        f"{emotion['displayLabel']} · 强度 {int(float(emotion['intensity']) * 100)}%"
+        if emotion["updatedAt"] is not None
+        else "平静 · 暂无近期情绪事件"
+    )
+    lines = [
+        "Agent 人设",
+        f"模式：{mode}",
+        f"概览：{persona_editor_summary(draft)}",
+        f"身份：{draft.identity}",
+        f"群内角色：{draft.group_role}",
+        (
+            f"实际行为：主动候选 ×{behavior.active_probability_scale:.2f}；"
+            f"自动续聊 {followup_text}；主动 reaction {reaction_text}"
+        ),
+        f"动态情绪：{emotion_text}",
+    ]
+    if draft.custom_notes:
+        lines.append(f"补充：{draft.custom_notes}")
     return "\n".join(lines)
 
 
 def _build_persona_menu(config: GroupAgentConfig) -> str:
-    lines = [_build_persona_text(config), "", "选择要编辑的字段："]
-    for index, choice in enumerate(_PERSONA_CHOICES, start=1):
+    lines = [_build_persona_text(config), "", "选择要做什么："]
+    for index, choice in enumerate(_PERSONA_MENU_CHOICES, start=1):
         lines.append(f"{index}. {choice.label}")
-    lines.append("回复序号或字段名称；「菜单」重新显示，「取消」退出。")
+    lines.append("回复序号或名称；「菜单」重新显示，「取消」退出。")
     return "\n".join(lines)
+
+
+def _build_persona_preset_menu() -> str:
+    lines = ["选择角色模板："]
+    for index, preset in enumerate(PERSONA_PRESETS.values(), start=1):
+        lines.append(f"{index}. {preset.label} — {preset.description}")
+    lines.append("回复序号或模板名称；「返回」回上一级。")
+    return "\n".join(lines)
+
+
+def _resolve_persona_preset(value: str) -> str | None:
+    cleaned = value.strip().lower()
+    if cleaned.isdigit():
+        index = int(cleaned) - 1
+        presets = list(PERSONA_PRESETS.values())
+        if 0 <= index < len(presets):
+            return presets[index].id
+    for preset in PERSONA_PRESETS.values():
+        if cleaned in {preset.id.lower(), preset.label.lower()}:
+            return preset.id
+    return None
+
+
+def _build_persona_trait_menu(*, social: bool) -> str:
+    choices = _PERSONA_SOCIAL_CHOICES if social else _PERSONA_STYLE_CHOICES
+    title = "选择要调整的社交倾向：" if social else "选择要调整的说话风格："
+    lines = [title]
+    for index, choice in enumerate(choices, start=1):
+        lines.append(f"{index}. {choice.label}")
+    lines.append("回复序号或名称；「返回」回上一级。")
+    return "\n".join(lines)
+
+
+def _build_persona_trait_value_menu(key: str, current: int) -> str:
+    lines = [
+        f"{_PERSONA_TRAIT_LABELS[key]}：当前 {current}/4（{persona_trait_label(key, current)}）",
+        "请选择 0-4：",
+    ]
+    lines.extend(
+        f"{value}. {persona_trait_label(key, value)}" for value in range(5)
+    )
+    return "\n".join(lines)
+
+
+def _persona_trial_text(config: GroupAgentConfig) -> str:
+    return (
+        "人设试演入口\n"
+        f"当前：{persona_summary(config)}\n"
+        "WebUI → Agent → 人设 可以用未保存草稿直接做真实模型试演；"
+        "试演不会写数据库、不会发群消息、不会执行工具。"
+    )
 
 
 async def _commit(session: async_scoped_session) -> bool:
@@ -801,71 +894,48 @@ async def handle_agent_persona(
         await agent_persona.finish(_build_persona_text(config))
     if action in {"示例", "example"}:
         await agent_persona.finish(
-            "高级语法：/Agent人设 设置 name=Yawn tone=温和 "
-            "style=短句为主 response_length=通常1到3句\n"
-            "普通使用直接发送 /Agent人设 进入字段选择。"
+            "直接发送 /Agent人设，通过角色模板、0-4 档特征和自定义补充调整。"
+        )
+    if action in {"试演", "preview", "trial"}:
+        await agent_persona.finish(_persona_trial_text(config))
+    if action in {"模板", "preset"} and len(parts) >= 2:
+        preset_id = _resolve_persona_preset(" ".join(parts[1:]))
+        if preset_id is None:
+            await agent_persona.finish(
+                "没有这个角色模板。\n" + _build_persona_preset_menu()
+            )
+        before = persona_summary(config)
+        draft = persona_editor_apply_preset(persona_editor_profile(config), preset_id)
+        mutation = apply_persona_editor_profile(config, draft, enabled=True)
+        if mutation.semantic_changed:
+            config.persona_version += 1
+            config.updated_by = int(event.get_user_id())
+        if mutation.storage_changed and not await _commit(session):
+            await agent_persona.finish("操作失败，请稍后重试")
+        if not mutation.semantic_changed:
+            await agent_persona.finish("当前已经是这个模板。")
+        await agent_persona.finish(
+            format_change_preview(
+                "角色模板", before, persona_editor_summary(draft)
+            )
+            + "\n已启用当前群自定义人设。"
         )
     if action in {"重置", "reset"}:
-        config.persona_override = {}
-        config.persona_enabled = True
-        config.persona_version += 1
-        config.updated_by = int(event.get_user_id())
+        mutation = reset_persona(config)
+        if mutation.semantic_changed:
+            config.persona_version += 1
+            config.updated_by = int(event.get_user_id())
         persona_version = config.persona_version
-        if not await _commit(session):
+        if mutation.storage_changed and not await _commit(session):
             await agent_persona.finish("操作失败，请稍后重试")
+        if not mutation.storage_changed:
+            await agent_persona.finish("当前已经是全局默认人设")
         dbg(f"群 {event.group_id} 人设已重置,version={persona_version}")
         await agent_persona.finish("已重置为全局默认人设")
-    if action in {"设置", "set"}:
-        try:
-            updates = parse_persona_assignments(parts[1:])
-        except ValueError as exc:
-            dbg(f"群 {event.group_id} /Agent人设 解析失败: {exc}")
-            await agent_persona.finish(str(exc))
-        if not updates:
-            await agent_persona.finish("至少需要一个 key=value 人设字段")
-        before = resolve_persona(config)
-        override = dict(config.persona_override or {})
-        override.update(updates)
-        config.persona_override = {
-            key: override[key] for key in PERSONA_FIELDS if key in override
-        }
-        config.persona_enabled = True
-        config.persona_version += 1
-        config.updated_by = int(event.get_user_id())
-        persona_version = config.persona_version
-        if not await _commit(session):
-            await agent_persona.finish("操作失败，请稍后重试")
-        dbg(
-            f"群 {event.group_id} 人设已更新: fields={sorted(updates)} "
-            f"version={persona_version}"
-        )
-        preview = ["群级人设已更新："]
-        for key, value in updates.items():
-            label = _PERSONA_LABELS.get(key, key)
-            preview.append(format_change_preview(label, before[key], value))
-        await agent_persona.finish("\n\n".join(preview))
     if raw:
-        key = resolve_choice(raw, _PERSONA_CHOICES)
-        if key is not None:
-            matcher.state["agent_persona_step"] = (
-                "confirm" if key == "reset" else "value"
-            )
-            matcher.state["agent_persona_key"] = key
-            if key == "reset":
-                await agent_persona.send(
-                    "预览：将删除本群全部人设覆盖，恢复全局默认。\n"
-                    f"回复「{_PERSONA_CONFIRM_PHRASE}」保存，或发送「取消」。"
-                )
-            else:
-                current = resolve_persona(config)[key]
-                await agent_persona.send(
-                    f"已选择：{_PERSONA_LABELS[key]}\n当前：{current}\n"
-                    f"请输入新的内容（最多 {MAX_FIELD_LENGTH} 字符）；发送「返回」回菜单，「取消」退出。"
-                )
-            return
         await agent_persona.finish(
-            "用法：/Agent人设；/Agent人设 查看；"
-            "/Agent人设 设置 key=value ...；/Agent人设 重置"
+            "用法：/Agent人设；/Agent人设 查看；/Agent人设 模板 <名称>；"
+            "/Agent人设 试演；/Agent人设 重置"
         )
 
     matcher.state["agent_persona_step"] = "select"
@@ -896,58 +966,156 @@ async def handle_agent_persona_input(
         await agent_persona.finish("Agent 配置暂时不可用，请稍后重试")
     step = str(matcher.state.get("agent_persona_step") or "select")
     if intent is SessionIntent.MENU:
+        matcher.state["agent_persona_step"] = "select"
         await agent_persona.reject_arg(
             "agent_persona_input", _build_persona_menu(config)
         )
+        return
     if intent is SessionIntent.BACK:
         if step == "select":
             await agent_persona.finish("已退出 Agent 人设修改。")
         matcher.state["agent_persona_step"] = "select"
         matcher.state.pop("agent_persona_key", None)
-        matcher.state.pop("agent_persona_pending", None)
-        matcher.state.pop("agent_persona_before", None)
+        matcher.state.pop("agent_persona_pending_profile", None)
         await agent_persona.reject_arg(
             "agent_persona_input", _build_persona_menu(config)
         )
+        return
 
     if step == "select":
-        key = resolve_choice(value, _PERSONA_CHOICES)
+        key = resolve_choice(value, _PERSONA_MENU_CHOICES)
         if key is None:
             await agent_persona.reject_arg(
                 "agent_persona_input",
-                validation_failed("没有这个字段", "回复菜单中的序号或字段名称")
+                validation_failed("没有这个选项", "回复菜单中的序号或名称")
                 + "\n\n"
                 + _build_persona_menu(config),
             )
             return
-        matcher.state["agent_persona_key"] = key
+        if key == "preset":
+            matcher.state["agent_persona_step"] = "preset"
+            await agent_persona.reject_arg(
+                "agent_persona_input", _build_persona_preset_menu()
+            )
+            return
+        if key == "style":
+            matcher.state["agent_persona_step"] = "style_trait"
+            await agent_persona.reject_arg(
+                "agent_persona_input", _build_persona_trait_menu(social=False)
+            )
+            return
+        if key == "social":
+            matcher.state["agent_persona_step"] = "social_trait"
+            await agent_persona.reject_arg(
+                "agent_persona_input", _build_persona_trait_menu(social=True)
+            )
+            return
+        if key == "notes":
+            matcher.state["agent_persona_step"] = "notes_value"
+            current_notes = persona_editor_profile(config).custom_notes or "（无）"
+            await agent_persona.reject_arg(
+                "agent_persona_input",
+                f"当前补充：{current_notes}\n请输入新的自定义补充（最多 {MAX_FIELD_LENGTH} 字符）；"
+                "输入「清空」删除补充。",
+            )
+            return
+        if key == "trial":
+            await agent_persona.reject_arg(
+                "agent_persona_input",
+                _persona_trial_text(config) + "\n\n" + _build_persona_menu(config),
+            )
+            return
         if key == "reset":
+            matcher.state["agent_persona_key"] = "reset"
             matcher.state["agent_persona_step"] = "confirm"
-            matcher.state["agent_persona_pending"] = "__reset__"
             await agent_persona.reject_arg(
                 "agent_persona_input",
                 "预览：将删除本群全部人设覆盖，恢复全局默认。\n"
                 f"回复「{_PERSONA_CONFIRM_PHRASE}」保存，或发送「取消」。",
             )
             return
-        matcher.state["agent_persona_step"] = "value"
-        current = resolve_persona(config)[key]
+
+    if step == "preset":
+        preset_id = _resolve_persona_preset(value)
+        if preset_id is None:
+            await agent_persona.reject_arg(
+                "agent_persona_input",
+                "没有这个角色模板。\n\n" + _build_persona_preset_menu(),
+            )
+            return
+        before = persona_editor_profile(config)
+        pending = persona_editor_apply_preset(before, preset_id)
+        matcher.state["agent_persona_pending_profile"] = pending
+        matcher.state["agent_persona_key"] = "profile"
+        matcher.state["agent_persona_step"] = "confirm"
         await agent_persona.reject_arg(
             "agent_persona_input",
-            f"已选择：{_PERSONA_LABELS[key]}\n当前：{current}\n"
-            f"请输入新的内容（最多 {MAX_FIELD_LENGTH} 字符）；发送「返回」回菜单，「取消」退出。",
+            format_change_preview(
+                "角色模板", persona_editor_summary(before), persona_editor_summary(pending)
+            )
+            + ("\n保存后将切换为当前群自定义人设。" if not config.persona_enabled else "")
+            + f"\n\n回复「{_PERSONA_CONFIRM_PHRASE}」保存，或发送「取消」。",
         )
         return
 
-    key = str(matcher.state.get("agent_persona_key") or "")
-    if step == "value":
-        cleaned_source = " ".join(value.strip().split())
-        if not cleaned_source:
+    if step in {"style_trait", "social_trait"}:
+        choices = (
+            _PERSONA_SOCIAL_CHOICES if step == "social_trait" else _PERSONA_STYLE_CHOICES
+        )
+        key = resolve_choice(value, choices)
+        if key is None:
             await agent_persona.reject_arg(
                 "agent_persona_input",
-                validation_failed("内容不能为空", "输入人设内容"),
+                validation_failed("没有这个特征", "回复当前菜单中的序号或名称")
+                + "\n\n"
+                + _build_persona_trait_menu(social=step == "social_trait"),
             )
             return
+        matcher.state["agent_persona_key"] = key
+        matcher.state["agent_persona_step"] = "trait_value"
+        current = int(getattr(persona_editor_profile(config), key))
+        await agent_persona.reject_arg(
+            "agent_persona_input", _build_persona_trait_value_menu(key, current)
+        )
+        return
+
+    if step == "trait_value":
+        key = str(matcher.state.get("agent_persona_key") or "")
+        cleaned = value.strip()
+        if key not in _PERSONA_TRAIT_LABELS or not cleaned.isdigit():
+            await agent_persona.reject_arg(
+                "agent_persona_input",
+                validation_failed("档位无效", "输入 0、1、2、3 或 4"),
+            )
+            return
+        level = int(cleaned)
+        if not 0 <= level <= 4:
+            await agent_persona.reject_arg(
+                "agent_persona_input", validation_failed("档位超出范围", "输入 0-4")
+            )
+            return
+        before = persona_editor_profile(config)
+        previous = int(getattr(before, key))
+        pending = before.model_copy(update={key: level})
+        matcher.state["agent_persona_pending_profile"] = pending
+        matcher.state["agent_persona_key"] = "profile"
+        matcher.state["agent_persona_step"] = "confirm"
+        await agent_persona.reject_arg(
+            "agent_persona_input",
+            format_change_preview(
+                _PERSONA_TRAIT_LABELS[key],
+                f"{previous}/4（{persona_trait_label(key, previous)}）",
+                f"{level}/4（{persona_trait_label(key, level)}）",
+            )
+            + ("\n保存后将切换为当前群自定义人设。" if not config.persona_enabled else "")
+            + f"\n\n回复「{_PERSONA_CONFIRM_PHRASE}」保存，或发送「取消」。",
+        )
+        return
+
+    if step == "notes_value":
+        cleaned_source = " ".join(value.strip().split())
+        if cleaned_source == "清空":
+            cleaned_source = ""
         if len(cleaned_source) > MAX_FIELD_LENGTH:
             await agent_persona.reject_arg(
                 "agent_persona_input",
@@ -957,23 +1125,23 @@ async def handle_agent_persona_input(
                 ),
             )
             return
-        try:
-            pending = parse_persona_assignments([f"{key}={cleaned_source}"])[key]
-        except (KeyError, ValueError) as exc:
-            await agent_persona.reject_arg("agent_persona_input", str(exc))
-            return
-        before = resolve_persona(config)[key]
-        matcher.state["agent_persona_pending"] = pending
-        matcher.state["agent_persona_before"] = before
+        before = persona_editor_profile(config)
+        pending = before.model_copy(update={"custom_notes": cleaned_source})
+        matcher.state["agent_persona_pending_profile"] = pending
+        matcher.state["agent_persona_key"] = "profile"
         matcher.state["agent_persona_step"] = "confirm"
         await agent_persona.reject_arg(
             "agent_persona_input",
-            format_change_preview(_PERSONA_LABELS[key], before, pending)
+            format_change_preview(
+                "自定义补充", before.custom_notes or "（无）", cleaned_source or "（无）"
+            )
+            + ("\n保存后将切换为当前群自定义人设。" if not config.persona_enabled else "")
             + f"\n\n回复「{_PERSONA_CONFIRM_PHRASE}」保存，或发送「取消」。",
         )
         return
 
-    if step != "confirm" or key not in {*PERSONA_FIELDS, "reset"}:
+    key = str(matcher.state.get("agent_persona_key") or "")
+    if step != "confirm" or key not in {"profile", "reset"}:
         matcher.state["agent_persona_step"] = "select"
         await agent_persona.reject_arg(
             "agent_persona_input",
@@ -990,31 +1158,27 @@ async def handle_agent_persona_input(
         return
 
     if key == "reset":
-        config.persona_override = {}
+        mutation = reset_persona(config)
         final_message = "已重置为全局默认人设。"
     else:
-        pending = str(matcher.state.get("agent_persona_pending") or "")
-        if not pending:
-            matcher.state["agent_persona_step"] = "value"
+        pending = matcher.state.get("agent_persona_pending_profile")
+        if not isinstance(pending, PersonaEditorProfileV2):
+            matcher.state["agent_persona_step"] = "select"
             await agent_persona.reject_arg(
-                "agent_persona_input", "待保存内容已失效，请重新输入。"
+                "agent_persona_input",
+                "待保存人设已失效，请重新选择。\n\n" + _build_persona_menu(config),
             )
             return
-        override = dict(config.persona_override or {})
-        override[key] = pending
-        config.persona_override = {
-            field: override[field] for field in PERSONA_FIELDS if field in override
-        }
-        before = str(matcher.state.get("agent_persona_before") or "")
-        final_message = (
-            format_change_preview(_PERSONA_LABELS[key], before, pending) + "\n已保存。"
-        )
-    config.persona_enabled = True
-    config.persona_version += 1
-    config.updated_by = int(event.get_user_id())
+        mutation = apply_persona_editor_profile(config, pending, enabled=True)
+        final_message = f"已保存：{persona_editor_summary(pending)}"
+    if mutation.semantic_changed:
+        config.persona_version += 1
+        config.updated_by = int(event.get_user_id())
     persona_version = config.persona_version
-    if not await _commit(session):
+    if mutation.storage_changed and not await _commit(session):
         await agent_persona.finish("操作失败，请稍后重试")
+    if not mutation.semantic_changed:
+        await agent_persona.finish("人设内容没有变化。")
     dbg(f"群 {event.group_id} /Agent人设 会话保存 key={key} version={persona_version}")
     await agent_persona.finish(final_message)
 

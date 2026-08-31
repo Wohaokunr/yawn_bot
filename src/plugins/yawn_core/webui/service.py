@@ -32,8 +32,16 @@ from ..metrics import ai_health_snapshot, snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
+from ..yawn_agent.emotion import emotion_public_state
 from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
-from ..yawn_agent.persona import PERSONA_FIELDS, resolve_persona
+from ..yawn_agent.persona import (
+    PERSONA_SCHEMA_VERSION,
+    persona_behavior,
+    persona_editor_profile,
+    persona_preset_payloads,
+    persona_summary,
+    resolve_persona,
+)
 
 ADMIN_TOOLS = frozenset({"mute_member", "create_group_announcement"})
 
@@ -880,12 +888,20 @@ def serialize_agent_config(
 
 
 def serialize_persona(row: GroupAgentConfig | None, group_id: int) -> dict[str, Any]:
+    editor = persona_editor_profile(row)
     return {
         "groupId": str(group_id),
-        "enabled": row.persona_enabled if row else True,
+        "enabled": row.persona_enabled if row else False,
+        "schemaVersion": PERSONA_SCHEMA_VERSION,
+        "profile": editor.model_dump(by_alias=True),
+        "presets": persona_preset_payloads(),
+        "summary": persona_summary(row),
+        "behavior": persona_behavior(row).as_dict(),
+        "emotion": emotion_public_state(
+            row.emotion_state if row and isinstance(row.emotion_state, dict) else {},
+            expressiveness=editor.expressiveness,
+        ),
         "resolved": resolve_persona(row),
-        "overrides": dict(row.persona_override or {}) if row else {},
-        "fields": list(PERSONA_FIELDS),
         "version": version(row.updated_at) if row else None,
     }
 

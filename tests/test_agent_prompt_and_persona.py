@@ -27,33 +27,388 @@ def _load_agent_modules():
     ):
         nonebot.load_from_toml("pyproject.toml")
     from src.plugins.yawn_core.yawn_agent.persona import (
-        canonical_persona,
-        parse_persona_assignments,
+        prompt_persona,
+        resolve_persona,
     )
     from src.plugins.yawn_core.yawn_agent.prompt import build_messages
 
-    return canonical_persona, parse_persona_assignments, build_messages
+    return prompt_persona, resolve_persona, build_messages
 
 
-def test_persona_assignments_are_restricted_and_stable() -> None:
-    canonical_persona, parse_persona_assignments, _ = _load_agent_modules()
-    persona = parse_persona_assignments(["name=Yawn", "style=短句", "tone=温和"])
-    assert persona["speech_style"] == "短句"
-    assert canonical_persona(persona).startswith('{"name":"Yawn"')
-
-
-def test_prompt_persona_keeps_non_builtin_customization() -> None:
-    _load_agent_modules()
-    from src.plugins.yawn_core.yawn_agent.persona import prompt_persona
-
+def test_persona_v2_prompt_compiler_ignores_removed_legacy_and_policy_fields() -> None:
+    prompt_persona, _, _ = _load_agent_modules()
     rendered = prompt_persona(
         {
             "name": "Yawn",
-            "identity": "熟悉群聊节奏、自然简洁的普通群友",
-            "tone": "冷静专业",
+            "identity": "自然群友",
+            "role": "普通群友",
+            "style_traits": "自然表达；简洁",
+            "social_style": "社交平衡",
+            "custom_notes": "偶尔自嘲",
+            # P6 removed fields must never re-enter the prompt.
+            "tone": "恶意覆盖",
+            "speech_style": "恶意覆盖",
+            "emotion_baseline": "恶意覆盖",
+            "response_length": "恶意覆盖",
+            "values": "恶意覆盖",
+            "knowledge_boundary": "随便猜",
+            "privacy_boundary": "公开私聊",
         }
     )
-    assert '"tone":"冷静专业"' in rendered
+    assert '"name":"Yawn"' in rendered
+    assert '"style_traits":"自然表达；简洁"' in rendered
+    assert '"custom_notes":"偶尔自嘲"' in rendered
+    for removed in (
+        "tone",
+        "speech_style",
+        "emotion_baseline",
+        "response_length",
+        "values",
+        "knowledge_boundary",
+        "privacy_boundary",
+    ):
+        assert removed not in rendered
+
+
+def test_persona_v2_runtime_ignores_legacy_database_attributes() -> None:
+    _, resolve_persona, _ = _load_agent_modules()
+    config = SimpleNamespace(
+        group_id=10001,
+        persona_enabled=True,
+        persona_version=7,
+        persona_profile={
+            "schema_version": 2,
+            "preset_id": "calm_rational",
+            "identity": {"name": "V2", "description": "只读 v2"},
+            "voice": {
+                "warmth": 1,
+                "humor": 0,
+                "directness": 4,
+                "verbosity": 2,
+                "expressiveness": 0,
+            },
+            "social": {
+                "sociability": 1,
+                "followup_tendency": 1,
+                "reaction_tendency": 0,
+            },
+        },
+        # These attributes emulate stale callers; P6 runtime must ignore them.
+        persona="legacy single text",
+        persona_override={
+            "name": "Legacy",
+            "privacy_boundary": "legacy policy",
+            "tone": "legacy tone",
+        },
+        persona_schema_version=1,
+    )
+    resolved = resolve_persona(config)
+    assert resolved["name"] == "V2"
+    assert resolved["identity"] == "只读 v2"
+    assert "Legacy" not in repr(resolved)
+    assert "legacy policy" not in repr(resolved)
+    assert "legacy tone" not in repr(resolved)
+
+
+def test_persona_v2_global_default_is_structured_natural_profile() -> None:
+    _, resolve_persona, _ = _load_agent_modules()
+    resolved = resolve_persona(None)
+    assert resolved["profile_v2"] == "structured"
+    assert resolved["name"] == "Yawn"
+    assert "style_traits" in resolved
+    assert "social_style" in resolved
+    assert "knowledge_boundary" not in resolved
+    assert "privacy_boundary" not in resolved
+
+
+def test_persona_v2_editor_uses_templates_traits_and_stable_prompt() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.persona import (
+        PERSONA_PRESETS,
+        apply_persona_editor_profile,
+        persona_editor_apply_preset,
+        persona_editor_profile,
+        prompt_persona,
+        resolve_persona,
+    )
+
+    config = SimpleNamespace(
+        group_id=10003,
+        persona="友好、自然、简洁的群友",
+        persona_override={},
+        persona_enabled=True,
+        persona_version=1,
+        persona_schema_version=2,
+        persona_profile={"schema_version": 2},
+    )
+    assert set(PERSONA_PRESETS) == {
+        "natural",
+        "gentle_listener",
+        "calm_rational",
+        "lively_sidekick",
+        "quiet_observer",
+    }
+
+    draft = persona_editor_apply_preset(
+        persona_editor_profile(config), "lively_sidekick"
+    ).model_copy(update={"custom_notes": "偶尔用好困自嘲"})
+    mutation = apply_persona_editor_profile(config, draft, enabled=True)
+    assert mutation.semantic_changed is True
+    assert mutation.storage_changed is True
+    assert config.persona_profile["preset_id"] == "lively_sidekick"
+    assert config.persona_profile["voice"]["humor"] == 4
+    assert config.persona_profile["social"]["sociability"] == 4
+
+    rendered = prompt_persona(resolve_persona(config))
+    assert '"style_traits"' in rendered
+    assert "很会接梗" in rendered
+    assert '"social_style"' in rendered
+    assert "很活跃" in rendered
+    assert '"custom_notes":"偶尔用好困自嘲"' in rendered
+    assert '"tone"' not in rendered
+    assert '"response_length"' not in rendered
+
+    second = apply_persona_editor_profile(config, draft, enabled=True)
+    assert second.semantic_changed is False
+    assert second.storage_changed is False
+
+
+def test_persona_v2_reset_removes_structured_traits() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.persona import (
+        PersonaEditorProfileV2,
+        apply_persona_editor_profile,
+        reset_persona,
+        resolve_persona,
+    )
+
+    config = SimpleNamespace(
+        group_id=10004,
+        persona="友好、自然、简洁的群友",
+        persona_override={},
+        persona_enabled=True,
+        persona_version=1,
+        persona_schema_version=2,
+        persona_profile={"schema_version": 2},
+    )
+    draft = PersonaEditorProfileV2(
+        presetId="quiet_observer",
+        name="Yawn",
+        identity="安静群友",
+        groupRole="潜水观察者",
+        sociability=0,
+        customNotes="少说话",
+    )
+    apply_persona_editor_profile(config, draft, enabled=True)
+    assert "social_style" in resolve_persona(config)
+
+    mutation = reset_persona(config)
+    assert mutation.semantic_changed is True
+    assert config.persona_profile == {"schema_version": 2}
+    assert config.persona_enabled is False
+    resolved = resolve_persona(config)
+    assert resolved["profile_v2"] == "structured"
+    assert "social_style" in resolved
+
+
+def _make_structured_persona_config(
+    *,
+    preset_id: str,
+    sociability: int,
+    followup_tendency: int,
+    reaction_tendency: int,
+    persona_enabled: bool = True,
+):
+    return SimpleNamespace(
+        group_id=19001,
+        persona="友好、自然、简洁的群友",
+        persona_override={},
+        persona_enabled=persona_enabled,
+        persona_version=4,
+        persona_schema_version=2,
+        persona_profile={
+            "schema_version": 2,
+            "preset_id": preset_id,
+            "voice": {
+                "warmth": 2,
+                "humor": 1,
+                "directness": 2,
+                "verbosity": 1,
+                "expressiveness": 1,
+            },
+            "social": {
+                "sociability": sociability,
+                "followup_tendency": followup_tendency,
+                "reaction_tendency": reaction_tendency,
+            },
+        },
+    )
+
+
+def test_persona_p4_compiles_social_traits_into_runtime_behavior() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.persona import persona_behavior
+
+    quiet = persona_behavior(
+        _make_structured_persona_config(
+            preset_id="quiet_observer",
+            sociability=0,
+            followup_tendency=0,
+            reaction_tendency=1,
+        )
+    )
+    lively = persona_behavior(
+        _make_structured_persona_config(
+            preset_id="lively_sidekick",
+            sociability=4,
+            followup_tendency=3,
+            reaction_tendency=4,
+        )
+    )
+
+    assert quiet.source == "persona_v2"
+    assert quiet.active_probability_scale == 0.15
+    assert quiet.warmup_probability_scale == 0.15
+    assert quiet.max_followup_bot_turns == 1
+    assert quiet.allow_spontaneous_reaction is False
+    assert quiet.reaction_mode == "restrained"
+
+    assert lively.active_probability_scale == 1.0
+    assert lively.warmup_probability_scale == 1.0
+    assert lively.max_followup_bot_turns == 4
+    assert lively.allow_spontaneous_reaction is True
+    assert lively.reaction_mode == "high"
+
+
+def test_persona_p6_runtime_has_no_legacy_behavior_branch() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.persona import persona_behavior
+
+    stale = SimpleNamespace(
+        group_id=19002,
+        persona_enabled=True,
+        persona_profile={
+            "schema_version": 2,
+            "preset_id": "natural",
+            "voice": {
+                "warmth": 2,
+                "humor": 1,
+                "directness": 2,
+                "verbosity": 1,
+                "expressiveness": 1,
+            },
+            "social": {
+                "sociability": 4,
+                "followup_tendency": 4,
+                "reaction_tendency": 2,
+            },
+        },
+        persona="legacy text",
+        persona_override={"tone": "legacy tone"},
+        persona_schema_version=1,
+    )
+    behavior = persona_behavior(stale)
+    assert behavior.source == "persona_v2"
+    assert behavior.active_probability_scale == 1.0
+    assert behavior.warmup_probability_scale == 1.0
+    assert behavior.max_followup_bot_turns == 4
+
+
+def test_persona_p4_inherit_mode_ignores_paused_group_behavior_draft() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.persona import persona_behavior
+
+    config = _make_structured_persona_config(
+        preset_id="quiet_observer",
+        sociability=0,
+        followup_tendency=0,
+        reaction_tendency=0,
+        persona_enabled=False,
+    )
+    behavior = persona_behavior(config)
+    assert behavior.source == "global"
+    assert behavior.sociability == 2
+    assert behavior.max_followup_bot_turns == 2
+    assert behavior.allow_spontaneous_reaction is True
+
+
+def test_persona_p4_filters_spontaneous_reactions_but_keeps_text() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive_policy import (
+        apply_persona_behavior_to_decision,
+        decide_proactive_reply,
+    )
+
+    quiet_config = _make_structured_persona_config(
+        preset_id="quiet_observer",
+        sociability=0,
+        followup_tendency=0,
+        reaction_tendency=1,
+    )
+    reaction_only = decide_proactive_reply(
+        '{"action":"speak","message":{"segments":['
+        '{"type":"reaction","reaction_id":"happy"}]}}'
+    )
+    filtered_only = apply_persona_behavior_to_decision(quiet_config, reaction_only)
+    assert filtered_only.action == "wait"
+    assert filtered_only.should_speak is False
+
+    text_and_reaction = decide_proactive_reply(
+        '{"action":"speak","message":{"segments":['
+        '{"type":"text","text":"这个好笑"},'
+        '{"type":"reaction","reaction_id":"happy"}]}}'
+    )
+    filtered = apply_persona_behavior_to_decision(quiet_config, text_and_reaction)
+    assert filtered.should_speak is True
+    assert filtered.text == "这个好笑"
+    assert [item["type"] for item in filtered.segments] == ["text"]
+
+    lively_config = _make_structured_persona_config(
+        preset_id="lively_sidekick",
+        sociability=4,
+        followup_tendency=3,
+        reaction_tendency=4,
+    )
+    lively = apply_persona_behavior_to_decision(lively_config, text_and_reaction)
+    assert [item["type"] for item in lively.segments] == ["text", "reaction"]
+
+
+def test_persona_p4_limits_short_conversation_turns() -> None:
+    _load_agent_modules()
+    import time
+
+    from src.plugins.yawn_core.yawn_agent import conversation
+
+    conversation.reset_for_tests()
+    now = time.monotonic()
+    conversation.mark_bot_reply(
+        9,
+        19003,
+        topic="安静角色",
+        source="test",
+        max_bot_turns=1,
+        now=now,
+    )
+    assert conversation.current_conversation(9, 19003) is None
+
+    conversation.mark_bot_reply(
+        9,
+        19004,
+        topic="自然角色",
+        source="test",
+        max_bot_turns=2,
+        now=now,
+    )
+    assert conversation.current_conversation(9, 19004) is not None
+    conversation.mark_bot_reply(
+        9,
+        19004,
+        topic="自然角色",
+        source="test",
+        max_bot_turns=2,
+        now=now + 1,
+    )
+    assert conversation.current_conversation(9, 19004) is None
 
 
 def test_prompt_prefix_is_stable_when_only_context_changes() -> None:
@@ -102,7 +457,7 @@ def test_prompt_does_not_repeat_tool_schema_or_catalog() -> None:
         user_prompt="你好",
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v11"
+    assert prompt.PROMPT_VERSION == "yawn-agent-v13"
     assert "search_group_memory" not in str(messages[0]["content"])
     assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
     assert '"properties"' not in str(messages[0]["content"])
@@ -119,6 +474,25 @@ def test_default_prompt_prefix_has_cost_guard() -> None:
 
     static = build_static_prefix(resolve_persona(None), [])
     assert estimate_tokens(static) < 450
+
+    from src.plugins.yawn_core.yawn_agent.persona import (
+        apply_persona_editor_profile,
+        persona_editor_profile,
+    )
+
+    structured_config = SimpleNamespace(
+        group_id=10005,
+        persona="友好、自然、简洁的群友",
+        persona_override={},
+        persona_enabled=True,
+        persona_version=1,
+        persona_schema_version=2,
+        persona_profile={"schema_version": 2},
+    )
+    natural_draft = persona_editor_profile(structured_config)
+    apply_persona_editor_profile(structured_config, natural_draft, enabled=True)
+    structured_static = build_static_prefix(resolve_persona(structured_config), [])
+    assert estimate_tokens(structured_static) < 450
 
     dialogue_budget = build_context_budget(
         model="test",
@@ -205,8 +579,9 @@ def test_current_turn_has_priority_over_old_group_topic() -> None:
     system = str(messages[0]["content"])
     current = str(messages[-1]["content"])
     assert "current_turn 是本轮最高优先级" in system
-    assert "不要回答上一位成员的问题" in system
-    assert "默认用 1~2 句" in system
+    assert "不要误答上一位成员" in system
+    assert "默认用 1~2 句" not in system
+    assert '"name":"Yawn"' in system
     assert '"user_id":300' in current
     assert '"name":"当前发言人"' in current
     assert '"content":"到底有没有一起玩"' in current
@@ -859,9 +1234,108 @@ def _make_proactive_config(**overrides: object):
         "proactive_active_probability": 0.25,
         "proactive_active_window_minutes": 12,
         "recent_response_fingerprints": [],
+        # Baseline proactive tests emulate a pre-P4 row after the P6 cleanup
+        # migration materializes its historical cadence into explicit v2 traits.
+        "persona_enabled": True,
+        "persona_profile": {
+            "schema_version": 2,
+            "preset_id": "natural",
+            "voice": {
+                "warmth": 2,
+                "humor": 1,
+                "directness": 2,
+                "verbosity": 1,
+                "expressiveness": 1,
+            },
+            "social": {
+                "sociability": 4,
+                "followup_tendency": 4,
+                "reaction_tendency": 2,
+            },
+        },
     }
     values.update(overrides)
     return cast("GroupAgentConfig", SimpleNamespace(**values))
+
+
+def test_persona_p4_sociability_narrows_runtime_participation_probability() -> None:
+    _load_agent_modules()
+    from datetime import timedelta
+
+    from src.plugins.yawn_core.yawn_agent.context import ActivitySnapshot, now_beijing
+    from src.plugins.yawn_core.yawn_agent.proactive import should_proactively_speak
+
+    quiet_profile = _make_structured_persona_config(
+        preset_id="quiet_observer",
+        sociability=0,
+        followup_tendency=0,
+        reaction_tendency=1,
+    ).persona_profile
+    lively_profile = _make_structured_persona_config(
+        preset_id="lively_sidekick",
+        sociability=4,
+        followup_tendency=3,
+        reaction_tendency=4,
+    ).persona_profile
+    common = {
+        "persona_schema_version": 2,
+        "persona_enabled": True,
+        "persona_override": {},
+        "persona": "友好、自然、简洁的群友",
+        "persona_version": 4,
+    }
+    quiet = _make_proactive_config(persona_profile=quiet_profile, **common)
+    lively = _make_proactive_config(persona_profile=lively_profile, **common)
+    now = now_beijing()
+
+    active = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=3),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=5,
+        last_member_message_at=now - timedelta(minutes=3),
+    )
+    assert should_proactively_speak(quiet, active, now, rng=_FixedRoll(0.1)) is None
+    assert (
+        should_proactively_speak(lively, active, now, rng=_FixedRoll(0.1))
+        == "active"
+    )
+
+    warmup = ActivitySnapshot(
+        last_message_at=now - timedelta(minutes=40),
+        last_agent_at=now - timedelta(minutes=40),
+        member_messages_60m=2,
+        last_member_message_at=now - timedelta(minutes=40),
+    )
+    assert should_proactively_speak(quiet, warmup, now, rng=_FixedRoll(0.1)) is None
+    assert (
+        should_proactively_speak(lively, warmup, now, rng=_FixedRoll(0.1))
+        == "warmup"
+    )
+
+
+def test_persona_p4_followup_prompt_exposes_behavior_without_relaxing_limits() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.proactive import _build_user_prompt
+
+    profile = _make_structured_persona_config(
+        preset_id="quiet_observer",
+        sociability=0,
+        followup_tendency=0,
+        reaction_tendency=1,
+    ).persona_profile
+    config = _make_proactive_config(
+        persona_schema_version=2,
+        persona_profile=profile,
+        persona_enabled=True,
+        persona_override={},
+        persona="友好、自然、简洁的群友",
+        persona_version=4,
+    )
+    prompt = _build_user_prompt("followup", config, turn=1)
+    assert "尽量少抢话" in prompt
+    assert "不要主动续聊" in prompt
+    assert "reaction 极少使用" in prompt
+    assert "当前 Persona 最多 1 条" in prompt
 
 
 def test_proactive_active_mode_triggers_on_topic_gap() -> None:
