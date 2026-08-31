@@ -471,3 +471,55 @@ async def test_disallowed_media_url_is_not_forwarded_to_model(
     assert blocks == []
     assert captions == []
     assert digests == []
+
+
+@pytest.mark.asyncio
+async def test_default_qq_image_cdn_is_materialized_for_multimodal_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capabilities, media, _tools = _load_agent_modules()
+    image_url = "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=test"
+    image_bytes = b"\x89PNG\r\n\x1a\nqq-image-fixture"
+    fetched: list[str] = []
+
+    async def fetch_url(url: str) -> bytes:
+        fetched.append(url)
+        return image_bytes
+
+    class Bot:
+        async def call_api(self, action: str, **params: Any) -> dict[str, Any]:
+            del params
+            raise AssertionError(action)
+
+    from src.plugins.yawn_core.llm import LLMRoutingConfig
+
+    default_hosts = LLMRoutingConfig().agent_media_allowed_hosts
+    monkeypatch.setattr(media.ai_config, "agent_media_allowed_hosts", default_hosts)
+    assert media._url_allowed(image_url)
+    assert media._url_allowed("https://gchat.qpic.cn/download?appid=1407")
+    assert not media._url_allowed("https://private.example/image.png")
+    monkeypatch.setattr(media.ai_config, "agent_media_allowed_hosts", "")
+    assert not media._url_allowed(image_url)
+    monkeypatch.setattr(media.ai_config, "agent_media_allowed_hosts", default_hosts)
+    monkeypatch.setattr(media, "_fetch_url", fetch_url)
+
+    blocks, captions, digests = await media.prepare_image_inputs(
+        Bot(),
+        1,
+        [
+            {
+                "type": "image",
+                "source": "current",
+                "file": "AABBCC.png",
+                "url": image_url,
+            }
+        ],
+    )
+
+    assert fetched == [image_url]
+    assert captions == []
+    assert len(digests) == 1
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "image_url"
+    assert blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "multimedia.nt.qq.com.cn" not in str(blocks)

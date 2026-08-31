@@ -104,7 +104,10 @@ class LLMRoutingConfig(BaseModel):
 
     agent_media_cache_ttl: int = 86400
     agent_media_cache_dir: str = "data/agent_media"
-    agent_media_allowed_hosts: str = ""
+    # NapCat/QQNT received-image segments expose signed image URLs on these
+    # QQ-owned CDN hosts.  This remains an exact allowlist: explicitly setting
+    # AGENT_MEDIA_ALLOWED_HOSTS= still disables remote image downloads.
+    agent_media_allowed_hosts: str = "gchat.qpic.cn,multimedia.nt.qq.com.cn"
 
     @model_validator(mode="after")
     def validate_providers(self) -> "LLMRoutingConfig":

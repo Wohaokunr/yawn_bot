@@ -138,6 +138,37 @@ def _accumulate_turn_usage(total: dict[str, int], result: Any) -> dict[str, Any]
     }
 
 
+def _trace_prompt_shape(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return useful prompt diagnostics without retaining the full prompt."""
+
+    roles: dict[str, int] = {}
+    text_chars = 0
+    media_blocks = 0
+    tool_call_messages = 0
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        roles[role] = roles.get(role, 0) + 1
+        if message.get("tool_calls"):
+            tool_call_messages += 1
+        content = message.get("content")
+        if isinstance(content, str):
+            text_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    text_chars += len(str(block.get("text") or ""))
+                elif str(block.get("type") or "").startswith("image"):
+                    media_blocks += 1
+    return {
+        "roles": roles,
+        "text_chars": text_chars,
+        "media_blocks": media_blocks,
+        "tool_call_messages": tool_call_messages,
+    }
+
+
 def _visible_tool_send_ends_turn(result: dict[str, Any]) -> bool:
     """用户可见发送一旦成功，本轮必须结束，禁止再追加最终纯文本。"""
 
@@ -1111,6 +1142,12 @@ async def _finalize_reply(
 
     prepared = prepare_text_message(content) if isinstance(content, str) else content
     reply_text = prepared.normalized_text
+    short_conversation_enabled = bool(config.short_conversation_enabled)
+    max_followup_bot_turns = (
+        persona_behavior(config).max_followup_bot_turns
+        if short_conversation_enabled
+        else 1
+    )
     fingerprint_source = reply_text or json.dumps(
         list(prepared.segment_records), ensure_ascii=False, sort_keys=True
     )
@@ -1150,63 +1187,73 @@ async def _finalize_reply(
     if not sent.ends_turn:
         dbg(f"群 {group_id} 回复确认未发送(触发过期或明确失败),放弃本轮状态更新")
         return
-    if sent.sent:
-        # 只有确认成功才写入 Bot 消息历史；unknown 不能伪造一条确定存在的 QQ 消息。
-        await persist_bot_reply(
-            session,
-            int(bot.self_id),
-            group_id,
-            sent.message_id,
-            sent.normalized_text,
-            int(config.raw_retention_days),
-            segments=sent.segments,
-            reply_chain=sent.reply_chain,
-            forward_tree=sent.forward_tree,
-            media_refs=sent.media_refs,
-        )
-    else:
-        dbg(f"群 {group_id} 回复投递状态未知,按可能已送达推进冷却/去重但不写消息历史")
-    recent.append(
-        {
-            "input": input_fingerprint,
-            "response": response_fingerprint,
-            "text": reply_text[:500],
-            "at": now.isoformat(),
-        }
+    next_active_topic = config.active_topic
+    topic_changed = bool(
+        normalized.plain_text
+        and normalized.plain_text[:240] != config.active_topic
     )
-    config.recent_response_fingerprints = recent[-8:]
-    config.last_response_fingerprint = response_fingerprint
-    config.last_response_input_fingerprint = input_fingerprint
-    config.last_response_at = now
-    config.last_agent_at = now
-    if normalized.plain_text and normalized.plain_text[:240] != config.active_topic:
-        config.context_epoch += 1
-        config.active_topic = normalized.plain_text[:240]
-        dbg(
-            f"群 {group_id} 话题切换: epoch={config.context_epoch} "
-            f"topic={config.active_topic!r}"
-        )
-    if config.short_conversation_enabled:
-        mark_bot_reply(
-            int(bot.self_id),
-            group_id,
-            topic=str(config.active_topic or normalized.plain_text or ""),
-            source="dialogue",
-            max_bot_turns=persona_behavior(config).max_followup_bot_turns,
-        )
+    if topic_changed:
+        next_active_topic = normalized.plain_text[:240]
+
+    # 发送已经是不可逆外部副作用。之后的消息历史、去重、冷却等本地状态
+    # 只能降级失败，不能再把整轮标记成“执行失败”，否则 WebUI 会出现
+    # “OneBot 已确认成功，但 Trace 最终失败”的假阴性。
     try:
+        if sent.sent:
+            # 只有确认成功才写入 Bot 消息历史；unknown 不能伪造一条确定存在的 QQ 消息。
+            await persist_bot_reply(
+                session,
+                int(bot.self_id),
+                group_id,
+                sent.message_id,
+                sent.normalized_text,
+                int(config.raw_retention_days),
+                segments=sent.segments,
+                reply_chain=sent.reply_chain,
+                forward_tree=sent.forward_tree,
+                media_refs=sent.media_refs,
+            )
+        else:
+            dbg(f"群 {group_id} 回复投递状态未知,按可能已送达推进冷却/去重但不写消息历史")
+        recent.append(
+            {
+                "input": input_fingerprint,
+                "response": response_fingerprint,
+                "text": reply_text[:500],
+                "at": now.isoformat(),
+            }
+        )
+        config.recent_response_fingerprints = recent[-8:]
+        config.last_response_fingerprint = response_fingerprint
+        config.last_response_input_fingerprint = input_fingerprint
+        config.last_response_at = now
+        config.last_agent_at = now
+        if topic_changed:
+            config.context_epoch += 1
+            config.active_topic = next_active_topic
+            dbg(
+                f"群 {group_id} 话题切换: epoch={config.context_epoch} "
+                f"topic={config.active_topic!r}"
+            )
         await session.commit()
-    except SQLAlchemyError:
+    except Exception as exc:  # noqa: BLE001
         trace_event(
             "state",
             "回复后状态提交",
-            status="failed",
-            output={"rolled_back": True},
-            detail="消息可能已发送，但去重/冷却状态提交失败",
+            status="degraded",
+            output={
+                "rolled_back": True,
+                "delivery_state": sent.delivery_state,
+                "error_type": type(exc).__name__,
+            },
+            detail="消息已结束投递流程，但本地消息历史/去重/冷却状态写入失败",
         )
-        # 消息已经发出；状态丢失只影响重复抑制，不能上抛。
+        # 消息已经发出或投递结果未知；状态丢失只影响本地上下文/重复抑制，不能上抛。
         dbg_exc(f"群 {group_id} 回复后状态提交失败,已回滚")
-        await session.rollback()
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"群 {group_id} 回复后状态回滚失败(忽略)")
     else:
         trace_event(
             "state",
@@ -1218,6 +1265,25 @@ async def _finalize_reply(
             },
         )
         dbg(f"群 {group_id} 回复后状态已提交(指纹记录 {len(recent[-8:])} 条)")
+
+    if short_conversation_enabled:
+        try:
+            mark_bot_reply(
+                int(bot.self_id),
+                group_id,
+                topic=str(next_active_topic or normalized.plain_text or ""),
+                source="dialogue",
+                max_bot_turns=max_followup_bot_turns,
+            )
+        except Exception as exc:  # noqa: BLE001
+            trace_event(
+                "state",
+                "短会话状态推进",
+                status="degraded",
+                output={"error_type": type(exc).__name__},
+                detail="正文已经结束投递流程，但短会话内存状态推进失败",
+            )
+            dbg_exc(f"群 {group_id} 短会话状态推进失败(忽略)")
 
 
 async def _process_group_message(
@@ -1272,7 +1338,15 @@ async def _process_group_message(
             trace_event(
                 "context",
                 "上下文选择与装箱",
-                input={"focus_user_ids": _current_turn_focus_ids(actor_user_id, normalized, bot_id=bot_id)},
+                input={
+                    "focus_user_ids": _current_turn_focus_ids(
+                        actor_user_id, normalized, bot_id=bot_id
+                    ),
+                    "query_chars": len(normalized.prompt_text()),
+                    "query_preview": normalized.prompt_text()[:240],
+                    "context_token_limit": 2400,
+                    "completion_reserve": 800,
+                },
                 output={
                     "messages": len(list(context.get("messages") or [])),
                     "members": len(list(context.get("members") or [])),
@@ -1341,12 +1415,14 @@ async def _process_group_message(
                 f"模型轮次上限={round_limit}"
             )
             media_started = time.monotonic()
+            media_diagnostics: list[dict[str, Any]] = []
             media_blocks, cached_captions, media_digests = await prepare_image_inputs(
                 bot,
                 group_id,
                 normalized.media_refs,
                 session=session,
                 cache_enabled=bool(config.media_cache_enabled),
+                diagnostics=media_diagnostics,
             )
             dbg(
                 f"群 {group_id} 媒体输入: media_blocks={len(media_blocks)} "
@@ -1374,6 +1450,9 @@ async def _process_group_message(
                     "vision_blocks": len(media_blocks),
                     "cached_captions": len(cached_captions),
                     "content_hashes": [digest[:12] for digest in media_digests],
+                    "items": media_diagnostics,
+                    "cache_enabled": bool(config.media_cache_enabled),
+                    "multimodal_mode": resolve_llm_request("agent_dialogue").multimodal,
                 },
                 duration_ms=(time.monotonic() - media_started) * 1000,
             )
@@ -1412,6 +1491,7 @@ async def _process_group_message(
                 persona_version=config.persona_version,
             )
             stable_key = stable_context_key(context)
+            prompt_shape = _trace_prompt_shape(messages)
             trace_event(
                 "prompt",
                 "Prompt 构建",
@@ -1422,6 +1502,13 @@ async def _process_group_message(
                 },
                 output={
                     "message_count": len(messages),
+                    **prompt_shape,
+                    "current_turn_chars": len(user_prompt),
+                    "current_turn_preview": user_prompt[:240],
+                    "tool_names": [
+                        str(item.get("function", {}).get("name") or "")
+                        for item in tools
+                    ],
                     "prefix_fingerprint": _prefix_fingerprint[:12],
                     "prompt_cache": "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss",
                     "context_cache": "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss",
@@ -1556,6 +1643,7 @@ async def _process_group_message(
                             for call in tool_calls
                         ],
                         "finish_reason": completion.finish_reason,
+                        "content_preview": content[:320],
                         "usage": usage,
                     },
                     duration_ms=(time.monotonic() - llm_started) * 1000,
@@ -1838,6 +1926,7 @@ async def process_group_message(
             "trigger_source": normalized.trigger_source or "explicit_call",
             "trigger_signals": dict(normalized.trigger_signals),
             "text_chars": len(normalized.plain_text),
+            "text_preview": normalized.plain_text[:240],
             "segment_types": [item.type for item in normalized.segments],
             "media": [
                 {
@@ -1864,9 +1953,18 @@ async def process_group_message(
             normalized,
             enqueued_at=enqueued_at,
         )
-    except BaseException:
+    except BaseException as exc:
         outcome = "error"
-        trace_event("turn", "执行异常", status="failed", detail="未处理异常终止本轮")
+        trace_event(
+            "turn",
+            "执行异常",
+            status="failed",
+            output={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:320],
+            },
+            detail="未处理异常终止本轮",
+        )
         raise
     finally:
         trace_event(
