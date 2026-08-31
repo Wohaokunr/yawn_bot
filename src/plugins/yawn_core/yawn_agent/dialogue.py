@@ -53,6 +53,7 @@ from .context_history import (
     select_context_messages_only as _select_context_messages,
 )
 from .context_budget import pack_context
+from .emotion import emotion_context_state
 from .execution_trace import (
     begin_execution_trace,
     bind_execution_trace,
@@ -72,7 +73,7 @@ from .outbound import (
     prepare_text_message,
     send_prepared_outbound,
 )
-from .persona import resolve_persona
+from .persona import persona_behavior, persona_editor_profile, resolve_persona
 from .prompt import (
     build_messages,
     prompt_cache_key,
@@ -989,9 +990,11 @@ async def _load_context(
         relations=relations,
         activity=activity,
         active_topic=config.active_topic,
-        emotion_state=config.emotion_state
-        if isinstance(config.emotion_state, dict)
-        else {},
+        emotion_state=emotion_context_state(
+            config.emotion_state if isinstance(config.emotion_state, dict) else {},
+            now=context_now,
+            expressiveness=persona_editor_profile(config).expressiveness,
+        ),
         reference_at=context_now,
     )
 
@@ -1189,6 +1192,7 @@ async def _finalize_reply(
             group_id,
             topic=str(config.active_topic or normalized.plain_text or ""),
             source="dialogue",
+            max_bot_turns=persona_behavior(config).max_followup_bot_turns,
         )
     try:
         await session.commit()
@@ -1720,6 +1724,9 @@ async def _process_group_message(
                                     group_id,
                                     topic=str(config.active_topic or normalized.plain_text or ""),
                                     source="dialogue",
+                                    max_bot_turns=persona_behavior(
+                                        config
+                                    ).max_followup_bot_turns,
                                 )
                     assistant["tool_calls"].append(
                         {

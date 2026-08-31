@@ -25,10 +25,11 @@ class GroupAgentConfig(Model):
         primary_key=True,
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    persona: Mapped[str] = mapped_column(Text, default="友好、自然、简洁的群友")
-    persona_override: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    persona_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Persona v2 only. ``persona_enabled`` means this group owns a custom profile;
+    # False means follow the global natural Persona while keeping no legacy fallback.
+    persona_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     persona_version: Mapped[int] = mapped_column(Integer, default=1)
+    persona_profile: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     # Legacy compatibility only. Runtime behavior is controlled by the orthogonal
     # capability flags below; keep this field for one compatibility window.
     trigger_mode: Mapped[str] = mapped_column(

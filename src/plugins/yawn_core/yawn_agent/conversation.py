@@ -48,6 +48,7 @@ class ConversationSession:
     last_bot_at: float
     bot_turns: int
     topic: str | None
+    max_bot_turns: int = CONVERSATION_MAX_BOT_TURNS
     evaluation_count: int = 0
     consecutive_waits: int = 0
     batch_first_at: float | None = None
@@ -74,7 +75,9 @@ def set_followup_handler(handler: FollowupHandler) -> None:
 def _expired(session: ConversationSession, now: float) -> bool:
     return (
         now - session.started_at >= CONVERSATION_MAX_SECONDS
-        or session.bot_turns >= CONVERSATION_MAX_BOT_TURNS
+        or session.bot_turns >= min(
+            max(int(session.max_bot_turns), 1), CONVERSATION_MAX_BOT_TURNS
+        )
     )
 
 
@@ -117,6 +120,7 @@ def mark_bot_reply(
     topic: str | None,
     source: str,
     preserve_pending: bool = False,
+    max_bot_turns: int = CONVERSATION_MAX_BOT_TURNS,
     now: float | None = None,
 ) -> ConversationSession:
     """成功发送一条 Bot 正文后开启或推进短会话。"""
@@ -124,6 +128,7 @@ def mark_bot_reply(
     key = (int(bot_id), int(group_id))
     current = float(time.monotonic() if now is None else now)
     session = _sessions.get(key)
+    bounded_max_turns = min(max(int(max_bot_turns), 1), CONVERSATION_MAX_BOT_TURNS)
     if session is None or _expired(session, current):
         session = ConversationSession(
             session_id=next(_session_ids),
@@ -131,6 +136,7 @@ def mark_bot_reply(
             last_bot_at=current,
             bot_turns=1,
             topic=(topic or "").strip()[:240] or None,
+            max_bot_turns=bounded_max_turns,
         )
         _sessions[key] = session
         dbg(
@@ -139,17 +145,18 @@ def mark_bot_reply(
         )
     else:
         session.last_bot_at = current
+        session.max_bot_turns = bounded_max_turns
         session.bot_turns += 1
         if topic and topic.strip():
             session.topic = topic.strip()[:240]
         dbg(
             f"群 {group_id} 短会话推进: session={session.session_id} "
-            f"turn={session.bot_turns}/{CONVERSATION_MAX_BOT_TURNS} source={source}"
+            f"turn={session.bot_turns}/{session.max_bot_turns} source={source}"
         )
     if not preserve_pending:
         _clear_batch(session)
         _cancel_waiting_task(key)
-    if session.bot_turns >= CONVERSATION_MAX_BOT_TURNS:
+    if session.bot_turns >= session.max_bot_turns:
         close_conversation(bot_id, group_id, reason="达到单话题发言上限")
     return session
 

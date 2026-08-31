@@ -17,6 +17,11 @@ from .conversation import CONVERSATION_MAX_BOT_TURNS
 from .log import dbg
 from .memory import parse_json_reply
 from .outbound import MAX_OUTBOUND_SEGMENTS
+from .persona import (
+    PersonaBehavior,
+    persona_behavior,
+    persona_behavior_instruction,
+)
 
 _ACTIVE_MIN_GAP_SECONDS = 30.0
 _ACTIVE_MIN_MEMBER_MESSAGES = 2
@@ -177,12 +182,13 @@ def clamp_probability(value: Any) -> float:
 
 
 def warmup_probability(config: GroupAgentConfig, idle_seconds: float) -> float:
-    """冷得越久越可能开口：阈值时为基准值，两倍阈值后翻倍，封顶 0.6。"""
+    """冷得越久越可能开口，但 Persona 只能在运行概率上限内继续收窄。"""
 
     base = clamp_probability(config.proactive_probability)
     threshold = max(int(config.idle_threshold_minutes), 1) * 60
-    scale = 1.0 + min(max(idle_seconds / threshold - 1.0, 0.0), 1.0)
-    return min(base * scale, _WARMUP_PROBABILITY_CAP)
+    idle_scale = 1.0 + min(max(idle_seconds / threshold - 1.0, 0.0), 1.0)
+    behavior_scale = persona_behavior(config).warmup_probability_scale
+    return min(base * idle_scale, _WARMUP_PROBABILITY_CAP) * behavior_scale
 
 
 def skip_backoff_timestamp(now: datetime, cooldown_minutes: int) -> datetime:
@@ -261,6 +267,50 @@ def decide_proactive_reply(raw: str) -> ProactiveDecision:
     )
 
 
+def apply_persona_behavior_to_decision(
+    config: GroupAgentConfig, decision: ProactiveDecision
+) -> ProactiveDecision:
+    """对模型给出的主动消息执行 Persona 行为硬约束。
+
+    当前只限制“主动 reaction”：用户明确要求表情包时走普通 dialogue 工具路径，
+    不受这里影响。低 reaction 倾向的角色不能在主动/续聊场景自己刷表情包。
+    """
+
+    behavior = persona_behavior(config)
+    if behavior.allow_spontaneous_reaction or not decision.segments:
+        return decision
+    filtered = tuple(
+        item
+        for item in decision.segments
+        if str(item.get("type") or "").strip().lower() != "reaction"
+    )
+    if filtered == decision.segments:
+        return decision
+    text = "".join(
+        str(item.get("text") or "")
+        for item in filtered
+        if str(item.get("type") or "").strip().lower() == "text"
+    ).strip() or decision.text
+    if not filtered and not text:
+        return ProactiveDecision(
+            "wait",
+            "",
+            decision.topic,
+            "Persona 禁止当前角色主动使用 reaction",
+            target_user_id=decision.target_user_id,
+            confidence=decision.confidence,
+        )
+    return ProactiveDecision(
+        decision.action,
+        text,
+        decision.topic,
+        decision.reason,
+        filtered,
+        target_user_id=decision.target_user_id,
+        confidence=decision.confidence,
+    )
+
+
 def recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
     lines = [
         str(item.get("text") or "").strip()
@@ -271,7 +321,11 @@ def recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
 
 
 def build_user_prompt(
-    scene: str, config: GroupAgentConfig, *, turn: int | None = None
+    scene: str,
+    config: GroupAgentConfig,
+    *,
+    turn: int | None = None,
+    behavior: PersonaBehavior | None = None,
 ) -> str:
     """Build a prompt for an internally selected participation scene."""
     if scene == "active":
@@ -280,11 +334,19 @@ def build_user_prompt(
         base = _FOLLOWUP_PROMPT
     else:
         base = _WARMUP_PROMPT
-    parts = [base, _MEMORY_USE_PROMPT]
+    resolved_behavior = behavior or persona_behavior(config)
+    parts = [
+        base,
+        persona_behavior_instruction(resolved_behavior, scene=scene),
+        _MEMORY_USE_PROMPT,
+    ]
     if turn is not None:
+        max_turns = min(
+            CONVERSATION_MAX_BOT_TURNS, resolved_behavior.max_followup_bot_turns
+        )
         parts.append(
-            f"这是本话题中 Bot 的第 {turn} 条候选发言，最多 "
-            f"{CONVERSATION_MAX_BOT_TURNS} 条。"
+            f"这是本话题中 Bot 的第 {turn} 条候选发言，当前 Persona 最多 "
+            f"{max_turns} 条。"
         )
     parts.append(_JSON_PROTOCOL)
     recent = recent_proactive_lines(config)
@@ -382,7 +444,12 @@ def should_proactively_speak(
             f"{snapshot.member_messages_60m} 条,群里没在聊"
         )
         return None
-    probability = clamp_probability(config.proactive_active_probability)
+    behavior = persona_behavior(config)
+    probability = min(
+        clamp_probability(config.proactive_active_probability)
+        * behavior.active_probability_scale,
+        clamp_probability(config.proactive_active_probability),
+    )
     if roll < probability:
         dbg(
             f"群 {group_id} 插话场景触发: {'持续刷屏' if busy_flow else '自然间隙'} "
@@ -400,6 +467,7 @@ def should_proactively_speak(
 __all__ = [
     "ProactiveDecision",
     "RandomSource",
+    "apply_persona_behavior_to_decision",
     "build_user_prompt",
     "clamp_probability",
     "decide_proactive_reply",

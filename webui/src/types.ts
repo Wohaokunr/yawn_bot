@@ -195,13 +195,77 @@ export interface AgentCapabilities {
   }>;
 }
 
+export interface PersonaBehavior {
+  source: string;
+  sociability: number;
+  followupTendency: number;
+  reactionTendency: number;
+  warmupProbabilityScale: number;
+  activeProbabilityScale: number;
+  maxFollowupBotTurns: number;
+  allowSpontaneousReaction: boolean;
+  reactionMode: "off" | "restrained" | "normal" | "expressive" | "high" | string;
+}
+
+export interface PersonaEmotion {
+  schemaVersion: number;
+  label: "neutral" | "warm" | "amused" | "curious" | "concerned" | "guarded" | "irritated" | string;
+  displayLabel: string;
+  valence: number;
+  arousal: number;
+  intensity: number;
+  expressionIntensity: number;
+  expressionHint: string;
+  source: string;
+  reason: string;
+  updatedAt: string | null;
+  ageMinutesBucket: number;
+  eventCount: number;
+}
+
 export interface Persona {
   groupId: string;
   enabled: boolean;
+  schemaVersion: number;
+  profile: PersonaProfile;
+  presets: PersonaPreset[];
+  summary: string;
+  behavior: PersonaBehavior;
+  emotion: PersonaEmotion;
   resolved: Record<string, string>;
-  overrides: Record<string, string>;
-  fields: string[];
   version: string | null;
+}
+
+export interface PersonaProfile {
+  presetId: string;
+  name: string;
+  identity: string;
+  groupRole: string;
+  warmth: number;
+  humor: number;
+  directness: number;
+  verbosity: number;
+  expressiveness: number;
+  sociability: number;
+  followupTendency: number;
+  reactionTendency: number;
+  customNotes: string;
+}
+
+export interface PersonaPreset {
+  id: string;
+  label: string;
+  description: string;
+  identity: string;
+  groupRole: string;
+  warmth: number;
+  humor: number;
+  directness: number;
+  verbosity: number;
+  expressiveness: number;
+  sociability: number;
+  followupTendency: number;
+  reactionTendency: number;
 }
 
 export interface MemoryItem {
@@ -333,6 +397,16 @@ export interface AgentExecutionTrace {
 export interface AgentDebugResponse {
   promptVersion: string;
   mode: AgentDebugMode;
+  persona: {
+    source: "draft" | "persisted";
+    persistedSummary: string;
+    persistedProfile: PersonaProfile;
+    appliedProfile: PersonaProfile;
+    persistedBehavior: PersonaBehavior;
+    appliedBehavior: PersonaBehavior;
+    persistedEmotion: PersonaEmotion;
+    appliedEmotion: PersonaEmotion;
+  };
   currentTurn: Record<string, unknown>;
   context: {
     messages?: Array<Record<string, unknown>>;

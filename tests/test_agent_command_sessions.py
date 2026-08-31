@@ -211,10 +211,10 @@ async def test_agent_persona_session_previews_before_commit(
     matcher = SimpleNamespace(state={"agent_persona_step": "select"})
     config = SimpleNamespace(
         group_id=10001,
-        persona="友好、自然、简洁的群友",
-        persona_override={},
         persona_enabled=True,
         persona_version=1,
+        persona_profile={},
+        emotion_state={},
         updated_by=None,
     )
     prompts: list[tuple[Any, ...]] = []
@@ -242,18 +242,22 @@ async def test_agent_persona_session_previews_before_commit(
     monkeypatch.setattr(commands.agent_persona, "finish", fake_finish)
     monkeypatch.setattr(commands, "_commit", fake_commit)
 
-    await commands.handle_agent_persona_input(event, matcher, object(), "语气")
-    assert matcher.state["agent_persona_step"] == "value"
+    await commands.handle_agent_persona_input(event, matcher, object(), "微调说话风格")
+    assert matcher.state["agent_persona_step"] == "style_trait"
 
-    await commands.handle_agent_persona_input(event, matcher, object(), "温和但简洁")
+    await commands.handle_agent_persona_input(event, matcher, object(), "温和程度")
+    assert matcher.state["agent_persona_step"] == "trait_value"
+
+    await commands.handle_agent_persona_input(event, matcher, object(), "4")
     assert matcher.state["agent_persona_step"] == "confirm"
-    assert config.persona_override == {}
+    assert config.persona_profile == {}
     assert commits == 0
     assert "修改前" in str(prompts[-1][1])
-    assert "修改后：温和但简洁" in str(prompts[-1][1])
+    assert "修改后：4/4（很温暖）" in str(prompts[-1][1])
 
     await commands.handle_agent_persona_input(event, matcher, object(), "确认保存")
-    assert config.persona_override["tone"] == "温和但简洁"
+    assert config.persona_profile["voice"]["warmth"] == 4  # noqa: PLR2004
+    assert config.persona_profile["preset_id"] == "natural"
     assert commits == 1
     assert finishes and "已保存" in str(finishes[-1][0])
 

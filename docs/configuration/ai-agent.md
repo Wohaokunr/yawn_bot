@@ -94,21 +94,59 @@ AGENT_DEBUG_LOG=false
 
 图片类表情包放在 `AGENT_FILE_ROOT/reactions/`，索引文件为 `index.json`。模型只接触 reaction id、标签和描述，不直接猜本地路径。
 
-## Agent 全局默认人设
+## Agent Persona v2
 
-每个字段最多 240 字符，群级设置可在命令/WebUI 中覆盖；重置后重新继承这里的全局默认。
+Persona v2 把**角色、临时情绪、系统策略**拆成三个不同层级：
+
+1. **System Policy**：事实性、隐私、权限、工具安全与 Prompt 注入防护，不允许 Persona 覆盖。
+2. **Persona Profile**：稳定角色设定，包括模板、身份、说话风格、社交倾向与自定义补充。
+3. **Dynamic Emotion**：随近期群聊事件短暂变化的 Bot 表达状态，会自动衰减，只影响措辞和表现力。
+
+全局只保留一个轻量环境变量用于默认名字：
 
 ```dotenv
 AGENT_PERSONA_NAME=Yawn
-AGENT_PERSONA_IDENTITY=熟悉群聊节奏、自然简洁的普通群友
-AGENT_PERSONA_ROLE=普通群友
-AGENT_PERSONA_TONE=口语化、克制，不刻意热情或装熟
-AGENT_PERSONA_SPEECH_STYLE=短句为主，不复述上文，不固定用反问续聊
-AGENT_PERSONA_VALUES=尊重事实、尊重边界、先倾听再回答
-AGENT_PERSONA_KNOWLEDGE_BOUNDARY=不知道就明确说不知道，不猜测成员隐私
-AGENT_PERSONA_EMOTION_BASELINE=平静、友善，随对话轻微变化
-AGENT_PERSONA_RESPONSE_LENGTH=通常 1-2 句，明确的复杂问题再展开
-AGENT_PERSONA_PRIVACY_BOUNDARY=不公开私聊内容、隐私记忆、权限信息和工具内部结果
 ```
 
-人设配置不会覆盖硬编码的隐私、权限和工具安全边界。
+详细角色风格由 Persona v2 的结构化模板决定。内置模板包括：`自然群友`、`温和倾听`、`冷静理性`、`活跃捧哏`、`安静潜水`。每个群可以继续微调：
+
+- 说话风格：温和程度、幽默程度、直接程度、回复详略、表现力。
+- 社交倾向：社交活跃度、续聊倾向、接梗/反应倾向。
+- 身份文字：名字、身份定位、群内角色，以及一段最多 240 字符的自定义补充。
+
+QQ 使用 `/Agent人设` 进入“模板 → 风格/社交微调 → 预览确认”的会话入口。P6 起不再支持 `/Agent人设 设置 key=value ...`，WebUI 也不再接受 flat `overrides`；Persona 的唯一写入格式是结构化 `persona_profile`。WebUI 可以把**尚未保存的 Persona 草稿**交给 Agent Debug 试演，试演复用真实 `build_messages()` 和可选真实模型调用，但不会保存 Persona、执行工具、发送 QQ、写入记忆、修改动态情绪或主动参与状态。
+
+### P4：Persona 控制真实群聊行为
+
+Persona 的社交特征会进入真实控制流，而不只是写进 Prompt。优先级固定为：**System Policy → 群运行配置硬门槛/上限 → Persona 行为倾向 → 当前上下文**。Persona 只能在管理员已经允许的范围内进一步收窄行为。
+
+- `sociability` 缩放暖场/热闹插话候选概率。0–4 档对应 `0.15 / 0.45 / 0.75 / 0.90 / 1.00`。
+- `followup_tendency` 限制一个短会话中 Bot 的总发言数。0–4 档对应 `1 / 2 / 3 / 4 / 4`；1 表示本轮回答后不再自动续聊。
+- `reaction_tendency` 控制主动参与/自动续聊时是否允许 Agent 自发使用 reaction。0–1 档会过滤自发 reaction；用户明确要求发送表情包时仍走普通 dialogue 工具路径。
+
+P6 删除了 runtime 的 v1 fallback。升级迁移会把旧群的历史参与节奏显式写成最终 v2 social traits，因此兼容只存在于 migration 中，运行时没有 `legacy` Persona 分支。
+
+### P5：动态情绪
+
+动态情绪使用已有 `emotion_state` JSON 保存，不新增 LLM 调用，也不新增用户画像字段。它描述的是 **Bot 自己的临时表达 stance**，不是对成员心理状态的诊断。
+
+当前状态包括：`平静 / 亲和 / 愉快 / 好奇 / 关切 / 谨慎 / 轻微不耐`。系统只依据粗粒度交互信号更新，例如友好反馈、玩梗氛围、质疑、冲突语气或需要关切的表达；不会把原消息文本、用户 ID 或“某成员正在焦虑/生气”这类推断写入情绪状态。
+
+- 直接 @/回复/唤醒 Agent 的事件影响更强；普通群聊氛围只产生较弱 ambient 影响。
+- 状态约以 **35 分钟半衰期**自动回落到平静，长时间无事件会清空持久状态。
+- Persona 的 `expressiveness` 只决定同一情绪在文字里表现多少，不改变底层情绪状态。
+- `emotion_state` 只调整临时表达，不改变事实、记忆、权限、安全、工具能力或主动参与硬门槛。即使状态为“轻微不耐”，也不得攻击、羞辱、报复或升级冲突。
+- 已通过 `/Agent隐私` 退出的成员消息在解析前就被拦截，因此不会写记忆，也不会影响动态情绪。
+- WebUI 与 `/Agent人设 查看` 会展示当前动态情绪、强度、粗粒度原因与衰减状态。Debug 草稿只重新计算“当前 Persona 会把这份情绪表现到什么程度”，不会写回 `emotion_state`。
+
+### P6：历史兼容债务清理
+
+P6 的数据库迁移在 Persona v2 数据落稳后执行一次性清理：
+
+- 删除 `persona`、`persona_override`、`persona_schema_version` 三个旧列；运行时只读取 `persona_profile`。
+- 旧 `tone / speech_style / temperament / response_length / values` 会尽量压缩到 `custom_notes`，避免角色文字静默丢失。
+- 旧 `legacy_policy_fields`、`knowledge_boundary`、`privacy_boundary` 不再迁移进 Persona，因为它们已经由不可覆盖的 System Policy 接管。
+- 旧群若尚未保存 P4 结构化 social traits，迁移会把原来的参与节奏显式物化为 v2 traits，再删除 runtime fallback。
+- downgrade 仍提供 best-effort 回填，保证迁移链可以回退，但降级后的旧格式不再属于当前运行 API。
+
+以下旧环境变量也已退休，不再作为 Persona 配置入口：`AGENT_PERSONA_IDENTITY`、`AGENT_PERSONA_ROLE`、`AGENT_PERSONA_TONE`、`AGENT_PERSONA_SPEECH_STYLE`、`AGENT_PERSONA_VALUES`、`AGENT_PERSONA_EMOTION_BASELINE`、`AGENT_PERSONA_RESPONSE_LENGTH`、`AGENT_PERSONA_KNOWLEDGE_BOUNDARY`、`AGENT_PERSONA_PRIVACY_BOUNDARY`。

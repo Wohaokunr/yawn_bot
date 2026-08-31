@@ -60,6 +60,10 @@ import type {
   MemoryItem,
   MemorySubjectItem,
   Persona,
+  PersonaBehavior,
+  PersonaEmotion,
+  PersonaProfile,
+  PersonaPreset,
   PrivacyItem,
 } from "./types";
 
@@ -96,24 +100,102 @@ export function profileKeyLabel(key: string): string {
   return PROFILE_KEY_META[key] ?? key;
 }
 
-const PERSONA_FIELD_META: Record<string, { label: string; help: string; placeholder: string }> = {
-  name: { label: "名字", help: "Agent 在群里自称或被称呼的名字。", placeholder: "例如：Yawn" },
-  identity: { label: "身份定位", help: "描述它是谁，以及希望给群友留下的整体印象。", placeholder: "例如：熟悉群聊节奏、自然简洁的普通群友" },
-  role: { label: "群内角色", help: "定义它在群聊中的职责和参与方式。", placeholder: "例如：普通群友" },
-  tone: { label: "语气", help: "控制措辞的温度、正式程度和情绪表达。", placeholder: "例如：口语化、克制，不刻意热情或装熟" },
-  speech_style: { label: "表达风格", help: "控制句式、节奏、口头禅以及整体说话方式。", placeholder: "例如：短句为主，不复述上文，不固定用反问续聊" },
-  emotion_baseline: { label: "情绪基线", help: "设定日常情绪状态，以及随上下文变化的幅度。", placeholder: "例如：平静、友善，随对话轻微变化" },
-  response_length: { label: "回复长度", help: "描述通常回答多长，复杂问题是否允许展开。", placeholder: "例如：通常 1-2 句，明确的复杂问题再展开" },
-  values: { label: "价值取向", help: "定义回答时优先遵循的原则和行为偏好。", placeholder: "例如：尊重事实、尊重边界、先倾听再回答" },
-  knowledge_boundary: { label: "知识边界", help: "约束不知道或不确定的信息应该如何处理。", placeholder: "例如：不知道就明确说不知道，不猜测成员隐私" },
-  privacy_boundary: { label: "隐私边界", help: "明确哪些内容绝不能在群聊中主动公开。", placeholder: "例如：不公开私聊内容、隐私记忆和权限信息" },
+type PersonaTraitKey =
+  | "warmth"
+  | "humor"
+  | "directness"
+  | "verbosity"
+  | "expressiveness"
+  | "sociability"
+  | "followupTendency"
+  | "reactionTendency";
+
+interface PersonaFormValues {
+  mode: "inherit" | "custom";
+  profile: PersonaProfile;
+}
+
+const PERSONA_TRAIT_META: Record<PersonaTraitKey, { label: string; help: string; levels: string[] }> = {
+  warmth: { label: "温和程度", help: "控制措辞的温度，不改变事实与安全边界。", levels: ["偏冷淡", "较克制", "自然", "温和", "很温暖"] },
+  humor: { label: "幽默程度", help: "控制玩梗与轻松表达的频率。", levels: ["不玩梗", "偶尔", "适度", "会接梗", "很会接梗"] },
+  directness: { label: "直接程度", help: "控制结论是委婉表达还是直接说明。", levels: ["很委婉", "偏委婉", "适中", "较直接", "很直接"] },
+  verbosity: { label: "回复详略", help: "控制通常回复的展开程度；复杂问题仍可按需说明。", levels: ["极简", "简洁", "适中", "较详细", "很详细"] },
+  expressiveness: { label: "表现力", help: "控制感叹、语气变化与情绪表现的明显程度。", levels: ["很淡", "克制", "自然", "明显", "很强"] },
+  sociability: { label: "社交活跃度", help: "描述角色愿不愿意参与群聊；不会突破运行配置的主动发言上限。", levels: ["很少参与", "偏安静", "平衡", "较主动", "很活跃"] },
+  followupTendency: { label: "续聊倾向", help: "控制回答后是否倾向自然延展话题。", levels: ["不续聊", "很少", "适度", "较愿意", "很愿意"] },
+  reactionTendency: { label: "接梗 / 反应", help: "控制对群友玩笑、表情和气氛变化的回应倾向。", levels: ["几乎不接", "较少", "自然", "较常", "很爱接"] },
 };
 
-const PERSONA_SECTIONS = [
-  { key: "identity", kicker: "IDENTITY", title: "身份与角色", description: "先定义 Agent 是谁，以及它在这个群里以什么身份参与。", fields: ["name", "identity", "role"] },
-  { key: "voice", kicker: "VOICE & TEMPERAMENT", title: "语气与表达", description: "塑造说话的声音、情绪基线和回复节奏。", fields: ["tone", "speech_style", "emotion_baseline", "response_length"] },
-  { key: "boundaries", kicker: "VALUES & BOUNDARIES", title: "原则与边界", description: "明确价值取向、知识边界和隐私底线，避免人设覆盖安全约束。", fields: ["values", "knowledge_boundary", "privacy_boundary"] },
+const PERSONA_STYLE_TRAITS: PersonaTraitKey[] = ["warmth", "humor", "directness", "verbosity", "expressiveness"];
+const PERSONA_SOCIAL_TRAITS: PersonaTraitKey[] = ["sociability", "followupTendency", "reactionTendency"];
+
+const PERSONA_TRIAL_SCENARIOS = [
+  { value: "ordinary", label: "普通问题", mode: "dialogue", text: "今天适合做什么？" },
+  { value: "joke", label: "群友玩梗", mode: "active", text: "你又来晚了，罚你讲个冷笑话。" },
+  { value: "cold", label: "群聊冷场", mode: "warmup", text: "群里安静半天了。" },
+  { value: "followup", label: "自然续聊", mode: "followup", text: "刚才的话题还有一点可以接。" },
+  { value: "challenge", label: "成员质疑", mode: "dialogue", text: "你刚才是不是在瞎说？" },
+  { value: "custom", label: "自定义", mode: "dialogue", text: "" },
 ] as const;
+
+export function personaDraftSummary(profile: PersonaProfile, presets: PersonaPreset[]): string {
+  const preset = presets.find((item) => item.id === profile.presetId);
+  const meta = PERSONA_TRAIT_META;
+  return [
+    profile.name,
+    preset?.label ?? profile.presetId,
+    meta.warmth.levels[profile.warmth],
+    meta.humor.levels[profile.humor],
+    meta.verbosity.levels[profile.verbosity],
+    meta.sociability.levels[profile.sociability],
+  ].filter(Boolean).join(" · ");
+}
+
+export function mergePersonaPreset(profile: PersonaProfile, preset: PersonaPreset): PersonaProfile {
+  return {
+    ...profile,
+    presetId: preset.id,
+    identity: preset.identity,
+    groupRole: preset.groupRole,
+    warmth: preset.warmth,
+    humor: preset.humor,
+    directness: preset.directness,
+    verbosity: preset.verbosity,
+    expressiveness: preset.expressiveness,
+    sociability: preset.sociability,
+    followupTendency: preset.followupTendency,
+    reactionTendency: preset.reactionTendency,
+  };
+}
+
+export function personaBehaviorPreview(profile: PersonaProfile): PersonaBehavior {
+  const probabilityScales = [0.15, 0.45, 0.75, 0.9, 1] as const;
+  const maxTurns = [1, 2, 3, 4, 4] as const;
+  const reactionModes = ["off", "restrained", "normal", "expressive", "high"] as const;
+  const sociability = Math.max(0, Math.min(4, profile.sociability));
+  const followup = Math.max(0, Math.min(4, profile.followupTendency));
+  const reaction = Math.max(0, Math.min(4, profile.reactionTendency));
+  return {
+    source: "draft",
+    sociability,
+    followupTendency: followup,
+    reactionTendency: reaction,
+    warmupProbabilityScale: probabilityScales[sociability],
+    activeProbabilityScale: probabilityScales[sociability],
+    maxFollowupBotTurns: maxTurns[followup],
+    allowSpontaneousReaction: reaction >= 2,
+    reactionMode: reactionModes[reaction],
+  };
+}
+
+export function personaEmotionExpressionPreview(
+  emotion: PersonaEmotion,
+  expressiveness: number,
+): number {
+  const scales = [0.2, 0.4, 0.62, 0.82, 1] as const;
+  const level = Math.max(0, Math.min(4, Math.round(expressiveness)));
+  return Math.max(0, Math.min(1, emotion.intensity * scales[level]));
+}
 
 // 画像成员的展示名：群名片优先、全局昵称兜底，解析失败回退 QQ 号（与关系图谱同口径）。
 export function memberDisplayName(
@@ -635,30 +717,67 @@ function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
 
 function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp();
-  const [form] = Form.useForm();
+  const [form] = Form.useForm<PersonaFormValues>();
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const watchedEnabled = Form.useWatch("enabled", form) as boolean | undefined;
-  const watchedOverrides = Form.useWatch("overrides", form) as Record<string, string> | undefined;
+  const [trialActorUserId, setTrialActorUserId] = useState("");
+  const [trialScenario, setTrialScenario] = useState("ordinary");
+  const [trialCustomText, setTrialCustomText] = useState("");
+  const [trialRunModel, setTrialRunModel] = useState(false);
+  const [trialRunning, setTrialRunning] = useState(false);
+  const [trialResult, setTrialResult] = useState<AgentDebugResponse | null>(null);
+  const [trialError, setTrialError] = useState<string | null>(null);
+  const watchedMode = Form.useWatch("mode", form) as PersonaFormValues["mode"] | undefined;
+  const watchedProfile = Form.useWatch("profile", form) as PersonaProfile | undefined;
   const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
   const query = useApiQuery(load, { resources: ["agent_persona"] });
   useUnsavedChanges(dirty);
+
   useEffect(() => {
     if (query.data) {
-      form.setFieldsValue({ enabled: query.data.enabled, overrides: query.data.overrides });
+      form.setFieldsValue({
+        mode: query.data.enabled ? "custom" : "inherit",
+        profile: query.data.profile,
+      });
       setDirty(false);
+      setTrialResult(null);
+      setTrialError(null);
     }
   }, [form, query.data]);
-  const save = async (values: { enabled: boolean; overrides?: Record<string, string> }) => {
+
+  const data = query.data;
+  if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
+
+  const profile = watchedProfile ?? data.profile;
+  const mode = watchedMode ?? (data.enabled ? "custom" : "inherit");
+  const draftSummary = personaDraftSummary(profile, data.presets);
+  const draftBehavior = personaBehaviorPreview(profile);
+  const draftEmotionExpression = personaEmotionExpressionPreview(data.emotion, profile.expressiveness);
+  const selectedPreset = data.presets.find((item) => item.id === profile.presetId) ?? data.presets[0];
+
+  const applyPreset = (presetId: string) => {
+    const preset = data.presets.find((item) => item.id === presetId);
+    if (!preset) return;
+    const current = form.getFieldValue("profile") as PersonaProfile;
+    form.setFieldsValue({ profile: mergePersonaPreset(current, preset) });
+    setDirty(true);
+    setTrialResult(null);
+  };
+
+  const save = async (values: PersonaFormValues) => {
     setSaving(true);
     try {
       await api<Persona>(`/agent/groups/${groupId}/persona`, {
         method: "PUT",
-        body: JSON.stringify({ version: query.data?.version, enabled: values.enabled, overrides: values.overrides ?? {} }),
+        body: JSON.stringify({
+          version: data.version,
+          enabled: values.mode === "custom",
+          profile: values.profile,
+        }),
       });
       setDirty(false);
-      message.success("群级人设已保存");
+      message.success(values.mode === "custom" ? "当前群人设已保存" : "已切换为跟随全局人设");
       query.reload();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -669,15 +788,16 @@ function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
       setSaving(false);
     }
   };
+
   const reset = async () => {
     setResetting(true);
     try {
       await api<Persona>(`/agent/groups/${groupId}/persona`, {
         method: "DELETE",
-        headers: query.data?.version ? { "If-Match": query.data.version } : {},
+        headers: data.version ? { "If-Match": data.version } : {},
       });
       setDirty(false);
-      message.success("已恢复全局默认人设");
+      message.success("已清除当前群自定义并恢复全局人设");
       query.reload();
     } catch (error) {
       message.error((error as Error).message);
@@ -685,40 +805,60 @@ function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
       setResetting(false);
     }
   };
-  const data = query.data;
-  if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
 
-  const personaEnabled = watchedEnabled ?? data.enabled;
-  const activeOverrideCount = data.fields.filter((field) => Boolean(watchedOverrides?.[field]?.trim())).length;
-  const knownFields = new Set<string>(PERSONA_SECTIONS.flatMap((section) => [...section.fields]));
-  const extraFields = data.fields.filter((field) => !knownFields.has(field));
-  const fieldEditor = (field: string) => {
-    const meta = PERSONA_FIELD_META[field] ?? {
-      label: field,
-      help: "覆盖该字段在当前群中的人设表现。",
-      placeholder: "留空则继承全局默认",
-    };
-    const overridden = Boolean(watchedOverrides?.[field]?.trim());
+  const runTrial = async () => {
+    const actorId = Number(trialActorUserId.trim());
+    if (!Number.isInteger(actorId) || actorId <= 0) {
+      message.warning("请填写当前群中的成员 QQ 号作为试演发言人");
+      return;
+    }
+    const scenario = PERSONA_TRIAL_SCENARIOS.find((item) => item.value === trialScenario);
+    const trialText = (trialScenario === "custom" ? trialCustomText : scenario?.text ?? "").trim();
+    if (!trialText) {
+      message.warning("请输入试演消息");
+      return;
+    }
+    const draft = form.getFieldValue("profile") as PersonaProfile;
+    setTrialRunning(true);
+    setTrialError(null);
+    try {
+      const response = await api<AgentDebugResponse>(`/agent/groups/${groupId}/debug/run`, {
+        method: "POST",
+        body: JSON.stringify({
+          mode: scenario?.mode ?? "dialogue",
+          actorUserId: actorId,
+          text: trialText,
+          runModel: trialRunModel,
+          personaDraft: draft,
+        }),
+      });
+      setTrialResult(response.data);
+      message.success(trialRunModel ? "草稿真实模型试演完成，无副作用" : "草稿 Prompt 快照已生成");
+    } catch (error) {
+      setTrialError((error as Error).message);
+    } finally {
+      setTrialRunning(false);
+    }
+  };
+
+  const renderTrait = (key: PersonaTraitKey) => {
+    const meta = PERSONA_TRAIT_META[key];
+    const value = Number(profile[key] ?? 0);
     return (
-      <div className="persona-field-card" key={field}>
-        <div className="persona-field-head">
+      <div className="persona-trait-card" key={key}>
+        <div className="persona-trait-head">
           <div>
-            <div className="persona-field-title">{meta.label}</div>
-            <div className="persona-field-help">{meta.help}</div>
+            <strong>{meta.label}</strong>
+            <span>{meta.help}</span>
           </div>
-          <Tag color={overridden ? "magenta" : undefined}>{overridden ? "群级覆盖" : "继承默认"}</Tag>
+          <Tag>{value}/4 · {meta.levels[value]}</Tag>
         </div>
-        <Form.Item name={["overrides", field]} className="persona-field-input">
-          {field === "name" ? (
-            <Input maxLength={240} placeholder={meta.placeholder} showCount />
-          ) : (
-            <Input.TextArea maxLength={240} autoSize={{ minRows: 2, maxRows: 5 }} placeholder={meta.placeholder} showCount />
-          )}
+        <Form.Item name={["profile", key]} noStyle>
+          <Segmented
+            block
+            options={meta.levels.map((label, level) => ({ value: level, label: `${level} ${label}` }))}
+          />
         </Form.Item>
-        <div className="persona-field-resolved">
-          <span>当前已保存的生效值</span>
-          <strong>{data.resolved[field] || "—"}</strong>
-        </div>
       </div>
     );
   };
@@ -728,128 +868,210 @@ function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
       form={form}
       layout="vertical"
       onFinish={save}
-      onValuesChange={() => setDirty(true)}
+      onValuesChange={() => { setDirty(true); setTrialResult(null); }}
       className="persona-config-form"
     >
       <div className="persona-config-page agent-studio-page agent-studio-persona">
         <section className="persona-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="persona-config-hero-copy">
-            <div className="persona-config-eyebrow">PERSONA PROFILE</div>
+            <div className="persona-config-eyebrow">PERSONA STUDIO · V2</div>
             <div className="persona-config-title-row">
               <div>
-                <h2>群级人设</h2>
-                <p>在不修改全局默认的前提下，为当前群塑造独立的身份、语气与行为边界。</p>
+                <h2>当前群人设</h2>
+                <p>先选一个角色模板，再用少量可理解的特征微调。事实、隐私、权限与工具安全不属于人设，始终由系统策略强制执行。</p>
               </div>
               <SaveStatus dirty={dirty} saving={saving} />
             </div>
             <div className="persona-config-metrics">
-              <div className="persona-config-metric">
-                <span>群级覆盖</span>
-                <strong>{activeOverrideCount}</strong>
-                <small>/ {data.fields.length} 项</small>
-              </div>
-              <div className="persona-config-metric">
-                <span>未覆盖字段</span>
-                <strong>{Math.max(0, data.fields.length - activeOverrideCount)}</strong>
-                <small>自动继承</small>
-              </div>
-              <div className="persona-config-metric persona-config-metric-wide">
-                <span>当前状态</span>
-                <strong>{personaEnabled ? "群级人设生效" : "使用全局默认"}</strong>
-              </div>
+              <div className="persona-config-metric"><span>当前模板</span><strong>{selectedPreset?.label ?? "自然群友"}</strong></div>
+              <div className="persona-config-metric"><span>说话风格</span><strong>{PERSONA_TRAIT_META.warmth.levels[profile.warmth]}</strong></div>
+              <div className="persona-config-metric"><span>社交倾向</span><strong>{PERSONA_TRAIT_META.sociability.levels[profile.sociability]}</strong></div>
+              <div className="persona-config-metric persona-config-metric-wide"><span>模式</span><strong>{mode === "custom" ? "当前群自定义" : "跟随全局"}</strong></div>
             </div>
           </div>
 
-          <div className={`persona-master-card${personaEnabled ? " is-enabled" : ""}`}>
+          <div className="persona-master-card is-enabled">
             <div className="persona-master-copy">
-              <div className="persona-master-label">群级覆盖总开关</div>
-              <div className="persona-master-title">{personaEnabled ? "当前正在使用群级人设" : "当前使用全局默认人设"}</div>
-              <div className="persona-master-description">
-                关闭只会暂停这些覆盖，不会删除已填写内容；重新开启后会继续使用原来的群级设置。
-              </div>
+              <div className="persona-master-label">生效模式</div>
+              <div className="persona-master-title">{mode === "custom" ? "使用当前群自定义" : "跟随全局人设"}</div>
+              <div className="persona-master-description">切换为“跟随全局”不会删除当前草稿；再次切回自定义时可以继续编辑。恢复默认会真正清空当前群人设。</div>
             </div>
-            <Form.Item name="enabled" valuePropName="checked" noStyle>
-              <Switch />
+            <Form.Item name="mode" noStyle>
+              <Segmented options={[{ value: "inherit", label: "跟随全局" }, { value: "custom", label: "当前群自定义" }]} />
             </Form.Item>
           </div>
         </section>
 
-        {!personaEnabled && (
+        {mode === "inherit" && (
           <Alert
             className="section-alert"
             type="info"
             showIcon
-            message="群级人设覆盖已暂停"
-            description="下面的内容仍可编辑和保存，但 Agent 当前会使用全局默认人设；重新打开总开关后这些覆盖会再次生效。"
+            message="当前 Agent 正在跟随全局人设"
+            description="你仍然可以编辑和试演下面的草稿；只有切换到“当前群自定义”并保存后，草稿才会参与真实群聊。"
           />
         )}
 
         <div className="persona-config-layout">
           <div className="persona-config-main">
-            {PERSONA_SECTIONS.map((section) => {
-              const fields = section.fields.filter((field) => data.fields.includes(field));
-              if (fields.length === 0) return null;
-              return (
-                <section className="persona-config-section liquid-glass agent-config-floating" key={section.key}>
-                  <div className="persona-config-section-head">
-                    <div>
-                      <div className="persona-config-section-kicker">{section.kicker}</div>
-                      <h3>{section.title}</h3>
-                      <p>{section.description}</p>
-                    </div>
-                    <Tag>{fields.filter((field) => Boolean(watchedOverrides?.[field]?.trim())).length} 项覆盖</Tag>
-                  </div>
-                  <div className="persona-field-grid">{fields.map(fieldEditor)}</div>
-                </section>
-              );
-            })}
-            {extraFields.length > 0 && (
-              <section className="persona-config-section liquid-glass agent-config-floating">
-                <div className="persona-config-section-head">
-                  <div>
-                    <div className="persona-config-section-kicker">OTHER</div>
-                    <h3>其他字段</h3>
-                    <p>后端新增的人设字段会自动出现在这里。</p>
-                  </div>
-                </div>
-                <div className="persona-field-grid">{extraFields.map(fieldEditor)}</div>
-              </section>
-            )}
+            <section className="persona-config-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">PRESET</div><h3>角色模板</h3><p>模板给出一套完整起点，选择后仍可继续微调；不会改变系统安全规则。</p></div>
+                <Tag>{data.presets.length} 个模板</Tag>
+              </div>
+              <div className="persona-preset-grid">
+                {data.presets.map((preset) => (
+                  <button
+                    type="button"
+                    key={preset.id}
+                    className={`persona-preset-card${profile.presetId === preset.id ? " is-selected" : ""}`}
+                    onClick={() => applyPreset(preset.id)}
+                  >
+                    <strong>{preset.label}</strong>
+                    <span>{preset.description}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="persona-config-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">IDENTITY</div><h3>它是谁</h3><p>这里只保留真正需要文字表达的身份信息，不要求你写 Prompt。</p></div>
+              </div>
+              <Row gutter={[16, 0]}>
+                <Col xs={24} md={8}><Form.Item name={["profile", "name"]} label="名字" rules={[{ required: true, message: "请输入名字" }]}><Input maxLength={64} showCount /></Form.Item></Col>
+                <Col xs={24} md={16}><Form.Item name={["profile", "groupRole"]} label="群内角色"><Input maxLength={240} showCount placeholder="例如：普通群友" /></Form.Item></Col>
+              </Row>
+              <Form.Item name={["profile", "identity"]} label="身份定位"><Input.TextArea maxLength={240} showCount autoSize={{ minRows: 2, maxRows: 5 }} placeholder="例如：熟悉群聊节奏、自然简洁的普通群友" /></Form.Item>
+            </section>
+
+            <section className="persona-config-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">VOICE</div><h3>怎么说话</h3><p>用 0–4 档位微调常见表达特征，避免自由文本互相打架。</p></div>
+              </div>
+              <div className="persona-trait-grid">{PERSONA_STYLE_TRAITS.map(renderTrait)}</div>
+            </section>
+
+            <section className="persona-config-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">SOCIAL</div><h3>怎么参与群聊</h3><p>这些倾向会直接参与主动候选、短会话续聊和主动 reaction 决策；“运行设置”的开关、概率、冷却和每日上限始终是硬边界。</p></div>
+              </div>
+              <div className="persona-trait-grid">{PERSONA_SOCIAL_TRAITS.map(renderTrait)}</div>
+            </section>
+
+            <section className="persona-config-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">NOTES</div><h3>自定义补充</h3><p>只写模板和档位无法表达的角色细节。不要在这里重复隐私、知识或工具安全规则。</p></div>
+              </div>
+              <Form.Item name={["profile", "customNotes"]}>
+                <Input.TextArea maxLength={240} showCount autoSize={{ minRows: 3, maxRows: 6 }} placeholder="例如：喜欢偶尔用“好困”自嘲，但不要每条消息都提。" />
+              </Form.Item>
+            </section>
+
+            <section className="persona-config-section persona-trial-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">TRY IT</div><h3>未保存草稿试演</h3><p>直接用当前表单草稿调用同一套 Agent Debug。不会保存人设、不会执行工具、不会发 QQ、不会写记忆或主动状态。</p></div>
+                <Tag color="blue">personaDraft</Tag>
+              </div>
+              <Row gutter={[16, 16]}>
+                <Col xs={24} md={8}>
+                  <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+                    <Text strong>试演成员 QQ 号</Text>
+                    <Input value={trialActorUserId} onChange={(event) => setTrialActorUserId(event.target.value)} placeholder="必须是当前群成员" />
+                  </Space>
+                </Col>
+                <Col xs={24} md={16}>
+                  <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+                    <Text strong>场景</Text>
+                    <Select value={trialScenario} onChange={setTrialScenario} options={PERSONA_TRIAL_SCENARIOS.map((item) => ({ value: item.value, label: item.label }))} style={{ width: "100%" }} />
+                  </Space>
+                </Col>
+              </Row>
+              {trialScenario === "custom" && <Input.TextArea value={trialCustomText} onChange={(event) => setTrialCustomText(event.target.value)} maxLength={4000} showCount autoSize={{ minRows: 3, maxRows: 7 }} placeholder="输入自定义试演消息" style={{ marginTop: 16 }} />}
+              {trialScenario !== "custom" && <Alert style={{ marginTop: 16 }} type="info" showIcon message={PERSONA_TRIAL_SCENARIOS.find((item) => item.value === trialScenario)?.text} />}
+              <div className="agent-debug-run-row persona-trial-run-row">
+                <Space wrap>
+                  <Switch checked={trialRunModel} onChange={setTrialRunModel} />
+                  <div><Text strong>{trialRunModel ? "调用真实模型" : "仅构建 Prompt"}</Text><br /><Text type="secondary">真实模型也仍然是 dry-run，不执行任何工具或发送动作。</Text></div>
+                </Space>
+                <Button type="primary" onClick={runTrial} loading={trialRunning}>{trialRunModel ? "试演草稿" : "生成草稿快照"}</Button>
+              </div>
+              {trialError && <QueryErrorAlert error={trialError} onRetry={runTrial} />}
+              {trialResult && (
+                <Card size="small" className="persona-trial-result" title="试演结果" extra={<Tag color="purple">{trialResult.persona.source === "draft" ? "未保存草稿" : "已保存人设"}</Tag>}>
+                  <Descriptions size="small" column={{ xs: 1, md: 2 }} items={[
+                    { key: "saved", label: "当前已保存", children: trialResult.persona.persistedSummary },
+                    { key: "draft", label: "本次草稿", children: personaDraftSummary(trialResult.persona.appliedProfile, data.presets) },
+                    { key: "behavior", label: "本次行为", children: `主动候选 ×${trialResult.persona.appliedBehavior.activeProbabilityScale.toFixed(2)} · 自动续聊 ${Math.max(0, trialResult.persona.appliedBehavior.maxFollowupBotTurns - 1)} 次 · 主动 reaction ${trialResult.persona.appliedBehavior.allowSpontaneousReaction ? "允许" : "关闭"}` },
+                    { key: "emotion", label: "动态情绪", children: `${trialResult.persona.appliedEmotion.displayLabel} · 状态强度 ${Math.round(trialResult.persona.appliedEmotion.intensity * 100)}% · 表达 ${Math.round(trialResult.persona.appliedEmotion.expressionIntensity * 100)}%` },
+                    { key: "prompt", label: "Prompt", children: `${trialResult.promptVersion} · ${trialResult.promptMessages.length} 条消息` },
+                    { key: "sideEffect", label: "副作用", children: "0（工具、发送、状态写入均跳过）" },
+                  ]} />
+                  <Paragraph style={{ marginTop: 14, marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                    {trialResult.result?.text || (trialRunModel ? "（模型没有返回文本，可能只产生了工具意图）" : "已生成 Prompt 快照；开启“调用真实模型”可查看实际回答。")}
+                  </Paragraph>
+                </Card>
+              )}
+            </section>
           </div>
 
           <aside className="persona-config-aside">
             <div className="persona-note-card liquid-glass agent-config-floating">
-              <div className="persona-note-title">继承规则</div>
-              <div className="persona-inherit-flow">
-                <div><span>1</span><strong>全局默认</strong><small>作为基础人设</small></div>
-                <i>↓</i>
-                <div><span>2</span><strong>群级覆盖</strong><small>仅替换已填写字段</small></div>
-                <i>↓</i>
-                <div><span>3</span><strong>最终生效</strong><small>注入当前群对话</small></div>
+              <div className="persona-note-title">当前草稿</div>
+              <strong className="persona-draft-summary">{draftSummary}</strong>
+              <p>{profile.identity}</p>
+              <div className="persona-summary-tags">
+                <Tag>{PERSONA_TRAIT_META.directness.levels[profile.directness]}</Tag>
+                <Tag>{PERSONA_TRAIT_META.expressiveness.levels[profile.expressiveness]}</Tag>
+                <Tag>{PERSONA_TRAIT_META.followupTendency.levels[profile.followupTendency]}</Tag>
+                <Tag>{PERSONA_TRAIT_META.reactionTendency.levels[profile.reactionTendency]}</Tag>
               </div>
             </div>
+            <div className="persona-note-card persona-behavior-card liquid-glass agent-config-floating">
+              <div className="persona-note-title">实际行为影响</div>
+              <p>主动候选：现有运行策略 × {draftBehavior.activeProbabilityScale.toFixed(2)}。Persona 只能收窄，不能突破运行配置。</p>
+              <p>自动续聊：{draftBehavior.maxFollowupBotTurns <= 1 ? "首轮回复后结束" : `最多再续 ${draftBehavior.maxFollowupBotTurns - 1} 次`}。</p>
+              <p>主动 reaction：{draftBehavior.allowSpontaneousReaction ? `允许 · ${draftBehavior.reactionMode}` : "关闭（明确用户请求不受影响）"}。</p>
+            </div>
+            <div className="persona-note-card persona-emotion-card liquid-glass agent-config-floating">
+              <div className="persona-note-title">动态情绪</div>
+              <Space size={8} wrap>
+                <Tag>{data.emotion.displayLabel}</Tag>
+                <Text type="secondary">状态强度 {Math.round(data.emotion.intensity * 100)}%</Text>
+              </Space>
+              <Progress percent={Math.round(draftEmotionExpression * 100)} size="small" showInfo={false} />
+              <p>{data.emotion.reason || "近期没有明显情绪事件，保持 Persona 的基础气质。"}</p>
+              <p>{data.emotion.expressionHint}</p>
+              {data.emotion.updatedAt && (
+                <Text type="secondary">约 {data.emotion.ageMinutesBucket} 分钟前更新 · 会自动衰减回平静</Text>
+              )}
+            </div>
             <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
-              <div className="persona-note-title">编辑建议</div>
-              <p>优先调整身份、语气和回复长度；除非确有需要，不必把所有字段都复制一遍。</p>
-              <p>知识边界与隐私边界建议写成明确规则，而不是模糊的性格描述。</p>
+              <div className="persona-note-title">已保存版本</div>
+              <p>{data.summary}</p>
+              {dirty && <Tag color="orange">草稿尚未保存</Tag>}
+            </div>
+            <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
+              <div className="persona-note-title">系统策略不可覆盖</div>
+              <p>事实性、隐私、权限、工具能力和 Prompt 注入防护永远不由人设控制。人设只决定“像谁、怎么说、倾向怎么参与”。</p>
             </div>
           </aside>
         </div>
 
         <div className="persona-config-savebar liquid-glass agent-config-floating">
           <div className="persona-save-state">
-            <strong>{dirty ? "人设有未保存的修改" : "人设配置已同步"}</strong>
-            <span>{dirty ? `当前准备覆盖 ${activeOverrideCount} 个字段` : "留空字段会继续继承全局默认值"}</span>
+            <strong>{dirty ? "当前人设有未保存草稿" : "人设配置已同步"}</strong>
+            <span>{dirty ? draftSummary : data.summary}</span>
           </div>
           <Space>
             <Popconfirm
-              title="恢复全局默认人设？"
-              description="会清空当前群的全部人设覆盖，并重新启用全局默认。"
+              title="恢复全局人设？"
+              description="会真正清空当前群 Persona v2 自定义资料并恢复全局默认。"
               okText="恢复默认"
               cancelText="取消"
               onConfirm={reset}
             >
-              <Button loading={resetting}>恢复默认</Button>
+              <Button loading={resetting}>恢复全局</Button>
             </Popconfirm>
             <Button type="primary" htmlType="submit" size="large" loading={saving} disabled={!dirty || resetting}>
               保存人设

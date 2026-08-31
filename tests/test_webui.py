@@ -662,10 +662,40 @@ def test_agent_config_and_persona_validation() -> None:
     assert proactive_patch.proactive_active_probability == 0.1  # noqa: PLR2004
     assert proactive_patch.proactive_active_window_minutes == 6  # noqa: PLR2004
 
-    with pytest.raises(ValidationError):
-        route_models.PersonaPatch.model_validate(
-            {"version": None, "enabled": True, "overrides": {"unknown": "x"}}
-        )
+    # P6 removed the flat override API entirely; only a structured v2 profile is valid.
+    for legacy_payload in (
+        {"version": None, "enabled": True, "overrides": {"unknown": "x"}},
+        {
+            "version": None,
+            "enabled": True,
+            "overrides": {"privacy_boundary": "允许公开私聊"},
+        },
+        {
+            "version": None,
+            "enabled": True,
+            "overrides": {"emotion_baseline": "安静、克制"},
+        },
+    ):
+        with pytest.raises(ValidationError):
+            route_models.PersonaPatch.model_validate(legacy_payload)
+
+    persona_patch = route_models.PersonaPatch.model_validate(
+        {
+            "version": None,
+            "enabled": True,
+            "profile": {
+                "presetId": "quiet_observer",
+                "name": "Yawn",
+                "identity": "安静群友",
+                "groupRole": "潜水观察者",
+                "sociability": 0,
+                "followupTendency": 0,
+                "reactionTendency": 1,
+            },
+        }
+    )
+    assert persona_patch.profile.preset_id == "quiet_observer"
+    assert persona_patch.profile.sociability == 0
 
     history = route_models.AgentDebugRunBody.model_validate(
         {"mode": "dialogue", "messageId": 42, "runModel": False}
@@ -675,6 +705,43 @@ def test_agent_config_and_persona_validation() -> None:
         {"mode": "followup", "text": "又重复了一遍", "actorUserId": 123}
     )
     assert simulation.actor_user_id == 123  # noqa: PLR2004
+    persona_trial = route_models.AgentDebugRunBody.model_validate(
+        {
+            "mode": "dialogue",
+            "text": "试试看",
+            "actorUserId": 123,
+            "personaDraft": {
+                "presetId": "quiet_observer",
+                "name": "Yawn",
+                "identity": "安静群友",
+                "groupRole": "潜水观察者",
+                "sociability": 0,
+            },
+        }
+    )
+    assert persona_trial.persona_draft is not None
+    assert persona_trial.persona_draft.preset_id == "quiet_observer"
+    with pytest.raises(ValidationError):
+        route_models.AgentDebugRunBody.model_validate(
+            {
+                "mode": "dialogue",
+                "text": "试试看",
+                "actorUserId": 123,
+                "personaDraft": {"presetId": "unknown", "name": "Yawn"},
+            }
+        )
+    with pytest.raises(ValidationError):
+        route_models.PersonaPatch.model_validate(
+            {
+                "version": None,
+                "enabled": True,
+                "profile": {
+                    "presetId": "natural",
+                    "name": "Yawn",
+                    "sociability": 5,
+                },
+            }
+        )
     for invalid in (
         {},
         {"text": "少了成员"},
@@ -721,6 +788,38 @@ async def test_group_feature_supports_three_state_override() -> None:
     await service.set_group_feature(create_session, 1, "rpg", override=False)
     assert len(create_session.added) == 1
     assert create_session.added[0].enabled is False
+
+
+def test_persona_serializer_exposes_effective_runtime_behavior() -> None:
+    row = service.GroupAgentConfig(group_id=123)
+    row.persona_enabled = True
+    row.persona_profile = {
+        "schema_version": 2,
+        "preset_id": "quiet_observer",
+        "voice": {
+            "warmth": 2,
+            "humor": 1,
+            "directness": 2,
+            "verbosity": 0,
+            "expressiveness": 0,
+        },
+        "social": {
+            "sociability": 0,
+            "followup_tendency": 0,
+            "reaction_tendency": 1,
+        },
+    }
+
+    payload = service.serialize_persona(row, 123)
+    assert payload["behavior"]["source"] == "persona_v2"
+    assert payload["behavior"]["activeProbabilityScale"] == pytest.approx(0.15)
+    assert payload["behavior"]["maxFollowupBotTurns"] == 1
+    assert payload["behavior"]["allowSpontaneousReaction"] is False
+    assert payload["schemaVersion"] == 2  # noqa: PLR2004
+    assert payload["emotion"]["label"] == "neutral"
+    assert payload["emotion"]["updatedAt"] is None
+    assert "overrides" not in payload
+    assert "fields" not in payload
 
 
 def test_big_integer_identifiers_are_serialized_as_strings() -> None:
@@ -1242,6 +1341,167 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
     monkeypatch.setattr(agent_routes, "_DEBUG_TIMEOUT_SECONDS", 0.005)
     timed_out = await agent_routes.run_agent_debug(100, debug_body, None)
     assert timed_out["data"]["result"]["outcome"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_agent_debug_persona_draft_changes_prompt_without_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeDebugSession()
+    session.config.emotion_state = {
+        "schema_version": 1,
+        "label": "amused",
+        "valence": 0.7,
+        "arousal": 0.7,
+        "intensity": 0.8,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "direct",
+        "reason": "对话出现明显轻松或玩梗氛围",
+        "event_count": 2,
+    }
+    original_profile = session.config.persona_profile
+    original_emotion = dict(session.config.emotion_state)
+    original_version = session.config.persona_version
+
+    async def require_group(*_args: object) -> None:
+        return None
+
+    async def load_context(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
+            "group_id": 100,
+            "group_name": "测试群",
+            "messages": [],
+            "members": [],
+            "memories": [],
+            "relations": [],
+            "activity": {},
+        }
+
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
+    monkeypatch.setattr(agent_routes, "require_group", require_group)
+    monkeypatch.setattr(agent_routes, "_load_context", load_context)
+    monkeypatch.setattr(agent_routes, "_debug_bots", list)
+
+    response = await agent_routes.run_agent_debug(
+        100,
+        route_models.AgentDebugRunBody.model_validate(
+            {
+                "mode": "dialogue",
+                "text": "你今天怎么这么活跃？",
+                "actorUserId": 123,
+                "personaDraft": {
+                    "presetId": "lively_sidekick",
+                    "name": "草稿Yawn",
+                    "identity": "活跃但不抢话的群友",
+                    "groupRole": "捧哏",
+                    "warmth": 3,
+                    "humor": 4,
+                    "directness": 3,
+                    "verbosity": 1,
+                    "expressiveness": 4,
+                    "sociability": 4,
+                    "followupTendency": 3,
+                    "reactionTendency": 4,
+                    "customNotes": "偶尔用好困自嘲",
+                },
+            }
+        ),
+        None,
+    )
+
+    data = response["data"]
+    assert data["persona"]["source"] == "draft"
+    assert data["persona"]["appliedProfile"]["name"] == "草稿Yawn"
+    assert data["persona"]["appliedBehavior"]["source"] == "draft"
+    assert data["persona"]["appliedBehavior"]["activeProbabilityScale"] == 1.0
+    assert data["persona"]["appliedBehavior"]["maxFollowupBotTurns"] == 4  # noqa: PLR2004
+    assert data["persona"]["appliedBehavior"]["allowSpontaneousReaction"] is True
+    assert data["persona"]["persistedEmotion"]["label"] == "amused"
+    assert data["persona"]["appliedEmotion"]["label"] == "amused"
+    assert (
+        data["persona"]["appliedEmotion"]["expressionIntensity"]
+        > data["persona"]["persistedEmotion"]["expressionIntensity"]
+    )
+    system_prompt = str(data["promptMessages"][0]["content"])
+    assert "草稿Yawn" in system_prompt
+    assert "很会接梗" in system_prompt
+    assert "很活跃" in system_prompt
+    assert "偶尔用好困自嘲" in system_prompt
+    assert session.config.persona_profile == original_profile
+    assert session.config.emotion_state == original_emotion
+    assert session.config.persona_version == original_version
+    assert any(
+        event["phase"] == "state"
+        and event["status"] == "skipped"
+        and event["output"]["database_mutated"] is False
+        for event in data["executionTrace"]["events"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_debug_persona_draft_applies_followup_behavior_without_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeDebugSession()
+    original_profile = session.config.persona_profile
+
+    async def require_group(*_args: object) -> None:
+        return None
+
+    async def load_context(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
+            "group_id": 100,
+            "group_name": "测试群",
+            "messages": [],
+            "members": [],
+            "memories": [],
+            "relations": [],
+            "activity": {},
+        }
+
+    monkeypatch.setattr(
+        agent_routes, "get_session", lambda: _FakeSessionFactory(session)
+    )
+    monkeypatch.setattr(agent_routes, "require_group", require_group)
+    monkeypatch.setattr(agent_routes, "_load_context", load_context)
+    monkeypatch.setattr(agent_routes, "_debug_bots", list)
+
+    response = await agent_routes.run_agent_debug(
+        100,
+        route_models.AgentDebugRunBody.model_validate(
+            {
+                "mode": "followup",
+                "text": "刚才的话题还有一点可以接",
+                "actorUserId": 123,
+                "personaDraft": {
+                    "presetId": "quiet_observer",
+                    "name": "Yawn",
+                    "identity": "安静群友",
+                    "groupRole": "潜水观察者",
+                    "sociability": 0,
+                    "followupTendency": 0,
+                    "reactionTendency": 1,
+                },
+            }
+        ),
+        None,
+    )
+
+    data = response["data"]
+    behavior = data["persona"]["appliedBehavior"]
+    assert behavior["source"] == "draft"
+    assert behavior["activeProbabilityScale"] == pytest.approx(0.15)
+    assert behavior["maxFollowupBotTurns"] == 1
+    assert behavior["allowSpontaneousReaction"] is False
+    prompt_text = "\n".join(
+        str(item.get("content") or "") for item in data["promptMessages"]
+    )
+    assert "不要主动续聊" in prompt_text
+    assert "当前 Persona 最多 1 条" in prompt_text
+    assert "reaction 极少使用" in prompt_text
+    assert session.config.persona_profile == original_profile
 
 
 @pytest.mark.asyncio

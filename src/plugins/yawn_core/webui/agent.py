@@ -38,6 +38,7 @@ from ..yawn_agent.config_store import agent_runtime_enabled, set_agent_runtime_e
 from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
 from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.dialogue import _history_message_meta, _load_context
+from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
     finish_execution_trace,
@@ -53,7 +54,16 @@ from ..yawn_agent.memory import (
     rebuild_group_memories,
     record_memory_failure,
 )
-from ..yawn_agent.persona import resolve_persona
+from ..yawn_agent.persona import (
+    apply_persona_editor_profile,
+    persona_behavior,
+    persona_behavior_draft,
+    persona_editor_profile,
+    persona_summary,
+    reset_persona,
+    resolve_persona,
+    resolve_persona_draft,
+)
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
 from ..yawn_agent.tools import (
@@ -294,6 +304,7 @@ async def get_agent_persona(
 async def put_agent_persona(
     group_id: int, body: PersonaPatch, _session: AdminWriteSession
 ) -> dict[str, Any]:
+    changed = False
     async with get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
@@ -301,14 +312,18 @@ async def put_agent_persona(
         if row is None:
             row = GroupAgentConfig(group_id=group_id)
             db.add(row)
-        row.persona_enabled = body.enabled
-        overrides: dict[str, object] = dict(body.overrides)
-        row.persona_override = overrides
-        row.persona_version += 1
-        await db.commit()
-        await db.refresh(row)
+        mutation = apply_persona_editor_profile(
+            row, body.profile, enabled=body.enabled
+        )
+        if mutation.semantic_changed:
+            row.persona_version += 1
+            changed = True
+        if mutation.storage_changed:
+            await db.commit()
+            await db.refresh(row)
         result = serialize_persona(row, group_id)
-    await hub.notify_change("agent_persona", str(group_id))
+    if changed:
+        await hub.notify_change("agent_persona", str(group_id))
     return ok(result)
 
 
@@ -318,6 +333,7 @@ async def reset_agent_persona(
     _session: AdminWriteSession,
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> dict[str, Any]:
+    changed = False
     async with get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
@@ -325,13 +341,16 @@ async def reset_agent_persona(
         if row is None:
             row = GroupAgentConfig(group_id=group_id)
             db.add(row)
-        row.persona_override = {}
-        row.persona_enabled = True
-        row.persona_version += 1
-        await db.commit()
-        await db.refresh(row)
+        mutation = reset_persona(row)
+        if mutation.semantic_changed:
+            row.persona_version += 1
+            changed = True
+        if mutation.storage_changed:
+            await db.commit()
+            await db.refresh(row)
         result = serialize_persona(row, group_id)
-    await hub.notify_change("agent_persona", str(group_id))
+    if changed:
+        await hub.notify_change("agent_persona", str(group_id))
     return ok(result)
 
 
@@ -1527,6 +1546,34 @@ async def run_agent_debug(
                 trace=debug_trace,
             )
 
+        persisted_editor = persona_editor_profile(config)
+        applied_behavior = (
+            persona_behavior_draft(config, body.persona_draft)
+            if body.persona_draft is not None
+            else persona_behavior(config)
+        )
+        applied_expressiveness = (
+            body.persona_draft.expressiveness
+            if body.persona_draft is not None
+            else persisted_editor.expressiveness
+        )
+        emotion_raw = (
+            config.emotion_state if isinstance(config.emotion_state, dict) else {}
+        )
+        persisted_emotion = emotion_public_state(
+            emotion_raw, expressiveness=persisted_editor.expressiveness
+        )
+        applied_emotion = emotion_public_state(
+            emotion_raw, expressiveness=applied_expressiveness
+        )
+        draft_emotion_context = emotion_context_state(
+            emotion_raw, expressiveness=applied_expressiveness
+        )
+        context = dict(context)
+        if draft_emotion_context:
+            context["emotion_state"] = draft_emotion_context
+        else:
+            context.pop("emotion_state", None)
         user_prompt = (
             current_turn.content
             if body.mode == "dialogue"
@@ -1534,11 +1581,17 @@ async def run_agent_debug(
                 body.mode,
                 config,
                 turn=2 if body.mode == "followup" else 1,
+                behavior=applied_behavior,
             )
+        )
+        applied_persona = (
+            resolve_persona_draft(config, body.persona_draft)
+            if body.persona_draft is not None
+            else resolve_persona(config)
         )
         prompt_started = time.monotonic()
         prompt_messages, _fingerprint = build_messages(
-            persona=resolve_persona(config),
+            persona=applied_persona,
             tools=tools,
             context=context,
             user_prompt=user_prompt,
@@ -1547,7 +1600,14 @@ async def run_agent_debug(
         trace_event(
             "prompt",
             "Prompt 构建",
-            input={"tool_count": len(tools), "mode": body.mode},
+            input={
+                "tool_count": len(tools),
+                "mode": body.mode,
+                "persona_source": (
+                    "draft" if body.persona_draft is not None else "persisted"
+                ),
+                "persona_behavior": applied_behavior.as_dict(),
+            },
             output={
                 "message_count": len(prompt_messages),
                 "prompt_version": PROMPT_VERSION,
@@ -1690,6 +1750,20 @@ async def run_agent_debug(
         payload = {
             "promptVersion": PROMPT_VERSION,
             "mode": body.mode,
+            "persona": {
+                "source": "draft" if body.persona_draft is not None else "persisted",
+                "persistedSummary": persona_summary(config),
+                "persistedProfile": persisted_editor.model_dump(by_alias=True),
+                "persistedBehavior": persona_behavior(config).as_dict(),
+                "appliedBehavior": applied_behavior.as_dict(),
+                "persistedEmotion": persisted_emotion,
+                "appliedEmotion": applied_emotion,
+                "appliedProfile": (
+                    body.persona_draft.model_dump(by_alias=True)
+                    if body.persona_draft is not None
+                    else persisted_editor.model_dump(by_alias=True)
+                ),
+            },
             "currentTurn": current_turn.as_dict(),
             "context": context,
             "contextSelection": context_selection,
