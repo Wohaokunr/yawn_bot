@@ -123,8 +123,29 @@ class AgentConfigPatch(BaseModel):
     admin_tool_daily_limit: int | None = Field(
         default=None, ge=1, le=1000, alias="adminToolDailyLimit"
     )
+    critical_tool_daily_limit: int | None = Field(
+        default=None, ge=1, le=100, alias="criticalToolDailyLimit"
+    )
     tool_allowlist: list[
-        Literal["mute_member", "create_group_announcement", "send_file"]
+        Literal[
+            "mute_member",
+            "create_group_announcement",
+            "send_file",
+            "set_essence_message",
+            "remove_essence_message",
+            "delete_group_notice",
+            "set_group_card",
+            "set_special_title",
+            "set_group_name",
+            "create_group_folder",
+            "kick_member",
+            "set_whole_group_mute",
+            "set_group_admin",
+            "delete_group_file",
+            "move_group_file",
+            "rename_group_file",
+            "delete_group_folder",
+        ]
     ] | None = Field(default=None, alias="toolAllowlist")
 
     @field_validator("tool_allowlist")

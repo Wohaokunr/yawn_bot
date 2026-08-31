@@ -41,6 +41,10 @@ _FORWARD_RULES = (
     "custom 只用已知 user_id/content。"
     "发送成功后不要重复回复。"
 )
+_DISCOVERY_RULES = (
+    "如果当前工具列表缺少完成用户请求所需的能力，先调用 discover_tools；"
+    "只使用发现后下一轮实际出现在 schema 中的工具，不要猜工具名或 OneBot action。"
+)
 
 # 稳定层字段与记忆来源：只在整理任务写入或群资料变更时变化。
 # 其余字段（活跃度、最近消息、发言人画像、关系）都随每次请求变化，
@@ -110,6 +114,8 @@ def build_tool_guidance(tools: list[dict[str, Any]]) -> str:
         parts.append(_REACTION_RULES)
     if "send_forward" in tool_names:
         parts.append(_FORWARD_RULES)
+    if "discover_tools" in tool_names:
+        parts.append(_DISCOVERY_RULES)
     return "\n".join(parts)
 
 

@@ -110,9 +110,11 @@ export interface AgentConfig {
   crossGroupVisibility: "isolated" | "public_summary";
   mediaCacheEnabled: boolean;
   adminToolDailyLimit: number;
+  criticalToolDailyLimit: number;
   toolAllowlist: string[];
   proactiveToday: number;
   adminToolsToday: number;
+  criticalToolsToday: number;
   version: string | null;
 }
 
@@ -433,7 +435,12 @@ export interface AgentDebugResponse {
   tools: Array<Record<string, unknown>>;
   toolPermissions: Array<{
     name: string;
-    permissionLevel: "read" | "state_write" | "message_send" | "privileged";
+    permissionLevel:
+      | "read"
+      | "state_write"
+      | "message_send"
+      | "privileged"
+      | "critical";
     exposed: boolean;
     reason: string;
     actions: string[];

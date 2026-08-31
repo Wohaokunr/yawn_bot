@@ -132,16 +132,50 @@ async def probe_group_capabilities(
         "get_group_member_list",
         "get_msg",
         "get_forward_msg",
+        "get_group_msg_history",
+        "get_group_honor_info",
+        "get_essence_msg_list",
+        "_get_group_notice",
+        "get_group_shut_list",
+        "get_group_root_files",
+        "get_group_files_by_folder",
+        "get_group_file_url",
+        "set_msg_emoji_like",
         "send_group_forward_msg",
         # OneBot adapters may allow file delivery for ordinary members; the
         # executor still validates path/domain/size before sending.
         "upload_group_file",
     }
     if role in {"owner", "admin"}:
-        actions.update({"set_group_ban", "send_group_notice", "_send_group_notice"})
+        # NapCat/go-cqhttp 的群公告接口是扩展 action `_send_group_notice`。
+        # `send_group_notice` 仅在适配器显式声明支持时加入，避免在没有
+        # supported_actions 元数据时把不存在的别名误判为可用。
+        actions.update(
+            {
+                "set_group_ban",
+                "_send_group_notice",
+                "set_essence_msg",
+                "delete_essence_msg",
+                "_del_group_notice",
+                "set_group_card",
+                "set_group_name",
+                "set_group_special_title",
+                "create_group_file_folder",
+                "set_group_kick",
+                "set_group_whole_ban",
+                "set_group_admin",
+                "delete_group_file",
+                "move_group_file",
+                "rename_group_file",
+                "delete_group_folder",
+            }
+        )
     declared = getattr(bot, "supported_actions", None)
     if isinstance(declared, (set, frozenset, list, tuple)):
-        actions.intersection_update(str(item) for item in declared)
+        declared_actions = {str(item) for item in declared}
+        actions.intersection_update(declared_actions)
+        if role in {"owner", "admin"} and "send_group_notice" in declared_actions:
+            actions.add("send_group_notice")
     result = BotGroupCapabilities(role, role in {"owner", "admin"}, frozenset(actions))
     if len(_capability_cache) >= _MAX_CACHE_ENTRIES:
         oldest = min(_capability_cache, key=lambda item: _capability_cache[item][0])
