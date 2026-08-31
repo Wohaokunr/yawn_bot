@@ -127,6 +127,20 @@ allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
 
+[tool.pytest.ini_options]
+# Keep the default developer/PR suite focused on runtime and plugin tests.
+# Expensive RPG editor/playtest suites are first-class CI jobs and are invoked
+# explicitly by path instead of being pulled into every plain `pytest` run.
+testpaths = [
+    "src/plugins",
+    "tests",
+]
+markers = [
+    "slow: expensive regression test that should not gate every fast iteration",
+    "tool_ui: RPG module editor Textual UI/integration test",
+    "playtest_e2e: exhaustive RPG playtest/search regression",
+]
+
 [tool.pyright]
 # For Pylance/Pyright configurations, see https://microsoft.github.io/pyright/#/configuration.
 pythonVersion = "3.10"
