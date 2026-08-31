@@ -73,13 +73,32 @@ def test_execution_trace_is_bounded_redacted_and_stored_per_group() -> None:
     assert payload["durationMs"] is not None
     assert [event["phase"] for event in payload["events"]] == ["media", "outbound"]
     media_input = payload["events"][0]["input"]
-    assert media_input["url"] == "[redacted]"
-    assert media_input["path"] == "[redacted]"
-    assert media_input["file"] == "[redacted]"
-    assert media_input["nested"]["raw_payload"] == "[redacted]"
+    assert media_input["url"] == {
+        "redacted": True,
+        "kind": "url",
+        "scheme": "https",
+        "host": "signed.example",
+        "suffix": None,
+        "has_query": True,
+        "query_keys": ["token"],
+    }
+    assert media_input["path"]["redacted"] is True
+    assert media_input["path"]["kind"] == "path"
+    assert media_input["path"]["platform"] == "windows"
+    assert media_input["path"]["suffix"] == ".png"
+    assert media_input["file"]["redacted"] is True
+    assert media_input["file"]["kind"] == "file_ref"
+    assert media_input["nested"]["raw_payload"] == {
+        "redacted": True,
+        "kind": "payload",
+        "value_type": "dict",
+        "key_count": 1,
+        "keys": ["secret"],
+    }
     assert len(str(media_input["text"])) <= 601  # noqa: PLR2004
     serialized = str(payload)
-    assert "signed.example" not in serialized
+    assert "signed.example/image" not in serialized
+    assert "token=secret" not in serialized
     assert "C:/private" not in serialized
     assert "/var/cache/yawn" not in serialized
     assert "never expose" not in serialized

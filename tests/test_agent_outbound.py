@@ -9,6 +9,7 @@ from typing import Any
 
 import nonebot
 import pytest
+from sqlalchemy.exc import OperationalError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -597,6 +598,96 @@ class _PersistSession:
 
     def add(self, row: Any) -> None:
         self.added.append(row)
+
+
+class _PostSendFailureSession:
+    def __init__(self) -> None:
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_confirmed_send_is_not_reclassified_when_post_send_db_state_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _send_success(*_args: Any, **_kwargs: Any) -> outbound.SendResult:
+        return outbound.SendResult(
+            sent=True,
+            message_id=1469749875,
+            normalized_text="正常发送",
+            segment_types=("text",),
+            segments=({"type": "text", "data": {"text": "正常发送"}},),
+        )
+
+    async def _persist_failure(*_args: Any, **_kwargs: Any) -> None:
+        raise OperationalError(  # noqa: TRY003
+            "select bot reply", {}, RuntimeError("database locked")
+        )
+
+    marked: list[dict[str, Any]] = []
+
+    def _mark_reply(*_args: Any, **kwargs: Any) -> None:
+        marked.append(kwargs)
+
+    monkeypatch.setattr(dialogue, "_send_unless_expired", _send_success)
+    monkeypatch.setattr(dialogue, "persist_bot_reply", _persist_failure)
+    monkeypatch.setattr(dialogue, "mark_bot_reply", _mark_reply)
+
+    session = _PostSendFailureSession()
+    config = SimpleNamespace(
+        short_conversation_enabled=True,
+        persona_enabled=False,
+        raw_retention_days=7,
+        recent_response_fingerprints=[],
+        last_response_fingerprint=None,
+        last_response_input_fingerprint=None,
+        last_response_at=None,
+        last_agent_at=None,
+        active_topic=None,
+        context_epoch=0,
+    )
+    normalized = dialogue.NormalizedMessage(plain_text="看看这个", segments=[])
+    bot = SimpleNamespace(self_id="100")
+    trace = dialogue.begin_execution_trace(
+        1,
+        mode="dialogue",
+        source="runtime",
+        trigger_source="mention",
+    )
+    token = dialogue.bind_execution_trace(trace)
+    try:
+        await dialogue._finalize_reply(
+            bot,
+            1,
+            config,
+            session,
+            normalized,
+            "正常发送",
+            "看看这个",
+            None,
+            123,
+        )
+        dialogue.finish_execution_trace(trace, outcome="completed", store=False)
+    finally:
+        dialogue.reset_execution_trace(token)
+
+    assert trace.status == "completed"
+    assert trace.outcome == "completed"
+    assert session.commit_calls == 0
+    assert session.rollback_calls == 1
+    assert len(marked) == 1
+    state_events = [event for event in trace.events if event.phase == "state"]
+    assert len(state_events) == 1
+    assert state_events[0].label == "回复后状态提交"
+    assert state_events[0].status == "degraded"
+    assert state_events[0].output["delivery_state"] == "confirmed_success"
+    assert state_events[0].output["error_type"] == "OperationalError"
 
 
 @pytest.mark.asyncio

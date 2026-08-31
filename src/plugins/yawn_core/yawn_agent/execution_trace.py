@@ -14,7 +14,9 @@ import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import PurePath
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from .context import now_beijing
 
@@ -37,6 +39,69 @@ _REDACT_KEYS = {
 _URL_RE = re.compile(r"https?://[^\s\]\[\)\(\}\{<>\"']+", re.IGNORECASE)
 _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:[\\/][^\s\]\[\)\(\}\{<>\"']+")
 _POSIX_PATH_RE = re.compile(r"(?<![\w:])/(?:[^/\s]+/)+[^\s\]\[\)\(\}\{<>\"']+")
+
+
+def _redacted_metadata(name: str, value: Any) -> dict[str, Any]:
+    """Hide sensitive values while retaining non-secret diagnostics.
+
+    Trace is an admin-only, in-memory diagnostic surface.  Replacing every URL/path/file
+    with one opaque marker made failures impossible to diagnose, so sensitive fields now
+    keep only structural metadata (host, suffix, payload keys, length).  Full values are
+    still never retained in the trace buffer.
+    """
+
+    lowered = name.lower()
+    if lowered == "url" or lowered.endswith("_url"):
+        text = str(value or "").strip()
+        parts = urlsplit(text)
+        query_keys = sorted({key for key, _value in parse_qsl(parts.query, keep_blank_values=True)})
+        suffix = PurePath(parts.path).suffix.lower()[:16] if parts.path else ""
+        return {
+            "redacted": True,
+            "kind": "url",
+            "scheme": parts.scheme[:12] or None,
+            "host": (parts.hostname or "")[:160] or None,
+            "suffix": suffix or None,
+            "has_query": bool(parts.query),
+            "query_keys": query_keys[:12],
+        }
+    if lowered in {"path", "cache_path"} or lowered.endswith("_path"):
+        text = str(value or "").strip()
+        suffix = PurePath(text.replace("\\", "/")).suffix.lower()[:16]
+        return {
+            "redacted": True,
+            "kind": "path",
+            "platform": "windows" if re.match(r"^[A-Za-z]:[\\/]", text) else "posix",
+            "absolute": bool(re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("/")),
+            "suffix": suffix or None,
+            "chars": len(text),
+        }
+    if lowered in {"raw_message", "raw_payload", "payload_raw"}:
+        keys = [str(key)[:80] for key in value] if isinstance(value, dict) else []
+        return {
+            "redacted": True,
+            "kind": "payload",
+            "value_type": type(value).__name__,
+            "key_count": len(keys),
+            "keys": keys[:16],
+        }
+    if lowered in {"file", "file_ref"}:
+        text = str(value or "")
+        suffix = PurePath(text.replace("\\", "/")).suffix.lower()[:16]
+        return {
+            "redacted": True,
+            "kind": "file_ref",
+            "value_type": type(value).__name__,
+            "suffix": suffix or None,
+            "chars": len(text),
+        }
+    text = str(value or "")
+    return {
+        "redacted": True,
+        "kind": "secret",
+        "present": bool(text),
+        "chars": len(text),
+    }
 
 
 @dataclass(slots=True)
@@ -144,7 +209,7 @@ def _safe_value(value: Any, *, depth: int = 0) -> Any:
                 or lowered.endswith(("_url", "_path"))
                 or lowered in {"cache_path", "file_ref"}
             ):
-                output[name] = "[redacted]"
+                output[name] = _redacted_metadata(name, item)
             else:
                 output[name] = _safe_value(item, depth=depth + 1)
         return output

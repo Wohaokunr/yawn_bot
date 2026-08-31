@@ -298,30 +298,60 @@ async def prepare_image_inputs(
     *,
     session: Any = None,
     cache_enabled: bool = False,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str]], list[str]]:
     """Return OpenAI image blocks and cached captions keyed by content hash."""
 
     blocks: list[dict[str, Any]] = []
     captions: list[tuple[str, str]] = []
     digests: list[str] = []
-    for ref in media_refs:
+    for index, ref in enumerate(media_refs):
+        diagnostic: dict[str, Any] = {
+            "index": index,
+            "type": str(ref.get("type") or "unknown"),
+            "source": str(ref.get("source") or "current"),
+        }
+        url = str(ref.get("url") or "").strip()
+        if url:
+            parsed = urlparse(url)
+            diagnostic["url"] = url
+            diagnostic["url_allowed"] = _url_allowed(url)
+            diagnostic["url_host"] = parsed.hostname or None
         if str(ref.get("type")) != "image":
+            diagnostic["status"] = "skipped_non_image"
+            if diagnostics is not None:
+                diagnostics.append(diagnostic)
             dbg(f"群 {group_id} 媒体跳过: 非图片类型 {ref.get('type')!r}")
             continue
         loaded = await _load_bytes(bot, ref)
         if loaded is None:
             # A provider may still be able to fetch the original URL.  It is
             # only passed through when it was explicitly supplied by OneBot.
-            url = str(ref.get("url") or "").strip()
             if _url_allowed(url):
+                diagnostic["status"] = "url_passthrough"
                 dbg(f"群 {group_id} 媒体降级: 直接透传原始 URL 给模型 url={url!r}")
                 blocks.append({"type": "image_url", "image_url": {"url": url}})
             else:
+                diagnostic["status"] = "dropped_unavailable"
+                diagnostic["reason"] = "无法取得图片字节，且原始 URL 不允许直接透传"
                 dbg(f"群 {group_id} 媒体丢弃: 无法加载且 URL 不可透传 ref={ref}")
+            if diagnostics is not None:
+                diagnostics.append(diagnostic)
             continue
         data, hint = loaded
         digest = hashlib.sha256(data).hexdigest()
         digests.append(digest)
+        mime = _mime_for_bytes(data, hint)
+        diagnostic.update(
+            {
+                "status": "loaded",
+                "size_bytes": len(data),
+                "mime": mime,
+                "content_hash": digest[:12],
+                "load_hint": hint,
+                "cache_enabled": cache_enabled,
+            }
+        )
         dbg(
             f"群 {group_id} 媒体就绪: {len(data)} 字节 sha256={digest[:16]}… "
             f"hint={hint!r}"
@@ -335,12 +365,14 @@ async def prepare_image_inputs(
                 model_name=resolve_llm_request("agent_image").model,
             )
             if cached_caption is not None and cached_caption.caption:
+                diagnostic["caption_cache"] = "hit"
                 dbg(
                     f"群 {group_id} 媒体缓存命中字幕: digest={digest[:16]}… "
                     f"caption={cached_caption.caption!r}"
                 )
                 captions.append((digest, cached_caption.caption))
             else:
+                diagnostic["caption_cache"] = "miss"
                 dbg(f"群 {group_id} 媒体缓存无可用字幕: digest={digest[:16]}…")
             try:
                 cache_dir = Path(
@@ -405,10 +437,11 @@ async def prepare_image_inputs(
                         )
                     else:
                         dbg(f"群 {group_id} 媒体缓存 DB 行已写入 digest={digest[:16]}…")
-        mime = _mime_for_bytes(data, hint)
         blocks.append(
             {"type": "image_url", "image_url": {"url": _data_url(data, mime)}}
         )
+        if diagnostics is not None:
+            diagnostics.append(diagnostic)
     dbg(
         f"群 {group_id} 媒体输入准备完成: blocks={len(blocks)} "
         f"缓存字幕={len(captions)} digests={len(digests)} "

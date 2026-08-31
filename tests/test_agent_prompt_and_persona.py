@@ -433,6 +433,27 @@ def test_prompt_prefix_is_stable_when_only_context_changes() -> None:
     assert first[2] != second[2]
 
 
+def test_build_messages_keeps_image_block_alongside_text_placeholder() -> None:
+    _, _, build_messages = _load_agent_modules()
+    image_block = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,ZmFrZS1pbWFnZQ=="},
+    }
+
+    messages, _ = build_messages(
+        persona={"name": "Yawn"},
+        tools=[],
+        context={},
+        user_prompt="[图片]",
+        media_inputs=[image_block],
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, list)
+    assert user_content[0] == {"type": "text", "text": "[图片]"}
+    assert user_content[1] == image_block
+
+
 def test_prompt_does_not_repeat_tool_schema_or_catalog() -> None:
     _load_agent_modules()
     from src.plugins.yawn_core.yawn_agent import prompt

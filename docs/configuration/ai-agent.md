@@ -84,7 +84,7 @@ AGENT_RECEIVED_MEDIA_REUSE=deny
 AGENT_DEBUG_LOG=false
 ```
 
-- `AGENT_MEDIA_ALLOWED_HOSTS` 为空时，群图片不会被 Agent 主动下载用于视觉理解。
+- `AGENT_MEDIA_ALLOWED_HOSTS` 默认仅允许 `gchat.qpic.cn` 与 `multimedia.nt.qq.com.cn`；显式置空时，群图片不会被 Agent 主动下载用于视觉理解。
 - `AGENT_FILE_ROOT` 必须是独立运行时目录，不要指向源码、数据库或系统目录。
 - 常用文本、引用、@、QQ face、图片等消息段默认可用；`share/contact/location/music` 只有写入 `AGENT_OPTIONAL_MESSAGE_SEGMENTS` 才开放。
 - XML、JSON、anonymous、`@all` 与任意原始 CQ payload 不提供开关给模型。

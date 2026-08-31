@@ -1816,6 +1816,76 @@ function traceMetric(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+const TRACE_FIELD_LABELS: Record<string, string> = {
+  model: "模型",
+  text_preview: "文本预览",
+  content_preview: "模型输出预览",
+  current_turn_preview: "当前回合预览",
+  query_preview: "检索文本预览",
+  error_type: "异常类型",
+  error_message: "异常信息",
+  finish_reason: "结束原因",
+  message_id: "消息 ID",
+  text_chars: "文本字符",
+  query_chars: "检索字符",
+  current_turn_chars: "当前回合字符",
+  size_bytes: "大小",
+  mime: "MIME",
+  url_host: "URL 主机",
+  url_allowed: "URL 可直传",
+  status: "处理状态",
+  reason: "原因",
+  multimodal_mode: "多模态模式",
+  cache_enabled: "媒体缓存",
+  caption_cache: "图片转述缓存",
+  context_token_limit: "上下文 Token 上限",
+  completion_reserve: "预留输出 Token",
+  prefix_fingerprint: "Prompt 指纹",
+  prompt_cache: "Prompt 前缀缓存",
+  context_cache: "稳定上下文缓存",
+};
+
+function traceByteSize(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 / 1024).toFixed(2)} MiB`;
+}
+
+function TraceDiagnosticValue({ name, value }: { name: string; value: unknown }): React.JSX.Element {
+  if (value == null || value === "") return <Text type="secondary">—</Text>;
+  if (typeof value === "boolean") return <Tag color={value ? "green" : "default"}>{value ? "是" : "否"}</Tag>;
+  if (typeof value === "number") return <Text>{name === "size_bytes" ? traceByteSize(value) : value}</Text>;
+  if (typeof value === "string") return <Text code={name.endsWith("_id") || name.includes("fingerprint")}>{value}</Text>;
+  if (Array.isArray(value)) {
+    const scalar = value.filter((item) => ["string", "number", "boolean"].includes(typeof item)).slice(0, 12);
+    if (scalar.length === value.length) return <Space wrap size={[4, 4]}>{scalar.map((item, index) => <Tag key={`${String(item)}-${index}`}>{String(item)}</Tag>)}</Space>;
+    return <Text type="secondary">{value.length} 项结构化数据</Text>;
+  }
+  const row = debugRecord(value);
+  if (row.redacted === true) {
+    const kind = String(row.kind ?? "sensitive");
+    if (kind === "url") return <Space wrap size={[4, 4]}><Tag color="gold">完整 URL 已隐藏</Tag>{row.host ? <Text code>{String(row.host)}</Text> : null}{row.suffix ? <Tag>{String(row.suffix)}</Tag> : null}{row.has_query ? <Tag>含查询参数</Tag> : null}</Space>;
+    if (kind === "path") return <Space wrap size={[4, 4]}><Tag color="gold">完整路径已隐藏</Tag>{row.platform ? <Tag>{String(row.platform)}</Tag> : null}{row.suffix ? <Tag>{String(row.suffix)}</Tag> : null}</Space>;
+    if (kind === "payload") return <Space wrap size={[4, 4]}><Tag color="gold">Payload 值已隐藏</Tag>{stringArray(row.keys).map((key) => <Tag key={key}>{key}</Tag>)}</Space>;
+    return <Tag color="gold">敏感值已隐藏 · {kind}</Tag>;
+  }
+  return <Space wrap size={[4, 4]}>{Object.entries(row).slice(0, 10).map(([key, item]) => <Tag key={key}>{key}={typeof item === "object" ? "…" : String(item)}</Tag>)}</Space>;
+}
+
+function TraceDiagnosticFields({ input, output }: { input: Record<string, unknown>; output: Record<string, unknown> }): React.JSX.Element | null {
+  const hidden = new Set(["media", "items", "usage", "arguments", "trigger_signals", "onebot_actions", "selected_tool_names", "tool_names", "message_segment_types", "content_hashes", "roles"]);
+  const rows = [...Object.entries(input).map(([name, value]) => [`输入 · ${name}`, name, value] as const), ...Object.entries(output).map(([name, value]) => [`输出 · ${name}`, name, value] as const)]
+    .filter(([, name, value]) => !hidden.has(name) && value != null && value !== "")
+    .slice(0, 18);
+  if (rows.length === 0) return null;
+  return <Descriptions
+    className="agent-trace-facts"
+    size="small"
+    column={{ xs: 1, sm: 2, lg: 3 }}
+    items={rows.map(([key, name, value]) => ({ key, label: TRACE_FIELD_LABELS[name] ?? name, children: <TraceDiagnosticValue name={name} value={value} /> }))}
+  />;
+}
+
 function ToolArgumentSummary({ name, value }: { name: string; value: unknown }): React.JSX.Element | null {
   const args = debugRecord(value);
   if (Object.keys(args).length === 0) return null;
@@ -1874,6 +1944,8 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
       <Text>这次执行的触发原因：<Tag color="blue">{trigger}</Tag></Text>
       {scene && <Text type="secondary">内部参与场景：{scene === "warmup" ? "冷场暖场" : scene === "active" ? "加入活跃话题" : scene === "followup" ? "自然续聊" : scene}</Text>}
       {matched.length > 1 && <Text type="secondary">同时检测到：{matched.join(" / ")}</Text>}
+      {output.text_preview ? <Text type="secondary">消息预览：{String(output.text_preview)}</Text> : null}
+      {typeof output.queue_wait_ms === "number" ? <Text type="secondary">进入执行前排队 {output.queue_wait_ms.toFixed(1)} ms</Text> : null}
     </Space>;
   }
 
@@ -1914,12 +1986,16 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
   }
 
   if (event.phase === "context") {
-    return <Text>
-      最终选入 <Text strong>{traceMetric(output.messages)}</Text> 条历史消息、
-      <Text strong>{traceMetric(output.members)}</Text> 位成员、
-      <Text strong>{traceMetric(output.memories)}</Text> 条记忆和
-      <Text strong>{traceMetric(output.relations)}</Text> 条关系。
-    </Text>;
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        最终选入 <Text strong>{traceMetric(output.messages)}</Text> 条历史消息、
+        <Text strong>{traceMetric(output.members)}</Text> 位成员、
+        <Text strong>{traceMetric(output.memories)}</Text> 条记忆和
+        <Text strong>{traceMetric(output.relations)}</Text> 条关系。
+      </Text>
+      {output.model ? <Text type="secondary">上下文按模型 <Text code>{String(output.model)}</Text> 的预算装箱；上限 {traceMetric(input.context_token_limit)} Token，预留输出 {traceMetric(input.completion_reserve)} Token。</Text> : null}
+      {input.query_preview ? <Text type="secondary">用于相关性选择的文本：{String(input.query_preview)}</Text> : null}
+    </Space>;
   }
 
   if (event.phase === "parse" || event.phase === "intake") {
@@ -1939,15 +2015,39 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
 
   if (event.phase === "media") {
     const media = Array.isArray(input.media) ? input.media.map((item) => debugRecord(item)) : [];
+    const items = Array.isArray(output.items) ? output.items.map((item) => debugRecord(item)) : [];
+    const statusLabel: Record<string, string> = {
+      loaded: "已读取并转成视觉输入",
+      url_passthrough: "本地读取失败，改由模型读取原始 URL",
+      dropped_unavailable: "无法取得图片，已丢弃",
+      skipped_non_image: "不是图片，已跳过",
+    };
     return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
       <Text>
         准备了 <Text strong>{traceMetric(output.vision_blocks)}</Text> 个视觉输入，
         命中 <Text strong>{traceMetric(output.cached_captions)}</Text> 条图片转述缓存。
       </Text>
+      {output.multimodal_mode ? <Text type="secondary">当前多模态策略：<Text code>{String(output.multimodal_mode)}</Text>；媒体缓存：{output.cache_enabled ? "开启" : "关闭"}。</Text> : null}
       {media.length > 0 && <Space wrap size={[6, 6]}>{media.map((item, index) => {
         const source = String(item.source || "current");
         return <Tag key={`${String(item.type)}-${index}`}>{SEGMENT_NAME_LABELS[String(item.type)] ?? String(item.type || "媒体")} · {TRACE_MEDIA_SOURCE_LABELS[source] ?? source}</Tag>;
       })}</Space>}
+      {items.length > 0 && <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+        {items.map((item, index) => {
+          const status = String(item.status ?? "unknown");
+          return <div key={`${status}-${index}`} className="agent-trace-media-row">
+            <Space wrap size={[4, 4]}>
+              <Tag color={status === "loaded" ? "green" : status === "dropped_unavailable" ? "red" : "gold"}>图片 {index + 1}</Tag>
+              <Text>{statusLabel[status] ?? status}</Text>
+              {item.mime ? <Tag>{String(item.mime)}</Tag> : null}
+              {typeof item.size_bytes === "number" ? <Tag>{traceByteSize(item.size_bytes)}</Tag> : null}
+              {item.url_host ? <Tag>{String(item.url_host)}</Tag> : null}
+              {item.caption_cache ? <Tag>字幕缓存 {String(item.caption_cache)}</Tag> : null}
+            </Space>
+            {item.reason ? <Text type="danger">{String(item.reason)}</Text> : null}
+          </div>;
+        })}
+      </Space>}
     </Space>;
   }
 
@@ -1955,11 +2055,20 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
     const count = traceMetric(output.message_count);
     const promptCache = String(output.prompt_cache ?? "");
     const contextCache = String(output.context_cache ?? "");
-    return <Text>
-      已组装 <Text strong>{count}</Text> 条 Prompt 消息
-      {promptCache ? `；Prompt 前缀缓存${promptCache === "hit" ? "命中" : "未命中"}` : ""}
-      {contextCache ? `，稳定上下文缓存${contextCache === "hit" ? "命中" : "未命中"}` : ""}。
-    </Text>;
+    const roles = debugRecord(output.roles);
+    const tools = stringArray(output.tool_names);
+    const hasPromptShape = typeof output.text_chars === "number" || typeof output.media_blocks === "number";
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        已组装 <Text strong>{count}</Text> 条 Prompt 消息
+        {hasPromptShape ? <>，共约 <Text strong>{traceMetric(output.text_chars)}</Text> 个文本字符、<Text strong>{traceMetric(output.media_blocks)}</Text> 个图片块</> : null}
+        {promptCache ? `；Prompt 前缀缓存${promptCache === "hit" ? "命中" : "未命中"}` : ""}
+        {contextCache ? `，稳定上下文缓存${contextCache === "hit" ? "命中" : "未命中"}` : ""}。
+      </Text>
+      {Object.keys(roles).length > 0 && <Space wrap size={[4, 4]}><Text type="secondary">角色构成：</Text>{Object.entries(roles).map(([role, amount]) => <Tag key={role}>{role} × {String(amount)}</Tag>)}</Space>}
+      {tools.length > 0 && <Space wrap size={[4, 4]}><Text type="secondary">Prompt 携带工具：</Text>{tools.map((tool) => <Tag key={tool}>{toolDisplayName(tool)}</Tag>)}</Space>}
+      {output.current_turn_preview ? <Text type="secondary">模型看到的当前回合预览：{String(output.current_turn_preview)}</Text> : null}
+    </Space>;
   }
 
   if (event.phase === "llm") {
@@ -1976,6 +2085,8 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
         {tools.length > 0 ? `，并请求调用 ${tools.length} 个工具。` : "。"}
       </Text>
       {tools.length > 0 && <Space wrap size={[6, 6]}>{tools.map((name) => <Tag color="blue" key={name}>{toolDisplayName(name)}</Tag>)}</Space>}
+      {output.model ? <Text type="secondary">模型：<Text code>{String(output.model)}</Text>{output.finish_reason ? `；结束原因：${String(output.finish_reason)}` : ""}</Text> : null}
+      {output.content_preview ? <Text type="secondary">输出预览：{String(output.content_preview)}</Text> : null}
       {hasTurnUsage && <Text type="secondary">
         本次请求输入/输出：{traceMetric(requestUsage.prompt_tokens)} / {traceMetric(requestUsage.completion_tokens)} Token；
         本回合累计输入：{traceMetric(turnUsage.prompt_tokens)}，其中缓存命中 {traceMetric(turnUsage.cached_tokens)}、未命中 {traceMetric(turnUsage.cache_miss_tokens)} Token。
@@ -2008,18 +2119,24 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
         {degradedFrom ? `；已从 ${degradedFrom} 方案降级` : ""}。
       </Text>
       {segments.length > 0 && <Space wrap size={[6, 6]}><Text type="secondary">实际消息：</Text>{segments.map((name) => <Tag key={name}>{SEGMENT_NAME_LABELS[name] ?? name}</Tag>)}</Space>}
+      {(output.text_preview || input.text_preview) ? <Text type="secondary">发送文本预览：{String(output.text_preview ?? input.text_preview)}</Text> : null}
+      {output.message_id ? <Text type="secondary">OneBot message_id：<Text code>{String(output.message_id)}</Text></Text> : null}
     </Space>;
   }
 
   if (event.phase === "state") {
     if (event.status === "skipped") return <Text>本次是调试执行，不会修改数据库、冷却时间或 Agent 状态。</Text>;
     if (event.status === "failed") return <Text type="danger">状态写入失败，已按当前流程回滚或保留发送结果。</Text>;
+    if (event.status === "degraded") return <Text type="warning">消息投递流程已结束，但部分本地状态更新失败；发送结果不会因此改判为失败。</Text>;
     return <Text>本轮状态已经写入，包括去重指纹、冷却时间和会话进度。</Text>;
   }
 
   if (event.phase === "turn") {
     const outcome = String(output.outcome ?? "");
-    return <Text>本轮执行结束{outcome ? `，结果：${traceOutcomeLabel(outcome)}` : ""}。</Text>;
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>本轮执行结束{outcome ? `，结果：${traceOutcomeLabel(outcome)}` : ""}。</Text>
+      {output.error_type ? <Text type="danger">{String(output.error_type)}{output.error_message ? `：${String(output.error_message)}` : ""}</Text> : null}
+    </Space>;
   }
 
   return null;
@@ -2061,6 +2178,7 @@ function DebugToolsView({ tools, permissions }: { tools: AgentDebugResponse["too
 const TRACE_PHASE_LABELS: Record<string, string> = {
   parse: "解析",
   intake: "输入",
+  policy: "策略",
   context: "上下文",
   capability: "能力",
   media: "媒体",
@@ -2087,12 +2205,14 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
   const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
   const visibleEvents = compact ? trace.events.slice(-12) : trace.events;
   return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 6 }} items={[
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
       { key: "source", label: "执行来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
       { key: "trigger", label: "触发原因", children: trace.triggerSource ? <Tag color="blue">{triggerSourceLabel(trace.triggerSource)}</Tag> : "—" },
       { key: "status", label: "状态", children: <Tag color={status.color}>{status.label}</Tag> },
       { key: "outcome", label: "结果", children: traceOutcomeLabel(trace.outcome) },
       { key: "duration", label: "总耗时", children: trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(1)} ms` },
+      { key: "actor", label: "发言人", children: trace.actorUserId ? <Text code>{trace.actorUserId}</Text> : "—" },
+      { key: "message", label: "触发消息", children: trace.messageId ? <Text code>{trace.messageId}</Text> : "—" },
       { key: "trace", label: "Trace", children: <Text code>{trace.traceId.slice(0, 12)}</Text> },
     ]} />
     {compact && trace.events.length > visibleEvents.length && <Alert type="info" showIcon message={`仅显示最后 ${visibleEvents.length} / ${trace.events.length} 个事件`} />}
@@ -2114,8 +2234,9 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
             </Space>
             <TraceHumanSummary event={event} />
             {event.detail && <Text type={event.status === "failed" ? "danger" : "secondary"}>{event.detail}</Text>}
+            <TraceDiagnosticFields input={event.input ?? {}} output={event.output ?? {}} />
             {(hasInput || hasOutput) && <details className="agent-debug-details">
-              <summary>查看技术细节（JSON）</summary>
+              <summary>查看原始诊断字段（JSON，备用）</summary>
               {hasInput && <><Text type="secondary">输入</Text><DebugRawBlock value={event.input} /></>}
               {hasOutput && <><Text type="secondary">输出</Text><DebugRawBlock value={event.output} /></>}
             </details>}
@@ -2244,7 +2365,7 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
       title="最近真实执行"
       extra={<Button onClick={() => runtimeTraceQuery.reload()} loading={runtimeTraceQuery.loading}>刷新 Trace</Button>}
     >
-      <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空；所有 URL、本机路径、file 字段与原始 OneBot payload 都会在 Trace 层脱敏。" />
+      <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空。完整 URL、本机路径、file 值与原始 OneBot payload 不会保留；调试页会保留 host、文件类型/大小、Payload 字段结构等安全元数据用于排障。" />
       {runtimeTraceQuery.error && !runtimeTraceQuery.data
         ? <QueryErrorAlert error={runtimeTraceQuery.error} onRetry={runtimeTraceQuery.reload} />
         : (runtimeTraceQuery.data?.length ?? 0) === 0

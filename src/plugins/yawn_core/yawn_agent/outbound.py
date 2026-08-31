@@ -890,6 +890,8 @@ async def send_prepared_outbound(
             "message_type": original_type,
             "segment_types": original_types,
             "source": source,
+            "text_chars": len(prepared.normalized_text),
+            "text_preview": prepared.normalized_text[:320],
         },
         output={"known_unsupported": known_unsupported},
     )
@@ -986,6 +988,7 @@ async def send_prepared_outbound(
                         "delivery_state": DELIVERY_CONFIRMED_SUCCESS,
                         "segment_types": original_types,
                         "message_id": extract_message_id(raw_result),
+                        "text_preview": prepared.normalized_text[:320],
                     },
                 )
                 await _audit_outbound(
