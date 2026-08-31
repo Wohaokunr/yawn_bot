@@ -284,7 +284,8 @@ def _compact_message_text(raw: Any, *, maximum: int = 800) -> str:
             if not isinstance(segment, dict):
                 continue
             segment_type = str(segment.get("type") or "").strip().lower()
-            data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+            raw_data = segment.get("data")
+            data = raw_data if isinstance(raw_data, dict) else {}
             if segment_type == "text":
                 parts.append(str(data.get("text") or ""))
             elif segment_type in {"image", "record", "video", "file", "face"}:
@@ -306,7 +307,8 @@ def _compact_message_text(raw: Any, *, maximum: int = 800) -> str:
 def _compact_onebot_message(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("消息响应格式错误")
-    sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+    raw_sender = raw.get("sender")
+    sender = raw_sender if isinstance(raw_sender, dict) else {}
     user_id = raw.get("user_id") or sender.get("user_id")
     compact: dict[str, Any] = {
         "message_id": raw.get("message_id"),
