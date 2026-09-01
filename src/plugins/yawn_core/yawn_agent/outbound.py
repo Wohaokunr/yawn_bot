@@ -13,7 +13,7 @@ import json
 import mimetypes
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -272,9 +272,7 @@ def _bounded_int(value: Any, *, field: str, minimum: int, maximum: int) -> int:
     return parsed
 
 
-def _bounded_float(
-    value: Any, *, field: str, minimum: float, maximum: float
-) -> float:
+def _bounded_float(value: Any, *, field: str, minimum: float, maximum: float) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{field} 必须是数字")
     try:
@@ -450,6 +448,73 @@ def _quality_codes(plan: SpeechPlan) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item.code for item in plan.issues))
 
 
+async def prepare_speech_plan(
+    plan: SpeechPlan,
+    *,
+    session: Any,
+    group_id: int,
+    actor_user_id: int | None = None,
+    allowed_segment_types: frozenset[str] | None = None,
+    speech_user_text: str = "",
+    recent_speech: tuple[str, ...] | list[str] = (),
+    speech_autofix: bool = True,
+    trace_context: dict[str, Any] | None = None,
+) -> PreparedOutboundMessage:
+    """Finalize one SpeechPlan, trace the decision, then enter OneBot validation."""
+
+    resolved = finalize_speech_plan(
+        plan,
+        user_text=speech_user_text,
+        recent_texts=recent_speech,
+        autofix=speech_autofix,
+    )
+    trace_payload = resolved.trace_payload()
+    if trace_context:
+        trace_payload.update(trace_context)
+    trace_event(
+        "speech",
+        "发言决策",
+        status="planned" if resolved.should_speak else "skipped",
+        output=trace_payload,
+        detail=(
+            "SpeechPlan 已通过表达质量层，准备进入 OneBot 发送校验。"
+            if resolved.should_speak
+            else "SpeechPlan 决定不产生用户可见消息。"
+        ),
+    )
+    if not resolved.should_speak:
+        raise ValueError("SpeechPlan 当前动作不应发送消息")
+    if resolved.segments:
+        prepared = await prepare_outbound_message(
+            list(resolved.segments),
+            session=session,
+            group_id=group_id,
+            actor_user_id=actor_user_id,
+            allowed_segment_types=allowed_segment_types,
+            speech_scene=resolved.scene,
+            speech_style=resolved.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=False,
+            trace_speech=False,
+        )
+    else:
+        prepared = prepare_text_message(
+            resolved.text,
+            speech_scene=resolved.scene,
+            speech_style=resolved.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=False,
+            trace_speech=False,
+        )
+    return replace(
+        prepared,
+        speech_scene=resolved.scene,
+        quality_issues=_quality_codes(resolved),
+    )
+
+
 def prepare_text_message(
     text: str,
     *,
@@ -458,6 +523,7 @@ def prepare_text_message(
     speech_user_text: str = "",
     recent_speech: tuple[str, ...] | list[str] = (),
     speech_autofix: bool = True,
+    trace_speech: bool = True,
 ) -> PreparedOutboundMessage:
     """纯文本也先形成 SpeechPlan，再走统一 outbound 表示。"""
 
@@ -467,6 +533,13 @@ def prepare_text_message(
         recent_texts=recent_speech,
         autofix=speech_autofix,
     )
+    if trace_speech:
+        trace_event(
+            "speech",
+            "发言决策",
+            status="planned" if plan.should_speak else "skipped",
+            output=plan.trace_payload(),
+        )
     bounded = str(plan.text)
     if not bounded:
         raise ValueError("消息文本不能为空")
@@ -493,6 +566,7 @@ async def prepare_outbound_message(
     speech_user_text: str = "",
     recent_speech: tuple[str, ...] | list[str] = (),
     speech_autofix: bool = False,
+    trace_speech: bool = True,
 ) -> PreparedOutboundMessage:
     """先经 SpeechPlan 质量层，再验证受限消息段并转换为 NoneBot Message。"""
 
@@ -513,6 +587,13 @@ async def prepare_outbound_message(
         recent_texts=recent_speech,
         autofix=speech_autofix,
     )
+    if trace_speech:
+        trace_event(
+            "speech",
+            "发言决策",
+            status="planned" if plan.should_speak else "skipped",
+            output=plan.trace_payload(),
+        )
     raw_segments = list(plan.segments)
 
     reply_count = sum(item.get("type") == "reply" for item in raw_segments)
@@ -617,9 +698,7 @@ async def prepare_outbound_message(
                     required={"type", "id"},
                     allowed={"type", "id"},
                 )
-                face_id = _bounded_int(
-                    raw["id"], field="id", minimum=0, maximum=65_535
-                )
+                face_id = _bounded_int(raw["id"], field="id", minimum=0, maximum=65_535)
                 message += MessageSegment.face(face_id)
                 records.append(_segment_record("face", {"id": str(face_id)}))
                 continue
@@ -664,9 +743,7 @@ async def prepare_outbound_message(
                     message += MessageSegment.record(str(path))
                 else:
                     message += MessageSegment.video(str(path))
-                records.append(
-                    _segment_record(segment_type, {"file": "[redacted]"})
-                )
+                records.append(_segment_record(segment_type, {"file": "[redacted]"}))
                 media_refs.append({"type": segment_type, "file": "[redacted]"})
                 continue
 
@@ -789,19 +866,10 @@ async def prepare_outbound_message(
             )
             poke_type = str(raw["poke_type"]).strip()
             poke_id = str(raw["poke_id"]).strip()
-            if (
-                not poke_type
-                or not poke_id
-                or len(poke_type) > 32
-                or len(poke_id) > 32
-            ):
+            if not poke_type or not poke_id or len(poke_type) > 32 or len(poke_id) > 32:
                 raise ValueError("poke_type/poke_id 格式无效")
             message += MessageSegment.poke(poke_type, poke_id)
-            records.append(
-                _segment_record(
-                    "poke", {"type": poke_type, "id": poke_id}
-                )
-            )
+            records.append(_segment_record("poke", {"type": poke_type, "id": poke_id}))
     except BaseException:
         for path in temporary_files:
             path.unlink(missing_ok=True)
@@ -819,44 +887,6 @@ async def prepare_outbound_message(
         speech_scene=plan.scene,
         quality_issues=_quality_codes(plan),
     )
-
-
-async def prepare_speech_plan(
-    plan: SpeechPlan,
-    *,
-    session: Any,
-    group_id: int,
-    actor_user_id: int | None = None,
-    allowed_segment_types: frozenset[str] | None = None,
-    speech_user_text: str = "",
-    recent_speech: tuple[str, ...] | list[str] = (),
-    speech_autofix: bool = True,
-) -> PreparedOutboundMessage:
-    """Canonical SpeechPlan -> validated OneBot outbound adapter."""
-
-    if plan.segments:
-        return await prepare_outbound_message(
-            list(plan.segments),
-            session=session,
-            group_id=group_id,
-            actor_user_id=actor_user_id,
-            allowed_segment_types=allowed_segment_types,
-            speech_scene=plan.scene,
-            speech_style=plan.style,
-            speech_user_text=speech_user_text,
-            recent_speech=recent_speech,
-            speech_autofix=speech_autofix,
-        )
-    if plan.text:
-        return prepare_text_message(
-            plan.text,
-            speech_scene=plan.scene,
-            speech_style=plan.style,
-            speech_user_text=speech_user_text,
-            recent_speech=recent_speech,
-            speech_autofix=speech_autofix,
-        )
-    raise ValueError("SpeechPlan 没有可发送内容")
 
 
 def _is_unsupported_error(error: BaseException) -> bool:
@@ -1170,9 +1200,7 @@ async def send_prepared_outbound(
                     degraded_from=original_type,
                 )
                 raise
-            mark_segment_unsupported(
-                bot, group_id, "at", reason=type(exc).__name__
-            )
+            mark_segment_unsupported(bot, group_id, "at", reason=type(exc).__name__)
             text_fallback = _build_degraded_message(prepared, allow_at=False)
             text_types = ("text",)
             trace_event(
@@ -1357,9 +1385,7 @@ async def prepare_forward_message(
                     "user_id": user_id,
                     "nickname": nickname,
                     "content": content,
-                    "segments": [
-                        _segment_record("text", {"text": content}, content)
-                    ],
+                    "segments": [_segment_record("text", {"text": content}, content)],
                     "children": [],
                     "depth": 0,
                     "source": "custom",
@@ -1504,11 +1530,15 @@ async def send_outbound_message(
             allowed_segment_types=caps.allowed,
         )
     except Exception as exc:
-        raw_types = tuple(
-            str(item.get("type") or "").strip().lower()
-            for item in raw_segments
-            if isinstance(item, dict)
-        ) if isinstance(raw_segments, list) else ()
+        raw_types = (
+            tuple(
+                str(item.get("type") or "").strip().lower()
+                for item in raw_segments
+                if isinstance(item, dict)
+            )
+            if isinstance(raw_segments, list)
+            else ()
+        )
         await _audit_outbound(
             session,
             group_id,

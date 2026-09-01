@@ -33,11 +33,9 @@ from .conversation import (
     set_followup_handler,
     shutdown_conversations,
 )
-from .dialogue import (
-    _activity_window_counts,
-    _load_context,
-    persist_bot_reply,
-)
+from .activity import activity_window_counts as _activity_window_counts
+from .context_loader import load_context as _load_context
+from .dialogue_support import persist_bot_reply
 from .execution_trace import (
     begin_execution_trace,
     bind_execution_trace,
@@ -54,12 +52,14 @@ from .memory import (
 )
 from .media import cleanup_media_cache
 from .persona import persona_behavior, resolve_persona
+from .speech import SpeechPlan, speech_plan_from_segments, speech_plan_from_text
+from .speech_finalize import apply_speech_topic
+from .speech_runtime import build_runtime_speech_plan, trace_speech_decision
 from .prompt import build_messages
 from .outbound import (
     PreparedOutboundMessage,
     SendResult,
-    prepare_outbound_message,
-    prepare_text_message,
+    prepare_speech_plan,
     send_prepared_outbound,
 )
 from .proactive_policy import (
@@ -251,21 +251,47 @@ async def _apply_result(
 
 
 async def _prepare_proactive_message(
-    decision: _ProactiveDecision,
+    decision: _ProactiveDecision | SpeechPlan,
     *,
     session: Any,
     group_id: int,
+    speech_user_text: str = "",
+    recent_speech: tuple[str, ...] | list[str] = (),
+    emotion_state: object = None,
 ) -> PreparedOutboundMessage:
-    """把主动决策转换为和普通对话完全相同的受限消息计划。"""
+    """Compatibility parser boundary -> unified SpeechPlan -> outbound."""
 
-    if decision.segments:
-        return await prepare_outbound_message(
+    if isinstance(decision, SpeechPlan):
+        plan = decision
+    elif decision.segments:
+        plan = speech_plan_from_segments(
             list(decision.segments),
-            session=session,
-            group_id=group_id,
-            actor_user_id=None,
+            scene="conversation",
+            target=None,
+            reason=decision.reason,
+            confidence=decision.confidence,
         )
-    return prepare_text_message(decision.text)
+    else:
+        plan = speech_plan_from_text(
+            decision.text,
+            scene="conversation",
+            reason=decision.reason,
+            confidence=decision.confidence,
+        )
+    return await prepare_speech_plan(
+        plan,
+        session=session,
+        group_id=group_id,
+        actor_user_id=None,
+        speech_user_text=speech_user_text,
+        recent_speech=recent_speech,
+        speech_autofix=True,
+        trace_context={
+            "emotion": emotion_state,
+            "participation_action": plan.action,
+        },
+    )
+
 
 
 async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) -> str:
@@ -381,6 +407,18 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             decision = _apply_persona_behavior_to_decision(
                 config, _decide_proactive_reply(raw)
             )
+            speech_plan = build_runtime_speech_plan(
+                text=decision.text,
+                segments=list(decision.segments),
+                persona=resolve_persona(config),
+                context=context,
+                source=scene,
+                action=decision.action,
+                target_user_id=decision.target_user_id,
+                suggested_topic=decision.topic,
+                reason=decision.reason,
+                confidence=decision.confidence,
+            )
             trace_event(
                 "llm",
                 "主动发言决策",
@@ -396,6 +434,11 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 duration_ms=(time.monotonic() - llm_started) * 1000,
             )
             if not decision.should_speak:
+                trace_speech_decision(
+                    speech_plan,
+                    emotion_state=context.get("emotion_state"),
+                    participation_action=decision.action,
+                )
                 # 内容门拦截：模型读懂对话后判定此刻不适合开口。
                 # 记录 skip 审计便于观察决策质量，并推进 last_agent_at
                 # 防止下一分钟在同一话题上反复抽卡。
@@ -436,7 +479,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 )
                 await session.commit()
                 return decision.action
-            history_text = decision.history_text
+            history_text = speech_plan.visible_text or decision.history_text
             dbg(
                 f"群 {group_id} 主动发言生成结果: {history_text!r} "
                 f"segments={len(decision.segments)} reason={decision.reason!r}"
@@ -478,7 +521,11 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 return "wait"
             try:
                 prepared = await _prepare_proactive_message(
-                    decision, session=session, group_id=group_id
+                    speech_plan,
+                    session=session,
+                    group_id=group_id,
+                    recent_speech=_recent_proactive_lines(config),
+                    emotion_state=context.get("emotion_state"),
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = f"主动消息计划无效: {exc}"
@@ -557,10 +604,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 )
                 await session.commit()
                 return "send_failed"
-            if decision.topic:
-                # 用模型提炼的真实话题更新 active_topic，让后续对话路径的
-                # 上下文不再停留在"上次触发消息的原文"。
-                config.active_topic = decision.topic[:240]
+            apply_speech_topic(config, speech_plan)
             await _apply_result(
                 session,
                 config,
@@ -579,7 +623,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 mark_bot_reply(
                     sent_bot_id,
                     group_id,
-                    topic=decision.topic or str(config.active_topic or ""),
+                    topic=speech_plan.topic or str(config.active_topic or ""),
                     source=scene,
                     max_bot_turns=persona_behavior(config).max_followup_bot_turns,
                 )
@@ -791,6 +835,18 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             decision = _apply_persona_behavior_to_decision(
                 config, _decide_proactive_reply(raw or "")
             )
+            speech_plan = build_runtime_speech_plan(
+                text=decision.text,
+                segments=list(decision.segments),
+                persona=resolve_persona(config),
+                context=context,
+                source="followup",
+                action=decision.action,
+                target_user_id=decision.target_user_id,
+                suggested_topic=decision.topic or batch.topic,
+                reason=decision.reason,
+                confidence=decision.confidence,
+            )
             trace_event(
                 "llm",
                 "短会话决策",
@@ -807,7 +863,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             )
             action = decision.action
             reason = decision.reason
-            history_text = decision.history_text
+            history_text = speech_plan.visible_text or decision.history_text
             if reason == "LLM 返回了无法解析的 JSON":
                 action = "error"
                 history_text = ""
@@ -821,6 +877,11 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 reason = "续聊内容与近期回复撞重"
 
             if action != "speak":
+                trace_speech_decision(
+                    speech_plan,
+                    emotion_state=context.get("emotion_state"),
+                    participation_action=action,
+                )
                 session.add(
                     AgentAudit(
                         group_id=group_id,
@@ -849,7 +910,11 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
 
             try:
                 prepared = await _prepare_proactive_message(
-                    decision, session=session, group_id=group_id
+                    speech_plan,
+                    session=session,
+                    group_id=group_id,
+                    recent_speech=_recent_proactive_lines(config),
+                    emotion_state=context.get("emotion_state"),
                 )
                 sent_result = await send_prepared_outbound(
                     bot,
@@ -883,8 +948,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 await session.commit()
                 finish_followup_evaluation(batch, "send_failed")
                 return "send_failed"
-            if decision.topic:
-                config.active_topic = decision.topic[:240]
+            apply_speech_topic(config, speech_plan)
             sent_at = now_beijing()
             await _apply_result(
                 session,
@@ -903,7 +967,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             mark_bot_reply(
                 bot_id,
                 group_id,
-                topic=decision.topic or batch.topic,
+                topic=speech_plan.topic or batch.topic,
                 source="followup",
                 preserve_pending=True,
                 max_bot_turns=behavior.max_followup_bot_turns,

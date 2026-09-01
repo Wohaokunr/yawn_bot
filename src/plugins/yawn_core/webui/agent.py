@@ -36,8 +36,9 @@ from ..yawn_agent.capabilities import (
 )
 from ..yawn_agent.config_store import agent_runtime_enabled, set_agent_runtime_enabled
 from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
+from ..yawn_agent.context_history import history_message_meta as _history_message_meta
+from ..yawn_agent.context_loader import load_context as _load_context
 from ..yawn_agent.conversation import close_group_conversations
-from ..yawn_agent.dialogue import _history_message_meta, _load_context
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
@@ -66,6 +67,11 @@ from ..yawn_agent.persona import (
 )
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
+from ..yawn_agent.speech_runtime import (
+    build_runtime_speech_plan,
+    speech_simulation_payload,
+    trace_speech_decision,
+)
 from ..yawn_agent.tools import (
     build_tool_schemas,
     dialogue_tool_round_limit,
@@ -139,9 +145,7 @@ async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[st
         row = await db.get(GroupAgentConfig, group_id)
         result = serialize_agent_config(row, group_id)
         if row is not None:
-            result["enabled"] = await agent_runtime_enabled(
-                db, group_id, config=row
-            )
+            result["enabled"] = await agent_runtime_enabled(db, group_id, config=row)
         else:
             features = await group_feature_rows(db, group_id)
             result["enabled"] = bool(
@@ -312,9 +316,7 @@ async def put_agent_persona(
         if row is None:
             row = GroupAgentConfig(group_id=group_id)
             db.add(row)
-        mutation = apply_persona_editor_profile(
-            row, body.profile, enabled=body.enabled
-        )
+        mutation = apply_persona_editor_profile(row, body.profile, enabled=body.enabled)
         if mutation.semantic_changed:
             row.persona_version += 1
             changed = True
@@ -368,10 +370,7 @@ async def get_memories(
     clauses = [
         AgentMemory.group_id == group_id,
         AgentMemory.visibility.in_(("group", "public")),
-        (
-            AgentMemory.expires_at.is_(None)
-            | (AgentMemory.expires_at >= now_beijing())
-        ),
+        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now_beijing())),
     ]
     if search:
         pattern = f"%{search}%"
@@ -499,8 +498,7 @@ async def get_memory_subjects(
                     .order_by(UserGroup.user_id)
                     .limit(RELATION_GRAPH_LIMIT)
                 )
-            )
-            .all()
+            ).all()
         )
         member_names: dict[int, tuple[str, str | None]] = {
             int(user.user_id): (user.nickname, membership.group_nickname)
@@ -1125,9 +1123,7 @@ def _debug_context_stats(context: dict[str, Any]) -> dict[str, Any]:
     memories = list(context.get("memories") or [])
     relations = list(context.get("relations") or [])
     media_summary_count = sum(
-        1
-        for item in messages
-        if item.get("media_types") or item.get("forward_nodes")
+        1 for item in messages if item.get("media_types") or item.get("forward_nodes")
     )
     return {
         "history": {
@@ -1335,10 +1331,7 @@ async def run_agent_debug(
             trigger = "history_replay"
             if bot_id is not None and bot_id in mentions:
                 trigger = "mention"
-            elif (
-                reply_chain
-                and int(str(reply_chain[0].get("user_id") or 0)) == bot_id
-            ):
+            elif reply_chain and int(str(reply_chain[0].get("user_id") or 0)) == bot_id:
                 trigger = "reply_to_bot"
             current_turn = build_current_turn(
                 message_id=int(source.message_id),
@@ -1618,6 +1611,21 @@ async def run_agent_debug(
         )
         base_url, api_key = resolve_provider(route.provider)
         result_payload: dict[str, Any] | None = None
+        preview_plan = build_runtime_speech_plan(
+            text="",
+            persona=applied_persona,
+            current_turn=current_turn,
+            context=context,
+            source=body.mode,
+            action="speak",
+        )
+        speech_simulation = speech_simulation_payload(
+            preview_plan,
+            emotion_state=applied_emotion,
+            should_speak=None,
+            preview_only=True,
+            user_text=current_turn.content,
+        )
         if body.run_model:
             model_started = time.monotonic()
             try:
@@ -1635,6 +1643,58 @@ async def run_agent_debug(
                     timeout=_DEBUG_TIMEOUT_SECONDS,
                 )
                 result_payload = _debug_model_payload(result, body.mode)
+                if body.mode == "dialogue":
+                    if not result_payload.get("toolCalls") and result_payload.get(
+                        "text"
+                    ):
+                        simulated_plan = build_runtime_speech_plan(
+                            text=result_payload.get("text") or "",
+                            persona=applied_persona,
+                            current_turn=current_turn,
+                            context=context,
+                            source="dialogue",
+                        )
+                        speech_simulation = speech_simulation_payload(
+                            simulated_plan,
+                            emotion_state=applied_emotion,
+                            should_speak=True,
+                            user_text=current_turn.content,
+                        )
+                        trace_speech_decision(
+                            simulated_plan,
+                            emotion_state=applied_emotion,
+                            participation_action="speak",
+                            trace=debug_trace,
+                        )
+                else:
+                    simulated_decision = _decide_proactive_reply(
+                        str(result_payload.get("text") or "")
+                    )
+                    simulated_plan = build_runtime_speech_plan(
+                        text=simulated_decision.text,
+                        segments=list(simulated_decision.segments),
+                        persona=applied_persona,
+                        current_turn=current_turn,
+                        context=context,
+                        source=body.mode,
+                        action=simulated_decision.action,
+                        target_user_id=simulated_decision.target_user_id,
+                        suggested_topic=simulated_decision.topic,
+                        reason=simulated_decision.reason,
+                        confidence=simulated_decision.confidence,
+                    )
+                    speech_simulation = speech_simulation_payload(
+                        simulated_plan,
+                        emotion_state=applied_emotion,
+                        should_speak=simulated_decision.should_speak,
+                        user_text=current_turn.content,
+                    )
+                    trace_speech_decision(
+                        simulated_plan,
+                        emotion_state=applied_emotion,
+                        participation_action=simulated_decision.action,
+                        trace=debug_trace,
+                    )
                 trace_event(
                     "llm",
                     "真实模型试跑",
@@ -1785,6 +1845,7 @@ async def run_agent_debug(
             "stats": stats,
             "warnings": warnings,
             "result": result_payload,
+            "speechSimulation": speech_simulation,
             "executionTrace": debug_trace.as_dict(),
         }
     return ok(payload)

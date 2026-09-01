@@ -2156,6 +2156,25 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
     </Space>;
   }
 
+  if (event.phase === "speech") {
+    const quality = Array.isArray(output.quality) ? output.quality.map(debugRecord) : [];
+    const style = debugRecord(output.style);
+    return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Text>
+        发言动作 <Text strong>{String(output.action ?? "speak")}</Text>，场景 <Text code>{String(output.scene ?? "conversation")}</Text>，
+        话语动作 {String(output.act ?? "continue")}，话轮压力 {String(output.turn_pressure ?? "low")}。
+      </Text>
+      <Space wrap size={[6, 6]}>
+        {output.target_user_id ? <Tag>目标 {String(output.target_user_id)}</Tag> : null}
+        {output.topic ? <Tag color="blue">话题 {String(output.topic)}</Tag> : null}
+        {output.topic_action ? <Tag>{String(output.topic_action)}</Tag> : null}
+        {Object.keys(style).length > 0 ? <Tag>Persona style 已应用</Tag> : null}
+        {output.emotion ? <Tag color="purple">Emotion 已应用</Tag> : null}
+      </Space>
+      {quality.length > 0 && <Text type="secondary">质量检查：{quality.map((item) => String(item.code ?? "quality")).join(" / ")}</Text>}
+    </Space>;
+  }
+
   if (event.phase === "outbound") {
     const segments = stringArray(output.segment_types ?? output.fallback_types ?? input.segment_types);
     const deliveryState = String(output.delivery_state ?? "");
@@ -2232,6 +2251,7 @@ const TRACE_PHASE_LABELS: Record<string, string> = {
   prompt: "Prompt",
   llm: "模型",
   tool: "工具",
+  speech: "发言",
   outbound: "发送",
   state: "状态",
   turn: "回合",
@@ -2291,6 +2311,35 @@ function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionT
         };
       })}
     />
+  </Space>;
+}
+
+function DebugSpeechSimulation({ value }: { value: AgentDebugResponse["speechSimulation"] }): React.JSX.Element {
+  const style = debugRecord(value.style);
+  const quality = Array.isArray(value.quality) ? value.quality.map(debugRecord) : [];
+  const segments = Array.isArray(value.segments) ? value.segments.map(debugRecord) : [];
+  return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
+      { key: "speak", label: "是否发言", children: value.should_speak == null ? <Tag>仅策略预览</Tag> : <Tag color={value.should_speak ? "green" : "default"}>{value.should_speak ? "发言" : "保持沉默"}</Tag> },
+      { key: "action", label: "参与动作", children: <Tag>{value.action}</Tag> },
+      { key: "scene", label: "Speech Scene", children: <Tag color="blue">{value.scene}</Tag> },
+      { key: "act", label: "话语动作", children: value.act },
+      { key: "turn", label: "话轮压力", children: <Tag color={value.turn_pressure === "high" ? "orange" : undefined}>{value.turn_pressure}</Tag> },
+      { key: "target", label: "目标成员", children: debugDisplay(value.target_user_id) },
+      { key: "topic", label: "话题", children: debugDisplay(value.topic) },
+      { key: "topicAction", label: "话题动作", children: value.topic_action },
+    ]} />
+    <Space wrap>
+      <Tag>温暖 {debugDisplay(style.warmth)}</Tag>
+      <Tag>幽默 {debugDisplay(style.humor)}</Tag>
+      <Tag>直接 {debugDisplay(style.directness)}</Tag>
+      <Tag>详略 {debugDisplay(style.verbosity)}</Tag>
+      <Tag>表现力 {debugDisplay(style.expressiveness)}</Tag>
+    </Space>
+    {value.text ? <Card size="small" title="最终文本"><Paragraph style={{ marginBottom: 0 }}>{value.text}</Paragraph></Card> : <Text type="secondary">{value.status === "policy_only" ? "未调用模型；这里只预览发言策略，最终文本尚未生成。" : "本轮没有纯文本。"}</Text>}
+    {segments.length > 0 && <Card size="small" title={`最终消息段 ${segments.length}`}><DebugRawBlock value={segments} /></Card>}
+    {quality.length > 0 && <Space wrap><Text type="secondary">质量检查：</Text>{quality.map((item, index) => <Tag key={`${String(item.code ?? "quality")}-${index}`} color={item.autofixed ? "green" : "orange"}>{String(item.code ?? "quality")}{item.autofixed ? " · 已修正" : ""}</Tag>)}</Space>}
+    {value.reason ? <Text type="secondary">决策理由：{value.reason}</Text> : null}
   </Space>;
 }
 
@@ -2404,8 +2453,8 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
       type="info"
       showIcon
       className="section-alert"
-      message="执行追踪器"
-      description="这里同时提供无副作用调试 Trace 和当前进程最近的真实 Agent Trace。真实试跑只请求模型，不执行工具、不发送消息、不修改状态；真实运行时间线则会记录实际工具、发送降级与 delivery_state。"
+      message="执行追踪器 + 发言模拟器"
+      description="这里同时提供无副作用发言模拟、调试 Trace 和当前进程最近的真实 Agent Trace。真实试跑只请求模型，不执行工具、不发送消息、不修改状态；真实运行时间线则会记录实际工具、发送降级与 delivery_state。"
     />
 
     <Card
@@ -2510,6 +2559,10 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
           { key: "multimodal", label: "多模态", children: result.route.multimodal || "—" },
           { key: "result", label: "模型结果", children: result.result ? <Tag color={result.result.outcome === "success" ? "green" : "orange"}>{result.result.outcome}</Tag> : <Tag>未调用</Tag> },
         ]} />
+      </Card>
+
+      <Card title="发言模拟器" extra={<Tag color="blue">Dry-run · 不发送</Tag>}>
+        <DebugSpeechSimulation value={result.speechSimulation} />
       </Card>
 
       <Card title="调试详情" className="agent-debug-detail-card">

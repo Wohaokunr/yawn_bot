@@ -1,7 +1,8 @@
-"""Rules for turning structured tool results into natural group-chat speech."""
+"""Compact speech evidence derived from already-projected tool results."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 TOOL_RESULT_SPEECH_INSTRUCTION = (
@@ -17,29 +18,70 @@ TOOL_RESULT_SPEECH_INSTRUCTION = (
 )
 
 
-def tool_result_speech_hint(tool_name: str, payload: dict[str, Any]) -> str:
-    """Produce a compact deterministic hint for tests/debugging and future adapters."""
+@dataclass(frozen=True, slots=True)
+class SpeechEvidence:
+    tool_name: str
+    ok: bool
+    summary: str
+    delivery_state: str | None = None
+    item_count: int | None = None
 
+    def prompt_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "tool": self.tool_name,
+            "ok": self.ok,
+            "summary": self.summary,
+        }
+        if self.delivery_state:
+            payload["delivery_state"] = self.delivery_state
+        if self.item_count is not None:
+            payload["item_count"] = self.item_count
+        return payload
+
+
+def build_speech_evidence(tool_name: str, payload: dict[str, Any]) -> SpeechEvidence:
     name = str(tool_name or "工具").strip()[:64] or "工具"
     ok = bool(payload.get("ok"))
     if not ok:
         error = str(payload.get("error") or "执行失败").strip()[:160]
-        return f"{name} 未成功：{error}。只说明可公开原因，不声称动作已完成。"
+        return SpeechEvidence(tool_name=name, ok=False, summary=f"未成功：{error}")
+
     result = payload.get("result")
+    delivery_state: str | None = None
+    item_count: int | None = None
     if isinstance(result, dict):
+        delivery_state = str(result.get("delivery_state") or "").strip()[:32] or None
         items = result.get("items")
         if isinstance(items, list):
-            return (
-                f"{name} 成功，返回 {len(items)} 项；"
-                "按用户问题筛选后自然表述。"
-            )
-        if result.get("count") is not None:
-            return f"{name} 成功，共 {result.get('count')} 项；不要照抄结构化字段。"
-        if result.get("delivery_state") == "unknown":
-            return f"{name} 回执不确定；不能重复发送，也不能断言 QQ 一定未收到。"
-    if isinstance(result, list):
-        return f"{name} 成功，返回 {len(result)} 项；先概括，再挑相关项。"
-    return f"{name} 成功；只向用户说明与请求相关的结果。"
+            item_count = len(items)
+        elif isinstance(result.get("count"), int):
+            item_count = max(int(result["count"]), 0)
+    elif isinstance(result, list):
+        item_count = len(result)
+
+    if delivery_state in {"unknown", "delivery_unknown"}:
+        summary = "回执不确定；不能重复执行，也不能断言一定失败"
+    elif item_count is not None:
+        summary = f"成功，返回 {item_count} 项；只挑与当前问题有关的信息"
+    else:
+        summary = "成功；只说明与当前请求相关的结果"
+    return SpeechEvidence(
+        tool_name=name,
+        ok=True,
+        summary=summary,
+        delivery_state=delivery_state,
+        item_count=item_count,
+    )
 
 
-__all__ = ["TOOL_RESULT_SPEECH_INSTRUCTION", "tool_result_speech_hint"]
+def tool_result_speech_hint(tool_name: str, payload: dict[str, Any]) -> str:
+    evidence = build_speech_evidence(tool_name, payload)
+    return f"{evidence.tool_name} {evidence.summary}。"
+
+
+__all__ = [
+    "TOOL_RESULT_SPEECH_INSTRUCTION",
+    "SpeechEvidence",
+    "build_speech_evidence",
+    "tool_result_speech_hint",
+]
