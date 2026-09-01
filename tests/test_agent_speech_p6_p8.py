@@ -139,9 +139,11 @@ def test_p7_build_context_exposes_topic_state_as_authoritative_realtime_fact() -
         members=[],
         memories=[],
         relations=[],
-        activity=ActivitySnapshot(last_message_at=datetime(2026, 9, 1, 19, 0)),
+        activity=ActivitySnapshot(
+            last_message_at=datetime(2026, 9, 1, 19, 0)  # noqa: DTZ001
+        ),
         active_topic="Docker",
-        reference_at=datetime(2026, 9, 1, 19, 2),
+        reference_at=datetime(2026, 9, 1, 19, 2),  # noqa: DTZ001
     )
     assert context["active_topic"] == "Docker"
     assert context["topic_state"]["status"] == "fresh"
@@ -150,9 +152,18 @@ def test_p7_build_context_exposes_topic_state_as_authoritative_realtime_fact() -
         tools=[],
         context=context,
         user_prompt="继续",
-        current_turn={"user_id": 2, "name": "A", "content": "继续", "trigger": "mention"},
+        current_turn={
+            "user_id": 2,
+            "name": "A",
+            "content": "继续",
+            "trigger": "mention",
+        },
     )
-    system_text = "\n".join(str(item.get("content") or "") for item in messages if item["role"] == "system")
+    system_text = "\n".join(
+        str(item.get("content") or "")
+        for item in messages
+        if item["role"] == "system"
+    )
     assert '"topic_state"' in system_text
     assert "topic_state 是当前话题的权威结构化状态" in system_text
 
@@ -169,9 +180,11 @@ def test_p8_tool_guidance_requires_natural_language_projection() -> None:
     assert "ok=false" in guidance
 
 
-def test_p8_tool_result_hint_distinguishes_success_failure_and_unknown_delivery() -> None:
+def test_p8_tool_result_hint_handles_success_failure_and_unknown() -> None:
     _load_agent_modules()
-    from src.plugins.yawn_core.yawn_agent.tool_result_speech import tool_result_speech_hint
+    from src.plugins.yawn_core.yawn_agent.tool_result_speech import (
+        tool_result_speech_hint,
+    )
 
     assert "返回 2 项" in tool_result_speech_hint(
         "list_group_members",
