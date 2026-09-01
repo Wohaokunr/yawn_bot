@@ -28,6 +28,7 @@ from .speech import (
 if TYPE_CHECKING:
     from .context import CurrentTurn
 
+_REACTION_AUTO_MIN = 2
 
 _SCENE_RULES: dict[str, str] = {
     SPEECH_SCENE_DIRECT_REPLY: (
@@ -162,7 +163,7 @@ def resolve_speech_style(
         verbosity=verbosity,
         expressiveness=expressiveness,
         soft_target_chars=targets[verbosity],
-        allow_spontaneous_reaction=reaction >= 2,
+        allow_spontaneous_reaction=reaction >= _REACTION_AUTO_MIN,
     )
 
 
