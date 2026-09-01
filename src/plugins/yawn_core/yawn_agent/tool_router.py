@@ -15,6 +15,39 @@ from .tool_registry import (
 
 MAX_TOOL_ROUNDS = 4
 
+# Natural QQ requests often insert scope words inside a registered keyword, e.g.
+# "设置群精华" vs "设置精华" or "删除这条群消息精华".  Keep registry
+# keywords concise and normalize only harmless scope fillers before matching instead
+# of growing an unbounded synonym list for every tool.
+_INTENT_SCOPE_FILLERS = (
+    "这条消息",
+    "当前消息",
+    "群消息",
+    "群聊",
+    "这条",
+    "当前",
+    "消息",
+    "群",
+)
+
+
+def _compact_tool_intent(value: str) -> str:
+    compact = value.casefold()
+    for filler in _INTENT_SCOPE_FILLERS:
+        compact = compact.replace(filler, "")
+    return compact
+
+
+def _keyword_matches(normalized: str, keyword: str) -> bool:
+    folded = keyword.casefold()
+    if folded in normalized:
+        return True
+    compact_keyword = _compact_tool_intent(folded)
+    return bool(
+        compact_keyword
+        and compact_keyword in _compact_tool_intent(normalized)
+    )
+
 
 def select_dialogue_tool_names(
     text: str | None,
@@ -56,7 +89,7 @@ def select_dialogue_tool_names(
             TOOL_PERMISSION_CRITICAL,
         }:
             continue
-        if any(keyword.casefold() in normalized for keyword in definition.keywords):
+        if any(_keyword_matches(normalized, keyword) for keyword in definition.keywords):
             selected.add(definition.name)
 
     if allow_admin_tools:
@@ -79,7 +112,10 @@ def select_dialogue_tool_names(
                 hint in normalized for hint in mute_read_hints
             ):
                 continue
-            if any(keyword.casefold() in normalized for keyword in definition.keywords):
+            if any(
+                _keyword_matches(normalized, keyword)
+                for keyword in definition.keywords
+            ):
                 selected.add(definition.name)
 
     return frozenset(selected)
@@ -95,6 +131,7 @@ def rank_discoverable_tools(
     """Rank eligible registry entries without another model call."""
 
     normalized = str(query or "").strip().casefold()
+    compact_normalized = _compact_tool_intent(normalized)
     family_filter = str(family or "").strip().casefold()
     scored: list[tuple[int, str, ToolDefinition]] = []
     for definition in candidates:
@@ -109,10 +146,15 @@ def rank_discoverable_tools(
             score += 6
         if normalized and normalized in definition.family.casefold():
             score += 4
+        compact_description = _compact_tool_intent(definition.description)
+        if compact_normalized and compact_normalized in compact_description:
+            score += 4
         for keyword in definition.keywords:
             folded = keyword.casefold()
             if folded in normalized:
                 score += 5
+            elif _keyword_matches(normalized, keyword):
+                score += 4
             elif normalized and normalized in folded:
                 score += 3
         # A requested family is already a meaningful match; otherwise omit
