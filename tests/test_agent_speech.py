@@ -1,9 +1,8 @@
-# ruff: noqa: PLR2004
+# ruff: noqa: E501,PLR2004
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import nonebot
 import pytest
