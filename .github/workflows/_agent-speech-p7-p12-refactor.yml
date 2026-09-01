@@ -1,0 +1,36 @@
+name: Agent Speech P7-P12 Refactor
+
+on:
+  push:
+    branches:
+      - feat/agent-speech-p12
+    paths:
+      - scripts/_agent_speech_p7_p12_refactor.py
+      - .github/workflows/_agent-speech-p7-p12-refactor.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/agent-speech-p12
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply refactor
+        run: python scripts/_agent_speech_p7_p12_refactor.py
+      - name: Compile changed Python
+        run: python -m compileall -q src/plugins/yawn_core/yawn_agent src/plugins/yawn_core/webui tests/test_agent_speech_p7_p12_completion.py
+      - name: Commit refactor
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(agent): complete original speech P7-P12"
+          git push origin HEAD:feat/agent-speech-p12
