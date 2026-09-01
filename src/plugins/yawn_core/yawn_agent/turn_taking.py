@@ -25,6 +25,10 @@ TURN_PRESSURE_HIGH = "high"
 
 _RECENT_WINDOW = 6
 _HIGH_BOT_TURNS = 2
+_MIN_BUSY_PARTICIPANTS = 2
+_EXPLICIT_TRIGGERS = frozenset(
+    {"mention", "explicit_call", "explicit_wakeup", "at", "to_me", "reply"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +73,12 @@ def _recent_bot_turns(context: dict[str, Any]) -> int:
             continue
         role = str(item.get("role") or "").strip().lower()
         sender_kind = str(item.get("sender_kind") or "").strip().lower()
-        if role in {"bot", "assistant"} or sender_kind == "bot" or item.get("is_bot") is True:
+        is_bot = (
+            role in {"bot", "assistant"}
+            or sender_kind == "bot"
+            or item.get("is_bot") is True
+        )
+        if is_bot:
             count += 1
     return count
 
@@ -102,17 +111,20 @@ def plan_turn_taking(
     normalized_scene = normalize_speech_scene(scene)
     payload = _turn_payload(current_turn)
     trigger = str(payload.get("trigger") or "").strip().lower()
-    explicit_turn = normalized_scene in {
-        SPEECH_SCENE_DIRECT_REPLY,
-        SPEECH_SCENE_REPLY_THREAD,
-    } or trigger in {"mention", "explicit_call", "explicit_wakeup", "at", "to_me", "reply"}
+    explicit_turn = (
+        normalized_scene in {SPEECH_SCENE_DIRECT_REPLY, SPEECH_SCENE_REPLY_THREAD}
+        or trigger in _EXPLICIT_TRIGGERS
+    )
     resolved_context = context or {}
     recent_bot_turns = _recent_bot_turns(resolved_context)
     participant_count = _participant_count(resolved_context)
 
     if explicit_turn:
         pressure = TURN_PRESSURE_LOW
-    elif recent_bot_turns >= _HIGH_BOT_TURNS and participant_count >= 2:
+    elif (
+        recent_bot_turns >= _HIGH_BOT_TURNS
+        and participant_count >= _MIN_BUSY_PARTICIPANTS
+    ):
         pressure = TURN_PRESSURE_HIGH
     elif recent_bot_turns >= 1:
         pressure = TURN_PRESSURE_MEDIUM
@@ -132,11 +144,13 @@ def plan_turn_taking(
 def turn_taking_instruction(plan: TurnTakingPlan) -> str:
     if plan.explicit_turn:
         return (
-            "轮次=明确交给 Bot：正常完整回答当前发言人，不因群里之前 Bot 说过话而故意省略必要信息。"
+            "轮次=明确交给 Bot：正常完整回答当前发言人，"
+            "不因群里之前 Bot 说过话而故意省略必要信息。"
         )
     if plan.pressure == TURN_PRESSURE_HIGH:
         return (
-            "轮次压力=high：Bot 近期已参与较多且多人正在交谈；只回应一个最相关点，优先短句/轻反应，"
+            "轮次压力=high：Bot 近期已参与较多且多人正在交谈；"
+            "只回应一个最相关点，优先短句/轻反应，"
             "不要逐人点名作答，也不要用新问题继续占住话轮。"
         )
     if plan.pressure == TURN_PRESSURE_MEDIUM:
