@@ -11,7 +11,7 @@ from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v13"
+PROMPT_VERSION = "yawn-agent-v14"
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
 # Character Profile 决定，避免同一个 system prompt 同时给模型两套冲突指令。
@@ -46,8 +46,12 @@ _FORWARD_RULES = (
     "发送成功后不要重复回复。"
 )
 _DISCOVERY_RULES = (
-    "如果当前工具列表缺少完成用户请求所需的能力，先调用 discover_tools；"
-    "只使用发现后下一轮实际出现在 schema 中的工具，不要猜工具名或 OneBot action。"
+    "工具采用渐进披露：首轮只有最小核心能力。凡需要读取群资料、历史消息、记忆、成员资料、"
+    "表情、文件或执行任何管理动作，都先调用 discover_tools 描述任务，不要猜工具名。"
+    "如果要浏览能力目录，可用 query=‘全部工具’取得紧凑的 toolpacks；"
+    "如果需要某一类完整能力，再把 toolpacks.name 作为 family 调用 discover_tools 加载整包。"
+    "discover_tools 只负责发现并让下一轮注入 schema，不代表任何业务动作已经执行；"
+    "只能调用下一轮实际出现在 schema 中的工具。"
 )
 
 # 稳定层字段与记忆来源：只在整理任务写入或群资料变更时变化。

@@ -133,7 +133,6 @@ TOOL_DEFINITIONS = (
         actions=("get_msg",),
         family="history",
         keywords=("这条消息", "那条消息", "原消息", "刚才那条"),
-        core=True,
     ),
     ToolDefinition(
         "get_recent_group_messages",
@@ -154,13 +153,22 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "discover_tools",
-        "按任务描述发现当前群、当前权限下可用但尚未加载的工具",
+        "渐进披露入口：按任务发现可用工具；也可用 family 加载一个工具包。query/family 至少提供一个；发现只加载 schema，不代表动作已执行",
         {
-            "query": {"type": "string", "minLength": 1, "maxLength": 120},
-            "family": {"type": "string", "minLength": 1, "maxLength": 32},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 8},
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "描述要完成的任务；传‘全部工具’可先查看工具包目录",
+            },
+            "family": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "description": "工具包标识；通常来自上一次 discover_tools 返回的 toolpacks.name",
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 12},
         },
-        required=("query",),
         family="discovery",
         keywords=("工具", "能力", "能不能", "怎么操作"),
         core=True,
@@ -176,7 +184,6 @@ TOOL_DEFINITIONS = (
         required=("query",),
         family="memory",
         keywords=("记得", "记忆", "以前", "上次", "之前说", "还记不记得"),
-        core=True,
     ),
     ToolDefinition(
         "get_person_profile",

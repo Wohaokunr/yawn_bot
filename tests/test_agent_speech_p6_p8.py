@@ -78,7 +78,7 @@ def test_p6_reply_router_opens_real_reaction_lookup_and_segment() -> None:
     )
 
     tools = select_dialogue_tool_names("这个呢", has_reply=True)
-    assert {"send_message", "search_reactions", "react_to_message"} <= tools
+    assert tools == frozenset({"send_message", "discover_tools"})
     segments = select_dialogue_message_segment_types("这个呢", has_reply=True)
     assert {"text", "reply", "reaction"} <= segments
 
