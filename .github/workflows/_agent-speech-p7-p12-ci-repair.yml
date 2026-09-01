@@ -25,9 +25,9 @@ jobs:
         run: uv sync --all-groups --locked --python 3.10
       - name: Apply semantic repairs
         run: uv run --python 3.10 python scripts/_fix_agent_speech_p7_p12_ci.py
-      - name: Ruff autofix and format
+      - name: Ruff format and autofix
         run: |
-          uv run --python 3.10 ruff check --fix \
+          uv run --python 3.10 ruff format \
             src/plugins/yawn_core/webui/agent.py \
             src/plugins/yawn_core/yawn_agent/activity.py \
             src/plugins/yawn_core/yawn_agent/context_loader.py \
@@ -38,7 +38,7 @@ jobs:
             src/plugins/yawn_core/yawn_agent/tool_result_speech.py \
             src/plugins/yawn_core/yawn_agent/topic_state.py \
             tests/test_agent_speech_p7_p12_completion.py
-          uv run --python 3.10 ruff format \
+          uv run --python 3.10 ruff check --fix \
             src/plugins/yawn_core/webui/agent.py \
             src/plugins/yawn_core/yawn_agent/activity.py \
             src/plugins/yawn_core/yawn_agent/context_loader.py \
