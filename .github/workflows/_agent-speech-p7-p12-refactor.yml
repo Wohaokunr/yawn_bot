@@ -6,6 +6,7 @@ on:
       - feat/agent-speech-p12
     paths:
       - scripts/_agent_speech_p7_p12_refactor.py
+      - scripts/_fix_agent_speech_refactor.py
       - .github/workflows/_agent-speech-p7-p12-refactor.yml
 
 permissions:
@@ -22,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Repair refactor script
+        run: python scripts/_fix_agent_speech_refactor.py
       - name: Apply refactor
         run: python scripts/_agent_speech_p7_p12_refactor.py
       - name: Compile changed Python
