@@ -9,8 +9,8 @@ unless a caller explicitly enables autofix.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 from difflib import SequenceMatcher
+from typing import TYPE_CHECKING
 
 from .speech import (
     SPEECH_SCENE_ACTIVE_INTERJECT,
@@ -20,6 +20,9 @@ from .speech import (
     SpeechPlan,
     SpeechQualityIssue,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _BOILERPLATE_PREFIXES = (
     re.compile(r"^(?:好的|当然可以|没问题|可以的|明白了|收到)[！!，,：:\s]+"),
@@ -41,6 +44,11 @@ _SHORT_SCENES = frozenset(
         SPEECH_SCENE_REACTION,
     }
 )
+_MIN_ECHO_TEXT_CHARS = 12
+_MIN_ECHO_SENTENCES = 2
+_MIN_SIMILARITY_CHARS = 8
+_ECHO_SIMILARITY_THRESHOLD = 0.72
+_REPEAT_SIMILARITY_THRESHOLD = 0.82
 
 
 def _clean_lines(text: object) -> str:
@@ -63,8 +71,7 @@ def _clean_lines(text: object) -> str:
 
 def _similarity_key(text: object) -> str:
     normalized = str(text or "").casefold()
-    normalized = re.sub(r"[\s\W_]+", "", normalized, flags=re.UNICODE)
-    return normalized
+    return re.sub(r"[\s\W_]+", "", normalized, flags=re.UNICODE)
 
 
 def speech_similarity(left: object, right: object) -> float:
@@ -102,16 +109,16 @@ def _strip_generic_cta(text: str) -> tuple[str, bool]:
 
 
 def _strip_user_echo(text: str, user_text: str) -> tuple[str, bool]:
-    if not user_text.strip() or len(text) < 12:
+    if not user_text.strip() or len(text) < _MIN_ECHO_TEXT_CHARS:
         return text, False
     sentences = [item for item in _SENTENCE_SPLIT.split(text) if item]
-    if len(sentences) < 2:
+    if len(sentences) < _MIN_ECHO_SENTENCES:
         return text, False
     first = sentences[0].strip()
     explicit_echo = first.startswith(("你问", "你的问题是", "你刚才说", "你提到"))
     similar = (
-        len(_similarity_key(first)) >= 8
-        and speech_similarity(first, user_text) >= 0.72
+        len(_similarity_key(first)) >= _MIN_SIMILARITY_CHARS
+        and speech_similarity(first, user_text) >= _ECHO_SIMILARITY_THRESHOLD
     )
     if not explicit_echo and not similar:
         return text, False
@@ -133,10 +140,10 @@ def _trim_short_scene(text: str, plan: SpeechPlan) -> tuple[str, bool]:
 
 def _recent_repeat(text: str, recent_texts: Iterable[str]) -> float:
     best = 0.0
-    if len(_similarity_key(text)) < 8:
+    if len(_similarity_key(text)) < _MIN_SIMILARITY_CHARS:
         return best
     for recent in recent_texts:
-        if len(_similarity_key(recent)) < 8:
+        if len(_similarity_key(recent)) < _MIN_SIMILARITY_CHARS:
             continue
         best = max(best, speech_similarity(text, recent))
     return best
@@ -169,7 +176,7 @@ def _dedupe_issues(items: list[SpeechQualityIssue]) -> tuple[SpeechQualityIssue,
     return tuple(result)
 
 
-def _polish_text(
+def _polish_text(  # noqa: C901
     text: str,
     plan: SpeechPlan,
     *,
@@ -233,7 +240,7 @@ def _polish_text(
             cleaned = candidate
 
     repeat_score = _recent_repeat(cleaned, recent_texts)
-    if repeat_score >= 0.82:
+    if repeat_score >= _REPEAT_SIMILARITY_THRESHOLD:
         issues.append(
             _issue(
                 "recent_repeat",
