@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Unified user-visible speech plan shared by dialogue and proactive paths.
 
 A SpeechPlan describes *what the Agent intends to say* before OneBot-specific
@@ -7,7 +8,7 @@ validation and delivery.  It deliberately contains no raw CQ/OneBot payload;
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 SPEECH_SCENE_DIRECT_REPLY = "direct_reply"
@@ -105,8 +106,8 @@ class SpeechPlan:
     scene: str = SPEECH_SCENE_CONVERSATION
     text: str = ""
     segments: tuple[dict[str, Any], ...] = ()
-    target: SpeechTarget = SpeechTarget()
-    style: SpeechStyle = SpeechStyle()
+    target: SpeechTarget = field(default_factory=SpeechTarget)
+    style: SpeechStyle = field(default_factory=SpeechStyle)
     reason: str = ""
     confidence: float = 1.0
     issues: tuple[SpeechQualityIssue, ...] = ()
