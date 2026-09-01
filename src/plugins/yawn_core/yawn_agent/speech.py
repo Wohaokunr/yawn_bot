@@ -110,6 +110,10 @@ class SpeechPlan:
     style: SpeechStyle = field(default_factory=SpeechStyle)
     reason: str = ""
     confidence: float = 1.0
+    act: str = "continue"
+    turn_pressure: str = "low"
+    topic: str | None = None
+    topic_action: str = "continue"
     issues: tuple[SpeechQualityIssue, ...] = ()
 
     @property
@@ -151,6 +155,11 @@ class SpeechPlan:
                 str(item.get("type") or "") for item in self.segments
             ],
             "style": self.style.as_dict(),
+            "act": self.act,
+            "turn_pressure": self.turn_pressure,
+            "topic": self.topic,
+            "topic_action": self.topic_action,
+            "reason": self.reason,
             "quality": [item.as_dict() for item in self.issues],
             "confidence": max(0.0, min(float(self.confidence), 1.0)),
         }
@@ -164,6 +173,11 @@ def speech_plan_from_text(
     target: SpeechTarget | None = None,
     reason: str = "",
     confidence: float = 1.0,
+    action: str = "speak",
+    act: str = "continue",
+    turn_pressure: str = "low",
+    topic: str | None = None,
+    topic_action: str = "continue",
 ) -> SpeechPlan:
     return SpeechPlan(
         scene=normalize_speech_scene(scene),
@@ -172,6 +186,11 @@ def speech_plan_from_text(
         target=target or SpeechTarget(),
         reason=str(reason or "")[:240],
         confidence=max(0.0, min(float(confidence), 1.0)),
+        action=str(action or "speak").strip().lower() or "speak",
+        act=str(act or "continue").strip().lower() or "continue",
+        turn_pressure=str(turn_pressure or "low").strip().lower() or "low",
+        topic=str(topic or "").strip()[:240] or None,
+        topic_action=str(topic_action or "continue").strip().lower() or "continue",
     )
 
 
@@ -183,6 +202,11 @@ def speech_plan_from_segments(
     target: SpeechTarget | None = None,
     reason: str = "",
     confidence: float = 1.0,
+    action: str = "speak",
+    act: str = "continue",
+    turn_pressure: str = "low",
+    topic: str | None = None,
+    topic_action: str = "continue",
 ) -> SpeechPlan:
     safe_segments = tuple(dict(item) for item in segments if isinstance(item, dict))
     return SpeechPlan(
@@ -192,6 +216,11 @@ def speech_plan_from_segments(
         target=target or SpeechTarget(),
         reason=str(reason or "")[:240],
         confidence=max(0.0, min(float(confidence), 1.0)),
+        action=str(action or "speak").strip().lower() or "speak",
+        act=str(act or "continue").strip().lower() or "continue",
+        turn_pressure=str(turn_pressure or "low").strip().lower() or "low",
+        topic=str(topic or "").strip()[:240] or None,
+        topic_action=str(topic_action or "continue").strip().lower() or "continue",
     )
 
 

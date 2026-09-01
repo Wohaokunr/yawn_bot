@@ -396,6 +396,26 @@ export interface AgentExecutionTrace {
   events: AgentExecutionTraceEvent[];
 }
 
+export interface AgentSpeechSimulation {
+  status: "policy_only" | "final" | string;
+  should_speak: boolean | null;
+  action: string;
+  scene: string;
+  act: string;
+  turn_pressure: string;
+  target_user_id: string | number | null;
+  reply_to_message_id: string | number | null;
+  topic: string | null;
+  topic_action: string;
+  reason: string;
+  confidence: number;
+  text: string;
+  segments: Array<Record<string, unknown>>;
+  style: Record<string, unknown>;
+  quality: Array<Record<string, unknown>>;
+  emotion: unknown;
+}
+
 export interface AgentDebugResponse {
   promptVersion: string;
   mode: AgentDebugMode;
@@ -456,6 +476,7 @@ export interface AgentDebugResponse {
   };
   stats: Record<string, unknown>;
   warnings: string[];
+  speechSimulation: AgentSpeechSimulation;
   executionTrace: AgentExecutionTrace;
   result: null | {
     outcome: string;
@@ -916,4 +937,3 @@ export interface FanqieJobDetail {
   job: FanqieJob;
   chapters: FanqieJobChapter[];
 }
-

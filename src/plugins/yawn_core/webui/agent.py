@@ -37,7 +37,8 @@ from ..yawn_agent.capabilities import (
 from ..yawn_agent.config_store import agent_runtime_enabled, set_agent_runtime_enabled
 from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
 from ..yawn_agent.conversation import close_group_conversations
-from ..yawn_agent.dialogue import _history_message_meta, _load_context
+from ..yawn_agent.context_history import history_message_meta as _history_message_meta
+from ..yawn_agent.context_loader import load_context as _load_context
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
@@ -66,6 +67,11 @@ from ..yawn_agent.persona import (
 )
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
+from ..yawn_agent.speech_runtime import (
+    build_runtime_speech_plan,
+    speech_simulation_payload,
+    trace_speech_decision,
+)
 from ..yawn_agent.tools import (
     build_tool_schemas,
     dialogue_tool_round_limit,
@@ -1618,6 +1624,21 @@ async def run_agent_debug(
         )
         base_url, api_key = resolve_provider(route.provider)
         result_payload: dict[str, Any] | None = None
+        preview_plan = build_runtime_speech_plan(
+            text="",
+            persona=applied_persona,
+            current_turn=current_turn,
+            context=context,
+            source=body.mode,
+            action="speak",
+        )
+        speech_simulation = speech_simulation_payload(
+            preview_plan,
+            emotion_state=applied_emotion,
+            should_speak=None,
+            preview_only=True,
+            user_text=current_turn.content,
+        )
         if body.run_model:
             model_started = time.monotonic()
             try:
@@ -1635,6 +1656,56 @@ async def run_agent_debug(
                     timeout=_DEBUG_TIMEOUT_SECONDS,
                 )
                 result_payload = _debug_model_payload(result, body.mode)
+                if body.mode == "dialogue":
+                    if not result_payload.get("toolCalls") and result_payload.get("text"):
+                        simulated_plan = build_runtime_speech_plan(
+                            text=result_payload.get("text") or "",
+                            persona=applied_persona,
+                            current_turn=current_turn,
+                            context=context,
+                            source="dialogue",
+                        )
+                        speech_simulation = speech_simulation_payload(
+                            simulated_plan,
+                            emotion_state=applied_emotion,
+                            should_speak=True,
+                            user_text=current_turn.content,
+                        )
+                        trace_speech_decision(
+                            simulated_plan,
+                            emotion_state=applied_emotion,
+                            participation_action="speak",
+                            trace=debug_trace,
+                        )
+                else:
+                    simulated_decision = _decide_proactive_reply(
+                        str(result_payload.get("text") or "")
+                    )
+                    simulated_plan = build_runtime_speech_plan(
+                        text=simulated_decision.text,
+                        segments=list(simulated_decision.segments),
+                        persona=applied_persona,
+                        current_turn=current_turn,
+                        context=context,
+                        source=body.mode,
+                        action=simulated_decision.action,
+                        target_user_id=simulated_decision.target_user_id,
+                        suggested_topic=simulated_decision.topic,
+                        reason=simulated_decision.reason,
+                        confidence=simulated_decision.confidence,
+                    )
+                    speech_simulation = speech_simulation_payload(
+                        simulated_plan,
+                        emotion_state=applied_emotion,
+                        should_speak=simulated_decision.should_speak,
+                        user_text=current_turn.content,
+                    )
+                    trace_speech_decision(
+                        simulated_plan,
+                        emotion_state=applied_emotion,
+                        participation_action=simulated_decision.action,
+                        trace=debug_trace,
+                    )
                 trace_event(
                     "llm",
                     "真实模型试跑",
@@ -1785,6 +1856,7 @@ async def run_agent_debug(
             "stats": stats,
             "warnings": warnings,
             "result": result_payload,
+            "speechSimulation": speech_simulation,
             "executionTrace": debug_trace.as_dict(),
         }
     return ok(payload)
