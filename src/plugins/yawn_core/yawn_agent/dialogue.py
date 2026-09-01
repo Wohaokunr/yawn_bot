@@ -29,7 +29,9 @@ from ..llm import (
     vision_model_configured,
 )
 from .capabilities import (
+    BotGroupCapabilities,
     get_segment_capabilities,
+    local_group_capabilities,
     probe_group_capabilities,
     user_can_manage_group,
 )
@@ -113,6 +115,52 @@ _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
 )
+
+
+async def _resolve_turn_tool_capabilities(
+    bot: Bot,
+    group_id: int,
+    actor_user_id: int,
+    tool_intent_text: str,
+    *,
+    has_reply: bool,
+    has_mentions: bool,
+    has_media: bool,
+) -> tuple[BotGroupCapabilities, bool, frozenset[str], str]:
+    """按本轮工具意图决定是否真的需要 OneBot 权限探测。
+
+    普通聊天、只读工具、状态工具和受控消息发送一律使用本地保守 action 基线，
+    不调用 ``get_group_member_info``。只有文本本身命中了 privileged/critical 工具
+    候选，才查询调用者是否是群管理；调用者通过后再探测机器人自身角色。
+
+    这样机器人角色探测失败最多让管理类工具 fail-closed，不会成为普通 QQ 消息
+    或其它 OneBot action 的前置依赖。
+    """
+
+    baseline = local_group_capabilities(bot)
+    ordinary_names = select_dialogue_tool_names(
+        tool_intent_text,
+        has_reply=has_reply,
+        has_mentions=has_mentions,
+        has_media=has_media,
+        allow_admin_tools=False,
+    )
+    privileged_names = select_dialogue_tool_names(
+        tool_intent_text,
+        has_reply=has_reply,
+        has_mentions=has_mentions,
+        has_media=has_media,
+        allow_admin_tools=True,
+    )
+    if privileged_names == ordinary_names:
+        return baseline, False, ordinary_names, "local_baseline"
+
+    allow_admin_tools = await user_can_manage_group(bot, group_id, actor_user_id)
+    if not allow_admin_tools:
+        return baseline, False, ordinary_names, "actor_not_admin"
+
+    capabilities = await probe_group_capabilities(bot, group_id)
+    return capabilities, True, privileged_names, "privileged_live_probe"
 
 
 def _accumulate_turn_usage(total: dict[str, int], result: Any) -> dict[str, Any]:
@@ -408,27 +456,31 @@ async def _process_group_message(
                 duration_ms=(time.monotonic() - context_started) * 1000,
             )
             capability_started = time.monotonic()
-            capabilities = await probe_group_capabilities(bot, group_id)
-            allow_admin_tools = await user_can_manage_group(
-                bot, group_id, actor_user_id
-            )
-            dbg(
-                f"群 {group_id} 能力探测完成: bot_role={capabilities.role!r} "
-                f"can_manage={capabilities.can_manage} actions={len(capabilities.actions)} 个 "
-                f"发起人 {actor_user_id} 管理工具权限={allow_admin_tools}"
-            )
             has_target_mentions = any(
                 int(user_id) != int(bot_id) for user_id in normalized.mentions
             )
             tool_intent_text = normalized.intent_text()
             has_reply_context = bool(normalized.reply_chain)
             has_media_context = bool(normalized.media_refs)
-            selected_tool_names = select_dialogue_tool_names(
+            (
+                capabilities,
+                allow_admin_tools,
+                selected_tool_names,
+                capability_source,
+            ) = await _resolve_turn_tool_capabilities(
+                bot,
+                group_id,
+                actor_user_id,
                 tool_intent_text,
                 has_reply=has_reply_context,
                 has_mentions=has_target_mentions,
                 has_media=has_media_context,
-                allow_admin_tools=allow_admin_tools,
+            )
+            dbg(
+                f"群 {group_id} 工具能力计算完成: source={capability_source} "
+                f"bot_role={capabilities.role!r} can_manage={capabilities.can_manage} "
+                f"actions={len(capabilities.actions)} 个 "
+                f"发起人 {actor_user_id} 管理工具权限={allow_admin_tools}"
             )
             message_segment_types = select_dialogue_message_segment_types(
                 tool_intent_text,
@@ -456,6 +508,7 @@ async def _process_group_message(
                     "bot_role": capabilities.role,
                     "bot_can_manage": capabilities.can_manage,
                     "onebot_actions": sorted(capabilities.actions),
+                    "capability_source": capability_source,
                     "actor_can_manage": allow_admin_tools,
                     "round_limit": round_limit,
                     "message_segment_types": sorted(message_segment_types),

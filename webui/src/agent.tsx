@@ -374,13 +374,32 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
           ? <Spin />
           : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
             <Space wrap>
-              <Tag color={capabilities.offline ? "default" : capabilities.action.degraded ? "orange" : "green"}>
-                {capabilities.offline ? "Bot 离线" : capabilities.action.degraded ? "探测降级" : `角色 ${capabilities.action.role || "unknown"}`}
+              <Tag color={capabilities.offline ? "default" : "green"}>
+                {capabilities.offline ? "Bot 离线" : "Bot 已连接"}
               </Tag>
+              {!capabilities.offline && (
+                <Tag color={capabilities.action.degraded ? "orange" : "green"}>
+                  {capabilities.action.degraded
+                    ? "群角色探测降级"
+                    : `角色 ${capabilities.action.role || "unknown"}`}
+                </Tag>
+              )}
               <Text>Actions：{capabilities.action.actions.length}</Text>
               <Text>Segments：{capabilities.segments.filter((item) => item.exposed).length} 可暴露</Text>
-              {capabilities.action.lastError && <Text type="danger">最近探测：{capabilities.action.lastError}</Text>}
+              {capabilities.action.lastError && (
+                <Text type={capabilities.offline ? "danger" : "warning"}>
+                  最近群角色探测：{capabilities.action.lastError}
+                </Text>
+              )}
             </Space>
+            {!capabilities.offline && capabilities.action.degraded && (
+              <Alert
+                type="warning"
+                showIcon
+                message="机器人群角色探测失败"
+                description="NoneBot 仍有已连接的 Bot 实例。只有依赖群主/管理员身份的工具会保守降级；其它 OneBot 工具和 QQ 消息收发不会因此被禁用。"
+              />
+            )}
             <Space wrap>
               {capabilities.segments.map((item) => (
                 <Tag
