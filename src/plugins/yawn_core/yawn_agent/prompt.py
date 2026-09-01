@@ -205,7 +205,11 @@ def build_messages(  # noqa: PLR0913
     stable, volatile = split_context(context)
     speaker, realtime = split_volatile_context(volatile)
     tool_guidance = build_tool_guidance(tools)
-    speech_guidance = build_speech_instruction(persona, current_turn)
+    speech_guidance = build_speech_instruction(
+        persona,
+        current_turn,
+        context=context,
+    )
     rendered_user_prompt = (
         render_current_turn(current_turn) if current_turn is not None else user_prompt
     )
