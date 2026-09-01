@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Deterministic speech-quality checks for user-visible Agent output.
 
 The linter is deliberately conservative.  It may remove obvious assistant-like
@@ -8,8 +9,8 @@ unless a caller explicitly enables autofix.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from difflib import SequenceMatcher
-from typing import Iterable
 
 from .speech import (
     SPEECH_SCENE_ACTIVE_INTERJECT,
