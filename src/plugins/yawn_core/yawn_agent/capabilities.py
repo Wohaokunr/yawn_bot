@@ -142,6 +142,60 @@ _ADMIN_ACTIONS = frozenset(
 )
 
 
+def _member_rows(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        for key in ("members", "data", "items"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _role_from_member_list(raw: Any, user_id: int) -> str | None:
+    for item in _member_rows(raw):
+        try:
+            item_user_id = int(item.get("user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if item_user_id == int(user_id):
+            return str(item.get("role") or "member")
+    return None
+
+
+async def _probe_member_role(bot: Any, group_id: int, user_id: int) -> tuple[str, str]:
+    """Read one member role with an independent list fallback.
+
+    Some OneBot implementations may fail ``get_group_member_info`` while their
+    member-list endpoint remains healthy. A single broken action must not hide
+    unrelated privileged actions. Both reads still need to fail before we
+    return to the caller's fail-closed path.
+    """
+
+    try:
+        info = await bot.call_api(
+            "get_group_member_info", group_id=group_id, user_id=user_id
+        )
+    except Exception:  # noqa: BLE001
+        dbg_exc(
+            f"群 {group_id} get_group_member_info 查询 {user_id} 失败,尝试成员列表后备探测"
+        )
+    else:
+        if isinstance(info, dict):
+            return str(info.get("role") or "member"), "member_info"
+        dbg(
+            f"群 {group_id} get_group_member_info 查询 {user_id} 返回异常格式,尝试成员列表后备探测"
+        )
+
+    raw_members = await bot.call_api("get_group_member_list", group_id=group_id)
+    role = _role_from_member_list(raw_members, user_id)
+    if role is None:
+        raise LookupError(f"成员列表中找不到用户 {user_id}")
+    dbg(f"群 {group_id} 用户 {user_id} 角色通过 get_group_member_list 后备确认: {role!r}")
+    return role, "member_list_fallback"
+
+
 def local_group_capabilities(
     bot: Any, *, role: str = "member"
 ) -> BotGroupCapabilities:
@@ -175,7 +229,7 @@ def local_group_capabilities(
 async def probe_group_capabilities(
     bot: Any, group_id: int, *, refresh: bool = False
 ) -> BotGroupCapabilities:
-    """读取机器人自身群角色；API 不可用时按普通成员降级。"""
+    """读取机器人自身群角色；单 action 失败时尝试成员列表后备探测。"""
 
     key = (int(getattr(bot, "self_id", 0) or 0), int(group_id))
     cached = _capability_cache.get(key)
@@ -187,17 +241,14 @@ async def probe_group_capabilities(
     role = "member"
     degraded = False
     self_id = int(getattr(bot, "self_id", 0) or 0)
+    probe_source: str | None = None
     try:
-        info = await bot.call_api(
-            "get_group_member_info", group_id=group_id, user_id=self_id
-        )
-        if isinstance(info, dict):
-            role = str(info.get("role") or "member")
+        role, probe_source = await _probe_member_role(bot, group_id, self_id)
     except Exception:  # noqa: BLE001
         degraded = True
         error_class = "role_probe_failed"
         dbg_exc(
-            f"群 {group_id} 机器人角色探测失败,仅管理工具按普通成员降级"
+            f"群 {group_id} 机器人角色双路径探测失败,仅管理工具按普通成员降级"
             f"(其它 action 继续使用,短 TTL {_DEGRADED_TTL}s)"
         )
     else:
@@ -215,12 +266,13 @@ async def probe_group_capabilities(
     _capability_probe_status[key] = {
         "degraded": degraded,
         "last_error": error_class,
+        "probe_source": probe_source,
         "probed_at": time.time(),
         "ttl": _DEGRADED_TTL if degraded else _CAPABILITY_TTL,
     }
     dbg(
         f"群 {group_id} 能力探测完成: role={result.role!r} can_manage={result.can_manage} "
-        f"actions={sorted(result.actions)} degraded={degraded}"
+        f"actions={sorted(result.actions)} degraded={degraded} source={probe_source!r}"
     )
     return result
 
@@ -387,6 +439,7 @@ def capability_runtime_snapshot(bot: Any, group_id: int) -> dict[str, Any]:
             "actions": sorted(action_caps.actions) if action_caps is not None else [],
             "degraded": bool(probe.get("degraded")),
             "lastError": probe.get("last_error"),
+            "probeSource": probe.get("probe_source"),
             "probedAt": probe.get("probed_at"),
             "cacheRemainingSeconds": round(
                 float(probe.get("cache_remaining_seconds") or 0.0), 1
@@ -424,18 +477,17 @@ def reset_capability_cache() -> None:
 
 
 async def user_can_manage_group(bot: Any, group_id: int, user_id: int) -> bool:
-    """实时确认调用者仍是群主或管理员。"""
+    """实时确认调用者仍是群主或管理员；单 action 失败时走成员列表后备。"""
 
     try:
-        info = await bot.call_api(
-            "get_group_member_info", group_id=group_id, user_id=user_id
-        )
+        role, source = await _probe_member_role(bot, group_id, user_id)
     except Exception:  # noqa: BLE001
-        dbg_exc(f"群 {group_id} 查询用户 {user_id} 管理权限失败,视为无权限")
+        dbg_exc(f"群 {group_id} 查询用户 {user_id} 管理权限双路径失败,视为无权限")
         return False
-    role = str(info.get("role") or "member") if isinstance(info, dict) else "member"
     allowed = role in {"owner", "admin"}
-    dbg(f"群 {group_id} 用户 {user_id} 管理权限判定: role={role!r} → {allowed}")
+    dbg(
+        f"群 {group_id} 用户 {user_id} 管理权限判定: role={role!r} source={source!r} → {allowed}"
+    )
     return allowed
 
 
@@ -443,15 +495,10 @@ async def target_can_be_muted(
     bot: Any, group_id: int, user_id: int, bot_role: str
 ) -> bool:
     try:
-        info = await bot.call_api(
-            "get_group_member_info", group_id=group_id, user_id=user_id
-        )
+        target_role, source = await _probe_member_role(bot, group_id, user_id)
     except Exception:  # noqa: BLE001
-        dbg_exc(f"群 {group_id} 查询成员 {user_id} 禁言可行性失败,视为不可禁言")
+        dbg_exc(f"群 {group_id} 查询成员 {user_id} 禁言可行性双路径失败,视为不可禁言")
         return False
-    target_role = (
-        str(info.get("role") or "member") if isinstance(info, dict) else "member"
-    )
     if target_role == "owner":
         dbg(f"群 {group_id} 成员 {user_id} 是群主,不可禁言")
         return False
@@ -460,7 +507,8 @@ async def target_can_be_muted(
         return False
     allowed = bot_role in {"owner", "admin"}
     dbg(
-        f"群 {group_id} 禁言判定: target_role={target_role!r} bot_role={bot_role!r} → {allowed}"
+        f"群 {group_id} 禁言判定: target_role={target_role!r} bot_role={bot_role!r} "
+        f"source={source!r} → {allowed}"
     )
     return allowed
 
