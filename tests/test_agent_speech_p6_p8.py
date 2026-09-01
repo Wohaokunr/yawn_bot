@@ -168,14 +168,17 @@ def test_p7_build_context_exposes_topic_state_as_authoritative_realtime_fact() -
     assert "topic_state 是当前话题的权威结构化状态" in system_text
 
 
-def test_p8_system_policy_requires_natural_language_projection() -> None:
+def test_p8_tool_guidance_requires_natural_language_projection() -> None:
     _load_agent_modules()
-    from src.plugins.yawn_core.yawn_agent.prompt import build_static_prefix
+    from src.plugins.yawn_core.yawn_agent.prompt import build_tool_guidance
 
-    policy = build_static_prefix({"name": "Yawn"}, [])
-    assert "role=tool 只提供后台事实" in policy
-    assert "不要照抄 JSON" in policy
-    assert "未明确成功时不得声称已经完成" in policy
+    guidance = build_tool_guidance(
+        [{"type": "function", "function": {"name": "send_message"}}]
+    )
+    assert "工具返回是后台事实" in guidance
+    assert "不要照抄 JSON" in guidance
+    assert "ok=false" in guidance
+    assert "message_id/user_id" in guidance
 
 
 def test_p8_tool_result_hint_handles_success_failure_and_unknown() -> None:
