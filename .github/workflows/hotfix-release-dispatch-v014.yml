@@ -1,0 +1,31 @@
+name: One-shot v0.1.4 release dispatcher
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/hotfix-release-dispatch-v014.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch v0.1.4 production release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch release workflow with quality gates skipped
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            --field version=v0.1.4 \
+            --field deploy_production=true \
+            --field skip_quality_gates=true
