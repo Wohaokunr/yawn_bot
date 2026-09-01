@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from .topic_state import build_topic_state
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -307,10 +309,15 @@ def build_context(
         for key, value in (emotion_state or {}).items()
         if key not in {"updated_at", "last_prefix"}
     }
+    trimmed_messages = trim_context_messages(messages)
+    topic_state = build_topic_state(active_topic, trimmed_messages)
     return {
         "group_id": group_id,
         "group_name": group_name or "未知群聊",
+        # active_topic is kept as a compatibility label for existing callers;
+        # topic_state is the authoritative prompt representation from P7.
         "active_topic": active_topic,
+        "topic_state": topic_state.prompt_dict(),
         "emotion_state": clean_emotion,
         "activity": {
             # A coarse bucket keeps the value useful without changing every
@@ -325,7 +332,7 @@ def build_context(
             "mentions_60m": activity.mentions_60m,
         },
         "members": stable_members,
-        "messages": trim_context_messages(messages),
+        "messages": trimmed_messages,
         "memories": prompt_memories,
         "relations": relation_lines,
     }

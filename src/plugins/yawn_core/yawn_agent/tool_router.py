@@ -37,7 +37,12 @@ def select_dialogue_tool_names(
     selected: set[str] = set(CORE_DIALOGUE_TOOL_NAMES)
 
     if has_reply:
-        selected.update({"get_message", "react_to_message", "send_message"})
+        # Reply threads are the highest-value native QQ expression context.
+        # Expose reaction lookup here so the speech policy may choose a real
+        # reaction instead of forcing a text acknowledgement.
+        selected.update(
+            {"get_message", "react_to_message", "search_reactions", "send_message"}
+        )
     if has_mentions:
         selected.update({"get_group_member", "get_person_profile", "send_message"})
     if has_media:
@@ -131,6 +136,11 @@ def select_dialogue_message_segment_types(
     selected: set[str] = {"text"}
     if has_reply or "回复" in normalized or "引用" in normalized:
         selected.add("reply")
+    if has_reply:
+        # P6: reply threads may naturally use one reaction instead of a
+        # redundant acknowledgement sentence. Actual reaction_id still has to
+        # come from search_reactions and outbound validation remains unchanged.
+        selected.add("reaction")
     if has_target_mentions or "艾特" in normalized:
         selected.add("at")
     if "表情包" in normalized or "reaction" in normalized or any(

@@ -9,6 +9,7 @@ from typing import Any
 from .context import CurrentTurn
 from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
+from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
 PROMPT_VERSION = "yawn-agent-v13"
 
@@ -17,7 +18,9 @@ PROMPT_VERSION = "yawn-agent-v13"
 _SYSTEM_POLICY = (
     "按角色设定参与 QQ 群聊。"
     "current_turn 是本轮最高优先级：先确认当前发言人、指向和真实问题；"
-    "历史、active_topic、画像、关系和记忆只能辅助理解，不能覆盖当前消息。"
+    "历史、topic_state、画像、关系和记忆只能辅助理解，不能覆盖当前消息。"
+    "topic_state 是当前话题的权威结构化状态；active_topic 仅是兼容标签，"
+    "过期或冲突时不要强行沿用。"
     "不要误答上一位成员或把他人对话当成当前提问；"
     "不复述聊天记录、不模板化附和、不强行追问续聊。"
     "只依据已提供事实与公开记忆；不知道就明确说不知道，不编造现实经历或成员经历，"
@@ -118,6 +121,8 @@ def build_tool_guidance(tools: list[dict[str, Any]]) -> str:
         parts.append(_FORWARD_RULES)
     if "discover_tools" in tool_names:
         parts.append(_DISCOVERY_RULES)
+    if parts:
+        parts.insert(0, TOOL_RESULT_SPEECH_INSTRUCTION)
     return "\n".join(parts)
 
 
