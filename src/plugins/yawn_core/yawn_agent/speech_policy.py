@@ -24,6 +24,7 @@ from .speech import (
     SpeechStyle,
     normalize_speech_scene,
 )
+from .speech_native import native_expression_instruction, plan_native_expression
 
 if TYPE_CHECKING:
     from .context import CurrentTurn
@@ -190,7 +191,13 @@ def build_speech_instruction(
         "不要先复述用户刚说的话；不要用“还需要我帮你吗/如果还有问题可以继续问”之类"
         "通用结尾强行续聊。只有真正缺少关键信息时才反问。"
     )
-    return f"发言场景={scene}。{_SCENE_RULES[scene]}{style_rule}{quality_rule}"
+    native_rule = native_expression_instruction(
+        plan_native_expression(current_turn, scene=scene, style=style)
+    )
+    return (
+        f"发言场景={scene}。{_SCENE_RULES[scene]}{style_rule}{quality_rule}"
+        f"{native_rule}"
+    )
 
 
 __all__ = [
