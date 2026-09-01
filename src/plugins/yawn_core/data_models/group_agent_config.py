@@ -86,10 +86,15 @@ class GroupAgentConfig(Model):
     admin_tool_daily_limit: Mapped[int] = mapped_column(Integer, default=30)
     critical_tool_count: Mapped[int] = mapped_column(Integer, default=0)
     critical_tool_daily_limit: Mapped[int] = mapped_column(Integer, default=5)
-    # 默认仅开放历史兼容的低风险管理工具；新增 privileged/critical 必须显式启用。
-    # 空列表语义为全部禁用。
+    # 默认开放历史低风险管理能力与精华设置；其余新增 privileged/critical
+    # 仍必须显式启用。空列表语义为全部禁用。
     tool_allowlist: Mapped[list[str]] = mapped_column(
-        JSON, default=lambda: ["mute_member", "create_group_announcement"]
+        JSON,
+        default=lambda: [
+            "mute_member",
+            "create_group_announcement",
+            "set_essence_message",
+        ],
     )
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.current_timestamp(), onupdate=func.current_timestamp()
