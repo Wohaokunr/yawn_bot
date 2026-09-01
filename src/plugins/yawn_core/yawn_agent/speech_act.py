@@ -94,29 +94,31 @@ def plan_speech_act(
     normalized_scene = normalize_speech_scene(scene)
     payload = _turn_payload(current_turn)
     content = str(payload.get("content") or "").strip()
-    compact = "".join(content.split()).rstrip("。.!！?？~～")
+    compact = "".join(content.split()).rstrip("。.!！?？~")
 
     if normalized_scene == SPEECH_SCENE_TOOL_RESULT:
-        return SpeechActPlan(
+        plan = SpeechActPlan(
             SPEECH_ACT_TOOL_REPORT,
             reason="tool_result_scene",
         )
-    if normalized_scene == SPEECH_SCENE_REACTION:
-        return SpeechActPlan(SPEECH_ACT_REACT, reason="reaction_scene")
-    if any(hint in compact for hint in _CLOSE_HINTS):
-        return SpeechActPlan(SPEECH_ACT_CLOSE, reason="explicit_closure")
-    if compact in _ACK_TEXTS:
-        return SpeechActPlan(SPEECH_ACT_ACKNOWLEDGE, reason="short_ack")
-    if normalized_scene in {SPEECH_SCENE_DIRECT_REPLY, SPEECH_SCENE_REPLY_THREAD}:
-        return SpeechActPlan(
+    elif normalized_scene == SPEECH_SCENE_REACTION:
+        plan = SpeechActPlan(SPEECH_ACT_REACT, reason="reaction_scene")
+    elif any(hint in compact for hint in _CLOSE_HINTS):
+        plan = SpeechActPlan(SPEECH_ACT_CLOSE, reason="explicit_closure")
+    elif compact in _ACK_TEXTS:
+        plan = SpeechActPlan(SPEECH_ACT_ACKNOWLEDGE, reason="short_ack")
+    elif normalized_scene in {SPEECH_SCENE_DIRECT_REPLY, SPEECH_SCENE_REPLY_THREAD}:
+        plan = SpeechActPlan(
             SPEECH_ACT_ANSWER,
             must_answer=True,
             allow_followup_question=True,
             reason="explicit_turn",
         )
-    if normalized_scene == SPEECH_SCENE_FOLLOWUP:
-        return SpeechActPlan(SPEECH_ACT_CONTINUE, reason="bounded_followup")
-    return SpeechActPlan(SPEECH_ACT_CONTINUE, reason="normal_conversation")
+    elif normalized_scene == SPEECH_SCENE_FOLLOWUP:
+        plan = SpeechActPlan(SPEECH_ACT_CONTINUE, reason="bounded_followup")
+    else:
+        plan = SpeechActPlan(SPEECH_ACT_CONTINUE, reason="normal_conversation")
+    return plan
 
 
 def speech_act_instruction(plan: SpeechActPlan) -> str:
@@ -132,7 +134,10 @@ def speech_act_instruction(plan: SpeechActPlan) -> str:
     if plan.act == SPEECH_ACT_TOOL_REPORT:
         return "话语动作=tool_report：只报告真实结果与必要下一步，不展开后台过程。"
     if plan.act == SPEECH_ACT_CLOSE:
-        return "话语动作=close：自然收束，不追加新问题，不用客套 CTA 把已经结束的话题重新打开。"
+        return (
+            "话语动作=close：自然收束，不追加新问题，"
+            "不用客套 CTA 把已经结束的话题重新打开。"
+        )
     return (
         "话语动作=continue：只承接当前最相关的一点并贡献新信息；"
         "不要为了维持对话机械反问或重复上一轮。"
