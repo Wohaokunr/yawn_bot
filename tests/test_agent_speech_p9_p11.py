@@ -45,7 +45,7 @@ def test_p9_explicit_turn_is_answer_but_closure_stays_closed() -> None:
         scene="direct_reply",
     )
     assert closing.act == SPEECH_ACT_CLOSE
-    assert "不要" in speech_act_instruction(closing)
+    assert "不追加新问题" in speech_act_instruction(closing)
 
 
 def test_p9_short_ack_does_not_expand_into_new_topic() -> None:
