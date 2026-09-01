@@ -1,3 +1,4 @@
+# ruff: noqa: PLR0911, PLR2004
 """Bounded topic state and deterministic topic transitions for Agent speech."""
 
 from __future__ import annotations
@@ -162,7 +163,9 @@ def topic_state_from_prompt(value: object) -> TopicState:
 def _compact_topic_label(text: object) -> str | None:
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     value = re.sub(r"^(?:@\S+\s*)+", "", value)
-    value = re.sub(r"^(?:但是|不过|然后|所以|那|这个|就是|话说|对了)[，,：:\s]*", "", value)
+    value = re.sub(
+        r"^(?:但是|不过|然后|所以|那|这个|就是|话说|对了)[，,：:\s]*", "", value
+    )
     if not value:
         return None
     first = re.split(r"[。！？!?；;\n]", value, maxsplit=1)[0].strip(" ，,：:")
@@ -217,23 +220,46 @@ def resolve_topic_transition(
     suggestion = _compact_topic_label(suggested_topic)
     if suggestion:
         if not state.label:
-            return TopicTransition(TOPIC_ACTION_SHIFT, suggestion, "model_topic_without_anchor")
+            return TopicTransition(
+                TOPIC_ACTION_SHIFT, suggestion, "model_topic_without_anchor"
+            )
         if topic_similarity(state.label, suggestion) >= _TOPIC_SIMILARITY_CONTINUE:
-            return TopicTransition(TOPIC_ACTION_CONTINUE, state.label, "model_topic_matches")
+            return TopicTransition(
+                TOPIC_ACTION_CONTINUE, state.label, "model_topic_matches"
+            )
         return TopicTransition(TOPIC_ACTION_SHIFT, suggestion, "model_topic_changed")
 
     derived = _compact_topic_label(current_text)
-    if state.label and state.status not in {"stale", "empty"} and state.continuity in {
-        "continuing",
-        "active_cluster",
-    }:
-        return TopicTransition(TOPIC_ACTION_CONTINUE, state.label, "recent_cluster_continues")
-    if state.label and derived and topic_similarity(state.label, derived) >= _TOPIC_SIMILARITY_CONTINUE:
-        return TopicTransition(TOPIC_ACTION_CONTINUE, state.label, "current_turn_matches")
-    if derived and (not state.label or state.status == "stale" or state.continuity in {"none", "new"}):
+    if (
+        state.label
+        and state.status not in {"stale", "empty"}
+        and state.continuity
+        in {
+            "continuing",
+            "active_cluster",
+        }
+    ):
+        return TopicTransition(
+            TOPIC_ACTION_CONTINUE, state.label, "recent_cluster_continues"
+        )
+    if (
+        state.label
+        and derived
+        and topic_similarity(state.label, derived) >= _TOPIC_SIMILARITY_CONTINUE
+    ):
+        return TopicTransition(
+            TOPIC_ACTION_CONTINUE, state.label, "current_turn_matches"
+        )
+    if derived and (
+        not state.label
+        or state.status == "stale"
+        or state.continuity in {"none", "new"}
+    ):
         return TopicTransition(TOPIC_ACTION_SHIFT, derived, "new_or_stale_topic")
     if state.label:
-        return TopicTransition(TOPIC_ACTION_CONTINUE, state.label, "keep_existing_topic")
+        return TopicTransition(
+            TOPIC_ACTION_CONTINUE, state.label, "keep_existing_topic"
+        )
     return TopicTransition(TOPIC_ACTION_CONTINUE, None, "no_topic_signal")
 
 

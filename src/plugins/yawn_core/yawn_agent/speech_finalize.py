@@ -1,3 +1,4 @@
+# ruff: noqa: E501,TID252,TC001,TC002,PLR0915,PLR0917,SIM114
 """SpeechPlan finalization and post-send state updates for dialogue."""
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def apply_speech_topic(config: GroupAgentConfig, plan: SpeechPlan) -> str | None
         config.context_epoch += 1
         config.active_topic = next_topic
         dbg(
-            f"群 {config.group_id} 话题状态变更: epoch={config.context_epoch} "
+            f"群 {getattr(config, 'group_id', '?')} 话题状态变更: epoch={config.context_epoch} "
             f"action={plan.topic_action} topic={next_topic!r}"
         )
     return next_topic
@@ -90,7 +91,9 @@ async def finalize_reply(  # noqa: PLR0913
     fingerprint_source = reply_text or json.dumps(
         list(prepared.segment_records), ensure_ascii=False, sort_keys=True
     )
-    input_fingerprint = hashlib.sha256(user_prompt.casefold().encode("utf-8")).hexdigest()
+    input_fingerprint = hashlib.sha256(
+        user_prompt.casefold().encode("utf-8")
+    ).hexdigest()
     response_fingerprint = hashlib.sha256(
         fingerprint_source.casefold().encode("utf-8")
     ).hexdigest()
@@ -145,7 +148,9 @@ async def finalize_reply(  # noqa: PLR0913
                 media_refs=sent.media_refs,
             )
         else:
-            dbg(f"群 {group_id} 回复投递状态未知,按可能已送达推进冷却/去重但不写消息历史")
+            dbg(
+                f"群 {group_id} 回复投递状态未知,按可能已送达推进冷却/去重但不写消息历史"
+            )
         recent.append(
             {
                 "input": input_fingerprint,

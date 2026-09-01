@@ -1,3 +1,4 @@
+# ruff: noqa: E501,TID252,PLR0912,PLR0913,PLR0915,PLR2004,C901,TC003
 """Prompt context loading; kept outside dialogue orchestration by design."""
 
 from __future__ import annotations
@@ -17,7 +18,12 @@ from ..data_models.user_group import UserGroup
 from .activity import activity_window_counts as _activity_window_counts
 from .context import ActivitySnapshot, build_context, now_beijing, trim_context_messages
 from .context_budget import pack_context
-from .context_history import history_message_payload as _history_message_payload, select_context_messages
+from .context_history import (
+    history_message_payload as _history_message_payload,
+)
+from .context_history import (
+    select_context_messages,
+)
 from .emotion import emotion_context_state
 from .log import dbg
 from .memory import effective_relation_confidence, rank_memories
@@ -25,6 +31,7 @@ from .persona import persona_editor_profile
 
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 _MEMORY_CONTEXT_LIMIT = 24
+
 
 async def load_context(
     session: Any,
@@ -158,9 +165,7 @@ async def load_context(
         if len(focus_ids) >= 4:
             break
     relevant_member_ids = {
-        int(item["user_id"])
-        for item in messages
-        if item.get("role") != "bot"
+        int(item["user_id"]) for item in messages if item.get("role") != "bot"
     }
     relevant_member_ids.update(focus_ids)
     member_rows = (
@@ -280,13 +285,16 @@ async def load_context(
         ):
             continue
         local_rows.append(row)
-    focus_by_member: dict[int, list[AgentMemory]] = {user_id: [] for user_id in focus_ids}
+    focus_by_member: dict[int, list[AgentMemory]] = {
+        user_id: [] for user_id in focus_ids
+    }
     for row in local_rows:
         subject_id = int(row.subject_user_id or 0)
-        if (
-            subject_id in focus_by_member
-            and row.memory_type in {"core", "profile", "manual"}
-        ):
+        if subject_id in focus_by_member and row.memory_type in {
+            "core",
+            "profile",
+            "manual",
+        }:
             focus_by_member[subject_id].append(row)
     focused_profiles: list[AgentMemory] = []
     for position in range(32):
@@ -337,16 +345,20 @@ async def load_context(
             .all()
         )
         source_groups = {int(row.group_id or 0) for row in shared_rows}
-        shared_optouts = set(
-            (
-                await session.execute(
-                    select(AgentPrivacy.group_id, AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id.in_(source_groups),
-                        AgentPrivacy.opted_out.is_(True),
+        shared_optouts = (
+            set(
+                (
+                    await session.execute(
+                        select(AgentPrivacy.group_id, AgentPrivacy.user_id).where(
+                            AgentPrivacy.group_id.in_(source_groups),
+                            AgentPrivacy.opted_out.is_(True),
+                        )
                     )
-                )
-            ).all()
-        ) if source_groups else set()
+                ).all()
+            )
+            if source_groups
+            else set()
+        )
         shared_rows = [
             row
             for row in shared_rows
@@ -370,13 +382,16 @@ async def load_context(
     for row, source in [
         *((row, "group_summary") for row in summaries[:5]),
         *((row, "shared_public") for row in shared_rows),
-        *((
-            row,
-            "speaker"
-            if speaker_id is not None
-            and int(row.subject_user_id or 0) == speaker_id
-            else "participant",
-        ) for row in focused_profiles),
+        *(
+            (
+                row,
+                "speaker"
+                if speaker_id is not None
+                and int(row.subject_user_id or 0) == speaker_id
+                else "participant",
+            )
+            for row in focused_profiles
+        ),
         *((row, "topic") for row in topic_rows),
     ]:
         row_id = int(row.id or 0)
@@ -414,7 +429,9 @@ async def load_context(
             "source": row.source_kind,
             "evidence_count": len(row.evidence_message_ids or []),
             "first_observed_date": (row.created_at or now).date().isoformat(),
-            "last_confirmed_date": (row.updated_at or row.created_at or now).date().isoformat(),
+            "last_confirmed_date": (row.updated_at or row.created_at or now)
+            .date()
+            .isoformat(),
             "source_scope": source,
             "source_date": str(row.memory_key).rsplit(":", 1)[-1]
             if "daily:" in str(row.memory_key)
@@ -423,10 +440,7 @@ async def load_context(
         overhead = len(json.dumps(item, ensure_ascii=False))
         separator_chars = 2 if memories else 0
         remaining = (
-            _MEMORY_CONTEXT_CHAR_BUDGET
-            - memory_chars
-            - separator_chars
-            - overhead
+            _MEMORY_CONTEXT_CHAR_BUDGET - memory_chars - separator_chars - overhead
         )
         if remaining <= 0:
             break

@@ -1,3 +1,4 @@
+# ruff: noqa: TID252, TC001, TC002, PLR0913, PLR0917, RUF001
 """Small compatibility-safe helpers shared by dialogue/proactive paths."""
 
 from __future__ import annotations
@@ -31,7 +32,9 @@ def contains_word(text: str, word: str) -> bool:
     if not word:
         return False
     if re.fullmatch(r"[a-z0-9 ]+", word):
-        return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
+        return (
+            re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
+        )
     return word in text
 
 

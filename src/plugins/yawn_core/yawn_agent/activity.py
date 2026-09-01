@@ -1,3 +1,4 @@
+# ruff: noqa: TID252,PLR0913
 """Shared bounded group activity aggregates for dialogue/proactive paths."""
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from sqlalchemy import case, exists, func, select
 
 from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.group_agent_message import GroupAgentMessage
+
 
 async def activity_window_counts(
     session: Any,
@@ -53,9 +55,7 @@ async def activity_window_counts(
         await session.execute(
             select(
                 func.max(GroupAgentMessage.received_at),
-                func.max(
-                    case((in_window & is_member, GroupAgentMessage.received_at))
-                ),
+                func.max(case((in_window & is_member, GroupAgentMessage.received_at))),
                 func.sum(
                     case(
                         (
@@ -79,9 +79,7 @@ async def activity_window_counts(
                 func.sum(case((in_window & is_member, 1), else_=0)),
                 func.sum(case((in_5m & is_member, 1), else_=0)),
                 func.count(
-                    func.distinct(
-                        case((in_5m & is_member, GroupAgentMessage.user_id))
-                    )
+                    func.distinct(case((in_5m & is_member, GroupAgentMessage.user_id)))
                 ),
                 func.count(func.distinct(case((in_window, GroupAgentMessage.user_id)))),
                 func.sum(

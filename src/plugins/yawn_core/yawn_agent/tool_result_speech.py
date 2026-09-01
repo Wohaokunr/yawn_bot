@@ -44,7 +44,7 @@ def build_speech_evidence(tool_name: str, payload: dict[str, Any]) -> SpeechEvid
     ok = bool(payload.get("ok"))
     if not ok:
         error = str(payload.get("error") or "执行失败").strip()[:160]
-        return SpeechEvidence(name, False, f"未成功：{error}")
+        return SpeechEvidence(tool_name=name, ok=False, summary=f"未成功：{error}")
 
     result = payload.get("result")
     delivery_state: str | None = None
@@ -65,7 +65,13 @@ def build_speech_evidence(tool_name: str, payload: dict[str, Any]) -> SpeechEvid
         summary = f"成功，返回 {item_count} 项；只挑与当前问题有关的信息"
     else:
         summary = "成功；只说明与当前请求相关的结果"
-    return SpeechEvidence(name, True, summary, delivery_state, item_count)
+    return SpeechEvidence(
+        tool_name=name,
+        ok=True,
+        summary=summary,
+        delivery_state=delivery_state,
+        item_count=item_count,
+    )
 
 
 def tool_result_speech_hint(tool_name: str, payload: dict[str, Any]) -> str:
@@ -74,8 +80,8 @@ def tool_result_speech_hint(tool_name: str, payload: dict[str, Any]) -> str:
 
 
 __all__ = [
-    "SpeechEvidence",
     "TOOL_RESULT_SPEECH_INSTRUCTION",
+    "SpeechEvidence",
     "build_speech_evidence",
     "tool_result_speech_hint",
 ]

@@ -1,3 +1,4 @@
+# ruff: noqa: E501,PLR2004
 from __future__ import annotations
 
 import sys
@@ -63,13 +64,17 @@ def test_p7_stale_topic_can_shift_without_storing_full_raw_message() -> None:
 
 def test_p8_tool_backed_reply_enters_tool_result_scene_with_evidence() -> None:
     _load_agent_modules()
-    from src.plugins.yawn_core.yawn_agent.speech_runtime import build_runtime_speech_plan
-    from src.plugins.yawn_core.yawn_agent.tool_result_speech import build_speech_evidence
+    from src.plugins.yawn_core.yawn_agent.speech_runtime import (
+        build_runtime_speech_plan,
+    )
+    from src.plugins.yawn_core.yawn_agent.tool_result_speech import (
+        build_speech_evidence,
+    )
 
     evidence = build_speech_evidence(
         "list_group_members", {"ok": True, "result": {"items": [{}, {}]}}
     )
-    assert evidence.item_count == 2  # noqa: PLR2004
+    assert evidence.item_count == 2
     plan = build_runtime_speech_plan(
         text="群里现在有 2 个相关成员。",
         persona={"name": "Yawn"},
@@ -84,12 +89,20 @@ def test_p8_tool_backed_reply_enters_tool_result_scene_with_evidence() -> None:
 def test_p9_proactive_scene_builds_the_same_speech_plan_model() -> None:
     _load_agent_modules()
     from src.plugins.yawn_core.yawn_agent.speech import SpeechPlan
-    from src.plugins.yawn_core.yawn_agent.speech_runtime import build_runtime_speech_plan
+    from src.plugins.yawn_core.yawn_agent.speech_runtime import (
+        build_runtime_speech_plan,
+    )
 
     plan = build_runtime_speech_plan(
         text="这个确实有点离谱。",
         persona={"name": "Yawn"},
-        context={"topic_state": {"label": "部署", "status": "fresh", "continuity": "continuing"}},
+        context={
+            "topic_state": {
+                "label": "部署",
+                "status": "fresh",
+                "continuity": "continuing",
+            }
+        },
         source="active",
         action="speak",
         suggested_topic="部署",
@@ -130,13 +143,23 @@ def test_p10_speech_trace_is_a_distinct_stage() -> None:
 
 
 def test_p12_dialogue_no_longer_owns_context_activity_or_persistence() -> None:
-    dialogue = (PROJECT_ROOT / "src/plugins/yawn_core/yawn_agent/dialogue.py").read_text(encoding="utf-8")
-    proactive = (PROJECT_ROOT / "src/plugins/yawn_core/yawn_agent/proactive.py").read_text(encoding="utf-8")
-    webui = (PROJECT_ROOT / "src/plugins/yawn_core/webui/agent.py").read_text(encoding="utf-8")
+    dialogue = (
+        PROJECT_ROOT / "src/plugins/yawn_core/yawn_agent/dialogue.py"
+    ).read_text(encoding="utf-8")
+    proactive = (
+        PROJECT_ROOT / "src/plugins/yawn_core/yawn_agent/proactive.py"
+    ).read_text(encoding="utf-8")
+    webui = (PROJECT_ROOT / "src/plugins/yawn_core/webui/agent.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "async def _load_context" not in dialogue
     assert "async def _activity_window_counts" not in dialogue
     assert "async def persist_bot_reply" not in dialogue
     assert "from .dialogue import (" not in proactive
-    assert "yawn_agent.dialogue import _history_message_meta, _load_context" not in webui
-    assert len(dialogue.splitlines()) < 1500  # final orchestration file must stay materially smaller
+    assert (
+        "yawn_agent.dialogue import _history_message_meta, _load_context" not in webui
+    )
+    assert (
+        len(dialogue.splitlines()) < 1500
+    )  # final orchestration file must stay materially smaller

@@ -1,3 +1,4 @@
+# ruff: noqa: PLR0913
 """Common speech runtime shared by dialogue, proactive and WebUI dry-runs."""
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def build_runtime_speech_plan(
     text: object = "",
     segments: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
     persona: dict[str, str] | None,
-    current_turn: object = None,
+    current_turn: Any = None,
     context: dict[str, Any] | None = None,
     source: str | None = None,
     after_tool: bool = False,
@@ -89,7 +90,7 @@ def trace_speech_decision(
     emotion_state: object = None,
     participation_action: str | None = None,
     status: str | None = None,
-    trace: object = None,
+    trace: Any = None,
 ) -> SpeechPlan:
     resolved = finalize_speech_plan(plan, autofix=False)
     output = resolved.trace_payload()
@@ -131,7 +132,9 @@ def speech_simulation_payload(
     payload.update(
         {
             "status": "policy_only" if preview_only else "final",
-            "should_speak": resolved.should_speak if should_speak is None else should_speak,
+            "should_speak": resolved.should_speak
+            if should_speak is None
+            else should_speak,
             "text": resolved.visible_text,
             "segments": [dict(item) for item in resolved.segments],
             "emotion": emotion_state,
