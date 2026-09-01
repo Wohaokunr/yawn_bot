@@ -86,3 +86,12 @@ evidence = evidence.replace(
     1,
 )
 write(evidence_path, evidence)
+
+finalize_path = "src/plugins/yawn_core/yawn_agent/speech_finalize.py"
+finalize = read(finalize_path)
+old_log = '            f"群 {config.group_id} 话题状态变更: epoch={config.context_epoch} "\n'
+new_log = '            f"群 {getattr(config, \'group_id\', \'?\')} 话题状态变更: epoch={config.context_epoch} "\n'
+if old_log not in finalize:
+    raise RuntimeError("speech_finalize topic debug marker missing")
+finalize = finalize.replace(old_log, new_log, 1)
+write(finalize_path, finalize)
