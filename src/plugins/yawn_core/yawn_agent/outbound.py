@@ -40,6 +40,13 @@ from .context import now_beijing
 from .execution_trace import trace_event
 from .media import validate_outbound_image_path
 from .reactions import resolve_reaction
+from .speech import (
+    SpeechPlan,
+    SpeechStyle,
+    speech_plan_from_segments,
+    speech_plan_from_text,
+)
+from .speech_quality import finalize_speech_plan
 
 MAX_OUTBOUND_SEGMENTS = 12
 MAX_OUTBOUND_TEXT_CHARS = 4_000
@@ -80,6 +87,8 @@ class PreparedOutboundMessage:
     reply_chain: tuple[dict[str, Any], ...] = ()
     media_refs: tuple[dict[str, Any], ...] = ()
     temporary_files: tuple[Path, ...] = ()
+    speech_scene: str = "conversation"
+    quality_issues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,10 +446,28 @@ def _segment_record(
     }
 
 
-def prepare_text_message(text: str) -> PreparedOutboundMessage:
-    """纯文本也走统一 outbound 表示，供旧回复链路复用。"""
+def _quality_codes(plan: SpeechPlan) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(item.code for item in plan.issues))
 
-    bounded = str(text)
+
+def prepare_text_message(
+    text: str,
+    *,
+    speech_scene: str = "conversation",
+    speech_style: SpeechStyle | None = None,
+    speech_user_text: str = "",
+    recent_speech: tuple[str, ...] | list[str] = (),
+    speech_autofix: bool = True,
+) -> PreparedOutboundMessage:
+    """纯文本也先形成 SpeechPlan，再走统一 outbound 表示。"""
+
+    plan = finalize_speech_plan(
+        speech_plan_from_text(text, scene=speech_scene, style=speech_style),
+        user_text=speech_user_text,
+        recent_texts=recent_speech,
+        autofix=speech_autofix,
+    )
+    bounded = str(plan.text)
     if not bounded:
         raise ValueError("消息文本不能为空")
     if len(bounded) > MAX_OUTBOUND_TEXT_CHARS:
@@ -449,6 +476,8 @@ def prepare_text_message(text: str) -> PreparedOutboundMessage:
         message=Message(MessageSegment.text(bounded)),
         normalized_text=bounded,
         segment_records=(_segment_record("text", {"text": bounded}, bounded),),
+        speech_scene=plan.scene,
+        quality_issues=_quality_codes(plan),
     )
 
 
@@ -459,8 +488,13 @@ async def prepare_outbound_message(
     group_id: int,
     actor_user_id: int | None = None,
     allowed_segment_types: frozenset[str] | None = None,
+    speech_scene: str = "conversation",
+    speech_style: SpeechStyle | None = None,
+    speech_user_text: str = "",
+    recent_speech: tuple[str, ...] | list[str] = (),
+    speech_autofix: bool = False,
 ) -> PreparedOutboundMessage:
-    """验证模型给出的受限消息段，并转换为 NoneBot Message。"""
+    """先经 SpeechPlan 质量层，再验证受限消息段并转换为 NoneBot Message。"""
 
     if not isinstance(raw_segments, list) or not raw_segments:
         raise ValueError("segments 必须是非空数组")
@@ -468,6 +502,18 @@ async def prepare_outbound_message(
         raise ValueError(f"单条消息最多 {MAX_OUTBOUND_SEGMENTS} 个消息段")
     if any(not isinstance(item, dict) for item in raw_segments):
         raise ValueError("segments 中每一项都必须是对象")
+
+    plan = finalize_speech_plan(
+        speech_plan_from_segments(
+            raw_segments,
+            scene=speech_scene,
+            style=speech_style,
+        ),
+        user_text=speech_user_text,
+        recent_texts=recent_speech,
+        autofix=speech_autofix,
+    )
+    raw_segments = list(plan.segments)
 
     reply_count = sum(item.get("type") == "reply" for item in raw_segments)
     media_count = sum(
@@ -770,7 +816,47 @@ async def prepare_outbound_message(
         reply_chain=tuple(reply_chain),
         media_refs=tuple(media_refs),
         temporary_files=tuple(temporary_files),
+        speech_scene=plan.scene,
+        quality_issues=_quality_codes(plan),
     )
+
+
+async def prepare_speech_plan(
+    plan: SpeechPlan,
+    *,
+    session: Any,
+    group_id: int,
+    actor_user_id: int | None = None,
+    allowed_segment_types: frozenset[str] | None = None,
+    speech_user_text: str = "",
+    recent_speech: tuple[str, ...] | list[str] = (),
+    speech_autofix: bool = True,
+) -> PreparedOutboundMessage:
+    """Canonical SpeechPlan -> validated OneBot outbound adapter."""
+
+    if plan.segments:
+        return await prepare_outbound_message(
+            list(plan.segments),
+            session=session,
+            group_id=group_id,
+            actor_user_id=actor_user_id,
+            allowed_segment_types=allowed_segment_types,
+            speech_scene=plan.scene,
+            speech_style=plan.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=speech_autofix,
+        )
+    if plan.text:
+        return prepare_text_message(
+            plan.text,
+            speech_scene=plan.scene,
+            speech_style=plan.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=speech_autofix,
+        )
+    raise ValueError("SpeechPlan 没有可发送内容")
 
 
 def _is_unsupported_error(error: BaseException) -> bool:
@@ -853,6 +939,8 @@ def _build_degraded_message(
         message=message,
         normalized_text=normalized,
         segment_records=tuple(records),
+        speech_scene=prepared.speech_scene,
+        quality_issues=prepared.quality_issues,
     )
 
 
@@ -890,6 +978,8 @@ async def send_prepared_outbound(
             "message_type": original_type,
             "segment_types": original_types,
             "source": source,
+            "speech_scene": prepared.speech_scene,
+            "quality_issues": prepared.quality_issues,
             "text_chars": len(prepared.normalized_text),
             "text_preview": prepared.normalized_text[:320],
         },
@@ -1452,6 +1542,7 @@ __all__ = [
     "extract_message_id",
     "prepare_forward_message",
     "prepare_outbound_message",
+    "prepare_speech_plan",
     "prepare_text_message",
     "send_forward_message",
     "send_outbound_message",

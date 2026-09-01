@@ -8,6 +8,7 @@ from typing import Any
 
 from .context import CurrentTurn
 from .persona import prompt_persona
+from .speech_policy import build_speech_instruction
 
 PROMPT_VERSION = "yawn-agent-v13"
 
@@ -55,6 +56,7 @@ _STABLE_MEMORY_SCOPES = frozenset({"group_summary", "shared_public"})
 _STABLE_SYSTEM_PREFIX = "群背景资料（长期记忆，仅在记忆整理时更新）："
 _SPEAKER_SYSTEM_PREFIX = "当前相关成员资料（半稳定，仅作事实参考）："
 _REALTIME_SYSTEM_PREFIX = "当前群聊状态（易变）："
+_SPEECH_SYSTEM_PREFIX = "当前发言策略（只约束表达，不改变事实/权限/工具边界）："
 _SPEAKER_CONTEXT_KEYS = frozenset({"members", "memories", "relations"})
 
 
@@ -190,20 +192,24 @@ def build_messages(  # noqa: PLR0913
     """返回消息和固定前缀指纹。
 
     消息按变化频率分层：静态前缀 → 稳定群背景 → 半稳定成员资料 →
-    当前工具说明 → 易变状态 → 用户输入。activity / 最近消息不会再排在
-    成员画像和关系之前，因此同一发言人的连续回合可以命中更长前缀。
+    当前工具说明 → 易变状态+发言场景 → 用户输入。Speech policy 保持在
+    易变尾部，Persona/scene 调整不会破坏前面的稳定缓存层。
     """
 
     static = build_static_prefix(persona, tools)
     stable, volatile = split_context(context)
     speaker, realtime = split_volatile_context(volatile)
     tool_guidance = build_tool_guidance(tools)
+    speech_guidance = build_speech_instruction(persona, current_turn)
     rendered_user_prompt = (
         render_current_turn(current_turn) if current_turn is not None else user_prompt
     )
     user_content: str | list[dict[str, Any]] = rendered_user_prompt
     if media_inputs:
         user_content = [{"type": "text", "text": rendered_user_prompt}, *media_inputs]
+    realtime_content = f"{_REALTIME_SYSTEM_PREFIX}{canonical_json(realtime)}"
+    if speech_guidance:
+        realtime_content += f"\n{_SPEECH_SYSTEM_PREFIX}{speech_guidance}"
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": static},
         {
@@ -222,10 +228,7 @@ def build_messages(  # noqa: PLR0913
         messages.append({"role": "system", "content": tool_guidance})
     messages.extend(
         (
-            {
-                "role": "system",
-                "content": f"{_REALTIME_SYSTEM_PREFIX}{canonical_json(realtime)}",
-            },
+            {"role": "system", "content": realtime_content},
             {"role": "user", "content": user_content},
         )
     )
