@@ -7,8 +7,8 @@ speech-quality rules, then adds act and group-turn-taking checks.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .speech import SpeechStyle, speech_plan_from_text
 from .speech_act import (
@@ -19,6 +19,9 @@ from .speech_act import (
 )
 from .speech_quality import finalize_speech_plan
 from .turn_taking import TURN_PRESSURE_HIGH
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _MAX_SCORE = 100
 _PASS_SCORE = 80
