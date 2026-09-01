@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Scene and Persona policy for Agent speech.
 
 This module is intentionally deterministic and zero-AI-cost.  It tells the
