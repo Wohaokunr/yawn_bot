@@ -7,6 +7,8 @@ from typing import Any
 
 _TOPIC_STALE_MINUTES = 30
 _TOPIC_FRESH_MINUTES = 10
+_ACTIVE_CLUSTER_MIN_MESSAGES = 4
+_ACTIVE_CLUSTER_MIN_PARTICIPANTS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,14 +37,14 @@ class TopicState:
         return payload
 
 
-def _bounded_minutes(value: object) -> int | None:
-    if isinstance(value, bool):
+def _bounded_int(value: object, *, minimum: int = 0) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except ValueError:
         return None
-    return max(parsed, 0)
+    return max(parsed, minimum)
 
 
 def _message_cluster(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -55,6 +57,36 @@ def _message_cluster(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return messages[boundary:]
 
 
+def _topic_status(
+    *,
+    label: str | None,
+    cluster: list[dict[str, Any]],
+    latest_age: int | None,
+) -> str:
+    if not label and not cluster:
+        return "empty"
+    if latest_age is None:
+        return "unknown_age"
+    if latest_age >= _TOPIC_STALE_MINUTES:
+        return "stale"
+    if latest_age <= _TOPIC_FRESH_MINUTES:
+        return "fresh"
+    return "cooling"
+
+
+def _topic_continuity(message_count: int, participant_count: int) -> str:
+    if message_count == 0:
+        return "none"
+    if message_count == 1:
+        return "new"
+    if (
+        message_count >= _ACTIVE_CLUSTER_MIN_MESSAGES
+        and participant_count >= _ACTIVE_CLUSTER_MIN_PARTICIPANTS
+    ):
+        return "active_cluster"
+    return "continuing"
+
+
 def build_topic_state(
     active_topic: str | None,
     messages: list[dict[str, Any]],
@@ -63,43 +95,24 @@ def build_topic_state(
 
     cluster = _message_cluster(messages)
     label = str(active_topic or "").strip()[:240] or None
-    latest_age = (
-        _bounded_minutes(cluster[-1].get("minutes_ago")) if cluster else None
-    )
-    participant_ids = {
-        int(item.get("user_id") or 0)
-        for item in cluster
-        if item.get("role") != "bot" and int(item.get("user_id") or 0) > 0
-    }
+    latest_age = _bounded_int(cluster[-1].get("minutes_ago")) if cluster else None
+
+    participant_ids: set[int] = set()
+    for item in cluster:
+        if item.get("role") == "bot":
+            continue
+        user_id = _bounded_int(item.get("user_id"), minimum=1)
+        if user_id is not None:
+            participant_ids.add(user_id)
+
     anchors: list[int] = []
     for item in cluster[-3:]:
-        try:
-            message_id = int(item.get("message_id") or 0)
-        except (TypeError, ValueError):
-            continue
-        if message_id and message_id not in anchors:
+        message_id = _bounded_int(item.get("message_id"), minimum=1)
+        if message_id is not None and message_id not in anchors:
             anchors.append(message_id)
 
-    if not label and not cluster:
-        status = "empty"
-    elif latest_age is None:
-        status = "unknown_age"
-    elif latest_age >= _TOPIC_STALE_MINUTES:
-        status = "stale"
-    elif latest_age <= _TOPIC_FRESH_MINUTES:
-        status = "fresh"
-    else:
-        status = "cooling"
-
-    if not cluster:
-        continuity = "none"
-    elif len(cluster) == 1:
-        continuity = "new"
-    elif len(cluster) >= 4 and len(participant_ids) >= 2:
-        continuity = "active_cluster"
-    else:
-        continuity = "continuing"
-
+    status = _topic_status(label=label, cluster=cluster, latest_age=latest_age)
+    continuity = _topic_continuity(len(cluster), len(participant_ids))
     return TopicState(
         label=label,
         status=status,
