@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 """Scene and Persona policy for Agent speech.
 
-This module is intentionally deterministic and zero-AI-cost.  It tells the
+This module is intentionally deterministic and zero-AI-cost. It tells the
 model how to express an already-authorized turn; it never decides permissions
 or executes OneBot actions.
 """
@@ -24,7 +24,9 @@ from .speech import (
     SpeechStyle,
     normalize_speech_scene,
 )
+from .speech_act import plan_speech_act, speech_act_instruction
 from .speech_native import native_expression_instruction, plan_native_expression
+from .turn_taking import plan_turn_taking, turn_taking_instruction
 
 if TYPE_CHECKING:
     from .context import CurrentTurn
@@ -173,6 +175,7 @@ def build_speech_instruction(
     current_turn: CurrentTurn | dict[str, Any] | None = None,
     *,
     source: str | None = None,
+    context: dict[str, Any] | None = None,
 ) -> str:
     scene = resolve_speech_scene(current_turn, source=source)
     style = resolve_speech_style(persona, scene=scene)
@@ -191,12 +194,16 @@ def build_speech_instruction(
         "不要先复述用户刚说的话；不要用“还需要我帮你吗/如果还有问题可以继续问”之类"
         "通用结尾强行续聊。只有真正缺少关键信息时才反问。"
     )
+    act_rule = speech_act_instruction(plan_speech_act(current_turn, scene=scene))
+    turn_rule = turn_taking_instruction(
+        plan_turn_taking(current_turn, scene=scene, context=context)
+    )
     native_rule = native_expression_instruction(
         plan_native_expression(current_turn, scene=scene, style=style)
     )
     return (
-        f"发言场景={scene}。{_SCENE_RULES[scene]}{style_rule}{quality_rule}"
-        f"{native_rule}"
+        f"发言场景={scene}。{_SCENE_RULES[scene]}{act_rule}{turn_rule}"
+        f"{style_rule}{quality_rule}{native_rule}"
     )
 
 
