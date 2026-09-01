@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: noqa: E501,PLR0913
 """Unified user-visible speech plan shared by dialogue and proactive paths.
 
 A SpeechPlan describes *what the Agent intends to say* before OneBot-specific
@@ -196,6 +196,7 @@ def speech_plan_from_segments(
 
 
 __all__ = [
+    "SPEECH_SCENES",
     "SPEECH_SCENE_ACTIVE_INTERJECT",
     "SPEECH_SCENE_CONVERSATION",
     "SPEECH_SCENE_DIRECT_REPLY",
@@ -205,7 +206,6 @@ __all__ = [
     "SPEECH_SCENE_REPLY_THREAD",
     "SPEECH_SCENE_TOOL_RESULT",
     "SPEECH_SCENE_WARMUP",
-    "SPEECH_SCENES",
     "SpeechPlan",
     "SpeechQualityIssue",
     "SpeechStyle",
