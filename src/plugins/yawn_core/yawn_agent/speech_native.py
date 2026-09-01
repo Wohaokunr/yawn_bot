@@ -55,11 +55,11 @@ def _turn_payload(current_turn: CurrentTurn | dict[str, Any] | None) -> dict[str
 
 
 def _positive_int(value: object) -> int | None:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except ValueError:
         return None
     return parsed if parsed > 0 else None
 
@@ -86,15 +86,17 @@ def plan_native_expression(
             mentions.append(user_id)
 
     allow_reaction = bool(
-        style.allow_spontaneous_reaction
-        and scene not in {SPEECH_SCENE_DIRECT_REPLY}
+        style.allow_spontaneous_reaction and scene != SPEECH_SCENE_DIRECT_REPLY
     )
     modes: list[str] = []
     if reply_id is not None or scene == SPEECH_SCENE_REPLY_THREAD:
         modes.append("reply")
     if mentions:
         modes.append("at_if_targeted")
-    if allow_reaction and scene in {SPEECH_SCENE_REPLY_THREAD, SPEECH_SCENE_REACTION}:
+    if allow_reaction and scene in {
+        SPEECH_SCENE_REPLY_THREAD,
+        SPEECH_SCENE_REACTION,
+    }:
         modes.append("reaction_if_sufficient")
     modes.append("text")
     return NativeExpressionPlan(
@@ -108,7 +110,8 @@ def plan_native_expression(
 def native_expression_instruction(plan: NativeExpressionPlan) -> str:
     parts = [
         "QQ 原生表达按本轮已知事实选择，不要为了显得活泼机械加段。",
-        "只有当前 schema 暴露 send_message/对应 segment 时才使用复合消息，否则直接文本回答。",
+        "只有当前 schema 暴露 send_message/对应 segment 时才使用复合消息，"
+        "否则直接文本回答。",
     ]
     if plan.reply_message_id is not None:
         parts.append(
@@ -123,7 +126,8 @@ def native_expression_instruction(plan: NativeExpressionPlan) -> str:
         )
     if plan.allow_reaction:
         parts.append(
-            "轻量接梗/确认时 reaction 可以替代同义废话；有事实、步骤或风险信息时不能只发表情。"
+            "轻量接梗/确认时 reaction 可以替代同义废话；"
+            "有事实、步骤或风险信息时不能只发表情。"
         )
     else:
         parts.append("本轮以信息完整为先，不主动用 reaction 替代正文。")
