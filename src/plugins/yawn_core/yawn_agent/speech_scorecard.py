@@ -7,8 +7,8 @@ speech-quality rules, then adds act and group-turn-taking checks.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from .speech import SpeechStyle, speech_plan_from_text
 from .speech_act import (
@@ -21,6 +21,11 @@ from .speech_quality import finalize_speech_plan
 from .turn_taking import TURN_PRESSURE_HIGH
 
 _MAX_SCORE = 100
+_PASS_SCORE = 80
+_MIN_ANSWER_CHARS = 4
+_MAX_ACK_CHARS = 80
+_MAX_REACTION_CHARS = 48
+_MAX_HIGH_PRESSURE_CHARS = 120
 
 _QUALITY_PENALTIES = {
     "empty": 100,
@@ -40,7 +45,7 @@ class SpeechScore:
 
     @property
     def passed(self) -> bool:
-        return self.score >= 80
+        return self.score >= _PASS_SCORE
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -60,7 +65,7 @@ class SpeechScenario:
     recent_texts: tuple[str, ...] = ()
     expected_act: str | None = None
     turn_pressure: str = "low"
-    minimum_score: int = 80
+    minimum_score: int = _PASS_SCORE
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +99,7 @@ def _deduct(
     return max(score - amount, 0)
 
 
-def score_speech_output(
+def score_speech_output(  # noqa: PLR0913
     text: str,
     *,
     scene: str = "conversation",
@@ -106,7 +111,7 @@ def score_speech_output(
     plan = speech_plan_from_text(
         text,
         scene=scene,
-        style=SpeechStyle(soft_target_chars=120),
+        style=SpeechStyle(soft_target_chars=_MAX_HIGH_PRESSURE_CHARS),
     )
     checked = finalize_speech_plan(
         plan,
@@ -122,17 +127,17 @@ def score_speech_output(
         score = _deduct(score, penalty, f"quality:{code}", deductions)
 
     visible = checked.visible_text.strip()
-    if expected_act == SPEECH_ACT_ANSWER and len(visible) < 4:
+    if expected_act == SPEECH_ACT_ANSWER and len(visible) < _MIN_ANSWER_CHARS:
         score = _deduct(score, 35, "act:answer_too_thin", deductions)
-    elif expected_act == SPEECH_ACT_ACKNOWLEDGE and len(visible) > 80:
+    elif expected_act == SPEECH_ACT_ACKNOWLEDGE and len(visible) > _MAX_ACK_CHARS:
         score = _deduct(score, 20, "act:ack_overexpanded", deductions)
-    elif expected_act == SPEECH_ACT_REACT and len(visible) > 48:
+    elif expected_act == SPEECH_ACT_REACT and len(visible) > _MAX_REACTION_CHARS:
         score = _deduct(score, 25, "act:reaction_overexpanded", deductions)
     elif expected_act == SPEECH_ACT_CLOSE and visible.endswith(("?", "？")):
         score = _deduct(score, 30, "act:close_reopened", deductions)
 
     if turn_pressure == TURN_PRESSURE_HIGH:
-        if len(visible) > 120:
+        if len(visible) > _MAX_HIGH_PRESSURE_CHARS:
             score = _deduct(score, 20, "turn:high_pressure_overlong", deductions)
         if visible.endswith(("?", "？")):
             score = _deduct(score, 20, "turn:high_pressure_followup", deductions)
@@ -147,7 +152,12 @@ def score_speech_output(
 def run_speech_scorecard(scenarios: Iterable[SpeechScenario]) -> SpeechSuiteResult:
     items = list(scenarios)
     if not items:
-        return SpeechSuiteResult(total=0, passed=0, average_score=100.0, failed_names=())
+        return SpeechSuiteResult(
+            total=0,
+            passed=0,
+            average_score=100.0,
+            failed_names=(),
+        )
     scores: list[int] = []
     failed: list[str] = []
     for scenario in items:
