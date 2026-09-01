@@ -104,10 +104,10 @@ async def test_ordinary_dialogue_tool_routing_does_not_probe_onebot(
         )
     )
 
-    assert source == "local_baseline"
+    assert source == "progressive_bootstrap"
     assert allow_admin is False
     assert caps == capabilities.local_group_capabilities(Bot())
-    assert "get_group_info" in tool_names
+    assert tool_names == frozenset({"send_message", "discover_tools"})
 
 
 @pytest.mark.asyncio
@@ -383,20 +383,18 @@ def test_dialogue_tool_policy_keeps_core_bundle_available() -> None:
         ),
     )
 
-    core = frozenset(
-        {"send_message", "search_group_memory", "get_message", "discover_tools"}
-    )
+    core = frozenset({"send_message", "discover_tools"})
     assert tools.select_dialogue_tool_names("今天有点困") == core
     reply_bundle = tools.select_dialogue_tool_names(
         "今天有点困", has_reply=True, has_media=True
     )
-    assert core | {"react_to_message"} <= reply_bundle
+    assert reply_bundle == core
     mention_bundle = tools.select_dialogue_tool_names("你好", has_mentions=True)
-    assert core | {"get_group_member", "get_person_profile"} <= mention_bundle
+    assert mention_bundle == core
     memory_bundle = tools.select_dialogue_tool_names("你还记得我上次说的吗")
-    assert core <= memory_bundle
+    assert memory_bundle == core
     reaction_bundle = tools.select_dialogue_tool_names("发个无语表情包")
-    assert {"send_message", "search_reactions"} <= reaction_bundle
+    assert reaction_bundle == core
 
     schemas = tools.build_tool_schemas(caps, include_names=memory_bundle)
     assert _tool_names(schemas) == core
@@ -424,7 +422,7 @@ def test_dialogue_tool_round_budget_is_small_by_default() -> None:
     assert tools.dialogue_tool_round_limit({"send_message"}) == STANDARD_TOOL_ROUNDS
     assert (
         tools.dialogue_tool_round_limit({"discover_tools", "send_message"})
-        == EXTENDED_TOOL_ROUNDS
+        == tools.MAX_TOOL_ROUNDS
     )
     assert (
         tools.dialogue_tool_round_limit({"search_group_memory"})
@@ -496,6 +494,9 @@ async def test_discover_tools_only_returns_currently_exposable_tools(
 
     assert result["ok"] is True
     discovered = {item["name"] for item in result["result"]["tools"]}
+    packs = {item["name"]: item for item in result["result"]["toolpacks"]}
+    assert "essence" in packs
+    assert packs["essence"]["load_with"] == {"family": "essence"}
     assert "set_essence_message" in discovered
     # critical tools are never discoverable even if explicitly allowlisted.
     assert "kick_member" not in discovered

@@ -467,12 +467,21 @@ async def _discover_tools_for_actor(
     session: Any,
     capabilities: BotGroupCapabilities,
 ) -> dict[str, Any]:
-    """Return compact summaries for currently eligible discoverable tools."""
+    """Discover eligible tools without preloading their schemas.
+
+    Privileged discovery is resolved lazily here: ordinary dialogue never pays a
+    role-probe cost, while an administrator asking for a controlled capability
+    gets a live bot-role probe before those tools become discoverable.
+    """
 
     allow_admin_tools = bool(
         actor_user_id is not None
         and await user_can_manage_group(bot, group_id, actor_user_id)
     )
+    effective_capabilities = capabilities
+    if allow_admin_tools:
+        effective_capabilities = await probe_group_capabilities(bot, group_id)
+
     allowlist: set[str] = set()
     if session is not None:
         config = await session.get(GroupAgentConfig, group_id)
@@ -486,20 +495,54 @@ async def _discover_tools_for_actor(
     for definition in _TOOL_DEFINITIONS:
         exposed, _reason = _tool_exposure_reason(
             definition,
-            capabilities,
+            effective_capabilities,
             allow_admin_tools=allow_admin_tools,
             max_permission_level=resolved_level,
             privileged_allowlist=allowlist,
         )
         if exposed and definition.discoverable:
             candidates.append(definition)
-    matches = rank_discoverable_tools(
-        query,
-        candidates,
-        family=family,
-        limit=limit,
+
+    normalized_query = str(query or "").strip().casefold()
+    catalog_request = not family and normalized_query in {
+        "*",
+        "全部",
+        "全部工具",
+        "所有工具",
+        "工具目录",
+        "工具包",
+        "全部工具包",
+    }
+    matches = (
+        []
+        if catalog_request
+        else rank_discoverable_tools(
+            query,
+            candidates,
+            family=family,
+            limit=limit,
+        )
     )
+    matched_families = (
+        sorted({item.family for item in candidates})
+        if catalog_request
+        else sorted({item.family for item in matches})
+    )
+    toolpacks: list[dict[str, Any]] = []
+    for pack_name in matched_families:
+        members = [item for item in candidates if item.family == pack_name]
+        if not members:
+            continue
+        toolpacks.append(
+            {
+                "name": pack_name,
+                "count": len(members),
+                "summary": "；".join(item.description for item in members[:2])[:240],
+                "load_with": {"family": pack_name},
+            }
+        )
     return {
+        "mode": "catalog" if catalog_request else ("toolpack" if family else "search"),
         "tools": [
             {
                 "name": item.name,
@@ -509,6 +552,7 @@ async def _discover_tools_for_actor(
             }
             for item in matches
         ],
+        "toolpacks": toolpacks,
         "count": len(matches),
     }
 
@@ -560,14 +604,21 @@ async def _check_tool_policy(
     definition = _TOOL_BY_NAME.get(name)
     if definition is None:
         raise ValueError(f"未知工具: {name}")
-    if definition.admin and not capabilities.can_manage:
+    effective_capabilities = capabilities
+    if name in _CONTROLLED_TOOLS:
+        # Controlled actions re-check the bot role at execution time as well as
+        # discovery time; a stale discovery can never grant a lasting privilege.
+        effective_capabilities = await probe_group_capabilities(
+            bot, group_id, refresh=True
+        )
+    if definition.admin and not effective_capabilities.can_manage:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 机器人没有群管理权限")
         raise PermissionError("机器人没有群管理权限")
-    if definition.owner_only and capabilities.role != "owner":
+    if definition.owner_only and effective_capabilities.role != "owner":
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 机器人不是群主")
         raise PermissionError("该工具需要机器人是群主")
     if definition.actions and not any(
-        capabilities.has(action) for action in definition.actions
+        effective_capabilities.has(action) for action in definition.actions
     ):
         dbg(f"群 {group_id} 工具策略拒绝 {name}: OneBot 不支持 {definition.actions}")
         raise PermissionError("当前 OneBot 不支持该操作")
@@ -764,10 +815,14 @@ async def execute_tool(
         now = now_beijing()
         if name == "discover_tools":
             query = str(args.get("query") or "").strip()
-            if not query:
-                raise ValueError("query 不能为空")
             family = str(args.get("family") or "").strip() or None
-            limit = _tool_result_limit(args, default=5, maximum=8)
+            if not query and not family:
+                raise ValueError("query 和 family 至少提供一个")
+            if not query:
+                query = str(family)
+            limit = _tool_result_limit(
+                args, default=(12 if family else 5), maximum=12
+            )
             result = await _discover_tools_for_actor(
                 query=query,
                 family=family,

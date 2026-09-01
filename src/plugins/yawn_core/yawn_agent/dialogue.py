@@ -127,40 +127,24 @@ async def _resolve_turn_tool_capabilities(
     has_mentions: bool,
     has_media: bool,
 ) -> tuple[BotGroupCapabilities, bool, frozenset[str], str]:
-    """按本轮工具意图决定是否真的需要 OneBot 权限探测。
+    """Return the minimal first-round capability bundle.
 
-    普通聊天、只读工具、状态工具和受控消息发送一律使用本地保守 action 基线，
-    不调用 ``get_group_member_info``。只有文本本身命中了 privileged/critical 工具
-    候选，才查询调用者是否是群管理；调用者通过后再探测机器人自身角色。
-
-    这样机器人角色探测失败最多让管理类工具 fail-closed，不会成为普通 QQ 消息
-    或其它 OneBot action 的前置依赖。
+    Progressive disclosure deliberately avoids actor/bot role probes before the
+    model asks for a non-core capability. ``discover_tools`` performs permission
+    resolution lazily, and only discovered privileged tools trigger a live bot
+    capability upgrade for the next LLM round.
     """
 
+    del actor_user_id
     baseline = local_group_capabilities(bot)
-    ordinary_names = select_dialogue_tool_names(
+    bootstrap_names = select_dialogue_tool_names(
         tool_intent_text,
         has_reply=has_reply,
         has_mentions=has_mentions,
         has_media=has_media,
         allow_admin_tools=False,
     )
-    privileged_names = select_dialogue_tool_names(
-        tool_intent_text,
-        has_reply=has_reply,
-        has_mentions=has_mentions,
-        has_media=has_media,
-        allow_admin_tools=True,
-    )
-    if privileged_names == ordinary_names:
-        return baseline, False, ordinary_names, "local_baseline"
-
-    allow_admin_tools = await user_can_manage_group(bot, group_id, actor_user_id)
-    if not allow_admin_tools:
-        return baseline, False, ordinary_names, "actor_not_admin"
-
-    capabilities = await probe_group_capabilities(bot, group_id)
-    return capabilities, True, privileged_names, "privileged_live_probe"
+    return baseline, False, bootstrap_names, "progressive_bootstrap"
 
 
 def _accumulate_turn_usage(total: dict[str, int], result: Any) -> dict[str, Any]:
@@ -793,6 +777,7 @@ async def _process_group_message(
                 messages.append(assistant)
                 round_sent_message = False
                 discovered_tool_names: set[str] = set()
+                discovered_requires_admin = False
                 for call in tool_calls:
                     function = getattr(call, "function", None)
                     if function is None:
@@ -850,6 +835,11 @@ async def _process_group_message(
                         for item in discovery_rows:
                             if isinstance(item, dict) and item.get("name"):
                                 discovered_tool_names.add(str(item["name"]))
+                                if str(item.get("permission") or "") in {
+                                    "privileged",
+                                    "critical",
+                                }:
+                                    discovered_requires_admin = True
                     trace_event(
                         "tool",
                         f"工具 {tool_name or '[unknown]'}",
@@ -1002,6 +992,14 @@ async def _process_group_message(
                         # 同时调用 send_message/send_forward 连发多条。
                         break
                 if discovered_tool_names and not round_sent_message:
+                    if discovered_requires_admin:
+                        # The trusted discovery result only contains privileged
+                        # rows after actor permission and bot role were validated.
+                        # Re-read the cached/live bot capability object so the
+                        # discovered schema can be injected for the next round.
+                        capabilities = await probe_group_capabilities(bot, group_id)
+                        allow_admin_tools = True
+                        capability_source = "progressive_discovery_live_probe"
                     selected_tool_names = frozenset(
                         set(selected_tool_names) | discovered_tool_names
                     )
@@ -1036,6 +1034,7 @@ async def _process_group_message(
                             "loaded": loaded_discoveries,
                             "tool_count": len(tools),
                             "round_limit": round_limit,
+                            "capability_source": capability_source,
                         },
                         round_index=rounds,
                     )

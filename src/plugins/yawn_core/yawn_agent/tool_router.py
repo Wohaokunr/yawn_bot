@@ -7,9 +7,6 @@ from .tool_registry import (
     CONTROLLED_TOOLS,
     CORE_DIALOGUE_TOOL_NAMES,
     MESSAGE_SEND_TOOLS,
-    TOOL_DEFINITIONS,
-    TOOL_PERMISSION_CRITICAL,
-    TOOL_PERMISSION_PRIVILEGED,
     ToolDefinition,
 )
 
@@ -57,68 +54,16 @@ def select_dialogue_tool_names(
     has_media: bool = False,
     allow_admin_tools: bool = False,
 ) -> frozenset[str]:
-    """Return a compact but useful tool bundle for the current turn.
+    """Return only the progressive-disclosure bootstrap bundle.
 
-    Core tools remain visible so the model is not reduced to a text-only bot.
-    Structural message signals and registry keywords expand the bundle without
-    paying for a separate classifier model call. Controlled tools are only
-    preloaded when the caller is a current group manager and the user text
-    itself contains an explicit action hint.
+    Business tools are never inferred from user text here. The model starts with
+    the minimal core and must call ``discover_tools`` before any non-core schema
+    is injected. Structural signals still shape message-segment schemas elsewhere,
+    but they do not bypass tool discovery.
     """
 
-    normalized = str(text or "").strip().casefold()
-    selected: set[str] = set(CORE_DIALOGUE_TOOL_NAMES)
-
-    if has_reply:
-        # Reply threads are the highest-value native QQ expression context.
-        # Expose reaction lookup here so the speech policy may choose a real
-        # reaction instead of forcing a text acknowledgement.
-        selected.update(
-            {"get_message", "react_to_message", "search_reactions", "send_message"}
-        )
-    if has_mentions:
-        selected.update({"get_group_member", "get_person_profile", "send_message"})
-    if has_media:
-        selected.add("send_message")
-
-    for definition in TOOL_DEFINITIONS:
-        if definition.core:
-            continue
-        if definition.permission_level in {
-            TOOL_PERMISSION_PRIVILEGED,
-            TOOL_PERMISSION_CRITICAL,
-        }:
-            continue
-        if any(_keyword_matches(normalized, keyword) for keyword in definition.keywords):
-            selected.add(definition.name)
-
-    if allow_admin_tools:
-        mute_read_hints = (
-            "禁言列表",
-            "谁被禁言",
-            "谁还在禁言",
-            "谁正在禁言",
-            "查看禁言",
-            "看看禁言",
-            "禁言情况",
-        )
-        for definition in TOOL_DEFINITIONS:
-            if definition.permission_level not in {
-                TOOL_PERMISSION_PRIVILEGED,
-                TOOL_PERMISSION_CRITICAL,
-            }:
-                continue
-            if definition.name == "mute_member" and any(
-                hint in normalized for hint in mute_read_hints
-            ):
-                continue
-            if any(
-                _keyword_matches(normalized, keyword)
-                for keyword in definition.keywords
-            ):
-                selected.add(definition.name)
-
-    return frozenset(selected)
+    del text, has_reply, has_mentions, has_media, allow_admin_tools
+    return frozenset(CORE_DIALOGUE_TOOL_NAMES)
 
 
 def rank_discoverable_tools(
@@ -227,7 +172,8 @@ def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
     if names <= MESSAGE_SEND_TOOLS:
         return 2
     if "discover_tools" in names:
-        return min(MAX_TOOL_ROUNDS, 3)
+        # discover -> execute -> optional supporting tool -> final answer
+        return MAX_TOOL_ROUNDS
     if names & CONTROLLED_TOOLS:
         return min(MAX_TOOL_ROUNDS, 3)
     non_send = names - MESSAGE_SEND_TOOLS
