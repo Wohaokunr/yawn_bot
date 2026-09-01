@@ -10,3 +10,7 @@ This pass audits the original Speech Pipeline roadmap rather than later experime
 - **P12 cleanup**: reusable activity aggregation, context loading, send/persistence helpers and speech finalization leave `dialogue.py`. Thin compatibility names remain where existing tests/internal callers need them; new code imports the new modules directly.
 
 No database migration or additional LLM request is added by this pass. OneBot validation and permission boundaries remain in `outbound.py` / tools.
+
+## Validation
+
+The stabilization pass removes the duplicate outbound `prepare_speech_plan()` compatibility implementation, preserves the traced canonical implementation, makes topic-state debug logging non-fatal for minimal/test configs, and restores the lint allowances that the extracted legacy dialogue helpers already had before P12. The repair gate passes full Ruff, full Pyright, and the Python fast regression suite (554 tests).
