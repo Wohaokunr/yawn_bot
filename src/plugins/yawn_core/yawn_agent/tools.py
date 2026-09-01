@@ -738,14 +738,21 @@ async def execute_tool(
     session: Any = None,
     capabilities: BotGroupCapabilities,
 ) -> dict[str, Any]:
-    """执行单个工具；每次调用都重新执行能力和配额校验。"""
+    """执行单个工具；高权限工具实时重探测，普通工具不依赖角色探测。"""
 
     dbg(
         f"群 {group_id} 执行工具: name={name!r} args={json.dumps(args, ensure_ascii=False)} "
         f"actor={actor_user_id}"
     )
     try:
-        capabilities = await probe_group_capabilities(bot, group_id, refresh=True)
+        definition = _TOOL_BY_NAME.get(name)
+        if definition is not None and (
+            definition.admin or definition.owner_only or name in _CONTROLLED_TOOLS
+        ):
+            # 管理/特权工具必须使用实时 Bot 角色；失败时 probe 自身按 member
+            # fail-closed。普通 read/state/message-send 工具不需要为了执行先做
+            # get_group_member_info，避免协议探测成为消息处理关键路径。
+            capabilities = await probe_group_capabilities(bot, group_id, refresh=True)
         await _check_tool_policy(
             session,
             group_id,

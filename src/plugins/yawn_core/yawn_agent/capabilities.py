@@ -97,6 +97,80 @@ _MAX_CACHE_ENTRIES = 256
 _capability_cache: dict[tuple[int, int], tuple[float, BotGroupCapabilities, float]] = {}
 _capability_probe_status: dict[tuple[int, int], dict[str, Any]] = {}
 
+_MEMBER_ACTIONS = frozenset(
+    {
+        "send_group_msg",
+        "get_group_info",
+        "get_group_member_info",
+        "get_group_member_list",
+        "get_msg",
+        "get_forward_msg",
+        "get_group_msg_history",
+        "get_group_honor_info",
+        "get_essence_msg_list",
+        "_get_group_notice",
+        "get_group_shut_list",
+        "get_group_root_files",
+        "get_group_files_by_folder",
+        "get_group_file_url",
+        "set_msg_emoji_like",
+        "send_group_forward_msg",
+        # OneBot adapters may allow file delivery for ordinary members; the
+        # executor still validates path/domain/size before sending.
+        "upload_group_file",
+    }
+)
+_ADMIN_ACTIONS = frozenset(
+    {
+        "set_group_ban",
+        "_send_group_notice",
+        "set_essence_msg",
+        "delete_essence_msg",
+        "_del_group_notice",
+        "set_group_card",
+        "set_group_name",
+        "set_group_special_title",
+        "create_group_file_folder",
+        "set_group_kick",
+        "set_group_whole_ban",
+        "set_group_admin",
+        "delete_group_file",
+        "move_group_file",
+        "rename_group_file",
+        "delete_group_folder",
+    }
+)
+
+
+def local_group_capabilities(
+    bot: Any, *, role: str = "member"
+) -> BotGroupCapabilities:
+    """构造不发网络请求的 OneBot action 能力基线。
+
+    普通对话只需要知道“哪些协议 action 可以尝试”，不应该为了聊天先调用
+    ``get_group_member_info``。机器人群角色只在真正涉及管理/高权限工具时再实时
+    探测；这里默认按 member 处理，因此绝不会因为本地基线误暴露管理工具。
+    """
+
+    normalized_role = str(role or "member")
+    actions = set(_MEMBER_ACTIONS)
+    if normalized_role in {"owner", "admin"}:
+        actions.update(_ADMIN_ACTIONS)
+    declared = getattr(bot, "supported_actions", None)
+    if isinstance(declared, (set, frozenset, list, tuple)):
+        declared_actions = {str(item) for item in declared}
+        actions.intersection_update(declared_actions)
+        if (
+            normalized_role in {"owner", "admin"}
+            and "send_group_notice" in declared_actions
+        ):
+            actions.add("send_group_notice")
+    return BotGroupCapabilities(
+        normalized_role,
+        normalized_role in {"owner", "admin"},
+        frozenset(actions),
+    )
+
 
 async def probe_group_capabilities(
     bot: Any, group_id: int, *, refresh: bool = False
@@ -121,62 +195,14 @@ async def probe_group_capabilities(
             role = str(info.get("role") or "member")
     except Exception:  # noqa: BLE001
         degraded = True
-        error_class = "probe_failed"
-        dbg_exc(f"群 {group_id} 能力探测失败,按普通成员降级(短 TTL {_DEGRADED_TTL}s)")
+        error_class = "role_probe_failed"
+        dbg_exc(
+            f"群 {group_id} 机器人角色探测失败,仅管理工具按普通成员降级"
+            f"(其它 action 继续使用,短 TTL {_DEGRADED_TTL}s)"
+        )
     else:
         error_class = None
-    actions = {
-        "send_group_msg",
-        "get_group_info",
-        "get_group_member_info",
-        "get_group_member_list",
-        "get_msg",
-        "get_forward_msg",
-        "get_group_msg_history",
-        "get_group_honor_info",
-        "get_essence_msg_list",
-        "_get_group_notice",
-        "get_group_shut_list",
-        "get_group_root_files",
-        "get_group_files_by_folder",
-        "get_group_file_url",
-        "set_msg_emoji_like",
-        "send_group_forward_msg",
-        # OneBot adapters may allow file delivery for ordinary members; the
-        # executor still validates path/domain/size before sending.
-        "upload_group_file",
-    }
-    if role in {"owner", "admin"}:
-        # NapCat/go-cqhttp 的群公告接口是扩展 action `_send_group_notice`。
-        # `send_group_notice` 仅在适配器显式声明支持时加入，避免在没有
-        # supported_actions 元数据时把不存在的别名误判为可用。
-        actions.update(
-            {
-                "set_group_ban",
-                "_send_group_notice",
-                "set_essence_msg",
-                "delete_essence_msg",
-                "_del_group_notice",
-                "set_group_card",
-                "set_group_name",
-                "set_group_special_title",
-                "create_group_file_folder",
-                "set_group_kick",
-                "set_group_whole_ban",
-                "set_group_admin",
-                "delete_group_file",
-                "move_group_file",
-                "rename_group_file",
-                "delete_group_folder",
-            }
-        )
-    declared = getattr(bot, "supported_actions", None)
-    if isinstance(declared, (set, frozenset, list, tuple)):
-        declared_actions = {str(item) for item in declared}
-        actions.intersection_update(declared_actions)
-        if role in {"owner", "admin"} and "send_group_notice" in declared_actions:
-            actions.add("send_group_notice")
-    result = BotGroupCapabilities(role, role in {"owner", "admin"}, frozenset(actions))
+    result = local_group_capabilities(bot, role=role)
     if len(_capability_cache) >= _MAX_CACHE_ENTRIES:
         oldest = min(_capability_cache, key=lambda item: _capability_cache[item][0])
         _capability_cache.pop(oldest, None)

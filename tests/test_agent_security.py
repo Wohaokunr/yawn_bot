@@ -59,6 +59,130 @@ def test_admin_tool_schemas_require_actor_management_permission() -> None:
     assert {"mute_member", "create_group_announcement"} <= admin_tools
 
 
+def test_local_group_capabilities_never_calls_onebot() -> None:
+    capabilities, _media, _tools = _load_agent_modules()
+
+    class Bot:
+        self_id = "100"
+        supported_actions = frozenset({"send_group_msg", "get_group_info"})
+
+        async def call_api(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError
+
+    caps = capabilities.local_group_capabilities(Bot())
+
+    assert caps.role == "member"
+    assert caps.can_manage is False
+    assert caps.actions == frozenset({"send_group_msg", "get_group_info"})
+
+
+@pytest.mark.asyncio
+async def test_ordinary_dialogue_tool_routing_does_not_probe_onebot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, _tools = _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    class Bot:
+        self_id = "100"
+
+    async def forbidden_probe(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError
+
+    monkeypatch.setattr(dialogue, "user_can_manage_group", forbidden_probe)
+    monkeypatch.setattr(dialogue, "probe_group_capabilities", forbidden_probe)
+
+    caps, allow_admin, tool_names, source = (
+        await dialogue._resolve_turn_tool_capabilities(
+            Bot(),
+            1,
+            200,
+            "帮我看看群信息",
+            has_reply=False,
+            has_mentions=False,
+            has_media=False,
+        )
+    )
+
+    assert source == "local_baseline"
+    assert allow_admin is False
+    assert caps == capabilities.local_group_capabilities(Bot())
+    assert "get_group_info" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_read_tool_execution_does_not_force_role_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+
+    class Bot:
+        self_id = "100"
+
+        async def call_api(self, action: str, **_params: Any) -> dict[str, Any]:
+            assert action == "get_group_info"
+            return {"group_id": 1, "group_name": "测试群", "member_count": 3}
+
+    async def forbidden_probe(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", forbidden_probe)
+    bot = Bot()
+    result = await tools.execute_tool(
+        "get_group_info",
+        {},
+        bot=bot,
+        group_id=1,
+        capabilities=capabilities.local_group_capabilities(bot),
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["group_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_one_onebot_action_failure_does_not_disable_other_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities, _media, tools = _load_agent_modules()
+
+    class Bot:
+        self_id = "100"
+
+        async def call_api(self, action: str, **_params: Any) -> dict[str, Any]:
+            if action == "get_group_member_info":
+                raise RuntimeError
+            if action == "get_group_info":
+                return {"group_id": 1, "group_name": "测试群", "member_count": 3}
+            raise AssertionError
+
+    async def forbidden_probe(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError
+
+    monkeypatch.setattr(tools, "probe_group_capabilities", forbidden_probe)
+    bot = Bot()
+    caps = capabilities.local_group_capabilities(bot)
+
+    failed = await tools.execute_tool(
+        "get_group_member",
+        {"user_id": 200},
+        bot=bot,
+        group_id=1,
+        capabilities=caps,
+    )
+    succeeded = await tools.execute_tool(
+        "get_group_info",
+        {},
+        bot=bot,
+        group_id=1,
+        capabilities=caps,
+    )
+
+    assert failed["ok"] is False
+    assert succeeded["ok"] is True
+    assert succeeded["result"]["group_id"] == 1
+
+
 @pytest.mark.asyncio
 async def test_group_announcement_capability_defaults_to_napcat_action() -> None:
     capabilities, _media, _tools = _load_agent_modules()
