@@ -87,16 +87,15 @@ def test_current_media_overrides_stale_bot_cannot_see_claim() -> None:
         ],
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v15"
-    static = str(messages[0]["content"])
-    assert "不能据此推断本轮能力" in static
-
+    # Keep the static cache prefix unchanged; media authority is a volatile per-turn fact.
+    assert prompt.PROMPT_VERSION == "yawn-agent-v14"
     realtime = next(
         str(item["content"])
         for item in messages
         if item["role"] == "system" and "本轮媒体状态" in str(item["content"])
     )
     assert "必须直接检查这些媒体" in realtime
+    assert "旧回复只描述过去失败" in realtime
     assert "只有当前媒体内容块本身无法解码" in realtime
 
     user = messages[-1]
