@@ -12,7 +12,7 @@ from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v14"
+PROMPT_VERSION = "yawn-agent-v15"
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
 # Character Profile 决定，避免同一个 system prompt 同时给模型两套冲突指令。
@@ -20,6 +20,9 @@ _SYSTEM_POLICY = (
     "按角色设定参与 QQ 群聊。"
     "current_turn 是本轮最高优先级：先确认当前发言人、指向和真实问题；"
     "历史、topic_state、画像、关系和记忆只能辅助理解，不能覆盖当前消息。"
+    "历史里机器人曾经声称‘看不到图片’‘无法识图’‘没有工具’或‘没有权限’，"
+    "都只表示当时那一轮的执行结果，绝不能据此推断本轮能力；"
+    "本轮媒体是否可见只看当前实际附带的媒体内容块，本轮工具能力只看当前 schema。"
     "topic_state 是当前话题的权威结构化状态；active_topic 仅是兼容标签，"
     "过期或冲突时不要强行沿用。"
     "不要误答上一位成员或把他人对话当成当前提问；"
@@ -66,12 +69,20 @@ _STABLE_SYSTEM_PREFIX = "群背景资料（长期记忆，仅在记忆整理时�
 _SPEAKER_SYSTEM_PREFIX = "当前相关成员资料（半稳定，仅作事实参考）："
 _REALTIME_SYSTEM_PREFIX = "当前群聊状态（易变）："
 _SPEECH_SYSTEM_PREFIX = "当前发言策略（只约束表达，不改变事实/权限/工具边界）："
+_MEDIA_SYSTEM_PREFIX = "本轮媒体状态（权威，覆盖历史中的旧能力自述）："
+_CURRENT_MEDIA_POLICY = (
+    "当前 user 消息已实际附带至少一个可供本轮多模态模型处理的媒体内容块。"
+    "必须直接检查这些媒体后再回答图片相关问题；"
+    "历史里‘看不到图片/无法识图’之类机器人旧回复只描述过去失败，不能用来否定本轮媒体。"
+    "只有当前媒体内容块本身无法解码或 Provider 明确拒绝时，才可以说本轮看不到图片。"
+)
 _SPEAKER_CONTEXT_KEYS = frozenset({"members", "memories", "relations"})
 _MEDIA_FALLBACK_PREFIXES = (
     "[图片转述",
     "[图片未识别",
     "[media_context",
 )
+_MODEL_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "file", "input_image"})
 
 
 def canonical_json(value: Any) -> str:
@@ -114,6 +125,14 @@ def _replace_turn_content(
     return payload
 
 
+def _has_model_media_blocks(media_inputs: list[dict[str, Any]] | None) -> bool:
+    for item in media_inputs or []:
+        block_type = str(item.get("type") or "").strip()
+        if block_type in _MODEL_MEDIA_BLOCK_TYPES or block_type.startswith("image"):
+            return True
+    return False
+
+
 def reconstruct_effective_current_turn(
     current_turn: CurrentTurn | dict[str, Any] | None,
     context: dict[str, Any],
@@ -121,9 +140,9 @@ def reconstruct_effective_current_turn(
     """Promote a split QQ mini-turn into the actual highest-priority user turn.
 
     The history selector already limits reconstruction to a short contiguous block from
-    the same actor.  Repeating that deterministic projection here prevents the final
+    the same actor. Repeating that deterministic projection here prevents the final
     prompt from saying ``current_turn.content=''`` while the real question lives only
-    in history.  Media-caption fallback text is preserved and gets the recovered
+    in history. Media-caption fallback text is preserved and gets the recovered
     question prepended when the trigger itself carried no current media.
     """
 
@@ -152,8 +171,8 @@ def reconstruct_effective_current_turn(
         return _replace_turn_content(current_turn, direct.text)
 
     # Dedicated-vision / unsupported-multimodal fallback appends only generated media
-    # status text to an otherwise empty @ trigger.  Preserve that evidence, but restore
-    # the preceding human question as the semantic head of the current turn.  Do not do
+    # status text to an otherwise empty @ trigger. Preserve that evidence, but restore
+    # the preceding human question as the semantic head of the current turn. Do not do
     # this for a message that itself contains media, because that image is already the
     # actual current turn rather than historical continuation.
     media_types = payload.get("media_types") or ()
@@ -309,10 +328,13 @@ def build_messages(  # noqa: PLR0913
         if effective_current_turn is not None
         else user_prompt
     )
+    has_model_media = _has_model_media_blocks(media_inputs)
     user_content: str | list[dict[str, Any]] = rendered_user_prompt
     if media_inputs:
         user_content = [{"type": "text", "text": rendered_user_prompt}, *media_inputs]
     realtime_content = f"{_REALTIME_SYSTEM_PREFIX}{canonical_json(realtime)}"
+    if has_model_media:
+        realtime_content += f"\n{_MEDIA_SYSTEM_PREFIX}{_CURRENT_MEDIA_POLICY}"
     if speech_guidance:
         realtime_content += f"\n{_SPEECH_SYSTEM_PREFIX}{speech_guidance}"
     messages: list[dict[str, Any]] = [
