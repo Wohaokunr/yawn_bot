@@ -66,12 +66,20 @@ _STABLE_SYSTEM_PREFIX = "群背景资料（长期记忆，仅在记忆整理时�
 _SPEAKER_SYSTEM_PREFIX = "当前相关成员资料（半稳定，仅作事实参考）："
 _REALTIME_SYSTEM_PREFIX = "当前群聊状态（易变）："
 _SPEECH_SYSTEM_PREFIX = "当前发言策略（只约束表达，不改变事实/权限/工具边界）："
+_MEDIA_SYSTEM_PREFIX = "本轮媒体状态（权威，覆盖历史中的旧能力自述）："
+_CURRENT_MEDIA_POLICY = (
+    "当前 user 消息已实际附带至少一个可供本轮多模态模型处理的媒体内容块。"
+    "必须直接检查这些媒体后再回答图片相关问题；"
+    "历史里关于看不到图片或无法识图的机器人旧回复只描述过去失败，不能用来否定本轮媒体。"
+    "只有当前媒体内容块本身无法解码或 Provider 明确拒绝时，才可以说本轮看不到图片。"
+)
 _SPEAKER_CONTEXT_KEYS = frozenset({"members", "memories", "relations"})
 _MEDIA_FALLBACK_PREFIXES = (
     "[图片转述",
     "[图片未识别",
     "[media_context",
 )
+_MODEL_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "file", "input_image"})
 
 
 def canonical_json(value: Any) -> str:
@@ -114,6 +122,14 @@ def _replace_turn_content(
     return payload
 
 
+def _has_model_media_blocks(media_inputs: list[dict[str, Any]] | None) -> bool:
+    for item in media_inputs or []:
+        block_type = str(item.get("type") or "").strip()
+        if block_type in _MODEL_MEDIA_BLOCK_TYPES or block_type.startswith("image"):
+            return True
+    return False
+
+
 def reconstruct_effective_current_turn(
     current_turn: CurrentTurn | dict[str, Any] | None,
     context: dict[str, Any],
@@ -121,9 +137,9 @@ def reconstruct_effective_current_turn(
     """Promote a split QQ mini-turn into the actual highest-priority user turn.
 
     The history selector already limits reconstruction to a short contiguous block from
-    the same actor.  Repeating that deterministic projection here prevents the final
+    the same actor. Repeating that deterministic projection here prevents the final
     prompt from saying ``current_turn.content=''`` while the real question lives only
-    in history.  Media-caption fallback text is preserved and gets the recovered
+    in history. Media-caption fallback text is preserved and gets the recovered
     question prepended when the trigger itself carried no current media.
     """
 
@@ -152,8 +168,8 @@ def reconstruct_effective_current_turn(
         return _replace_turn_content(current_turn, direct.text)
 
     # Dedicated-vision / unsupported-multimodal fallback appends only generated media
-    # status text to an otherwise empty @ trigger.  Preserve that evidence, but restore
-    # the preceding human question as the semantic head of the current turn.  Do not do
+    # status text to an otherwise empty @ trigger. Preserve that evidence, but restore
+    # the preceding human question as the semantic head of the current turn. Do not do
     # this for a message that itself contains media, because that image is already the
     # actual current turn rather than historical continuation.
     media_types = payload.get("media_types") or ()
@@ -309,10 +325,13 @@ def build_messages(  # noqa: PLR0913
         if effective_current_turn is not None
         else user_prompt
     )
+    has_model_media = _has_model_media_blocks(media_inputs)
     user_content: str | list[dict[str, Any]] = rendered_user_prompt
     if media_inputs:
         user_content = [{"type": "text", "text": rendered_user_prompt}, *media_inputs]
     realtime_content = f"{_REALTIME_SYSTEM_PREFIX}{canonical_json(realtime)}"
+    if has_model_media:
+        realtime_content += f"\n{_MEDIA_SYSTEM_PREFIX}{_CURRENT_MEDIA_POLICY}"
     if speech_guidance:
         realtime_content += f"\n{_SPEECH_SYSTEM_PREFIX}{speech_guidance}"
     messages: list[dict[str, Any]] = [
