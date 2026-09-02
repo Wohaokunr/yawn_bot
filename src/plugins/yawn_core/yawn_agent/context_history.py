@@ -31,6 +31,7 @@ EFFECTIVE_TURN_MAX_AGE_MINUTES = 2
 LOW_INFO_HISTORY_TEXTS = frozenset(
     {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
 )
+_NON_SEMANTIC_QUERY_SENTINELS = frozenset({"[非文本消息]"})
 _MEDIA_QUERY_RE = re.compile(
     r"(?:图片|截图|照片|相片|这张|那张|上面那|前面那|刚才那|刚刚那|"
     r"我刚才发的|我刚发的|第[一二三四五六七八九十\d]+张|图里|图上|这里是不是|还有什么细节)"
@@ -78,7 +79,7 @@ def _trigger_only_query(query_text: str | None) -> bool:
     """识别 QQ 中常见的“前面说完问题，最后单独 @ 机器人”触发消息。"""
 
     text = str(query_text or "").strip()
-    if not text:
+    if not text or text in _NON_SEMANTIC_QUERY_SENTINELS:
         return True
     stripped = _TRIGGER_MARKUP_RE.sub("", text)
     stripped = re.sub(r"[\s,，。.!！?？:：;；~～、·]+", "", stripped)
