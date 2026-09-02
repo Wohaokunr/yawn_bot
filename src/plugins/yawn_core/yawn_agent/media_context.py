@@ -1,9 +1,8 @@
-# ruff: noqa: C901,E501,PLR0912,PLR0913,PLR0915,TID252,TC001,TC003
+# ruff: noqa: C901,E501,PLR0912,PLR0913,PLR0915,TID252,TC001,TC003,BLE001
 """Resolve media from current/reply/history/tool sources into one Agent media stream."""
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import LLMTask
+from .context_history import EffectiveTurn, effective_turn_query, query_requests_media
 from .log import dbg, dbg_exc
 from .media import (
     MediaInput,
@@ -22,10 +22,6 @@ from .media import (
 )
 
 _MAX_RESOLVED_MEDIA = 4
-_MEDIA_REFERENCE_RE = re.compile(
-    r"(?:图片|图里|图上|截图|照片|相片|这张|那张|上面那|前面那|刚才那|刚刚那|"
-    r"我刚才发的|我刚发的|第[一二三四五六七八九十\d]+张|这里是不是|还有什么细节)"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,10 +37,9 @@ class MediaContextProjection:
 
 
 def query_requests_historical_media(query_text: str | None) -> bool:
-    """Whether selected history images are worth restoring for this turn."""
+    """Compatibility wrapper around the single effective-turn media predicate."""
 
-    text = " ".join(str(query_text or "").split())
-    return bool(text and _MEDIA_REFERENCE_RE.search(text))
+    return query_requests_media(query_text)
 
 
 def _media_refs_from_current(current_message: Any) -> list[dict[str, Any]]:
@@ -233,6 +228,51 @@ def _append_unique_refs(
         target.append(ref)
 
 
+def _history_effective_turn(
+    selected_history: Sequence[dict[str, Any]] | None,
+    query_text: str | None,
+) -> EffectiveTurn:
+    history = [dict(item) for item in selected_history or [] if isinstance(item, dict)]
+    actor_user_id: int | None = None
+    for item in reversed(history):
+        if str(item.get("role") or "member") == "bot":
+            continue
+        actor_user_id = _optional_int(item.get("user_id"))
+        if actor_user_id:
+            break
+    return effective_turn_query(
+        history,
+        focus_user_ids=[actor_user_id] if actor_user_id else None,
+        query_text=query_text,
+    )
+
+
+def _trace_media_selection(
+    *,
+    effective: EffectiveTurn,
+    history_ids: Sequence[int],
+    reply_ids: Sequence[int],
+) -> None:
+    try:
+        from .execution_trace import trace_event
+
+        trace_event(
+            "media",
+            "媒体候选选择",
+            status="success",
+            output={
+                "effective_query_preview": effective.text[:320],
+                "media_requested": effective.media_requested,
+                "effective_turn_message_ids": list(effective.message_ids),
+                "effective_turn_media_ids": list(effective.media_message_ids),
+                "history_message_ids": list(history_ids),
+                "reply_message_ids": list(reply_ids),
+            },
+        )
+    except Exception:
+        return
+
+
 async def resolve_media_context(
     bot: Any,
     session: Any,
@@ -250,9 +290,9 @@ async def resolve_media_context(
 ) -> list[MediaInput]:
     """Resolve all supported media entry points to content-addressed MediaInput values.
 
-    Current/reply/forward media is always eligible. Historical media is intentionally
-    lazy and only restored when the current query refers to images. Tool media is
-    eligible because the model explicitly chose a history/message retrieval action.
+    Current/reply/forward media is always eligible. Historical media is restored only
+    when the shared effective-turn selector marks the turn as image-related. Tool media
+    is eligible because the model explicitly chose a history/message retrieval action.
     """
 
     limit = max(1, min(int(max_assets), 8))
@@ -266,10 +306,16 @@ async def resolve_media_context(
         bot_id = None
 
     reply_ids = _message_ids(reply_chain)
-    history_ids = (
-        _message_ids(selected_history)
-        if query_requests_historical_media(query_text)
-        else []
+    effective = _history_effective_turn(selected_history, query_text)
+    if effective.media_requested:
+        preferred_history_ids = list(effective.media_message_ids)
+        history_ids = preferred_history_ids or _message_ids(selected_history)
+    else:
+        history_ids = []
+    _trace_media_selection(
+        effective=effective,
+        history_ids=history_ids,
+        reply_ids=reply_ids,
     )
     row_ids = [*reply_ids, *(item for item in history_ids if item not in reply_ids)]
     try:
@@ -290,9 +336,6 @@ async def resolve_media_context(
         row_refs = [dict(item) for item in list(row.media_refs or []) if isinstance(item, dict)]
         for ref in row_refs:
             ref.setdefault("source_message_id", message_id)
-            # A media ref stored when it was received commonly says source=current.
-            # Once restored into a later turn it is history/reply media, and that
-            # distinction controls the LLM projection label.
             ref["source"] = "reply" if message_id in reply_ids else "history"
         _append_unique_refs(refs, row_refs, limit=limit)
 
@@ -317,8 +360,6 @@ async def resolve_media_context(
         diagnostics=diagnostics,
     )
 
-    # Lazy materialization may have enriched DB refs that predate MediaAsset support.
-    # Reassign the JSON value so SQLAlchemy reliably detects the mutation.
     for message_id, row in rows.items():
         changed = False
         updated: list[dict[str, Any]] = []

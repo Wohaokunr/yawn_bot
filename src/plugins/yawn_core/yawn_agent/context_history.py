@@ -1,4 +1,4 @@
-# ruff: noqa: E501,TID252,TC001,TC003,UP035,C901,PLR0912,PLR0915,PLR2004,SIM114
+# ruff: noqa: E501,TID252,TC001,TC003,UP035,C901,PLR0912,PLR0915,PLR2004,SIM114,BLE001,RUF001
 """群聊 Agent 历史消息稀疏化、相关性筛选与调试追踪。
 
 该模块只负责把数据库中的历史消息转成 Prompt 候选，并按当前回合选择有限的
@@ -26,12 +26,34 @@ CONTEXT_CLUSTER_GAP_MINUTES = 6
 CONTEXT_RELEVANT_MAX_AGE_MINUTES = 60
 CONTEXT_PROACTIVE_MAX_AGE_MINUTES = 45
 CONTEXT_PROACTIVE_MAX_MESSAGES = 10
+EFFECTIVE_TURN_MAX_MESSAGES = 4
+EFFECTIVE_TURN_MAX_AGE_MINUTES = 2
 LOW_INFO_HISTORY_TEXTS = frozenset(
     {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
 )
 _MEDIA_QUERY_RE = re.compile(
-    r"(?:图片|截图|照片|这张|那张|上面那|前面那|刚才那|刚刚那|第[一二三四五六七八九十\d]+张|图里|图上)"
+    r"(?:图片|截图|照片|相片|这张|那张|上面那|前面那|刚才那|刚刚那|"
+    r"我刚才发的|我刚发的|第[一二三四五六七八九十\d]+张|图里|图上|这里是不是|还有什么细节)"
 )
+_TRIGGER_MARKUP_RE = re.compile(
+    r"(?:@[\w\-\u4e00-\u9fff]+|\[(?:at|提及|@)[^\]]*\])",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveTurn:
+    """由当前触发与紧邻的同一发言人消息重建出的语义回合。"""
+
+    text: str
+    message_ids: tuple[int, ...] = ()
+    media_message_ids: tuple[int, ...] = ()
+    trigger_only: bool = False
+    used_history: bool = False
+
+    @property
+    def media_requested(self) -> bool:
+        return query_requests_media(self.text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +62,115 @@ class ContextSelection:
 
     messages: list[dict[str, Any]]
     trace: list[dict[str, Any]]
+    effective_query: str = ""
+    turn_message_ids: tuple[int, ...] = ()
+    media_message_ids: tuple[int, ...] = ()
+
+
+def query_requests_media(query_text: str | None) -> bool:
+    """统一判断一次用户语义回合是否显式指向图片。"""
+
+    text = " ".join(str(query_text or "").split())
+    return bool(text and _MEDIA_QUERY_RE.search(text))
+
+
+def _trigger_only_query(query_text: str | None) -> bool:
+    """识别 QQ 中常见的“前面说完问题，最后单独 @ 机器人”触发消息。"""
+
+    text = str(query_text or "").strip()
+    if not text:
+        return True
+    stripped = _TRIGGER_MARKUP_RE.sub("", text)
+    stripped = re.sub(r"[\s,，。.!！?？:：;；~～、·]+", "", stripped)
+    return not stripped
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _latest_actor_id(
+    messages: Sequence[dict[str, Any]], focus_user_ids: Sequence[int] | None
+) -> int | None:
+    for raw in focus_user_ids or ():
+        actor = _optional_positive_int(raw)
+        if actor is not None:
+            return actor
+    for item in reversed(messages):
+        if str(item.get("role") or "member") == "bot":
+            continue
+        actor = _optional_positive_int(item.get("user_id"))
+        if actor is not None:
+            return actor
+    return None
+
+
+def effective_turn_query(
+    messages: Sequence[dict[str, Any]],
+    *,
+    focus_user_ids: Sequence[int] | None = None,
+    query_text: str | None = None,
+) -> EffectiveTurn:
+    """把“图片 → 问题 → @机器人”重建成一个语义回合。
+
+    只在当前触发本身没有语义正文时回溯；回溯严格限制为最近两分钟、连续、同一
+    发言人且最多四条，遇到机器人或其他群成员立即停止，避免把群里别人的图片误
+    绑定到当前用户。
+    """
+
+    query = " ".join(str(query_text or "").split())
+    trigger_only = _trigger_only_query(query)
+    if not trigger_only:
+        return EffectiveTurn(text=query, trigger_only=False)
+
+    actor_user_id = _latest_actor_id(messages, focus_user_ids)
+    if actor_user_id is None:
+        return EffectiveTurn(text=query, trigger_only=True)
+
+    collected: list[dict[str, Any]] = []
+    for item in reversed(messages):
+        if len(collected) >= EFFECTIVE_TURN_MAX_MESSAGES:
+            break
+        if bool(item.get("topic_break_before")) and collected:
+            break
+        if str(item.get("role") or "member") == "bot":
+            break
+        user_id = _optional_positive_int(item.get("user_id"))
+        if user_id != actor_user_id:
+            break
+        if _minutes_ago(item) > EFFECTIVE_TURN_MAX_AGE_MINUTES:
+            break
+        collected.append(item)
+
+    if not collected:
+        return EffectiveTurn(text=query, trigger_only=True)
+
+    collected.reverse()
+    parts: list[str] = []
+    message_ids: list[int] = []
+    media_message_ids: list[int] = []
+    for item in collected:
+        message_id = _optional_positive_int(item.get("message_id"))
+        if message_id is not None:
+            message_ids.append(message_id)
+            if item.get("media_types"):
+                media_message_ids.append(message_id)
+        text = " ".join(str(item.get("text") or "").split())
+        if text and text not in LOW_INFO_HISTORY_TEXTS:
+            parts.append(text)
+
+    effective_text = "\n".join(parts[-3:]).strip() or query
+    return EffectiveTurn(
+        text=effective_text,
+        message_ids=tuple(message_ids),
+        media_message_ids=tuple(media_message_ids),
+        trigger_only=True,
+        used_history=bool(effective_text and effective_text != query),
+    )
 
 
 def bot_message_meta(row: GroupAgentMessage) -> dict[str, Any] | None:
@@ -242,6 +373,36 @@ def _trace_row(
     return row
 
 
+def _trace_effective_turn(
+    effective: EffectiveTurn,
+    *,
+    trigger_query: str,
+    selected_media_ids: Sequence[int],
+) -> None:
+    try:
+        from .execution_trace import trace_event
+
+        trace_event(
+            "turn",
+            "语义回合重建",
+            status="success",
+            input={
+                "trigger_only": effective.trigger_only,
+                "trigger_query_preview": trigger_query[:240],
+            },
+            output={
+                "used_history": effective.used_history,
+                "effective_query_preview": effective.text[:320],
+                "turn_message_ids": list(effective.message_ids),
+                "media_candidate_ids": list(effective.media_message_ids),
+                "selected_media_ids": list(selected_media_ids),
+                "media_requested": effective.media_requested,
+            },
+        )
+    except Exception:
+        return
+
+
 def select_context_messages(
     messages: list[dict[str, Any]],
     *,
@@ -257,9 +418,17 @@ def select_context_messages(
         for user_id in (focus_user_ids or [])
         if isinstance(user_id, int) and int(user_id) > 0
     }
-    query = str(query_text or "").strip()
+    trigger_query = str(query_text or "").strip()
+    effective = effective_turn_query(
+        messages,
+        focus_user_ids=focus_user_ids,
+        query_text=query_text,
+    )
+    query = effective.text
     query_tokens = extract_bigrams(query[:1000]) if query else set()
-    media_query = bool(query and _MEDIA_QUERY_RE.search(query))
+    media_query = effective.media_requested
+    effective_turn_ids = set(effective.message_ids)
+    effective_media_ids = set(effective.media_message_ids)
     selected: set[int] = set()
     reasons: dict[int, tuple[str, float | None]] = {}
 
@@ -270,6 +439,11 @@ def select_context_messages(
             reasons[index] = (reason, score)
 
     if query:
+        for index, item in enumerate(messages):
+            message_id = _optional_positive_int(item.get("message_id"))
+            if message_id is not None and message_id in effective_turn_ids:
+                choose(index, "effective_turn", 18.0)
+
         latest_age = _minutes_ago(messages[-1])
         if latest_age <= CONTEXT_FRESH_MINUTES:
             next_newer_age = latest_age
@@ -294,9 +468,11 @@ def select_context_messages(
             if age > CONTEXT_RELEVANT_MAX_AGE_MINUTES:
                 continue
             if media_query and item.get("media_types"):
-                # 图片指代无法靠文本 bigram 找回；把近期含媒体消息作为候选，
-                # 真正的字节恢复仍由 resolve_media_context 限量完成。
-                relevance.append((12.0 - age / 60.0, index, "media_reference"))
+                message_id = _optional_positive_int(item.get("message_id"))
+                if message_id is not None and message_id in effective_media_ids:
+                    relevance.append((20.0 - age / 60.0, index, "effective_turn_media"))
+                else:
+                    relevance.append((12.0 - age / 60.0, index, "media_reference"))
                 continue
             direct = _directly_touches_focus(item, focus)
             item_tokens = extract_bigrams(str(item.get("text") or "")[:700])
@@ -337,19 +513,23 @@ def select_context_messages(
         max_message_chars=CONTEXT_MESSAGE_CHAR_LIMIT,
         char_budget=CONTEXT_HISTORY_CHAR_BUDGET,
     )
-    # trim_context_messages 会复制 dict，不能按对象身份判断；用原始顺序+message_id 建键。
     kept_keys = [
         (item.get("message_id"), item.get("user_id"), item.get("minutes_ago"))
         for item in trimmed
     ]
     kept_key_set = set(kept_keys)
     trace: list[dict[str, Any]] = []
+    selected_media_ids: list[int] = []
     for index, item in enumerate(messages):
         key = (item.get("message_id"), item.get("user_id"), item.get("minutes_ago"))
         if index in selected:
             reason, score = reasons.get(index, ("selected", None))
             if key in kept_key_set:
                 trace.append(_trace_row(item, selected=True, reason=reason, score=score))
+                if item.get("media_types") and reason in {"effective_turn_media", "media_reference", "recent_cluster", "effective_turn"}:
+                    message_id = _optional_positive_int(item.get("message_id"))
+                    if message_id is not None and message_id not in selected_media_ids:
+                        selected_media_ids.append(message_id)
             else:
                 trace.append(_trace_row(item, selected=False, reason="context_budget", score=score))
             continue
@@ -363,7 +543,19 @@ def select_context_messages(
         else:
             reason = "not_relevant"
         trace.append(_trace_row(item, selected=False, reason=reason))
-    return ContextSelection(trimmed, trace)
+
+    _trace_effective_turn(
+        effective,
+        trigger_query=trigger_query,
+        selected_media_ids=selected_media_ids,
+    )
+    return ContextSelection(
+        trimmed,
+        trace,
+        effective_query=query,
+        turn_message_ids=effective.message_ids,
+        media_message_ids=tuple(selected_media_ids),
+    )
 
 
 def select_context_messages_only(
@@ -381,9 +573,12 @@ def select_context_messages_only(
 
 __all__ = [
     "ContextSelection",
+    "EffectiveTurn",
     "bot_message_meta",
+    "effective_turn_query",
     "history_message_meta",
     "history_message_payload",
+    "query_requests_media",
     "select_context_messages",
     "select_context_messages_only",
 ]
