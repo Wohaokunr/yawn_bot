@@ -1,3 +1,4 @@
+# ruff: noqa: E501,I001,PLR2004
 from __future__ import annotations
 
 import sys
