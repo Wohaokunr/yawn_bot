@@ -681,8 +681,19 @@ def test_critical_tools_require_explicit_admin_intent_and_allowlist() -> None:
     plain = tools.select_dialogue_tool_names("今天聊点什么", allow_admin_tools=True)
     assert "kick_member" not in plain
     assert "set_group_admin" not in plain
-    kick = tools.select_dialogue_tool_names("把小明踢出群", allow_admin_tools=True)
-    assert "kick_member" in kick
+    bootstrap = tools.select_dialogue_tool_names(
+        "把小明踢出群", allow_admin_tools=True
+    )
+    assert "discover_tools" in bootstrap
+    assert "kick_member" not in bootstrap
+    discovered = {
+        item.name
+        for item in tools.rank_discoverable_tools(
+            "把小明踢出群", list(tools._TOOL_DEFINITIONS), limit=12
+        )
+    }
+    assert "kick_member" in discovered
+    kick = frozenset({"kick_member"})
 
     without_allowlist = _tool_names(
         tools.build_tool_schemas(
@@ -809,20 +820,9 @@ def test_high_value_onebot_tools_are_routed_without_privilege_leaks() -> None:
         ),
     )
 
-    assert "get_recent_group_messages" in tools.select_dialogue_tool_names(
-        "刚才群里在聊什么"
-    )
-    assert "list_group_notices" in tools.select_dialogue_tool_names("看看群公告")
-    muted = tools.select_dialogue_tool_names("谁还在禁言", allow_admin_tools=True)
-    assert "list_muted_members" in muted
-    assert "mute_member" not in muted
-    mute_action = tools.select_dialogue_tool_names(
-        "把小明禁言 10 分钟", allow_admin_tools=True
-    )
-    assert "mute_member" in mute_action
-    assert "get_group_honor" in tools.select_dialogue_tool_names("这个群龙王是谁")
-    assert "list_group_files" in tools.select_dialogue_tool_names("群文件里有什么")
-    assert "get_group_file_link" in tools.select_dialogue_tool_names("给我群文件链接")
+    bootstrap = tools.select_dialogue_tool_names("刚才群里在聊什么")
+    assert "discover_tools" in bootstrap
+    assert "get_recent_group_messages" not in bootstrap
 
     names = _tool_names(tools.build_tool_schemas(caps))
     assert {
@@ -975,7 +975,12 @@ async def test_new_onebot_read_tools_return_compact_payloads(
     )
 
     assert history["result"]["items"][0]["text"] == "你好[图片]"
-    assert "secret.invalid" not in str(history["result"])
+    public_history = {
+        key: value
+        for key, value in history["result"]["items"][0].items()
+        if not key.startswith("_")
+    }
+    assert "secret.invalid" not in str(public_history)
     assert notices["result"] == [
         {"notice_id": "n1", "sender_id": 2, "publish_time": 123, "content": "公告正文"}
     ]

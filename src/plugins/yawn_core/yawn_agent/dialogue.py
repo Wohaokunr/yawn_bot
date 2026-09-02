@@ -23,7 +23,6 @@ from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from ..llm import (
     LLMMultimodalUnsupportedError,
-    complete,
     complete_with_tools_result,
     resolve_llm_request,
     vision_model_configured,
@@ -76,10 +75,9 @@ from .execution_trace import (
 from .log import dbg, dbg_exc
 from .media import (
     MediaInput,
-    build_media_content_blocks,
     get_cached_caption,
-    store_caption,
 )
+from .media_caption import describe_images as _describe_images
 from .media_context import (
     project_context_for_llm,
     project_tool_result_media,
@@ -125,10 +123,6 @@ _MAX_TURN_SECONDS = 120.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
 _VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
-_VISION_SYSTEM_PROMPT = (
-    "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
-    "不猜测身份、隐私或图片外的信息。"
-)
 
 
 async def _resolve_turn_tool_capabilities(
@@ -236,166 +230,6 @@ def _extract_message_id(result: Any) -> int | None:
     """OneBot 实现对 send_group_msg 返回值不统一：dict、对象或裸 int；0 视为缺失。"""
 
     return extract_outbound_message_id(result)
-
-
-async def _caption_single_image(
-    group_id: int,
-    normalized: NormalizedMessage,
-    media: MediaInput,
-    session: Any,
-    config: GroupAgentConfig,
-    diagnostics: list[dict[str, Any]] | None = None,
-) -> str | None:
-    blocks, _bound = await build_media_content_blocks(
-        [media],
-        task="agent_image",
-        group_id=group_id,
-        session=session,
-        cache_enabled=bool(config.media_cache_enabled),
-        diagnostics=diagnostics,
-    )
-    if not blocks:
-        return None
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _VISION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": normalized.prompt_text()},
-                blocks[0],
-            ],
-        },
-    ]
-    result = await complete(  # pyright: ignore[reportArgumentType]
-        messages,  # pyright: ignore[reportArgumentType]
-        task="agent_image",
-        max_tokens=500,
-        timeout=30,
-    )  # pyright: ignore[reportArgumentType]
-    return (result or "").strip() or None
-
-
-async def _describe_images(
-    group_id: int,
-    normalized: NormalizedMessage,
-    media_inputs: list[MediaInput],
-    session: Any,
-    config: GroupAgentConfig,
-    cached: list[tuple[str, str]],
-    digests: list[str],
-    diagnostics: list[dict[str, Any]] | None = None,
-) -> str:
-    """视觉转述降级路径：逐图独立生成并缓存 caption。
-
-    多图必须逐图转述，否则单一 caption 写进每个 digest 的缓存后，
-    任一单图命中缓存都会拿到混合描述。MediaInput 保留内容 hash，
-    即使后续 provider 由 dialogue 切换为 agent_image 也不会丢失图片身份。
-    """
-
-    has_vision_model = vision_model_configured()
-    if not media_inputs:
-        dbg(f"群 {group_id} 跳过图片识别: 无可用图片 block")
-        return "[图片未识别：没有可用的图片数据]"
-    caption_by_digest = dict(cached)
-    vision_request = resolve_llm_request("agent_image")
-    parts: list[str] = []
-    digest_set = set(digests)
-    for media in media_inputs:
-        digest = media.content_hash if media.content_hash in digest_set else None
-        caption = caption_by_digest.get(digest) if digest is not None else None
-        if caption:
-            parts.append(f"[图片转述（缓存）] {caption}")
-            if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "status": "caption_ready",
-                        "source": media.source,
-                        "source_message_id": media.source_message_id,
-                        "asset_id": media.asset_id,
-                        "content_hash": media.content_hash[:12],
-                        "_content_hash": media.content_hash,
-                        "provider": vision_request.provider,
-                        "model": vision_request.model,
-                        "caption_cache": "hit",
-                        "input_type": "caption",
-                        "vision_status": "cached_caption",
-                        "delivered_to_model": True,
-                    }
-                )
-            continue
-        if not has_vision_model:
-            parts.append("[图片未识别：当前未配置可用的识图模型]")
-            if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "status": "vision_unsupported",
-                        "source": media.source,
-                        "source_message_id": media.source_message_id,
-                        "asset_id": media.asset_id,
-                        "content_hash": media.content_hash[:12],
-                        "_content_hash": media.content_hash,
-                        "provider": vision_request.provider,
-                        "model": vision_request.model,
-                        "input_type": "none",
-                        "vision_status": "model_not_configured",
-                        "delivered_to_model": False,
-                        "reason": "agent_image_route_not_configured",
-                    }
-                )
-            continue
-        caption = await _caption_single_image(
-            group_id,
-            normalized,
-            media,
-            session,
-            config,
-            diagnostics=diagnostics,
-        )
-        if caption is None:
-            dbg(f"群 {group_id} 视觉模型返回空结果 digest={digest}")
-            parts.append("[图片未识别：视觉模型没有返回结果]")
-            if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "status": "vision_failed",
-                        "source": media.source,
-                        "source_message_id": media.source_message_id,
-                        "asset_id": media.asset_id,
-                        "content_hash": media.content_hash[:12],
-                        "_content_hash": media.content_hash,
-                        "provider": vision_request.provider,
-                        "model": vision_request.model,
-                        "vision_status": "empty_result",
-                        "reason": "agent_image_model_returned_empty",
-                    }
-                )
-            continue
-        dbg(f"群 {group_id} 视觉模型识别完成 digest={digest} caption={caption!r}")
-        if digest:
-            await store_caption(
-                session,
-                group_id,
-                digest,
-                caption,
-                resolve_llm_request("agent_image").model,
-                cache_enabled=bool(config.media_cache_enabled),
-            )
-        parts.append(f"[图片转述] {caption[:2000]}")
-        if diagnostics is not None:
-            diagnostics.append(
-                {
-                    "source": media.source,
-                    "source_message_id": media.source_message_id,
-                    "asset_id": media.asset_id,
-                    "content_hash": media.content_hash[:12],
-                    "_content_hash": media.content_hash,
-                    "provider": vision_request.provider,
-                    "model": vision_request.model,
-                    "vision_status": "caption_ready",
-                    "delivered_to_model": True,
-                }
-            )
-    return "\n".join(parts)
 
 
 async def _prepare_media_prompt(

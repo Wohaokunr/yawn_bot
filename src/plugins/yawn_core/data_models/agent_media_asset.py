@@ -40,11 +40,15 @@ class AgentMediaAsset(Model):
     )
 
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
-    media_type: Mapped[str] = mapped_column(String(24), default="image")
-    mime_type: Mapped[str] = mapped_column(
-        String(128), default="application/octet-stream"
+    media_type: Mapped[str] = mapped_column(
+        String(24), default="image", server_default="image"
     )
-    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    mime_type: Mapped[str] = mapped_column(
+        String(128),
+        default="application/octet-stream",
+        server_default="application/octet-stream",
+    )
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     source_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     source_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -53,8 +57,12 @@ class AgentMediaAsset(Model):
 
     cache_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
-    provider: Mapped[str] = mapped_column(String(32), default="local")
-    provider_scope: Mapped[str] = mapped_column(String(96), default="local")
+    provider: Mapped[str] = mapped_column(
+        String(32), default="local", server_default="local"
+    )
+    provider_scope: Mapped[str] = mapped_column(
+        String(96), default="local", server_default="local"
+    )
     remote_file_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, index=True
     )
@@ -78,4 +86,6 @@ class AgentMediaAsset(Model):
         index=True,
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
-    status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
+    status: Mapped[str] = mapped_column(
+        String(24), default="ready", server_default="ready", index=True
+    )

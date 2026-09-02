@@ -48,8 +48,9 @@ _FORWARD_RULES = (
 _DISCOVERY_RULES = (
     "工具采用渐进披露：首轮只有最小核心能力。凡需要读取群资料、历史消息、记忆、成员资料、"
     "表情、文件或执行任何管理动作，都先调用 discover_tools 描述任务，不要猜工具名。"
-    "如果要浏览能力目录，可用 query=‘全部工具’取得紧凑的 toolpacks；"
-    "如果需要某一类完整能力，再把 toolpacks.name 作为 family 调用 discover_tools 加载整包。"
+    "如果要浏览能力目录，可用 query=`全部工具` 取得紧凑的 toolpacks；"
+    "如果需要某一类完整能力，再把 toolpacks.name 作为 family 调用 "
+    "discover_tools 加载整包。"
     "discover_tools 只负责发现并让下一轮注入 schema，不代表任何业务动作已经执行；"
     "只能调用下一轮实际出现在 schema 中的工具。"
 )

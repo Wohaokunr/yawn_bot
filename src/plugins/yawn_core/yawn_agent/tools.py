@@ -314,7 +314,8 @@ def _message_media_refs(raw: Any) -> list[dict[str, Any]]:
     for segment in raw["message"][:24]:
         if not isinstance(segment, dict) or str(segment.get("type") or "") != "image":
             continue
-        data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+        raw_data = segment.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
         ref: dict[str, Any] = {"type": "image", "source": "tool"}
         if source_message_id is not None:
             ref["source_message_id"] = source_message_id

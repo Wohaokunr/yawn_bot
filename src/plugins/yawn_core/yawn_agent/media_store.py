@@ -187,6 +187,15 @@ async def save_local_asset(
             provider=_LOCAL_PROVIDER,
             provider_scope=_LOCAL_SCOPE,
         )
+    raw_source_message_id = source_ref.get("source_message_id") or source_ref.get(
+        "message_id"
+    )
+    source_message_id: int | None = None
+    if raw_source_message_id is not None:
+        try:
+            source_message_id = int(raw_source_message_id)
+        except (TypeError, ValueError):
+            source_message_id = None
     try:
         async with session.begin_nested():
             if row is None:
@@ -197,17 +206,7 @@ async def save_local_asset(
                     mime_type=media.mime_type,
                     size_bytes=size_bytes,
                     source_type=str(source_ref.get("source") or "current")[:32],
-                    source_message_id=(
-                        int(
-                            source_ref.get("source_message_id")
-                            or source_ref.get("message_id")
-                        )
-                        if (
-                            source_ref.get("source_message_id") is not None
-                            or source_ref.get("message_id") is not None
-                        )
-                        else None
-                    ),
+                    source_message_id=source_message_id,
                     source_file=(str(source_ref.get("file"))[:512] or None),
                     source_url=(str(source_ref.get("url")) or None),
                     cache_path=str(media.local_path) if media.local_path else None,

@@ -63,6 +63,8 @@ def _message_ids(items: Sequence[dict[str, Any]] | None) -> list[int]:
         if not isinstance(item, dict):
             continue
         raw = item.get("message_id") or item.get("source_message_id")
+        if raw is None:
+            continue
         try:
             message_id = int(raw)
         except (TypeError, ValueError):

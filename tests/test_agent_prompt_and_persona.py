@@ -1858,7 +1858,7 @@ async def test_image_caption_uses_configured_image_task(
     from types import SimpleNamespace
 
     _load_agent_modules()
-    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent import media_caption
 
     captured: dict[str, object] = {}
 
@@ -1866,10 +1866,10 @@ async def test_image_caption_uses_configured_image_task(
         captured.update(kwargs)
         return "一只猫"
 
-    monkeypatch.setattr(dialogue, "complete", complete)
+    monkeypatch.setattr(media_caption, "complete", complete)
     from src.plugins.yawn_core.yawn_agent.media import MediaInput
 
-    result = await dialogue._caption_single_image(
+    result = await media_caption._caption_single_image(
         1,
         SimpleNamespace(prompt_text=lambda: "这是什么"),
         MediaInput(
