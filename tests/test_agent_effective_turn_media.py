@@ -276,3 +276,151 @@ async def test_media_resolver_prefers_effective_turn_image_for_at_only_trigger(
     assert len(result) == 1
     assert prepared_refs[0]["source"] == "history"
     assert prepared_refs[0]["source_message_id"] == 101
+
+
+def test_mention_only_semantic_query_is_not_nontext_placeholder() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent.message_parser import NormalizedMessage
+
+    normalized = NormalizedMessage(plain_text="", segments=[])
+    normalized.trigger_source = "mention"
+    normalized.trigger_signals = {"mention": True}
+
+    assert normalized.semantic_query_text() == "[用户仅@机器人，没有附加正文]"
+    assert normalized.semantic_query_text() != "[非文本消息]"
+
+
+def test_real_media_keeps_nontext_media_semantics_even_when_mentioned() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent.message_parser import NormalizedMessage
+
+    normalized = NormalizedMessage(
+        plain_text="",
+        segments=[],
+        media_refs=[{"type": "image", "asset_id": 77}],
+    )
+    normalized.trigger_source = "mention"
+    normalized.trigger_signals = {"mention": True}
+
+    assert normalized.semantic_query_text() != "[用户仅@机器人，没有附加正文]"
+    assert "媒体" in normalized.semantic_query_text()
+
+
+def test_bare_mention_continues_across_recent_bot_reply() -> None:
+    context_history, _media_context = _load_modules()
+    messages = [
+        _text_message(201, 20001, "你AI味太强了", minutes_ago=3),
+        _text_message(202, 20001, "怎么不说话了", minutes_ago=2),
+        {
+            "message_id": 203,
+            "user_id": 50001,
+            "role": "bot",
+            "text": "上一条机器人回复",
+            "minutes_ago": 1,
+        },
+    ]
+
+    effective = context_history.effective_turn_query(
+        messages,
+        focus_user_ids=[20001],
+        query_text="[用户仅@机器人，没有附加正文]",
+    )
+
+    assert effective.trigger_only is True
+    assert effective.used_history is True
+    assert effective.text == "你AI味太强了\n怎么不说话了"
+    assert effective.message_ids == (201, 202)
+
+
+def test_bare_mention_never_crosses_another_human() -> None:
+    context_history, _media_context = _load_modules()
+    messages = [
+        _text_message(201, 20001, "继续刚才的话题", minutes_ago=3),
+        _text_message(202, 30001, "别人插话", minutes_ago=1),
+    ]
+
+    effective = context_history.effective_turn_query(
+        messages,
+        focus_user_ids=[20001],
+        query_text="[用户仅@机器人，没有附加正文]",
+    )
+
+    assert effective.used_history is False
+    assert effective.message_ids == ()
+
+
+def test_trace_shape_recovers_adapter_consumed_bot_mention() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent.message_parser import (
+        NormalizedMessage,
+        SegmentNode,
+    )
+
+    normalized = NormalizedMessage(
+        plain_text="",
+        segments=[SegmentNode("text", {"text": ""}, "")],
+    )
+    normalized.trigger_source = "mention"
+    normalized.trigger_signals = {"mention": True, "reply": False, "wake_word": False}
+
+    shape = dialogue._trace_message_shape(normalized, bot_id=50001)
+
+    assert shape["mention_bot"] is True
+    assert shape["original_segment_types"] == []
+    assert shape["observed_segment_types"] == []
+    assert shape["effective_segment_types"] == ["at"]
+    assert shape["observed_mentions"] == []
+    assert shape["effective_mentions"] == [50001]
+    assert shape["mention_stripped_for_prompt"] is True
+    assert shape["mention_recovered_from_trigger"] is True
+
+
+def test_trace_shape_keeps_real_at_without_marking_recovery() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent.message_parser import (
+        NormalizedMessage,
+        SegmentNode,
+    )
+
+    normalized = NormalizedMessage(
+        plain_text="@50001",
+        segments=[SegmentNode("at", {"qq": "50001"}, "@50001")],
+        mentions=[50001],
+    )
+    normalized.trigger_source = "mention"
+    normalized.trigger_signals = {"mention": True, "reply": False, "wake_word": False}
+
+    shape = dialogue._trace_message_shape(normalized, bot_id=50001)
+
+    assert shape["observed_segment_types"] == ["at"]
+    assert shape["effective_segment_types"] == ["at"]
+    assert shape["observed_mentions"] == [50001]
+    assert shape["effective_mentions"] == [50001]
+    assert shape["mention_stripped_for_prompt"] is False
+    assert shape["mention_recovered_from_trigger"] is False
+
+
+def test_trace_shape_leaves_plain_text_message_unchanged() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent.message_parser import (
+        NormalizedMessage,
+        SegmentNode,
+    )
+
+    normalized = NormalizedMessage(
+        plain_text="你好",
+        segments=[SegmentNode("text", {"text": "你好"}, "你好")],
+    )
+    normalized.trigger_source = "wake_word"
+    normalized.trigger_signals = {"mention": False, "reply": False, "wake_word": True}
+
+    shape = dialogue._trace_message_shape(normalized, bot_id=50001)
+
+    assert shape["observed_segment_types"] == ["text"]
+    assert shape["effective_segment_types"] == ["text"]
+    assert shape["effective_mentions"] == []
+    assert shape["mention_stripped_for_prompt"] is False
+    assert shape["mention_recovered_from_trigger"] is False

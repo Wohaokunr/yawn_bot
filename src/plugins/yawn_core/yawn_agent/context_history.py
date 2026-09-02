@@ -28,10 +28,11 @@ CONTEXT_PROACTIVE_MAX_AGE_MINUTES = 45
 CONTEXT_PROACTIVE_MAX_MESSAGES = 10
 EFFECTIVE_TURN_MAX_MESSAGES = 4
 EFFECTIVE_TURN_MAX_AGE_MINUTES = 2
+TRIGGER_CONTINUATION_MAX_AGE_MINUTES = 10
 LOW_INFO_HISTORY_TEXTS = frozenset(
     {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
 )
-_NON_SEMANTIC_QUERY_SENTINELS = frozenset({"[非文本消息]"})
+_NON_SEMANTIC_QUERY_SENTINELS = frozenset({"[用户仅@机器人，没有附加正文]", "[非文本消息]"})
 _MEDIA_QUERY_RE = re.compile(
     r"(?:图片|截图|照片|相片|这张|那张|上面那|前面那|刚才那|刚刚那|"
     r"我刚才发的|我刚发的|第[一二三四五六七八九十\d]+张|图里|图上|这里是不是|还有什么细节)"
@@ -133,17 +134,27 @@ def effective_turn_query(
         return EffectiveTurn(text=query, trigger_only=True)
 
     collected: list[dict[str, Any]] = []
+    continuation_trigger = query == "[用户仅@机器人，没有附加正文]"
+    max_age = (
+        TRIGGER_CONTINUATION_MAX_AGE_MINUTES
+        if continuation_trigger
+        else EFFECTIVE_TURN_MAX_AGE_MINUTES
+    )
     for item in reversed(messages):
         if len(collected) >= EFFECTIVE_TURN_MAX_MESSAGES:
             break
         if bool(item.get("topic_break_before")) and collected:
             break
+        if _minutes_ago(item) > max_age:
+            break
         if str(item.get("role") or "member") == "bot":
+            # A bare @ commonly means “continue what we were just discussing”.
+            # Skip recent bot replies, but never cross another human speaker.
+            if continuation_trigger:
+                continue
             break
         user_id = _optional_positive_int(item.get("user_id"))
         if user_id != actor_user_id:
-            break
-        if _minutes_ago(item) > EFFECTIVE_TURN_MAX_AGE_MINUTES:
             break
         collected.append(item)
 

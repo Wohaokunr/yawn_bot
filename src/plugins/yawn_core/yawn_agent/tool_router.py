@@ -82,8 +82,14 @@ def rank_discoverable_tools(
     for definition in candidates:
         if not definition.discoverable or definition.name == "discover_tools":
             continue
-        if family_filter and definition.family.casefold() != family_filter:
-            continue
+        if family_filter:
+            accepted_families = (
+                {"message", "history"}
+                if family_filter in {"message", "message_read", "message-read"}
+                else {family_filter}
+            )
+            if definition.family.casefold() not in accepted_families:
+                continue
         score = 0
         if normalized and normalized in definition.name.casefold():
             score += 8

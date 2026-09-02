@@ -97,6 +97,25 @@ class NormalizedMessage:
             if item.type == "text"
         ).strip()
 
+    def semantic_query_text(self) -> str:
+        """Return the semantic query for dialogue/context selection.
+
+        A trigger-only @ is an interaction signal, not an opaque non-text payload.
+        Keep real media/reply/forward messages on the normal prompt path so images,
+        files and quoted content are never mislabeled as an empty mention.
+        """
+
+        has_payload = bool(
+            self.intent_text()
+            or self.media_refs
+            or self.reply_chain
+            or self.forward_tree
+        )
+        mention_only = bool(self.trigger_signals.get("mention")) and not has_payload
+        if mention_only:
+            return "[用户仅@机器人，没有附加正文]"
+        return self.prompt_text()
+
     def prompt_text(self) -> str:
         """生成不会把二进制或完整 API payload 带入提示词的文本。"""
 

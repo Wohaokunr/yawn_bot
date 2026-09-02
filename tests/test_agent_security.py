@@ -1333,3 +1333,19 @@ async def test_default_qq_image_cdn_is_materialized_for_multimodal_model(
     assert blocks[0]["type"] == "image_url"
     assert blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert "multimedia.nt.qq.com.cn" not in str(blocks)
+
+
+def test_message_family_discovery_includes_read_tools() -> None:
+    _capabilities, _media, tools = _load_agent_modules()
+    discovered = {
+        item.name
+        for item in tools.rank_discoverable_tools(
+            "查看非文本消息内容",
+            list(tools._TOOL_DEFINITIONS),
+            family="message",
+            limit=12,
+        )
+    }
+
+    assert "get_message" in discovered
+    assert "get_recent_group_messages" in discovered

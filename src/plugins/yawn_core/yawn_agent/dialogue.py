@@ -250,7 +250,7 @@ async def _prepare_media_prompt(
     vision_request = resolve_llm_request("agent_image")
     mode = dialogue_request.multimodal
     dbg(f"群 {group_id} 多模态模式={mode!r}")
-    user_prompt = normalized.prompt_text()
+    user_prompt = _semantic_query_text(normalized)
     dedicated_vision = (
         bool(media_inputs)
         and vision_model_configured()
@@ -400,6 +400,72 @@ async def _finalize_reply(
     )
 
 
+def _semantic_query_text(normalized: Any) -> str:
+    semantic = getattr(normalized, "semantic_query_text", None)
+    if callable(semantic):
+        return str(semantic())
+    prompt = getattr(normalized, "prompt_text", None)
+    return str(prompt()) if callable(prompt) else ""
+
+
+def _trace_message_shape(
+    normalized: NormalizedMessage,
+    *,
+    bot_id: int,
+) -> dict[str, Any]:
+    """Project one consistent @ view for execution traces.
+
+    NoneBot/adapter preprocessing may consume the raw ``at`` segment while leaving
+    ``event.to_me`` as the trigger signal. Trace should expose both what the parser
+    physically observed and the effective dialogue semantics instead of contradicting
+    itself with ``mention=true`` plus ``mentions=[]``.
+    """
+
+    observed_types: list[str] = []
+    for item in normalized.segments:
+        segment_type = str(item.type or "").strip()
+        if not segment_type:
+            continue
+        if segment_type == "text" and not str(
+            item.data.get("text") or item.text or ""
+        ).strip():
+            continue
+        if segment_type not in observed_types:
+            observed_types.append(segment_type)
+
+    observed_mentions: list[int] = []
+    for raw in normalized.mentions:
+        try:
+            user_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if user_id > 0 and user_id not in observed_mentions:
+            observed_mentions.append(user_id)
+
+    mention_bot = bool(normalized.trigger_signals.get("mention"))
+    effective_mentions = list(observed_mentions)
+    if mention_bot and bot_id > 0 and bot_id not in effective_mentions:
+        effective_mentions.append(bot_id)
+
+    effective_types = list(observed_types)
+    if mention_bot and "at" not in effective_types:
+        effective_types.append("at")
+
+    mention_recovered = mention_bot and (
+        bot_id not in observed_mentions or "at" not in observed_types
+    )
+    return {
+        "mention_bot": mention_bot,
+        "original_segment_types": observed_types,
+        "observed_segment_types": observed_types,
+        "effective_segment_types": effective_types,
+        "observed_mentions": observed_mentions,
+        "effective_mentions": effective_mentions,
+        "mention_stripped_for_prompt": mention_bot and "at" not in observed_types,
+        "mention_recovered_from_trigger": mention_recovered,
+    }
+
+
 async def _process_group_message(
     bot: Bot,
     event: GroupMessageEvent,
@@ -413,7 +479,7 @@ async def _process_group_message(
     message_id = getattr(event, "message_id", None)
     dbg(
         f"群 {group_id} 开始处理消息: bot={bot_id} user={event.get_user_id()} "
-        f"message_id={message_id} 完整消息={normalized.prompt_text()!r}"
+        f"message_id={message_id} 完整消息={_semantic_query_text(normalized)!r}"
     )
     async with group_lock(group_id, bot_id):
         if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
@@ -443,7 +509,7 @@ async def _process_group_message(
                 focus_user_ids=_current_turn_focus_ids(
                     actor_user_id, normalized, bot_id=bot_id
                 ),
-                query_text=normalized.prompt_text(),
+                query_text=_semantic_query_text(normalized),
                 exclude_message_id=int(message_id) if message_id is not None else None,
                 context_model=model,
                 completion_reserve=800,
@@ -456,8 +522,8 @@ async def _process_group_message(
                     "focus_user_ids": _current_turn_focus_ids(
                         actor_user_id, normalized, bot_id=bot_id
                     ),
-                    "query_chars": len(normalized.prompt_text()),
-                    "query_preview": normalized.prompt_text()[:240],
+                    "query_chars": len(_semantic_query_text(normalized)),
+                    "query_preview": _semantic_query_text(normalized)[:240],
                     "context_token_limit": 2400,
                     "completion_reserve": 800,
                 },
@@ -551,7 +617,7 @@ async def _process_group_message(
                 current_message=normalized,
                 reply_chain=normalized.reply_chain,
                 selected_history=list(context.get("messages") or []),
-                query_text=normalized.prompt_text(),
+                query_text=_semantic_query_text(normalized),
                 asset_ttl_seconds=max(int(config.raw_retention_days), 1) * 86400,
                 cache_enabled=bool(config.media_cache_enabled),
                 diagnostics=media_diagnostics,
@@ -731,6 +797,10 @@ async def _process_group_message(
             deadline = time.monotonic() + _MAX_TURN_SECONDS
             rounds = 0
             had_tool_results = False
+            discovery_attempts = 0
+            discovery_fingerprints: set[str] = set()
+            discovery_known_names: set[str] = set(selected_tool_names)
+            disable_discovery = False
             turn_usage: dict[str, int] = {}
             while rounds < round_limit:
                 if time.monotonic() > deadline:
@@ -773,7 +843,7 @@ async def _process_group_message(
                     )
                     fallback_attempted = True
                     user_prompt = (
-                        f"{normalized.prompt_text()}\n"
+                        f"{_semantic_query_text(normalized)}\n"
                         f"{await _describe_images(group_id, normalized, media_inputs, session, config, cached_captions, media_digests, diagnostics=media_diagnostics)}"
                     )
                     current_turn = CurrentTurn(
@@ -912,15 +982,52 @@ async def _process_group_message(
                                 f"群 {group_id} 工具 {tool_name} 发送前触发已过期,取消副作用"
                             )
                         else:
-                            result = await execute_tool(
-                                tool_name,
-                                args,
-                                bot=bot,
-                                group_id=group_id,
-                                actor_user_id=actor_user_id,
-                                session=session,
-                                capabilities=capabilities,
-                            )
+                            discovery_fingerprint = ""
+                            if tool_name == "discover_tools":
+                                discovery_fingerprint = json.dumps(
+                                    {
+                                        "query": str(args.get("query") or "").strip().casefold(),
+                                        "family": str(args.get("family") or "").strip().casefold(),
+                                    },
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                )
+                                repeated = discovery_fingerprint in discovery_fingerprints
+                                if repeated or discovery_attempts >= 2:
+                                    disable_discovery = True
+                                    result = {
+                                        "ok": True,
+                                        "result": {
+                                            "mode": "guarded",
+                                            "tools": [],
+                                            "toolpacks": [],
+                                            "count": 0,
+                                            "no_new_tools": True,
+                                            "message": "本回合没有新的工具可加载；请使用已加载工具或直接回答，不要再次调用 discover_tools。",
+                                        },
+                                    }
+                                else:
+                                    discovery_attempts += 1
+                                    discovery_fingerprints.add(discovery_fingerprint)
+                                    result = await execute_tool(
+                                        tool_name,
+                                        args,
+                                        bot=bot,
+                                        group_id=group_id,
+                                        actor_user_id=actor_user_id,
+                                        session=session,
+                                        capabilities=capabilities,
+                                    )
+                            else:
+                                result = await execute_tool(
+                                    tool_name,
+                                    args,
+                                    bot=bot,
+                                    group_id=group_id,
+                                    actor_user_id=actor_user_id,
+                                    session=session,
+                                    capabilities=capabilities,
+                                )
                     had_tool_results = True
                     if tool_name == "discover_tools" and bool(result.get("ok")):
                         discovery = result.get("result")
@@ -929,21 +1036,36 @@ async def _process_group_message(
                             if isinstance(discovery, dict)
                             else []
                         )
+                        returned_names: set[str] = set()
                         for item in discovery_rows:
                             if isinstance(item, dict) and item.get("name"):
-                                discovered_tool_names.add(str(item["name"]))
+                                name = str(item["name"])
+                                returned_names.add(name)
+                                if name not in discovery_known_names:
+                                    discovered_tool_names.add(name)
                                 if str(item.get("permission") or "") in {
                                     "privileged",
                                     "critical",
                                 }:
                                     discovered_requires_admin = True
+                        new_names = returned_names - discovery_known_names
+                        discovery_known_names.update(returned_names)
+                        if not new_names or discovery_attempts >= 2:
+                            disable_discovery = True
+                            if isinstance(discovery, dict):
+                                discovery["no_new_tools"] = not bool(new_names)
+                                discovery["message"] = (
+                                    "没有发现新的工具；请使用已加载工具或直接回答，不要再次调用 discover_tools。"
+                                    if not new_names
+                                    else "已达到本回合工具发现上限；请使用已加载工具或直接回答。"
+                                )
                     tool_media_diagnostics: list[dict[str, Any]] = []
                     tool_media_inputs = await resolve_media_context(
                         bot,
                         session,
                         group_id,
                         tool_results=[result],
-                        query_text=normalized.prompt_text(),
+                        query_text=_semantic_query_text(normalized),
                         asset_ttl_seconds=max(int(config.raw_retention_days), 1) * 86400,
                         cache_enabled=bool(config.media_cache_enabled),
                         diagnostics=tool_media_diagnostics,
@@ -1236,6 +1358,33 @@ async def _process_group_message(
                             ],
                         }
                     )
+                if disable_discovery and not round_sent_message:
+                    selected_tool_names = frozenset(
+                        name for name in selected_tool_names if name != "discover_tools"
+                    )
+                    tools = build_tool_schemas(
+                        capabilities,
+                        allow_admin_tools=allow_admin_tools,
+                        segment_capabilities=get_segment_capabilities(bot, group_id),
+                        privileged_allowlist=set(config.tool_allowlist or []),
+                        include_names=selected_tool_names,
+                        message_segment_types=(
+                            message_segment_types
+                            if "send_message" in selected_tool_names
+                            else None
+                        ),
+                    )
+                    trace_event(
+                        "capability",
+                        "动态工具发现保护",
+                        output={
+                            "discovery_attempts": discovery_attempts,
+                            "discover_tools_disabled": True,
+                            "tool_count": len(tools),
+                        },
+                        round_index=rounds,
+                    )
+
                 if discovered_tool_names and not round_sent_message:
                     if discovered_requires_admin:
                         # The trusted discovery result only contains privileged
@@ -1326,15 +1475,38 @@ async def process_group_message(
         ),
     )
     token = bind_execution_trace(trace)
+    trace_shape = _trace_message_shape(normalized, bot_id=int(bot.self_id))
     for stage in normalized.parse_trace:
         if not isinstance(stage, dict):
             continue
+        stage_label = str(stage.get("label") or "消息解析")
+        stage_output = (
+            dict(stage.get("output"))
+            if isinstance(stage.get("output"), dict)
+            else {}
+        )
+        if stage_label == "消息段归一化":
+            stage_output.update(
+                {
+                    "mentions": len(trace_shape["effective_mentions"]),
+                    "mention_bot": trace_shape["mention_bot"],
+                    "observed_mentions": trace_shape["observed_mentions"],
+                    "effective_mentions": trace_shape["effective_mentions"],
+                    "original_segment_types": trace_shape["original_segment_types"],
+                    "observed_segment_types": trace_shape["observed_segment_types"],
+                    "effective_segment_types": trace_shape["effective_segment_types"],
+                    "mention_stripped_for_prompt": trace_shape[
+                        "mention_stripped_for_prompt"
+                    ],
+                    "mention_recovered_from_trigger": trace_shape[
+                        "mention_recovered_from_trigger"
+                    ],
+                }
+            )
         trace_event(
             "parse",
-            str(stage.get("label") or "消息解析"),
-            output=(
-                stage.get("output") if isinstance(stage.get("output"), dict) else {}
-            ),
+            stage_label,
+            output=stage_output,
             duration_ms=(
                 float(stage.get("duration_ms") or 0.0)
                 if stage.get("duration_ms") is not None
@@ -1347,9 +1519,17 @@ async def process_group_message(
         output={
             "trigger_source": normalized.trigger_source or "explicit_call",
             "trigger_signals": dict(normalized.trigger_signals),
+            "trigger": {
+                "source": normalized.trigger_source or "explicit_call",
+                "mention_bot": trace_shape["mention_bot"],
+                "reply": bool(normalized.trigger_signals.get("reply")),
+                "wake_word": bool(normalized.trigger_signals.get("wake_word")),
+            },
             "text_chars": len(normalized.plain_text),
             "text_preview": normalized.plain_text[:240],
-            "segment_types": [item.type for item in normalized.segments],
+            "segment_types": trace_shape["effective_segment_types"],
+            "original_segment_types": trace_shape["original_segment_types"],
+            "observed_segment_types": trace_shape["observed_segment_types"],
             "media": [
                 {
                     "type": item.get("type"),
@@ -1359,7 +1539,13 @@ async def process_group_message(
             ],
             "reply_depth": len(normalized.reply_chain),
             "forward_nodes": len(normalized.forward_tree),
-            "mentions": normalized.mentions,
+            "mentions": trace_shape["effective_mentions"],
+            "observed_mentions": trace_shape["observed_mentions"],
+            "mention_bot": trace_shape["mention_bot"],
+            "mention_stripped_for_prompt": trace_shape["mention_stripped_for_prompt"],
+            "mention_recovered_from_trigger": trace_shape[
+                "mention_recovered_from_trigger"
+            ],
             "truncated": normalized.truncated,
             "queue_wait_ms": (
                 round(max(started - enqueued_at, 0.0) * 1000, 1)

@@ -132,7 +132,7 @@ TOOL_DEFINITIONS = (
         required=("message_id",),
         actions=("get_msg",),
         family="history",
-        keywords=("这条消息", "那条消息", "原消息", "刚才那条"),
+        keywords=("这条消息", "那条消息", "原消息", "刚才那条", "查看消息", "消息内容", "非文本消息", "查看非文本消息内容"),
     ),
     ToolDefinition(
         "get_recent_group_messages",
@@ -149,6 +149,9 @@ TOOL_DEFINITIONS = (
             "刚才聊",
             "群里在聊",
             "大家在聊",
+            "查看消息内容",
+            "刚才消息内容",
+            "非文本消息",
         ),
     ),
     ToolDefinition(
