@@ -1,4 +1,4 @@
-# ruff: noqa: C901,E501,PLR0912,PLR0913,PLR0915,TID252,TC001,TC003
+# ruff: noqa: C901,E501,PLR0912,PLR0913,PLR0915,TID252,TC001,TC003,BLE001
 """Resolve media from current/reply/history/tool sources into one Agent media stream."""
 
 from __future__ import annotations
