@@ -143,6 +143,72 @@ def test_direct_media_query_keeps_existing_history_behavior() -> None:
     assert media_trace["reason"] == "media_reference"
 
 
+def test_prompt_promotes_split_question_into_current_turn() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent import prompt
+
+    context = {
+        "messages": [
+            _image_message(101, 20001),
+            _text_message(102, 20001, "这张图片怎么样"),
+        ]
+    }
+    turn = {
+        "message_id": 103,
+        "user_id": 20001,
+        "name": "用户",
+        "role": "member",
+        "title": None,
+        "content": "",
+        "mentions": (),
+        "reply_to": None,
+        "trigger": "at",
+        "received_at": None,
+        "media_types": (),
+        "media": (),
+        "forward_nodes": 0,
+        "truncated": False,
+    }
+
+    rebuilt = prompt.reconstruct_effective_current_turn(turn, context)
+
+    assert rebuilt is not None
+    assert rebuilt["content"] == "这张图片怎么样"
+
+
+def test_prompt_preserves_media_fallback_and_prepends_split_question() -> None:
+    _context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent import prompt
+
+    context = {
+        "messages": [
+            _image_message(101, 20001),
+            _text_message(102, 20001, "这张图片怎么样"),
+        ]
+    }
+    turn = {
+        "message_id": 103,
+        "user_id": 20001,
+        "name": "用户",
+        "role": "member",
+        "title": None,
+        "content": "[图片转述] 一张黑白插画",
+        "mentions": (),
+        "reply_to": None,
+        "trigger": "at",
+        "received_at": None,
+        "media_types": (),
+        "media": (),
+        "forward_nodes": 0,
+        "truncated": False,
+    }
+
+    rebuilt = prompt.reconstruct_effective_current_turn(turn, context)
+
+    assert rebuilt is not None
+    assert rebuilt["content"] == "这张图片怎么样\n[图片转述] 一张黑白插画"
+
+
 @pytest.mark.asyncio
 async def test_media_resolver_prefers_effective_turn_image_for_at_only_trigger(
     monkeypatch: pytest.MonkeyPatch,
