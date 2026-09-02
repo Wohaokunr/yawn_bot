@@ -87,7 +87,7 @@ def test_current_media_overrides_stale_bot_cannot_see_claim() -> None:
         ],
     )
 
-    # Keep the static cache prefix unchanged; media authority is a volatile per-turn fact.
+    # Media authority stays in the volatile per-turn prompt tail.
     assert prompt.PROMPT_VERSION == "yawn-agent-v14"
     realtime = next(
         str(item["content"])
