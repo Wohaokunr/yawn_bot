@@ -29,6 +29,9 @@ CONTEXT_PROACTIVE_MAX_MESSAGES = 10
 LOW_INFO_HISTORY_TEXTS = frozenset(
     {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
 )
+_MEDIA_QUERY_RE = re.compile(
+    r"(?:图片|截图|照片|这张|那张|上面那|前面那|刚才那|刚刚那|第[一二三四五六七八九十\d]+张|图里|图上)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +259,7 @@ def select_context_messages(
     }
     query = str(query_text or "").strip()
     query_tokens = extract_bigrams(query[:1000]) if query else set()
+    media_query = bool(query and _MEDIA_QUERY_RE.search(query))
     selected: set[int] = set()
     reasons: dict[int, tuple[str, float | None]] = {}
 
@@ -288,6 +292,11 @@ def select_context_messages(
         for index, item in enumerate(messages):
             age = _minutes_ago(item)
             if age > CONTEXT_RELEVANT_MAX_AGE_MINUTES:
+                continue
+            if media_query and item.get("media_types"):
+                # 图片指代无法靠文本 bigram 找回；把近期含媒体消息作为候选，
+                # 真正的字节恢复仍由 resolve_media_context 限量完成。
+                relevance.append((12.0 - age / 60.0, index, "media_reference"))
                 continue
             direct = _directly_touches_focus(item, focus)
             item_tokens = extract_bigrams(str(item.get("text") or "")[:700])

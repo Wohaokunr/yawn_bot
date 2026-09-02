@@ -478,7 +478,7 @@ def test_prompt_does_not_repeat_tool_schema_or_catalog() -> None:
         user_prompt="你好",
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v13"
+    assert prompt.PROMPT_VERSION == "yawn-agent-v14"
     assert "search_group_memory" not in str(messages[0]["content"])
     assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
     assert '"properties"' not in str(messages[0]["content"])
@@ -1867,14 +1867,76 @@ async def test_image_caption_uses_configured_image_task(
         return "一只猫"
 
     monkeypatch.setattr(dialogue, "complete", complete)
+    from src.plugins.yawn_core.yawn_agent.media import MediaInput
+
     result = await dialogue._caption_single_image(
         1,
         SimpleNamespace(prompt_text=lambda: "这是什么"),
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}},
+        MediaInput(
+            kind="image",
+            content_hash="d" * 64,
+            mime_type="image/png",
+            local_path=None,
+            data=b"x",
+        ),
+        object(),
+        SimpleNamespace(media_cache_enabled=False),
     )
 
     assert result == "一只猫"
     assert captured["task"] == "agent_image"
+
+
+@pytest.mark.asyncio
+async def test_auto_dialogue_routes_images_through_distinct_vision_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent.media import MediaInput
+
+    media_input = MediaInput(
+        kind="image",
+        content_hash="a" * 64,
+        mime_type="image/png",
+        local_path=None,
+        data=b"image",
+    )
+
+    def resolve(task: str) -> SimpleNamespace:
+        if task == "agent_dialogue":
+            return SimpleNamespace(
+                multimodal="auto",
+                provider="deepseek-text",
+                model="deepseek-chat",
+            )
+        return SimpleNamespace(
+            multimodal="supported",
+            provider="deepseek-vision",
+            model="deepseek-vl2",
+        )
+
+    async def describe(*_args: object, **_kwargs: object) -> str:
+        return "[图片转述] 一只橘猫趴在窗边"
+
+    monkeypatch.setattr(dialogue, "resolve_llm_request", resolve)
+    monkeypatch.setattr(dialogue, "vision_model_configured", lambda: True)
+    monkeypatch.setattr(dialogue, "_describe_images", describe)
+
+    prompt, blocks = await dialogue._prepare_media_prompt(
+        1,
+        SimpleNamespace(prompt_text=lambda: "这张图片怎么样？"),
+        object(),
+        SimpleNamespace(media_cache_enabled=False),
+        [media_input],
+        [],
+        [media_input.content_hash],
+    )
+
+    assert "一只橘猫趴在窗边" in prompt
+    assert blocks == []
 
 
 def test_conversation_batch_deadline_uses_quiet_or_hard_limit() -> None:

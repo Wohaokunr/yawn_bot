@@ -104,6 +104,10 @@ class LLMRoutingConfig(BaseModel):
 
     agent_media_cache_ttl: int = 86400
     agent_media_cache_dir: str = "data/agent_media"
+    agent_remote_media_enabled: bool = True
+    agent_remote_media_ttl_days: int = 7
+    agent_remote_media_max_bytes: int = 64 * 1024 * 1024
+    agent_remote_media_provider: str = "auto"
     # NapCat/QQNT received-image segments expose signed image URLs on these
     # QQ-owned CDN hosts.  This remains an exact allowlist: explicitly setting
     # AGENT_MEDIA_ALLOWED_HOSTS= still disables remote image downloads.

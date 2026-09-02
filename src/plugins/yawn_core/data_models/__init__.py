@@ -1,5 +1,6 @@
 from . import (
     agent_audit,
+    agent_media_asset,
     agent_media_cache,
     agent_memory,
     bot_group,
@@ -22,6 +23,7 @@ from . import (
 
 __all__ = [
     "agent_audit",
+    "agent_media_asset",
     "agent_media_cache",
     "agent_memory",
     "bot_group",

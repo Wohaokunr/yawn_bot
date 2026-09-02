@@ -1549,13 +1549,33 @@ async def test_search_group_memory_reranks_substring_candidates() -> None:
                     memory_type="summary",
                     memory_key="daily:2026-08-22",
                     content="刚整理的爬山计划",
-                    evidence_message_ids=[],
+                    evidence_message_ids=[555],
                     source_kind="auto",
                     related_user_ids=[],
                     salience=0.9,
                     confidence=0.8,
                     visibility="group",
                     expires_at=NOW + timedelta(days=30),
+                ),
+                message_models.GroupAgentMessage(
+                    bot_id=9,
+                    message_id=555,
+                    group_id=100,
+                    user_id=12345,
+                    sender_name="测试用户",
+                    normalized_text="[图片] 爬山路线",
+                    segments=[],
+                    reply_chain=[],
+                    forward_tree=[],
+                    media_refs=[
+                        {
+                            "type": "image",
+                            "asset_id": 77,
+                            "content_hash": "e" * 64,
+                        }
+                    ],
+                    received_at=NOW,
+                    expires_at=NOW + timedelta(days=7),
                 ),
             ]
         )
@@ -1604,6 +1624,9 @@ async def test_search_group_memory_reranks_substring_candidates() -> None:
         assert len(result) == 10
         # 重排后新鲜高显著记忆排第一，而非被先入库的陈旧记录挤出。
         assert result[0]["content"] == "刚整理的爬山计划"
+        assert result[0]["media_types"] == ["image"]
+        assert result[0]["_agent_media_refs"][0]["asset_id"] == 77
+        assert result[0]["_agent_media_refs"][0]["source_message_id"] == 555
     await engine.dispose()
 
 
