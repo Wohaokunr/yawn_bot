@@ -23,7 +23,6 @@ from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from ..llm import (
     LLMMultimodalUnsupportedError,
-    complete,
     complete_with_tools_result,
     resolve_llm_request,
     vision_model_configured,
@@ -74,7 +73,17 @@ from .execution_trace import (
     trace_event,
 )
 from .log import dbg, dbg_exc
-from .media import prepare_image_inputs, store_caption
+from .media import (
+    MediaInput,
+    get_cached_caption,
+)
+from .media_caption import describe_images as _describe_images
+from .media_context import (
+    project_context_for_llm,
+    project_tool_result_media,
+    public_media_diagnostics,
+    resolve_media_context,
+)
 from .memory import effective_relation_confidence, rank_memories
 from .message_parser import NormalizedMessage
 from .outbound import (
@@ -87,7 +96,10 @@ from .outbound import (
 )
 from .persona import persona_behavior, persona_editor_profile, resolve_persona
 from .speech import SpeechPlan
-from .speech_finalize import apply_speech_topic, finalize_reply as _speech_finalize_reply
+from .speech_finalize import (
+    apply_speech_topic,
+    finalize_reply as _speech_finalize_reply,
+)
 from .speech_runtime import build_runtime_speech_plan
 from .tool_result_speech import build_speech_evidence
 from .prompt import (
@@ -111,10 +123,6 @@ _MAX_TURN_SECONDS = 120.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
 _VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
-_VISION_SYSTEM_PROMPT = (
-    "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
-    "不猜测身份、隐私或图片外的信息。"
-)
 
 
 async def _resolve_turn_tool_capabilities(
@@ -224,102 +232,125 @@ def _extract_message_id(result: Any) -> int | None:
     return extract_outbound_message_id(result)
 
 
-async def _caption_single_image(
-    group_id: int, normalized: NormalizedMessage, block: dict[str, Any]
-) -> str | None:
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _VISION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": normalized.prompt_text()}, block],
-        },
-    ]
-    result = await complete(  # pyright: ignore[reportArgumentType]
-        messages,  # pyright: ignore[reportArgumentType]
-        task="agent_image",
-        max_tokens=500,
-        timeout=30,
-    )  # pyright: ignore[reportArgumentType]
-    return (result or "").strip() or None
-
-
-async def _describe_images(
-    group_id: int,
-    normalized: NormalizedMessage,
-    blocks: list[dict[str, Any]],
-    session: Any,
-    config: GroupAgentConfig,
-    cached: list[tuple[str, str]],
-    digests: list[str],
-) -> str:
-    """视觉转述降级路径：逐图独立生成并缓存 caption。
-
-    多图必须逐图转述，否则单一 caption 写进每个 digest 的缓存后，
-    任一单图命中缓存都会拿到混合描述。URL 透传图没有 digest、
-    不可缓存，但仍参与转述；data: 前缀的 block 与 digests 按序对齐。
-    """
-
-    has_vision_model = vision_model_configured()
-    if not blocks:
-        dbg(f"群 {group_id} 跳过图片识别: 无可用图片 block")
-        return "[图片未识别：没有可用的图片数据]"
-    caption_by_digest = dict(cached)
-    digest_iter = iter(digests)
-    parts: list[str] = []
-    for block in blocks:
-        url = str(((block.get("image_url") or {}).get("url")) or "")
-        digest = next(digest_iter, None) if url.startswith("data:") else None
-        caption = caption_by_digest.get(digest) if digest else None
-        if caption:
-            parts.append(f"[图片转述（缓存）] {caption}")
-            continue
-        if not has_vision_model:
-            parts.append("[图片未识别：当前未配置可用的识图模型]")
-            continue
-        caption = await _caption_single_image(group_id, normalized, block)
-        if caption is None:
-            dbg(f"群 {group_id} 视觉模型返回空结果 digest={digest}")
-            parts.append("[图片未识别：视觉模型没有返回结果]")
-            continue
-        dbg(f"群 {group_id} 视觉模型识别完成 digest={digest} caption={caption!r}")
-        if digest:
-            await store_caption(
-                session,
-                group_id,
-                digest,
-                caption,
-                resolve_llm_request("agent_image").model,
-                cache_enabled=bool(config.media_cache_enabled),
-            )
-        parts.append(f"[图片转述] {caption[:2000]}")
-    return "\n".join(parts)
-
-
 async def _prepare_media_prompt(
     group_id: int,
     normalized: NormalizedMessage,
     session: Any,
     config: GroupAgentConfig,
-    media_blocks: list[dict[str, Any]],
+    media_inputs: list[MediaInput],
     cached_captions: list[tuple[str, str]],
     media_digests: list[str],
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """多模态关闭时改为视觉转述注入 prompt；否则透传媒体 block。"""
+    """Choose direct multimodal input or the dedicated image route deterministically."""
 
-    mode = resolve_llm_request("agent_dialogue").multimodal
+    unresolved_snapshot = [dict(item) for item in (diagnostics or [])]
+    dialogue_request = resolve_llm_request("agent_dialogue")
+    vision_request = resolve_llm_request("agent_image")
+    mode = dialogue_request.multimodal
     dbg(f"群 {group_id} 多模态模式={mode!r}")
     user_prompt = normalized.prompt_text()
-    if media_blocks and mode == "unsupported":
-        dbg(f"群 {group_id} 多模态关闭,改走视觉转述注入 prompt")
-        user_prompt = f"{user_prompt}\n{await _describe_images(group_id, normalized, media_blocks, session, config, cached_captions, media_digests)}"
-        return user_prompt, []
-    if cached_captions:
-        dbg(f"群 {group_id} 追加缓存字幕 {len(cached_captions)} 条到 prompt")
-        user_prompt = f"{user_prompt}\n" + "\n".join(
-            f"[图片转述（缓存）] {caption}" for _digest, caption in cached_captions
+    dedicated_vision = (
+        bool(media_inputs)
+        and vision_model_configured()
+        and (
+            mode == "unsupported"
+            or (
+                mode == "auto"
+                and (
+                    vision_request.provider != dialogue_request.provider
+                    or vision_request.model != dialogue_request.model
+                )
+            )
         )
-    return user_prompt, media_blocks
-
+    )
+    if dedicated_vision:
+        dbg(
+            f"群 {group_id} 图片优先走独立视觉路由: "
+            f"dialogue={dialogue_request.provider}/{dialogue_request.model} "
+            f"vision={vision_request.provider}/{vision_request.model}"
+        )
+        notes = await project_context_for_llm(
+            [],
+            task="agent_dialogue",
+            group_id=group_id,
+            session=session,
+            unresolved_diagnostics=unresolved_snapshot,
+        )
+        note_text = "\n".join(
+            str(block.get("text") or "")
+            for block in notes.content_blocks
+            if block.get("type") == "text" and block.get("text")
+        )
+        described = await _describe_images(
+            group_id,
+            normalized,
+            media_inputs,
+            session,
+            config,
+            cached_captions,
+            media_digests,
+            diagnostics=diagnostics,
+        )
+        user_prompt = f"{user_prompt}\n{described}"
+        if note_text:
+            user_prompt = f"{user_prompt}\n{note_text}"
+        return user_prompt, []
+    if media_inputs and mode == "unsupported":
+        # 没有可用视觉模型时也给用户一个明确的降级事实，不把图片伪装成已处理。
+        described = await _describe_images(
+            group_id,
+            normalized,
+            media_inputs,
+            session,
+            config,
+            cached_captions,
+            media_digests,
+            diagnostics=diagnostics,
+        )
+        notes = await project_context_for_llm(
+            [],
+            task="agent_dialogue",
+            group_id=group_id,
+            session=session,
+            unresolved_diagnostics=unresolved_snapshot,
+        )
+        note_text = "\n".join(
+            str(block.get("text") or "")
+            for block in notes.content_blocks
+            if block.get("type") == "text" and block.get("text")
+        )
+        user_prompt = f"{user_prompt}\n{described}"
+        if note_text:
+            user_prompt = f"{user_prompt}\n{note_text}"
+        return user_prompt, []
+    if mode == "unsupported":
+        notes = await project_context_for_llm(
+            [],
+            task="agent_dialogue",
+            group_id=group_id,
+            session=session,
+            unresolved_diagnostics=unresolved_snapshot,
+        )
+        note_text = "\n".join(
+            str(block.get("text") or "")
+            for block in notes.content_blocks
+            if block.get("type") == "text" and block.get("text")
+        )
+        if note_text:
+            user_prompt = f"{user_prompt}\n{note_text}"
+        return user_prompt, []
+    projection = await project_context_for_llm(
+        media_inputs,
+        task="agent_dialogue",
+        group_id=group_id,
+        session=session,
+        cached_captions=dict(cached_captions),
+        unresolved_diagnostics=unresolved_snapshot,
+        diagnostics=diagnostics,
+    )
+    return user_prompt, projection.content_blocks
 
 
 async def _finalize_reply(
@@ -509,21 +540,37 @@ async def _process_group_message(
                 duration_ms=(time.monotonic() - capability_started) * 1000,
             )
             dbg(
-                f"群 {group_id} 本轮可用工具 {len(tools)} 个,"
-                f"模型轮次上限={round_limit}"
+                f"群 {group_id} 本轮可用工具 {len(tools)} 个,模型轮次上限={round_limit}"
             )
             media_started = time.monotonic()
             media_diagnostics: list[dict[str, Any]] = []
-            media_blocks, cached_captions, media_digests = await prepare_image_inputs(
+            media_inputs = await resolve_media_context(
                 bot,
+                session,
                 group_id,
-                normalized.media_refs,
-                session=session,
+                current_message=normalized,
+                reply_chain=normalized.reply_chain,
+                selected_history=list(context.get("messages") or []),
+                query_text=normalized.prompt_text(),
+                asset_ttl_seconds=max(int(config.raw_retention_days), 1) * 86400,
                 cache_enabled=bool(config.media_cache_enabled),
                 diagnostics=media_diagnostics,
             )
+            media_digests = [item.content_hash for item in media_inputs]
+            cached_captions: list[tuple[str, str]] = []
+            if config.media_cache_enabled:
+                vision_model = resolve_llm_request("agent_image").model
+                for media_input in media_inputs:
+                    caption = await get_cached_caption(
+                        session,
+                        group_id,
+                        media_input.content_hash,
+                        vision_model,
+                    )
+                    if caption:
+                        cached_captions.append((media_input.content_hash, caption))
             dbg(
-                f"群 {group_id} 媒体输入: media_blocks={len(media_blocks)} "
+                f"群 {group_id} 媒体输入: media_inputs={len(media_inputs)} "
                 f"缓存字幕={len(cached_captions)} digests={media_digests}"
             )
             user_prompt, media_blocks = await _prepare_media_prompt(
@@ -531,26 +578,66 @@ async def _process_group_message(
                 normalized,
                 session,
                 config,
-                media_blocks,
+                media_inputs,
                 cached_captions,
                 media_digests,
+                diagnostics=media_diagnostics,
             )
+            safe_media_diagnostics = public_media_diagnostics(media_diagnostics)
+            media_statuses = {
+                str(item.get("status") or "")
+                for item in safe_media_diagnostics
+                if isinstance(item, dict)
+            }
+            media_trace_status = (
+                "failed"
+                if media_statuses
+                and media_statuses
+                <= {"dropped_unavailable", "unavailable", "vision_failed"}
+                else (
+                    "degraded"
+                    if media_statuses.intersection(
+                        {
+                            "caption_ready",
+                            "image_url_ready",
+                            "inline_file_ready",
+                            "dropped_unavailable",
+                            "unavailable",
+                            "vision_unsupported",
+                            "vision_failed",
+                        }
+                    )
+                    else "success"
+                )
+            )
+            dialogue_media_request = resolve_llm_request("agent_dialogue")
             trace_event(
                 "media",
-                "多模态输入准备",
+                "媒体解析",
+                status=media_trace_status,
                 input={
                     "media": [
-                        {"type": item.get("type"), "source": item.get("source", "current")}
+                        {
+                            "type": item.get("type"),
+                            "source": item.get("source", "current"),
+                        }
                         for item in normalized.media_refs
                     ]
                 },
                 output={
                     "vision_blocks": len(media_blocks),
+                    "delivered_media": sum(
+                        1
+                        for item in safe_media_diagnostics
+                        if bool(item.get("delivered_to_model"))
+                    ),
                     "cached_captions": len(cached_captions),
                     "content_hashes": [digest[:12] for digest in media_digests],
-                    "items": media_diagnostics,
+                    "items": safe_media_diagnostics,
                     "cache_enabled": bool(config.media_cache_enabled),
-                    "multimodal_mode": resolve_llm_request("agent_dialogue").multimodal,
+                    "provider": dialogue_media_request.provider,
+                    "model": dialogue_media_request.model,
+                    "multimodal_mode": dialogue_media_request.multimodal,
                 },
                 duration_ms=(time.monotonic() - media_started) * 1000,
             )
@@ -578,8 +665,7 @@ async def _process_group_message(
                 user_prompt=user_prompt,
                 current_turn=current_turn,
                 media_inputs=media_blocks
-                if resolve_llm_request("agent_dialogue").multimodal
-                != "unsupported"
+                if resolve_llm_request("agent_dialogue").multimodal != "unsupported"
                 else None,
             )
             cache_key = prompt_cache_key(
@@ -608,8 +694,12 @@ async def _process_group_message(
                         for item in tools
                     ],
                     "prefix_fingerprint": _prefix_fingerprint[:12],
-                    "prompt_cache": "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss",
-                    "context_cache": "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss",
+                    "prompt_cache": "hit"
+                    if cache_key in _PROMPT_CACHE_KEYS
+                    else "miss",
+                    "context_cache": "hit"
+                    if stable_key in _PROMPT_CACHE_KEYS
+                    else "miss",
                 },
                 duration_ms=(time.monotonic() - prompt_started) * 1000,
             )
@@ -682,7 +772,10 @@ async def _process_group_message(
                         f"群 {group_id} 模型不支持多模态,降级为视觉转述重建提示词(不占轮次)"
                     )
                     fallback_attempted = True
-                    user_prompt = f"{normalized.prompt_text()}\n{await _describe_images(group_id, normalized, media_blocks, session, config, cached_captions, media_digests)}"
+                    user_prompt = (
+                        f"{normalized.prompt_text()}\n"
+                        f"{await _describe_images(group_id, normalized, media_inputs, session, config, cached_captions, media_digests, diagnostics=media_diagnostics)}"
+                    )
                     current_turn = CurrentTurn(
                         **{**current_turn.as_dict(), "content": user_prompt}
                     )
@@ -738,7 +831,10 @@ async def _process_group_message(
                         "model": model,
                         "content_chars": len(content),
                         "tool_calls": [
-                            str(getattr(getattr(call, "function", None), "name", "") or "")
+                            str(
+                                getattr(getattr(call, "function", None), "name", "")
+                                or ""
+                            )
                             for call in tool_calls
                         ],
                         "finish_reason": completion.finish_reason,
@@ -778,6 +874,7 @@ async def _process_group_message(
                 round_sent_message = False
                 discovered_tool_names: set[str] = set()
                 discovered_requires_admin = False
+                round_tool_media_blocks: list[dict[str, Any]] = []
                 for call in tool_calls:
                     function = getattr(call, "function", None)
                     if function is None:
@@ -840,14 +937,139 @@ async def _process_group_message(
                                     "critical",
                                 }:
                                     discovered_requires_admin = True
+                    tool_media_diagnostics: list[dict[str, Any]] = []
+                    tool_media_inputs = await resolve_media_context(
+                        bot,
+                        session,
+                        group_id,
+                        tool_results=[result],
+                        query_text=normalized.prompt_text(),
+                        asset_ttl_seconds=max(int(config.raw_retention_days), 1) * 86400,
+                        cache_enabled=bool(config.media_cache_enabled),
+                        diagnostics=tool_media_diagnostics,
+                    )
+                    tool_media_blocks: list[dict[str, Any]] = []
+                    tool_media_note: str | None = None
+                    dialogue_request = resolve_llm_request("agent_dialogue")
+                    vision_request = resolve_llm_request("agent_image")
+                    direct_tool_media = dialogue_request.multimodal == "supported" or (
+                        dialogue_request.multimodal == "auto"
+                        and dialogue_request.provider == vision_request.provider
+                        and dialogue_request.model == vision_request.model
+                    )
+                    if direct_tool_media:
+                        tool_cached_captions: dict[str, str] = {}
+                        if config.media_cache_enabled:
+                            for item in tool_media_inputs:
+                                cached_caption = await get_cached_caption(
+                                    session,
+                                    group_id,
+                                    item.content_hash,
+                                    vision_request.model,
+                                )
+                                if cached_caption:
+                                    tool_cached_captions[item.content_hash] = cached_caption
+                        projection = await project_context_for_llm(
+                            tool_media_inputs,
+                            task="agent_dialogue",
+                            group_id=group_id,
+                            session=session,
+                            cached_captions=tool_cached_captions,
+                            unresolved_diagnostics=[
+                                dict(item) for item in tool_media_diagnostics
+                            ],
+                            diagnostics=tool_media_diagnostics,
+                        )
+                        tool_media_blocks = projection.content_blocks
+                        known_hashes = {item.content_hash for item in media_inputs}
+                        media_inputs.extend(
+                            item
+                            for item in tool_media_inputs
+                            if item.content_hash not in known_hashes
+                        )
+                        if tool_media_blocks:
+                            media_blocks.extend(tool_media_blocks)
+                            round_tool_media_blocks.extend(tool_media_blocks)
+                    else:
+                        if tool_media_inputs:
+                            tool_media_note = await _describe_images(
+                                group_id,
+                                normalized,
+                                tool_media_inputs,
+                                session,
+                                config,
+                                [],
+                                [item.content_hash for item in tool_media_inputs],
+                                diagnostics=tool_media_diagnostics,
+                            )
+                        unresolved_projection = await project_context_for_llm(
+                            [],
+                            task="agent_dialogue",
+                            group_id=group_id,
+                            session=session,
+                            unresolved_diagnostics=tool_media_diagnostics,
+                        )
+                        unresolved_text = "\n".join(
+                            str(block.get("text") or "")
+                            for block in unresolved_projection.content_blocks
+                            if block.get("type") == "text" and block.get("text")
+                        )
+                        if unresolved_text:
+                            tool_media_note = "\n".join(
+                                part
+                                for part in (tool_media_note, unresolved_text)
+                                if part
+                            )
+                    if tool_media_diagnostics:
+                        safe_tool_media = public_media_diagnostics(
+                            tool_media_diagnostics
+                        )
+                        tool_media_statuses = {
+                            str(item.get("status") or "")
+                            for item in safe_tool_media
+                            if isinstance(item, dict)
+                        }
+                        media_trace_status = (
+                            "failed"
+                            if tool_media_statuses
+                            and tool_media_statuses
+                            <= {"dropped_unavailable", "unavailable"}
+                            else (
+                                "degraded"
+                                if tool_media_statuses.intersection(
+                                    {
+                                        "caption_ready",
+                                        "image_url_ready",
+                                        "inline_file_ready",
+                                        "dropped_unavailable",
+                                        "unavailable",
+                                    }
+                                )
+                                else "success"
+                            )
+                        )
+                        trace_event(
+                            "media",
+                            "工具结果媒体解析",
+                            status=media_trace_status,
+                            input={"tool": tool_name, "source": "tool"},
+                            output={
+                                "vision_blocks": len(tool_media_blocks),
+                                "items": safe_tool_media,
+                                "provider": dialogue_request.provider,
+                                "model": dialogue_request.model,
+                                "multimodal_mode": dialogue_request.multimodal,
+                            },
+                            round_index=rounds,
+                        )
+                    projected_tool_result = project_tool_result_media(
+                        result,
+                        tool_media_inputs,
+                    )
                     trace_event(
                         "tool",
                         f"工具 {tool_name or '[unknown]'}",
-                        status=(
-                            "success"
-                            if bool(result.get("ok"))
-                            else "failed"
-                        ),
+                        status=("success" if bool(result.get("ok")) else "failed"),
                         input={"arguments": args},
                         output={
                             "ok": bool(result.get("ok")),
@@ -859,7 +1081,7 @@ async def _process_group_message(
                     )
                     dbg(
                         f"群 {group_id} 工具 {tool_name!r} 返回: "
-                        f"{json.dumps(result, ensure_ascii=False)}"
+                        f"{json.dumps(projected_tool_result, ensure_ascii=False)}"
                     )
                     if _visible_tool_send_ends_turn(result):
                         round_sent_message = True
@@ -898,7 +1120,9 @@ async def _process_group_message(
                                 ),
                             )
                             now = now_beijing()
-                            fingerprint_source = str(payload.get("text") or "") or json.dumps(
+                            fingerprint_source = str(
+                                payload.get("text") or ""
+                            ) or json.dumps(
                                 {
                                     "segments": payload.get("segments", []),
                                     "forward_tree": payload.get("forward_tree", []),
@@ -910,7 +1134,9 @@ async def _process_group_message(
                                 fingerprint_source.casefold().encode("utf-8")
                             ).hexdigest()
                             input_fingerprint = hashlib.sha256(
-                                render_current_turn(current_turn).casefold().encode("utf-8")
+                                render_current_turn(current_turn)
+                                .casefold()
+                                .encode("utf-8")
                             ).hexdigest()
                             recent = list(config.recent_response_fingerprints or [])
                             recent.append(
@@ -954,9 +1180,15 @@ async def _process_group_message(
                             },
                         }
                     )
-                    tool_payload = dict(result)
+                    tool_payload = (
+                        dict(projected_tool_result)
+                        if isinstance(projected_tool_result, dict)
+                        else {"ok": False, "error": "tool_result_projection_failed"}
+                    )
+                    if tool_media_note:
+                        tool_payload["media_context"] = tool_media_note
                     tool_payload["speech_evidence"] = build_speech_evidence(
-                        tool_name, result
+                        tool_name, tool_payload
                     ).prompt_dict()
                     messages.append(
                         {
@@ -991,6 +1223,19 @@ async def _process_group_message(
                         # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
                         # 同时调用 send_message/send_forward 连发多条。
                         break
+                if round_tool_media_blocks and not round_sent_message:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "以下图片来自刚才的工具查询结果，请结合该工具结果继续回答。",
+                                },
+                                *round_tool_media_blocks,
+                            ],
+                        }
+                    )
                 if discovered_tool_names and not round_sent_message:
                     if discovered_requires_admin:
                         # The trusted discovery result only contains privileged
@@ -1088,9 +1333,7 @@ async def process_group_message(
             "parse",
             str(stage.get("label") or "消息解析"),
             output=(
-                stage.get("output")
-                if isinstance(stage.get("output"), dict)
-                else {}
+                stage.get("output") if isinstance(stage.get("output"), dict) else {}
             ),
             duration_ms=(
                 float(stage.get("duration_ms") or 0.0)
@@ -1163,9 +1406,7 @@ async def process_group_message(
                 outcome,
                 max(time.monotonic() - started, 0.0),
                 queue_wait_seconds=(
-                    max(started - enqueued_at, 0.0)
-                    if enqueued_at is not None
-                    else None
+                    max(started - enqueued_at, 0.0) if enqueued_at is not None else None
                 ),
             )
         except Exception:  # noqa: BLE001

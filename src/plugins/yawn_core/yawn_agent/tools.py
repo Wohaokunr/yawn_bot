@@ -304,6 +304,33 @@ def _compact_message_text(raw: Any, *, maximum: int = 800) -> str:
     return text[:maximum]
 
 
+def _message_media_refs(raw: Any) -> list[dict[str, Any]]:
+    """Keep image handles as resolver-only metadata, never as prompt-visible URLs."""
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("message"), list):
+        return []
+    output: list[dict[str, Any]] = []
+    source_message_id = raw.get("message_id")
+    for segment in raw["message"][:24]:
+        if not isinstance(segment, dict) or str(segment.get("type") or "") != "image":
+            continue
+        raw_data = segment.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
+        ref: dict[str, Any] = {"type": "image", "source": "tool"}
+        if source_message_id is not None:
+            ref["source_message_id"] = source_message_id
+        # file is preferred because it can be resolved through OneBot without exposing
+        # a signed CDN URL to the language model. URL remains internal fallback only.
+        file_handle = data.get("file") or data.get("file_id")
+        if file_handle is not None:
+            ref["file"] = file_handle
+        elif data.get("url") is not None:
+            ref["url"] = data["url"]
+        if len(ref) > 2:
+            output.append(ref)
+    return output
+
+
 def _compact_onebot_message(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("消息响应格式错误")
@@ -318,6 +345,10 @@ def _compact_onebot_message(raw: Any) -> dict[str, Any]:
     }
     if raw.get("time") is not None:
         compact["time"] = raw.get("time")
+    media_refs = _message_media_refs(raw)
+    if media_refs:
+        compact["media_types"] = ["image"] * len(media_refs)
+        compact["_agent_media_refs"] = media_refs
     return {key: value for key, value in compact.items() if value not in (None, "")}
 
 
@@ -1098,15 +1129,58 @@ async def execute_tool(
                 and not opted_out.intersection(set(row.related_user_ids or []))
             ]
             rows = rank_memories(rows, [query], None, now, limit=limit)
-            result = [
-                {
+            evidence_ids = list(
+                dict.fromkeys(
+                    int(message_id)
+                    for row in rows
+                    for message_id in list(row.evidence_message_ids or [])
+                    if str(message_id).lstrip("-").isdigit()
+                )
+            )
+            evidence_rows = (
+                (
+                    await session.execute(
+                        select(GroupAgentMessage).where(
+                            GroupAgentMessage.group_id == group_id,
+                            GroupAgentMessage.message_id.in_(evidence_ids),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+                if session is not None and evidence_ids
+                else []
+            )
+            evidence_by_message = {
+                int(message.message_id): [
+                    {
+                        **dict(ref),
+                        "source": "tool",
+                        "source_message_id": int(message.message_id),
+                    }
+                    for ref in list(message.media_refs or [])
+                    if isinstance(ref, dict) and str(ref.get("type") or "") == "image"
+                ]
+                for message in evidence_rows
+            }
+            result = []
+            for row in rows:
+                item: dict[str, Any] = {
                     "type": row.memory_type,
                     "key": row.memory_key,
                     "content": str(row.content or "")[:600],
                     "confidence": round(float(row.confidence or 0.0), 3),
                 }
-                for row in rows
-            ]
+                media_refs = [
+                    ref
+                    for message_id in list(row.evidence_message_ids or [])
+                    if str(message_id).lstrip("-").isdigit()
+                    for ref in evidence_by_message.get(int(message_id), [])
+                ]
+                if media_refs:
+                    item["media_types"] = ["image"] * len(media_refs)
+                    item["_agent_media_refs"] = media_refs[:8]
+                result.append(item)
         elif name == "list_user_relations":
             if session is None:
                 raise PermissionError("关系查询需要数据库会话")

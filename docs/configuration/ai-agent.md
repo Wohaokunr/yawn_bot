@@ -75,6 +75,10 @@ Profile 可用 `default / light / vision`；任务级 thinking 可用 `inherit /
 AGENT_MEDIA_CACHE_TTL=86400
 AGENT_MEDIA_CACHE_DIR=data/agent_media
 AGENT_MEDIA_ALLOWED_HOSTS=gchat.qpic.cn,multimedia.nt.qq.com.cn
+AGENT_REMOTE_MEDIA_ENABLED=true
+AGENT_REMOTE_MEDIA_TTL_DAYS=7
+AGENT_REMOTE_MEDIA_MAX_BYTES=67108864
+AGENT_REMOTE_MEDIA_PROVIDER=auto
 
 AGENT_FILE_ROOT=data/agent_files
 AGENT_FILE_ALLOWED_HOSTS=
@@ -85,6 +89,14 @@ AGENT_DEBUG_LOG=false
 ```
 
 - `AGENT_MEDIA_ALLOWED_HOSTS` 默认仅允许 `gchat.qpic.cn` 与 `multimedia.nt.qq.com.cn`；显式置空时，群图片不会被 Agent 主动下载用于视觉理解。
+- `AGENT_REMOTE_MEDIA_ENABLED=true` 时，支持 Files API 的 Provider 会优先按内容哈希复用/上传远端媒体；关闭后直接使用本轮可用的 inline/URL 降级链。
+- `AGENT_REMOTE_MEDIA_TTL_DAYS` 第一版统一为 7 天，同时约束本地 MediaAsset 与远端文件生命周期；不会默认创建永久文件。
+- `AGENT_REMOTE_MEDIA_MAX_BYTES` 默认 64 MiB，也是 Agent 接受单个媒体资产的硬上限；inline `file_data`/base64 降级仍限制在 32 MiB 内。
+- `AGENT_REMOTE_MEDIA_PROVIDER=auto` 仅在当前任务 Provider 明确支持 Files API 时启用远端文件语义。
+- 历史/回复/工具图片不会原样恢复成历史 `assistant`/`system` 多模态消息，而会经 Media Context Projection 投影到**当前 `user` 消息**；远端/本地传输都失败时会显式提供 `caption_ready` 或 `unavailable` 状态，避免模型假装看过图片。
+- `get_message`、`get_recent_group_messages`、群记忆检索等工具命中的图片会先物化为本地 MediaAsset；模型看到的工具结果只包含 `media=[{asset_id,type,available}]` 这类安全引用，不包含 OneBot `file`、QQ 签名 URL、base64 或 DeepSeek `file_id`。真正的视觉输入仍由 Dialogue/Speech 的媒体投影层绑定。
+- Execution Trace 的“媒体解析”阶段会按图片合并展示 OneBot/get_image、读取与缓存、MIME/大小/SHA-256、Files API、脱敏 file_id/TTL、视觉 Provider/Model、输入类型和最终是否送入模型；工具查询得到的图片使用同一套诊断链路。
+- 过期 MediaAsset 使用两阶段清理：先持久化 `cleanup_pending`，再删除远端文件；远端成功或 404 后持久化 `expired`，最后仅在没有其他活动资产引用时删除本地缓存。远端暂时失败会保留 `file_id` 与本地缓存供下次重试。
 - `AGENT_FILE_ROOT` 必须是独立运行时目录，不要指向源码、数据库或系统目录。
 - 常用文本、引用、@、QQ face、图片等消息段默认可用；`share/contact/location/music` 只有写入 `AGENT_OPTIONAL_MESSAGE_SEGMENTS` 才开放。
 - XML、JSON、anonymous、`@all` 与任意原始 CQ payload 不提供开关给模型。

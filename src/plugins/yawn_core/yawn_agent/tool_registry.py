@@ -159,7 +159,7 @@ TOOL_DEFINITIONS = (
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 120,
-                "description": "描述要完成的任务；传‘全部工具’可先查看工具包目录",
+                "description": "描述要完成的任务；传`全部工具`可先查看工具包目录",
             },
             "family": {
                 "type": "string",
@@ -486,7 +486,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="moderation",
         keywords=("踢出群", "踢出去", "移出群", "踢掉", "踢人"),
-        discoverable=False,
     ),
     ToolDefinition(
         "set_whole_group_mute",
@@ -498,7 +497,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="moderation",
         keywords=("全员禁言", "解除全员禁言", "关闭全员禁言"),
-        discoverable=False,
     ),
     ToolDefinition(
         "set_group_admin",
@@ -514,7 +512,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="moderation",
         keywords=("设为管理员", "设置管理员", "取消管理员", "撤销管理员"),
-        discoverable=False,
     ),
     ToolDefinition(
         "delete_group_file",
@@ -529,7 +526,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("删除群文件", "删群文件", "删除这个文件"),
-        discoverable=False,
     ),
     ToolDefinition(
         "move_group_file",
@@ -544,7 +540,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("移动群文件", "把文件移到", "移动这个文件"),
-        discoverable=False,
     ),
     ToolDefinition(
         "rename_group_file",
@@ -560,7 +555,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("重命名群文件", "群文件改名", "重命名这个文件"),
-        discoverable=False,
     ),
     ToolDefinition(
         "delete_group_folder",
@@ -572,7 +566,6 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("删除群文件夹", "删群文件夹", "删除这个文件夹"),
-        discoverable=False,
     ),
     ToolDefinition(
         "send_file",

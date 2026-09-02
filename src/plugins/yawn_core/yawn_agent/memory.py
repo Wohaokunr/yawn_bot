@@ -18,15 +18,17 @@ from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..data_models.agent_audit import AgentAudit
+from ..data_models.agent_media_asset import AgentMediaAsset
 from ..data_models.agent_media_cache import AgentMediaCache
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
 from ..llm import complete, get_client, resolve_llm_request
+from . import media_store
 from .context import now_beijing
 from .log import dbg, dbg_exc
-from .media import unlink_cache_file
+from .media import delete_remote_media_files, unlink_cache_file
 
 _COMPACT_BATCH_LIMIT = 40
 _COMPACT_INPUT_CHAR_LIMIT = 12_000
@@ -1268,13 +1270,41 @@ async def _delete_group_memories_locked(session: Any, group_id: int) -> int:
         .scalars()
         .all()
     )
-    cache_paths = [str(row.cache_path) for row in media_rows if row.cache_path]
+    asset_rows = (
+        (
+            await session.execute(
+                select(AgentMediaAsset).where(AgentMediaAsset.group_id == group_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    cache_paths = list(
+        dict.fromkeys(
+            [
+                *(str(row.cache_path) for row in media_rows if row.cache_path),
+                *(str(row.cache_path) for row in asset_rows if row.cache_path),
+            ]
+        )
+    )
+    remote_refs = list(
+        dict.fromkeys(
+            (
+                str(row.provider),
+                str(row.provider_scope),
+                str(row.remote_file_id),
+            )
+            for row in asset_rows
+            if row.remote_file_id
+        )
+    )
     counts = []
     for model in (
         AgentMemory,
         AgentRelation,
         GroupAgentMessage,
         AgentAudit,
+        AgentMediaAsset,
         AgentMediaCache,
     ):
         result = await session.execute(delete(model).where(model.group_id == group_id))
@@ -1296,11 +1326,14 @@ async def _delete_group_memories_locked(session: Any, group_id: int) -> int:
         config.context_epoch += 1
     await session.commit()
     # 先提交删除再清理磁盘文件，提交失败时不会留下悬空文件引用。
+    safe_remote_refs = await media_store.unreferenced_remote_refs(session, remote_refs)
+    remote_removed = await delete_remote_media_files(safe_remote_refs)
     for cache_path in cache_paths:
         unlink_cache_file(cache_path)
     dbg(
         f"群 {group_id} 记忆全量清除完成: memory={counts[0]} relation={counts[1]} "
-        f"message={counts[2]} audit={counts[3]} media={counts[4]} 磁盘文件={len(cache_paths)}"
+        f"message={counts[2]} audit={counts[3]} media_asset={counts[4]} "
+        f"legacy_media={counts[5]} 远端文件={remote_removed} 磁盘文件={len(cache_paths)}"
     )
     return sum(counts)
 

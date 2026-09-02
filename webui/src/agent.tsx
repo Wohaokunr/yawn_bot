@@ -1834,6 +1834,8 @@ const TRACE_MEDIA_SOURCE_LABELS: Record<string, string> = {
   current: "当前消息",
   reply: "引用消息",
   forward: "合并转发",
+  history: "历史消息",
+  tool: "工具搜索结果",
 };
 
 const TRACE_TRIGGER_SOURCE_LABELS: Record<string, string> = {
@@ -1917,6 +1919,15 @@ function traceByteSize(value: number): string {
   return `${(value / 1024 / 1024).toFixed(2)} MiB`;
 }
 
+function traceDurationSeconds(value: unknown): string {
+  const seconds = traceMetric(value, -1);
+  if (seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
 function TraceDiagnosticValue({ name, value }: { name: string; value: unknown }): React.JSX.Element {
   if (value == null || value === "") return <Text type="secondary">—</Text>;
   if (typeof value === "boolean") return <Tag color={value ? "green" : "default"}>{value ? "是" : "否"}</Tag>;
@@ -1995,6 +2006,48 @@ function ToolArgumentSummary({ name, value }: { name: string; value: unknown }):
     return <Text type="secondary">搜索表情：{String(args.query ?? args.keyword ?? args.tag ?? "未指定")}</Text>;
   }
   return null;
+}
+
+function MediaTraceDetails({ item, index, statusLabel }: { item: Record<string, unknown>; index: number; statusLabel: Record<string, string> }): React.JSX.Element {
+  const status = String(item.status ?? "unknown");
+  const source = String(item.source ?? "current");
+  const failed = ["dropped_unavailable", "unavailable", "vision_failed", "vision_unsupported"].includes(status);
+  const degraded = ["inline_file_ready", "image_url_ready", "caption_ready", "url_passthrough"].includes(status);
+  const getImageStatus = String(item.get_image_status ?? "not_needed");
+  const readStatus = String(item.image_read_status ?? "unknown");
+  const remoteStatus = String(item.remote_file_status ?? "not_used");
+  const localCache = String(item.local_cache ?? "unknown");
+  const details = [
+    { key: "source", label: "来源", children: <Text>{TRACE_MEDIA_SOURCE_LABELS[source] ?? source}</Text> },
+    { key: "asset", label: "Asset ID", children: item.asset_id != null ? <Text code>{String(item.asset_id)}</Text> : <Text type="secondary">—</Text> },
+    { key: "message", label: "来源消息", children: item.source_message_id != null ? <Text code>{String(item.source_message_id)}</Text> : <Text type="secondary">—</Text> },
+    { key: "onebot", label: "OneBot file", children: <Tag color={item.onebot_file ? "green" : "default"}>{item.onebot_file ? "✅ 有" : "—"}</Tag> },
+    { key: "get-image", label: "get_image", children: <Tag color={getImageStatus === "success" ? "green" : getImageStatus === "failed" ? "red" : "default"}>{getImageStatus === "success" ? "✅ 成功" : getImageStatus === "failed" ? "❌ 失败" : "未调用"}</Tag> },
+    { key: "read", label: "图片读取", children: <Tag color={readStatus === "success" ? "green" : readStatus === "failed" ? "red" : "default"}>{readStatus === "success" ? "✅ 成功" : readStatus === "failed" ? "❌ 失败" : readStatus}</Tag> },
+    { key: "mime", label: "MIME", children: item.mime ? <Text code>{String(item.mime)}</Text> : <Text type="secondary">—</Text> },
+    { key: "size", label: "大小", children: typeof item.size_bytes === "number" ? <Text>{traceByteSize(item.size_bytes)}</Text> : <Text type="secondary">—</Text> },
+    { key: "hash", label: "SHA-256", children: item.content_hash ? <Text code>{String(item.content_hash)}…</Text> : <Text type="secondary">—</Text> },
+    { key: "cache", label: "本地缓存", children: <Tag color={localCache === "hit" || localCache === "materialized" ? "green" : "default"}>{localCache === "hit" ? "hit" : localCache === "materialized" ? "已物化" : localCache}</Tag> },
+    { key: "provider", label: "视觉 Provider", children: item.provider ? <Text code>{String(item.provider)}</Text> : <Text type="secondary">—</Text> },
+    { key: "model", label: "视觉模型", children: item.model ? <Text code>{String(item.model)}</Text> : <Text type="secondary">—</Text> },
+    { key: "remote", label: "DeepSeek File", children: <Tag color={remoteStatus === "hit" || remoteStatus === "uploaded" ? "green" : remoteStatus === "upload_failed" ? "red" : "default"}>{remoteStatus === "hit" ? "✅ hit" : remoteStatus === "uploaded" ? "✅ uploaded" : remoteStatus === "upload_failed" ? "❌ 上传失败" : "未使用"}</Tag> },
+    { key: "file-id", label: "file_id", children: item.file_id_hint ? <Text code>{String(item.file_id_hint)}</Text> : <Text type="secondary">—</Text> },
+    { key: "ttl", label: "剩余有效期", children: <Text>{traceDurationSeconds(item.remote_ttl_seconds)}</Text> },
+    { key: "input", label: "模型输入类型", children: item.input_type ? <Tag>{String(item.input_type)}</Tag> : <Text type="secondary">—</Text> },
+    { key: "vision", label: "视觉处理", children: item.vision_status ? <Tag color={String(item.vision_status).includes("failed") || String(item.vision_status).includes("unsupported") ? "red" : "green"}>{String(item.vision_status)}</Tag> : <Text type="secondary">—</Text> },
+    { key: "delivered", label: "已送入模型", children: <Tag color={item.delivered_to_model ? "green" : "red"}>{item.delivered_to_model ? "✅ 是" : "❌ 否"}</Tag> },
+  ];
+  return <div className="agent-trace-media-row">
+    <Space wrap size={[6, 6]} style={{ marginBottom: 6 }}>
+      <Tag color={failed ? "red" : degraded ? "gold" : "green"}>图片 {index + 1}</Tag>
+      <Text strong>{statusLabel[status] ?? status}</Text>
+      {item.materialization_status ? <Tag>读取阶段 · {String(item.materialization_status)}</Tag> : null}
+      {item.url_host ? <Tag>host · {String(item.url_host)}</Tag> : null}
+    </Space>
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} items={details} />
+    {item.fallback_reason ? <Text type="warning">降级原因：{String(item.fallback_reason)}</Text> : null}
+    {item.reason ? <Text type="danger">失败原因：{String(item.reason)}</Text> : null}
+  </div>;
 }
 
 function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][number] }): React.JSX.Element | null {
@@ -2083,36 +2136,37 @@ function TraceHumanSummary({ event }: { event: AgentExecutionTrace["events"][num
     const media = Array.isArray(input.media) ? input.media.map((item) => debugRecord(item)) : [];
     const items = Array.isArray(output.items) ? output.items.map((item) => debugRecord(item)) : [];
     const statusLabel: Record<string, string> = {
-      loaded: "已读取并转成视觉输入",
-      url_passthrough: "本地读取失败，改由模型读取原始 URL",
-      dropped_unavailable: "无法取得图片，已丢弃",
+      loaded: "图片读取成功",
+      asset_reused: "本地媒体资产命中",
+      remote_file_ready: "DeepSeek File 已就绪",
+      inline_file_ready: "Files API 不可用，已降级为内联输入",
+      image_url_ready: "已降级为可信图片 URL",
+      caption_ready: "仅使用缓存图片转述",
+      url_passthrough: "图片字节读取失败，保留可信 URL",
+      dropped_unavailable: "图片引用存在，但文件不可读取",
+      unavailable: "图片不可用",
+      vision_unsupported: "当前视觉路由不可用",
+      vision_failed: "视觉模型处理失败",
       skipped_non_image: "不是图片，已跳过",
     };
     return <Space orientation="vertical" size={4} style={{ width: "100%" }}>
       <Text>
-        准备了 <Text strong>{traceMetric(output.vision_blocks)}</Text> 个视觉输入，
+        解析 <Text strong>{items.length || media.length}</Text> 个媒体资产，
+        <Text strong>{traceMetric(output.delivered_media, traceMetric(output.vision_blocks))}</Text> 个已进入模型输入，
         命中 <Text strong>{traceMetric(output.cached_captions)}</Text> 条图片转述缓存。
       </Text>
-      {output.multimodal_mode ? <Text type="secondary">当前多模态策略：<Text code>{String(output.multimodal_mode)}</Text>；媒体缓存：{output.cache_enabled ? "开启" : "关闭"}。</Text> : null}
+      <Space wrap size={[6, 6]}>
+        {output.provider ? <Tag>Dialogue Provider · {String(output.provider)}</Tag> : null}
+        {output.model ? <Tag>Dialogue Model · {String(output.model)}</Tag> : null}
+        {output.multimodal_mode ? <Tag>多模态 · {String(output.multimodal_mode)}</Tag> : null}
+        {typeof output.cache_enabled === "boolean" ? <Tag color={output.cache_enabled ? "green" : "default"}>媒体缓存 {output.cache_enabled ? "开启" : "关闭"}</Tag> : null}
+      </Space>
       {media.length > 0 && <Space wrap size={[6, 6]}>{media.map((item, index) => {
         const source = String(item.source || "current");
         return <Tag key={`${String(item.type)}-${index}`}>{SEGMENT_NAME_LABELS[String(item.type)] ?? String(item.type || "媒体")} · {TRACE_MEDIA_SOURCE_LABELS[source] ?? source}</Tag>;
       })}</Space>}
       {items.length > 0 && <Space orientation="vertical" size={4} style={{ width: "100%" }}>
-        {items.map((item, index) => {
-          const status = String(item.status ?? "unknown");
-          return <div key={`${status}-${index}`} className="agent-trace-media-row">
-            <Space wrap size={[4, 4]}>
-              <Tag color={status === "loaded" ? "green" : status === "dropped_unavailable" ? "red" : "gold"}>图片 {index + 1}</Tag>
-              <Text>{statusLabel[status] ?? status}</Text>
-              {item.mime ? <Tag>{String(item.mime)}</Tag> : null}
-              {typeof item.size_bytes === "number" ? <Tag>{traceByteSize(item.size_bytes)}</Tag> : null}
-              {item.url_host ? <Tag>{String(item.url_host)}</Tag> : null}
-              {item.caption_cache ? <Tag>字幕缓存 {String(item.caption_cache)}</Tag> : null}
-            </Space>
-            {item.reason ? <Text type="danger">{String(item.reason)}</Text> : null}
-          </div>;
-        })}
+        {items.map((item, index) => <MediaTraceDetails key={`${String(item.asset_id ?? item.content_hash ?? item.status ?? "media")}-${index}`} item={item} index={index} statusLabel={statusLabel} />)}
       </Space>}
     </Space>;
   }

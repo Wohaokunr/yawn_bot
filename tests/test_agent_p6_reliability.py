@@ -150,18 +150,22 @@ def test_llm_unexpected_sdk_error_degrades_instead_of_escaping(
 
 
 class _CleanupRows:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, empty: bool = False) -> None:
         self.path = path
+        self.empty = empty
 
     def scalars(self) -> _CleanupRows:
         return self
 
     def all(self) -> list[Any]:
+        if self.empty:
+            return []
         return [SimpleNamespace(cache_path=self.path)]
 
 
 class _CleanupDeleteResult:
-    rowcount = 1
+    def __init__(self, rowcount: int = 1) -> None:
+        self.rowcount = rowcount
 
 
 class _CleanupSession:
@@ -174,8 +178,14 @@ class _CleanupSession:
     async def execute(self, _statement: Any) -> Any:
         self.execute_count += 1
         if self.execute_count == 1:
+            # AgentMediaAsset select: this compatibility fixture represents a
+            # database that only has one legacy AgentMediaCache row.
+            return _CleanupRows(self.path, empty=True)
+        if self.execute_count == 2:
             return _CleanupRows(self.path)
-        return _CleanupDeleteResult()
+        if self.execute_count == 3:
+            return _CleanupDeleteResult(1)
+        return _CleanupDeleteResult(1)
 
     async def flush(self) -> None:
         self.events.append("flush")
@@ -199,7 +209,7 @@ async def test_media_cleanup_never_unlinks_before_db_commit(
         _CleanupSession("safe-cache.png", events, fail_commit=False)
     )
     assert removed == 1
-    assert events == ["flush", "commit", "unlink"]
+    assert events == ["flush", "flush", "commit", "unlink"]
 
 
 @pytest.mark.asyncio
@@ -212,5 +222,5 @@ async def test_media_cleanup_commit_failure_keeps_disk_file(
         await media.cleanup_media_cache(
             _CleanupSession("safe-cache.png", events, fail_commit=True)
         )
-    assert events == ["flush", "commit", "rollback"]
+    assert events == ["flush", "flush", "commit", "rollback"]
     assert "unlink" not in events

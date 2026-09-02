@@ -28,6 +28,7 @@ from .conversation import observe_member_message
 from .dialogue import contains_word, process_group_message
 from .emotion import update_emotion_state
 from .log import dbg, dbg_exc
+from .media import prepare_media_inputs
 from .message_parser import NormalizedMessage, parse_message
 
 _EXPLICIT_WAKE_WORDS = ("小助手", "群聊agent", "群聊 agent", "yawn")
@@ -142,6 +143,18 @@ async def _persist_message(
         dbg(f"群 {group_id} 无法取得 Agent 配置,消息 {message_id} 不落库")
         return
     retention = max(1, min(int(config.raw_retention_days), 365))
+    if normalized.media_refs:
+        # 历史图片可回读依赖“收到消息时就把字节物化成群内资产”。这里只做
+        # 本地 MediaAsset，不触发 Files API；远端文件仍在真正需要给模型看时
+        # 才上传，并由 content_hash/provider_scope 去重。
+        await prepare_media_inputs(
+            bot,
+            group_id,
+            normalized.media_refs,
+            session=session,
+            cache_enabled=False,
+            asset_ttl_seconds=retention * 86400,
+        )
     stored = normalized.storage_dict()
     session.add(
         GroupAgentMessage(
