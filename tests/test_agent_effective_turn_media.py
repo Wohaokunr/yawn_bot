@@ -61,7 +61,7 @@ def test_effective_turn_reconstructs_image_question_then_at_trigger() -> None:
     effective = context_history.effective_turn_query(
         messages,
         focus_user_ids=[20001],
-        query_text="",
+        query_text="[非文本消息]",
     )
 
     assert effective.trigger_only is True
@@ -117,7 +117,7 @@ def test_context_selection_marks_effective_turn_media() -> None:
             _text_message(102, 20001, "这张图片怎么样"),
         ],
         focus_user_ids=[20001],
-        query_text="",
+        query_text="[非文本消息]",
     )
 
     assert selection.effective_query == "这张图片怎么样"
@@ -159,7 +159,7 @@ def test_prompt_promotes_split_question_into_current_turn() -> None:
         "name": "用户",
         "role": "member",
         "title": None,
-        "content": "",
+        "content": "[非文本消息]",
         "mentions": (),
         "reply_to": None,
         "trigger": "at",
@@ -269,7 +269,7 @@ async def test_media_resolver_prefers_effective_turn_image_for_at_only_trigger(
             _image_message(101, 20001),
             _text_message(102, 20001, "这张图片怎么样"),
         ],
-        query_text="",
+        query_text="[非文本消息]",
     )
 
     assert loaded_ids == [101]
