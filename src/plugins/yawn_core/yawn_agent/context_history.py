@@ -1,4 +1,4 @@
-# ruff: noqa: E501,TID252,TC001,TC003,UP035,C901,PLR0912,PLR0915,PLR2004,SIM114
+# ruff: noqa: E501,TID252,TC001,TC003,UP035,C901,PLR0912,PLR0915,PLR2004,SIM114,BLE001,RUF001
 """群聊 Agent 历史消息稀疏化、相关性筛选与调试追踪。
 
 该模块只负责把数据库中的历史消息转成 Prompt 候选，并按当前回合选择有限的
