@@ -158,3 +158,53 @@ async def test_agent_queue_drops_expired_items_after_slow_processing(
     finally:
         _collector.reset_for_tests()
         await asyncio.sleep(0)
+
+
+def test_prune_idle_trims_to_threshold_and_keeps_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超阈值只回收溢出量；仍在活跃时段、只是此刻队列空的群不该被一起清掉。"""
+
+    threshold = 4
+    steady_max = threshold + 1
+    monkeypatch.setattr(_collector, "_MAX_TRACKED_GROUPS", threshold)
+    _collector.reset_for_tests()
+    try:
+        # 未超阈值时一个都不回收。
+        for group_id in range(1, threshold + 1):
+            _collector.queue_size(group_id, 100)
+        _collector._prune_idle()
+        assert len(_collector._queues) == threshold
+
+        # 超阈值 1 个时只回收 1 个，其余 4 个保留（旧口径会把全部空闲群清空到 0）。
+        _collector.queue_size(steady_max, 100)
+        assert len(_collector._queues) == steady_max
+        _collector._prune_idle()
+        assert len(_collector._queues) == threshold
+
+        # 持续新增下条目数保持有界（裁剪在建条目前执行，故稳定态是阈值 +1）。
+        for group_id in range(steady_max + 1, 21):
+            _collector.queue_size(group_id, 100)
+            assert len(_collector._queues) <= steady_max
+    finally:
+        _collector.reset_for_tests()
+
+
+def test_prune_idle_keeps_groups_with_pending_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """队列非空的群条目永远不能被回收，否则会丢掉待处理触发。"""
+
+    monkeypatch.setattr(_collector, "_MAX_TRACKED_GROUPS", 1)
+    _collector.reset_for_tests()
+    bot = types.SimpleNamespace(self_id="100")
+    try:
+        first = (bot, types.SimpleNamespace(message_id=1), "x")
+        second = (bot, types.SimpleNamespace(message_id=2), "y")
+        assert _collector.enqueue(1, first, 100)
+        assert _collector.enqueue(2, second, 100)
+        _collector._prune_idle()
+        assert _collector.queue_size(1, 100) == 1
+        assert _collector.queue_size(2, 100) == 1
+    finally:
+        _collector.reset_for_tests()

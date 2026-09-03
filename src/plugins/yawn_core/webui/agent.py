@@ -1,4 +1,4 @@
-# ruff: noqa: C901,FAST002,PLR0912,PLR0913,PLR0915,PLR0917,TC001,TID252
+# ruff: noqa: C901, FAST002, PLR0912, PLR0915, TC001, TID252
 """Agent configuration, memory, privacy, relation and message endpoints."""
 
 from __future__ import annotations
@@ -6,16 +6,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import timedelta
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, status
-from nonebot import get_bots, logger
+from fastapi import APIRouter, HTTPException, Query, status
+from nonebot import get_bots
 from nonebot_plugin_orm import get_session
-from sqlalchemy import BigInteger, cast, exists, func, or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
+from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.bot_user import BotUser
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
@@ -34,44 +33,27 @@ from ..yawn_agent.capabilities import (
     probe_group_capabilities,
     user_can_manage_group,
 )
-from ..yawn_agent.config_store import agent_runtime_enabled, set_agent_runtime_enabled
 from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
 from ..yawn_agent.context_history import history_message_meta as _history_message_meta
 from ..yawn_agent.context_loader import load_context as _load_context
-from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
+    execution_trace_by_id,
     finish_execution_trace,
-    recent_execution_traces,
+    recent_execution_trace_summaries,
     trace_event,
 )
-from ..yawn_agent.memory import (
-    compact_group_memory,
-    delete_group_memories,
-    delete_member_memories,
-    is_memory_compacting,
-    normalize_relation_type,
-    rebuild_group_memories,
-    record_memory_failure,
-)
 from ..yawn_agent.persona import (
-    apply_persona_editor_profile,
     persona_behavior,
     persona_behavior_draft,
     persona_editor_profile,
     persona_summary,
-    reset_persona,
     resolve_persona,
     resolve_persona_draft,
 )
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
-from ..yawn_agent.speech_runtime import (
-    build_runtime_speech_plan,
-    speech_simulation_payload,
-    trace_speech_decision,
-)
 from ..yawn_agent.tools import (
     build_tool_schemas,
     dialogue_tool_round_limit,
@@ -79,84 +61,84 @@ from ..yawn_agent.tools import (
     select_dialogue_tool_names,
     tool_permission_snapshot,
 )
+from . import (
+    agent_config_routes as _agent_config_routes,
+)
+from . import (
+    agent_memory_routes as _agent_memory_routes,
+)
+from . import (
+    agent_message_routes as _agent_message_routes,
+)
+from . import (
+    agent_persona_routes as _agent_persona_routes,
+)
+from . import (
+    agent_privacy_routes as _agent_privacy_routes,
+)
+from . import (
+    agent_relation_routes as _agent_relation_routes,
+)
 from .config import API_PATH
-from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
+from .deps import AdminReadSession, AdminWriteSession, ok
 from .hub import hub
 from .route_helpers import check_version, require_group
 from .route_models import (
-    AgentConfigPatch,
     AgentDebugRunBody,
-    MemoryCreateBody,
-    MemoryPatchBody,
-    PersonaPatch,
-    PrivacyPatchBody,
-    RelationCreateBody,
-    RelationPatchBody,
 )
 from .service import (
-    RELATION_GRAPH_LIMIT,
     agent_diagnostics,
-    agent_memory_status,
-    delete_one_memory,
-    group_feature_rows,
-    iso,
-    load_relation_graph,
-    page_meta,
-    serialize_agent_config,
-    serialize_agent_message,
-    serialize_guest_memory,
-    serialize_guest_relation,
-    serialize_memory,
-    serialize_persona,
-    serialize_relation,
 )
 
-router = APIRouter(prefix=API_PATH)
+
+def _sync_split_route_runtime(module: Any) -> None:
+    """保持旧 ``webui.agent`` monkeypatch 入口对直接函数调用仍然有效。"""
+
+    module.get_session = get_session
+    module.require_group = require_group
+    module.check_version = check_version
+    module.hub = hub
+    module.now_beijing = now_beijing
+    module.IntegrityError = IntegrityError
+
+
+async def get_memory_subjects(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    _sync_split_route_runtime(_agent_memory_routes)
+    return await _agent_memory_routes.get_memory_subjects(*args, **kwargs)
+
+
+async def get_relation_graph(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    _sync_split_route_runtime(_agent_relation_routes)
+    return await _agent_relation_routes.get_relation_graph(*args, **kwargs)
+
+
+async def create_relation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    _sync_split_route_runtime(_agent_relation_routes)
+    return await _agent_relation_routes.create_relation(*args, **kwargs)
+
+
+async def update_relation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    _sync_split_route_runtime(_agent_relation_routes)
+    return await _agent_relation_routes.update_relation(*args, **kwargs)
+
+
+router = APIRouter()
+_debug_router = APIRouter(prefix=API_PATH)
 _AGENT_DEBUG_RUNS = asyncio.Semaphore(2)
 _DEBUG_HISTORY_LIMIT = 40
 _DEBUG_MEMORY_LIMIT = 30
 _DEBUG_RELATION_LIMIT = 20
 _DEBUG_TIMEOUT_SECONDS = 30.0
+_SUBJECT_MEMORY_TYPES = _agent_memory_routes._SUBJECT_MEMORY_TYPES
 
 
-def _is_guest_view(session: Any) -> bool:
-    return getattr(session, "role", "admin") == "guest"
 
 
-def _memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:
-    if not user_ids:
-        return ()
-    related = func.json_each(AgentMemory.related_user_ids).table_valued("value")
-    has_related_optout = exists(
-        select(1)
-        .select_from(related)
-        .where(cast(related.c.value, BigInteger).in_(user_ids))
-    )
-    return (
-        AgentMemory.subject_user_id.not_in(user_ids),
-        ~has_related_optout,
-    )
 
 
-@router.get("/agent/groups/{group_id}/config")
-async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.get(GroupAgentConfig, group_id)
-        result = serialize_agent_config(row, group_id)
-        if row is not None:
-            result["enabled"] = await agent_runtime_enabled(db, group_id, config=row)
-        else:
-            features = await group_feature_rows(db, group_id)
-            result["enabled"] = bool(
-                next(item for item in features if item["key"] == "group_agent")[
-                    "effective"
-                ]
-            )
-        return ok(result)
 
 
-@router.get("/agent/groups/{group_id}/diagnostics")
+@_debug_router.get("/agent/groups/{group_id}/diagnostics")
 async def get_agent_diagnostics(
     group_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
@@ -165,7 +147,7 @@ async def get_agent_diagnostics(
         return ok(await agent_diagnostics(db, group_id))
 
 
-@router.get("/agent/groups/{group_id}/capabilities")
+@_debug_router.get("/agent/groups/{group_id}/capabilities")
 async def get_agent_capabilities(
     group_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
@@ -196,11 +178,13 @@ async def get_agent_capabilities(
     return ok({"offline": False, **capability_runtime_snapshot(bot, group_id)})
 
 
-@router.get("/agent/groups/{group_id}/execution-traces")
+@_debug_router.get("/agent/groups/{group_id}/execution-traces")
 async def get_agent_execution_traces(
-    group_id: int, _session: AdminReadSession
+    group_id: int,
+    _session: AdminReadSession,
+    status: str | None = Query(default=None, max_length=24),
 ) -> dict[str, Any]:
-    """返回当前进程内最近的真实 Agent 执行时间线。
+    """返回当前进程内最近真实 Agent 执行的轻量摘要。
 
     Trace 是短生命周期诊断缓冲，不从数据库重建，也不携带原始媒体 URL、
     本机路径或裸 OneBot payload。
@@ -208,10 +192,24 @@ async def get_agent_execution_traces(
 
     async with get_session() as db:
         await require_group(db, group_id)
-    return ok(recent_execution_traces(group_id))
+    return ok(recent_execution_trace_summaries(group_id, status=status))
 
 
-@router.post("/agent/groups/{group_id}/capabilities/refresh")
+@_debug_router.get("/agent/groups/{group_id}/execution-traces/{trace_id}")
+async def get_agent_execution_trace(
+    group_id: int, trace_id: str, _session: AdminReadSession
+) -> dict[str, Any]:
+    """返回一条 Trace 的完整事件详情。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+    trace = execution_trace_by_id(group_id, trace_id)
+    if trace is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "执行 Trace 不存在")
+    return ok(trace)
+
+
+@_debug_router.post("/agent/groups/{group_id}/capabilities/refresh")
 async def refresh_agent_capabilities(
     group_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
@@ -226,366 +224,24 @@ async def refresh_agent_capabilities(
     return ok({"offline": False, **capability_runtime_snapshot(bot, group_id)})
 
 
-@router.patch("/agent/groups/{group_id}/config")
-async def patch_agent_config(
-    group_id: int, body: AgentConfigPatch, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, body.version)
-        if row is None:
-            row = GroupAgentConfig(group_id=group_id)
-            db.add(row)
-        updates = body.model_dump(exclude_unset=True, exclude={"version"})
-        legacy_mode = updates.pop("trigger_mode", None)
-        if legacy_mode is not None:
-            legacy_flags = {
-                "mention_only": {
-                    "reply_trigger_enabled": False,
-                    "explicit_wakeup_enabled": False,
-                    "proactive_enabled": False,
-                },
-                "mention_or_reply": {
-                    "reply_trigger_enabled": True,
-                    "explicit_wakeup_enabled": False,
-                    "proactive_enabled": False,
-                },
-                "explicit_wakeup": {
-                    "reply_trigger_enabled": False,
-                    "explicit_wakeup_enabled": True,
-                    "proactive_enabled": False,
-                },
-                "mention_or_proactive": {
-                    "reply_trigger_enabled": True,
-                    "explicit_wakeup_enabled": True,
-                    "proactive_enabled": True,
-                },
-            }[legacy_mode]
-            # Explicit new fields win when old and new clients mix payloads.
-            for field, value in legacy_flags.items():
-                updates.setdefault(field, value)
-            row.trigger_mode = legacy_mode
-        if not updates and legacy_mode is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, "没有可更新的字段"
-            )
-        for field, value in updates.items():
-            if field == "enabled":
-                continue
-            setattr(row, field, value)
-        if "enabled" in updates:
-            await set_agent_runtime_enabled(
-                db,
-                group_id,
-                enabled=bool(updates["enabled"]),
-                config=row,
-            )
-        await db.commit()
-        await db.refresh(row)
-        result = serialize_agent_config(row, group_id)
-        if updates.get("enabled") is False:
-            close_group_conversations(group_id, reason="WebUI 关闭 Agent 总开关")
-        elif updates.get("short_conversation_enabled") is False:
-            close_group_conversations(group_id, reason="WebUI 关闭短会话续聊")
-    await hub.notify_change("agent_config", str(group_id))
-    if "enabled" in updates:
-        await hub.notify_change("group_feature", f"{group_id}:group_agent")
-    return ok(result)
 
 
-@router.get("/agent/groups/{group_id}/persona")
-async def get_agent_persona(
-    group_id: int, _session: AdminReadSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.get(GroupAgentConfig, group_id)
-        return ok(serialize_persona(row, group_id))
 
 
-@router.put("/agent/groups/{group_id}/persona")
-async def put_agent_persona(
-    group_id: int, body: PersonaPatch, _session: AdminWriteSession
-) -> dict[str, Any]:
-    changed = False
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, body.version)
-        if row is None:
-            row = GroupAgentConfig(group_id=group_id)
-            db.add(row)
-        mutation = apply_persona_editor_profile(row, body.profile, enabled=body.enabled)
-        if mutation.semantic_changed:
-            row.persona_version += 1
-            changed = True
-        if mutation.storage_changed:
-            await db.commit()
-            await db.refresh(row)
-        result = serialize_persona(row, group_id)
-    if changed:
-        await hub.notify_change("agent_persona", str(group_id))
-    return ok(result)
 
 
-@router.delete("/agent/groups/{group_id}/persona")
-async def reset_agent_persona(
-    group_id: int,
-    _session: AdminWriteSession,
-    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
-) -> dict[str, Any]:
-    changed = False
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, if_match)
-        if row is None:
-            row = GroupAgentConfig(group_id=group_id)
-            db.add(row)
-        mutation = reset_persona(row)
-        if mutation.semantic_changed:
-            row.persona_version += 1
-            changed = True
-        if mutation.storage_changed:
-            await db.commit()
-            await db.refresh(row)
-        result = serialize_persona(row, group_id)
-    if changed:
-        await hub.notify_change("agent_persona", str(group_id))
-    return ok(result)
 
 
-@router.get("/agent/groups/{group_id}/memories")
-async def get_memories(
-    group_id: int,
-    _session: GroupViewSession,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
-    search: str = Query(default="", max_length=120),
-    memory_type: str = Query(default="", alias="type", max_length=24),
-    subject_user_id: int | None = Query(default=None, alias="subjectUserId"),
-) -> dict[str, Any]:
-    page, page_size = page_params(page, page_size)
-    clauses = [
-        AgentMemory.group_id == group_id,
-        AgentMemory.visibility.in_(("group", "public")),
-        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now_beijing())),
-    ]
-    if search:
-        pattern = f"%{search}%"
-        clauses.append(
-            or_(
-                AgentMemory.memory_key.ilike(pattern),
-                AgentMemory.content.ilike(pattern),
-            )
-        )
-    if memory_type:
-        clauses.append(AgentMemory.memory_type == memory_type)
-    if subject_user_id is not None:
-        clauses.append(AgentMemory.subject_user_id == subject_user_id)
-    async with get_session() as db:
-        await require_group(db, group_id)
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if opted_out:
-            clauses.extend(_memory_privacy_clauses(opted_out))
-        total = int(
-            await db.scalar(
-                select(func.count()).select_from(AgentMemory).where(*clauses)
-            )
-            or 0
-        )
-        rows = list(
-            (
-                await db.execute(
-                    select(AgentMemory)
-                    .where(*clauses)
-                    .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    serializer = (
-        serialize_guest_memory if _is_guest_view(_session) else serialize_memory
-    )
-    return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
 
 
 # 成员画像面板的成员索引口径：profile/core/manual 都是按成员沉淀的可读事实
 # （对话注入同口径），群级行（subject=0）与 summary 不参与。
-_SUBJECT_MEMORY_TYPES = ("profile", "core", "manual")
 
 
-@router.get("/agent/groups/{group_id}/memories/subjects")
-async def get_memory_subjects(
-    group_id: int, _session: GroupViewSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        clauses = [
-            AgentMemory.group_id == group_id,
-            AgentMemory.subject_user_id != 0,
-            AgentMemory.memory_type.in_(_SUBJECT_MEMORY_TYPES),
-            AgentMemory.visibility.in_(("group", "public")),
-            (
-                AgentMemory.expires_at.is_(None)
-                | (AgentMemory.expires_at >= now_beijing())
-            ),
-        ]
-        if opted_out:
-            clauses.extend(_memory_privacy_clauses(opted_out))
-        rows = list(
-            (
-                await db.execute(
-                    select(AgentMemory)
-                    .where(*clauses)
-                    .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
-                    .limit(RELATION_GRAPH_LIMIT)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        # rows 按 updated_at 降序：首次见到某成员即其最新更新时间，dict 保持
-        # 插入序使结果天然按最近更新排列，与图谱端点的 Python 聚合模式一致。
-        subjects: dict[int, dict[str, Any]] = {}
-        for row in rows:
-            user_id = int(row.subject_user_id)
-            entry = subjects.get(user_id)
-            if entry is None:
-                entry = {
-                    "userId": str(user_id),
-                    "counts": dict.fromkeys(_SUBJECT_MEMORY_TYPES, 0),
-                    "total": 0,
-                    "updatedAt": iso(row.updated_at),
-                }
-                subjects[user_id] = entry
-            entry["counts"][row.memory_type] += 1
-            entry["total"] += 1
-        # 昵称联接走全群成员表（同图谱端点），避免大 in_ 参数；退群残留回退空昵称。
-        member_rows = list(
-            (
-                await db.execute(
-                    select(UserGroup, BotUser)
-                    .join(BotUser, BotUser.user_id == UserGroup.user_id)
-                    .where(UserGroup.group_id == group_id)
-                    .order_by(UserGroup.user_id)
-                    .limit(RELATION_GRAPH_LIMIT)
-                )
-            ).all()
-        )
-        member_names: dict[int, tuple[str, str | None]] = {
-            int(user.user_id): (user.nickname, membership.group_nickname)
-            for membership, user in member_rows
-        }
-        result = []
-        for user_id, entry in subjects.items():
-            nickname, group_nickname = member_names.get(user_id, ("", None))
-            result.append(
-                {**entry, "nickname": nickname, "groupNickname": group_nickname}
-            )
-    return ok(result)
 
 
-@router.get("/agent/groups/{group_id}/memories/export")
-async def export_memories(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        clauses = [
-            AgentMemory.group_id == group_id,
-            AgentMemory.visibility.in_(("group", "public")),
-            (
-                AgentMemory.expires_at.is_(None)
-                | (AgentMemory.expires_at >= now_beijing())
-            ),
-            *_memory_privacy_clauses(opted_out),
-        ]
-        rows = list(
-            (
-                await db.execute(
-                    select(AgentMemory)
-                    .where(*clauses)
-                    .order_by(AgentMemory.id)
-                    .limit(5000)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        relation_clauses = [AgentRelation.group_id == group_id]
-        if opted_out:
-            relation_clauses.extend(
-                (
-                    AgentRelation.subject_user_id.not_in(opted_out),
-                    AgentRelation.object_user_id.not_in(opted_out),
-                )
-            )
-        relation_rows = list(
-            (
-                await db.execute(
-                    select(AgentRelation)
-                    .where(*relation_clauses)
-                    .order_by(AgentRelation.id)
-                    .limit(5000)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    return ok(
-        {
-            "groupId": str(group_id),
-            "memories": [serialize_memory(row) for row in rows],
-            "relations": [serialize_relation(row) for row in relation_rows],
-        }
-    )
 
 
-@router.get("/agent/groups/{group_id}/memories/status")
-async def get_memory_status(
-    group_id: int, _session: AdminReadSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        return ok(await agent_memory_status(db, group_id))
 
 
 # 手动整理是重操作（LLM 摘要可达数十秒）：后台执行并按群防重复触发。
@@ -593,529 +249,38 @@ _compact_inflight: set[int] = set()
 _bg_tasks: set[asyncio.Task[None]] = set()
 
 
-async def _run_manual_compact(group_id: int) -> None:
-    try:
-        async with get_session() as db:
-            await compact_group_memory(db, group_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("WebUI 手动记忆整理失败: %s", group_id)
-        try:
-            async with get_session() as db:
-                await record_memory_failure(
-                    db, group_id, f"手动整理异常: {type(exc).__name__}"
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception("WebUI 手动记忆失败状态写入失败: %s", group_id)
-    finally:
-        _compact_inflight.discard(group_id)
-        await hub.notify_change("agent_memory", str(group_id))
 
 
-async def _run_manual_rebuild(group_id: int) -> None:
-    try:
-        async with get_session() as db:
-            await rebuild_group_memories(db, group_id)
-        async with get_session() as db:
-            await compact_group_memory(db, group_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("WebUI 手动记忆重建失败: %s", group_id)
-        try:
-            async with get_session() as db:
-                await record_memory_failure(
-                    db, group_id, f"手动重建异常: {type(exc).__name__}"
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception("WebUI 手动重建失败状态写入失败: %s", group_id)
-    finally:
-        _compact_inflight.discard(group_id)
-        await hub.notify_change("agent_memory", str(group_id))
 
 
-@router.post("/agent/groups/{group_id}/memories/compact")
-async def trigger_memory_compact(
-    group_id: int, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-    if group_id in _compact_inflight or is_memory_compacting(group_id):
-        raise HTTPException(status.HTTP_409_CONFLICT, "该群正在整理记忆，请稍后再试")
-    _compact_inflight.add(group_id)
-    task = asyncio.create_task(_run_manual_compact(group_id))
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
-    return ok({"started": True})
 
 
-@router.post("/agent/groups/{group_id}/memories/rebuild")
-async def trigger_memory_rebuild(
-    group_id: int, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-    if group_id in _compact_inflight or is_memory_compacting(group_id):
-        raise HTTPException(status.HTTP_409_CONFLICT, "该群正在整理记忆，请稍后再试")
-    _compact_inflight.add(group_id)
-    task = asyncio.create_task(_run_manual_rebuild(group_id))
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
-    return ok({"started": True, "rebuild": True})
 
 
-@router.post("/agent/groups/{group_id}/memories")
-async def create_memory(
-    group_id: int, body: MemoryCreateBody, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        now = now_beijing()
-        expires_at = (
-            now + timedelta(days=body.expires_in_days)
-            if body.expires_in_days is not None
-            else None
-        )
-        row = AgentMemory(
-            group_id=group_id,
-            scope="group",
-            subject_user_id=body.subject_user_id or 0,
-            memory_type=body.type,
-            memory_key=body.key.strip(),
-            content=body.content.strip(),
-            evidence_message_ids=[],
-            source_kind="manual",
-            related_user_ids=sorted(
-                {
-                    *body.related_user_ids,
-                    *([body.subject_user_id] if body.subject_user_id else []),
-                }
-            ),
-            salience=body.salience,
-            confidence=body.confidence,
-            visibility="group",
-            expires_at=expires_at,
-        )
-        db.add(row)
-        try:
-            await db.commit()
-        except IntegrityError:
-            await db.rollback()
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "同类型同 key 的记忆已存在"
-            ) from None
-        await db.refresh(row)
-        result = serialize_memory(row)
-    await hub.notify_change("agent_memory", str(row.id))
-    return ok(result)
 
 
-@router.put("/agent/groups/{group_id}/memories/{memory_id}")
-async def update_memory(
-    group_id: int, memory_id: int, body: MemoryPatchBody, _session: AdminWriteSession
-) -> dict[str, Any]:
-    updates = body.model_dump(exclude_unset=True, exclude={"version"})
-    if not updates:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "没有可更新的字段")
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.scalar(
-            select(AgentMemory).where(
-                AgentMemory.group_id == group_id,
-                AgentMemory.id == memory_id,
-            )
-        )
-        if row is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "记忆不存在")
-        check_version(row, body.version)
-        if "content" in updates:
-            row.content = str(updates["content"]).strip()
-        if "salience" in updates:
-            row.salience = float(updates["salience"])
-        if "confidence" in updates:
-            row.confidence = float(updates["confidence"])
-        if "expires_in_days" in updates:
-            row.expires_at = (
-                now_beijing() + timedelta(days=int(updates["expires_in_days"]))
-                if updates["expires_in_days"] is not None
-                else None
-            )
-        await db.commit()
-        await db.refresh(row)
-        result = serialize_memory(row)
-    await hub.notify_change("agent_memory", str(memory_id))
-    return ok(result)
 
 
-@router.delete("/agent/groups/{group_id}/memories/{memory_id}")
-async def delete_memory(
-    group_id: int, memory_id: int, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        count = await delete_one_memory(db, group_id, memory_id)
-        if not count:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "记忆不存在")
-        await db.commit()
-    await hub.notify_change("agent_memory", str(memory_id))
-    return ok({"deleted": count})
 
 
-@router.delete("/agent/groups/{group_id}/members/{user_id}/data")
-async def delete_member_agent_data(
-    group_id: int, user_id: int, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        count = await delete_member_memories(db, group_id, user_id)
-    await hub.notify_change("agent_member_data", f"{group_id}:{user_id}")
-    return ok({"deleted": count})
 
 
-@router.delete("/agent/groups/{group_id}/data")
-async def delete_group_agent_data(
-    group_id: int, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        count = await delete_group_memories(db, group_id)
-    await hub.notify_change("agent_group_data", str(group_id))
-    return ok({"deleted": count})
 
 
-@router.get("/agent/groups/{group_id}/privacy")
-async def get_privacy(
-    group_id: int,
-    _session: AdminReadSession,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
-) -> dict[str, Any]:
-    page, page_size = page_params(page, page_size)
-    clause = AgentPrivacy.group_id == group_id
-    async with get_session() as db:
-        await require_group(db, group_id)
-        total = int(
-            await db.scalar(
-                select(func.count()).select_from(AgentPrivacy).where(clause)
-            )
-            or 0
-        )
-        rows = list(
-            (
-                await db.execute(
-                    select(AgentPrivacy)
-                    .where(clause)
-                    .order_by(AgentPrivacy.updated_at.desc(), AgentPrivacy.user_id)
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    return ok(
-        [
-            {
-                "groupId": str(row.group_id),
-                "userId": str(row.user_id),
-                "optedOut": row.opted_out,
-                "updatedAt": iso(row.updated_at),
-            }
-            for row in rows
-        ],
-        page_meta(page, page_size, total),
-    )
 
 
-@router.get("/agent/groups/{group_id}/relations")
-async def get_relations(
-    group_id: int,
-    _session: GroupViewSession,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
-    search: str = Query(default="", max_length=24),
-    relation_type: str = Query(default="", alias="type", max_length=32),
-) -> dict[str, Any]:
-    page, page_size = page_params(page, page_size)
-    clauses = [AgentRelation.group_id == group_id]
-    if relation_type:
-        clauses.append(AgentRelation.relation_type == relation_type)
-    if search.strip().isdigit():
-        target = int(search.strip())
-        clauses.append(
-            or_(
-                AgentRelation.subject_user_id == target,
-                AgentRelation.object_user_id == target,
-            )
-        )
-    async with get_session() as db:
-        await require_group(db, group_id)
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if opted_out:
-            clauses.extend(
-                (
-                    AgentRelation.subject_user_id.not_in(opted_out),
-                    AgentRelation.object_user_id.not_in(opted_out),
-                )
-            )
-        total = int(
-            await db.scalar(
-                select(func.count()).select_from(AgentRelation).where(*clauses)
-            )
-            or 0
-        )
-        rows = list(
-            (
-                await db.execute(
-                    select(AgentRelation)
-                    .where(*clauses)
-                    .order_by(AgentRelation.confidence.desc(), AgentRelation.id.desc())
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    serializer = (
-        serialize_guest_relation if _is_guest_view(_session) else serialize_relation
-    )
-    return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
 
 
-@router.get("/agent/groups/{group_id}/relations/graph")
-async def get_relation_graph(
-    group_id: int, _session: GroupViewSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        return ok(
-            await load_relation_graph(db, group_id, guest=_is_guest_view(_session))
-        )
 
 
-@router.get("/agent/groups/{group_id}/relations/types")
-async def get_relation_types(
-    group_id: int, _session: GroupViewSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        clauses = [AgentRelation.group_id == group_id]
-        if _is_guest_view(_session):
-            opted_out = set(
-                (
-                    await db.execute(
-                        select(AgentPrivacy.user_id).where(
-                            AgentPrivacy.group_id == group_id,
-                            AgentPrivacy.opted_out.is_(True),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if opted_out:
-                clauses.extend(
-                    (
-                        AgentRelation.subject_user_id.not_in(opted_out),
-                        AgentRelation.object_user_id.not_in(opted_out),
-                    )
-                )
-        rows = (
-            (
-                await db.execute(
-                    select(AgentRelation.relation_type)
-                    .where(*clauses)
-                    .distinct()
-                    .order_by(AgentRelation.relation_type)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    return ok([str(row) for row in rows])
 
 
-@router.post("/agent/groups/{group_id}/relations")
-async def create_relation(
-    group_id: int, body: RelationCreateBody, _session: AdminWriteSession
-) -> dict[str, Any]:
-    relation_type = normalize_relation_type(body.type)
-    if not relation_type:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "关系类型不能为空")
-    if body.subject_user_id == body.object_user_id:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "关系两端不能是同一个人"
-        )
-    async with get_session() as db:
-        await require_group(db, group_id)
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if body.subject_user_id in opted_out or body.object_user_id in opted_out:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "关系一方已隐私退出，不得建立关系边",
-            )
-        row = AgentRelation(
-            group_id=group_id,
-            subject_user_id=body.subject_user_id,
-            object_user_id=body.object_user_id,
-            relation_type=relation_type,
-            source_kind="manual",
-            note=body.note.strip(),
-            confidence=body.confidence,
-            evidence_count=1,
-            last_seen_at=now_beijing(),
-        )
-        db.add(row)
-        try:
-            await db.commit()
-        except IntegrityError:
-            await db.rollback()
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "这两个成员的该类型关系边已存在"
-            ) from None
-        await db.refresh(row)
-        result = serialize_relation(row)
-    await hub.notify_change("agent_relation", str(row.id))
-    return ok(result)
 
 
-@router.put("/agent/groups/{group_id}/relations/{relation_id}")
-async def update_relation(
-    group_id: int,
-    relation_id: int,
-    body: RelationPatchBody,
-    _session: AdminWriteSession,
-) -> dict[str, Any]:
-    updates = body.model_dump(exclude_unset=True)
-    if not updates:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "没有可更新的字段")
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.scalar(
-            select(AgentRelation).where(
-                AgentRelation.group_id == group_id,
-                AgentRelation.id == relation_id,
-            )
-        )
-        if row is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "关系不存在")
-        if "note" in updates:
-            row.note = str(updates["note"] or "").strip()
-        if updates.get("confidence") is not None:
-            row.confidence = float(updates["confidence"])
-        await db.commit()
-        await db.refresh(row)
-        result = serialize_relation(row)
-    await hub.notify_change("agent_relation", str(relation_id))
-    return ok(result)
 
 
-@router.delete("/agent/groups/{group_id}/relations/{relation_id}")
-async def delete_relation(
-    group_id: int, relation_id: int, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.scalar(
-            select(AgentRelation).where(
-                AgentRelation.group_id == group_id,
-                AgentRelation.id == relation_id,
-            )
-        )
-        if row is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "关系不存在")
-        await db.delete(row)
-        await db.commit()
-    await hub.notify_change("agent_relation", str(relation_id))
-    return ok({"deleted": 1})
 
 
-@router.get("/agent/groups/{group_id}/messages")
-async def get_agent_messages(
-    group_id: int,
-    _session: AdminReadSession,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
-    search: str = Query(default="", max_length=120),
-    role: str = Query(default="", max_length=24),
-) -> dict[str, Any]:
-    page, page_size = page_params(page, page_size)
-    now = now_beijing()
-    clauses = [
-        GroupAgentMessage.group_id == group_id,
-        GroupAgentMessage.expires_at.is_not(None),
-        GroupAgentMessage.expires_at >= now,
-    ]
-    if role:
-        clauses.append(GroupAgentMessage.role == role)
-    if search:
-        pattern = f"%{search}%"
-        clauses.append(
-            or_(
-                GroupAgentMessage.normalized_text.ilike(pattern),
-                GroupAgentMessage.sender_name.ilike(pattern),
-            )
-        )
-    async with get_session() as db:
-        await require_group(db, group_id)
-        # 隐私退出是读路径级别的：管理台同样不得回看其消息。
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if opted_out:
-            clauses.append(GroupAgentMessage.user_id.not_in(opted_out))
-        total = int(
-            await db.scalar(
-                select(func.count()).select_from(GroupAgentMessage).where(*clauses)
-            )
-            or 0
-        )
-        rows = list(
-            (
-                await db.execute(
-                    select(GroupAgentMessage)
-                    .where(*clauses)
-                    .order_by(GroupAgentMessage.id.desc())
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    return ok(
-        [serialize_agent_message(row) for row in rows],
-        page_meta(page, page_size, total),
-    )
 
 
 def _debug_context_stats(context: dict[str, Any]) -> dict[str, Any]:
@@ -1123,7 +288,9 @@ def _debug_context_stats(context: dict[str, Any]) -> dict[str, Any]:
     memories = list(context.get("memories") or [])
     relations = list(context.get("relations") or [])
     media_summary_count = sum(
-        1 for item in messages if item.get("media_types") or item.get("forward_nodes")
+        1
+        for item in messages
+        if item.get("media_types") or item.get("forward_nodes")
     )
     return {
         "history": {
@@ -1225,7 +392,7 @@ async def _run_debug_completion(
         )
 
 
-@router.post("/agent/groups/{group_id}/debug/run")
+@_debug_router.post("/agent/groups/{group_id}/debug/run")
 async def run_agent_debug(
     group_id: int, body: AgentDebugRunBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
@@ -1331,7 +498,10 @@ async def run_agent_debug(
             trigger = "history_replay"
             if bot_id is not None and bot_id in mentions:
                 trigger = "mention"
-            elif reply_chain and int(str(reply_chain[0].get("user_id") or 0)) == bot_id:
+            elif (
+                reply_chain
+                and int(str(reply_chain[0].get("user_id") or 0)) == bot_id
+            ):
                 trigger = "reply_to_bot"
             current_turn = build_current_turn(
                 message_id=int(source.message_id),
@@ -1611,21 +781,6 @@ async def run_agent_debug(
         )
         base_url, api_key = resolve_provider(route.provider)
         result_payload: dict[str, Any] | None = None
-        preview_plan = build_runtime_speech_plan(
-            text="",
-            persona=applied_persona,
-            current_turn=current_turn,
-            context=context,
-            source=body.mode,
-            action="speak",
-        )
-        speech_simulation = speech_simulation_payload(
-            preview_plan,
-            emotion_state=applied_emotion,
-            should_speak=None,
-            preview_only=True,
-            user_text=current_turn.content,
-        )
         if body.run_model:
             model_started = time.monotonic()
             try:
@@ -1643,58 +798,6 @@ async def run_agent_debug(
                     timeout=_DEBUG_TIMEOUT_SECONDS,
                 )
                 result_payload = _debug_model_payload(result, body.mode)
-                if body.mode == "dialogue":
-                    if not result_payload.get("toolCalls") and result_payload.get(
-                        "text"
-                    ):
-                        simulated_plan = build_runtime_speech_plan(
-                            text=result_payload.get("text") or "",
-                            persona=applied_persona,
-                            current_turn=current_turn,
-                            context=context,
-                            source="dialogue",
-                        )
-                        speech_simulation = speech_simulation_payload(
-                            simulated_plan,
-                            emotion_state=applied_emotion,
-                            should_speak=True,
-                            user_text=current_turn.content,
-                        )
-                        trace_speech_decision(
-                            simulated_plan,
-                            emotion_state=applied_emotion,
-                            participation_action="speak",
-                            trace=debug_trace,
-                        )
-                else:
-                    simulated_decision = _decide_proactive_reply(
-                        str(result_payload.get("text") or "")
-                    )
-                    simulated_plan = build_runtime_speech_plan(
-                        text=simulated_decision.text,
-                        segments=list(simulated_decision.segments),
-                        persona=applied_persona,
-                        current_turn=current_turn,
-                        context=context,
-                        source=body.mode,
-                        action=simulated_decision.action,
-                        target_user_id=simulated_decision.target_user_id,
-                        suggested_topic=simulated_decision.topic,
-                        reason=simulated_decision.reason,
-                        confidence=simulated_decision.confidence,
-                    )
-                    speech_simulation = speech_simulation_payload(
-                        simulated_plan,
-                        emotion_state=applied_emotion,
-                        should_speak=simulated_decision.should_speak,
-                        user_text=current_turn.content,
-                    )
-                    trace_speech_decision(
-                        simulated_plan,
-                        emotion_state=applied_emotion,
-                        participation_action=simulated_decision.action,
-                        trace=debug_trace,
-                    )
                 trace_event(
                     "llm",
                     "真实模型试跑",
@@ -1845,34 +948,20 @@ async def run_agent_debug(
             "stats": stats,
             "warnings": warnings,
             "result": result_payload,
-            "speechSimulation": speech_simulation,
             "executionTrace": debug_trace.as_dict(),
         }
     return ok(payload)
 
 
-@router.patch("/agent/groups/{group_id}/privacy/{user_id}")
-async def patch_privacy(
-    group_id: int, user_id: int, body: PrivacyPatchBody, _session: AdminWriteSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        privacy = await db.get(AgentPrivacy, (group_id, user_id))
-        if privacy is None:
-            privacy = AgentPrivacy(group_id=group_id, user_id=user_id)
-            db.add(privacy)
-        privacy.opted_out = body.opted_out
-        if body.opted_out:
-            # 与 /Agent隐私 命令同语义：退出即连带清除该成员已沉淀的记忆。
-            await delete_member_memories(db, group_id, user_id)
-        else:
-            await db.commit()
-        await db.refresh(privacy)
-        result = {
-            "groupId": str(privacy.group_id),
-            "userId": str(privacy.user_id),
-            "optedOut": privacy.opted_out,
-            "updatedAt": iso(privacy.updated_at),
-        }
-    await hub.notify_change("agent_privacy", f"{group_id}:{user_id}")
-    return ok(result)
+
+
+for _route_group in (
+    _agent_config_routes.router.routes,
+    _agent_persona_routes.router.routes,
+    _agent_memory_routes.router.routes,
+    _agent_relation_routes.router.routes,
+    _agent_message_routes.router.routes,
+    _agent_privacy_routes.router.routes,
+    _debug_router.routes,
+):
+    router.routes.extend(_route_group)

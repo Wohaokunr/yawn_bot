@@ -13,7 +13,7 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, NoticeEvent
 from nonebot.plugin import on_message, on_notice
 from nonebot_plugin_orm import async_scoped_session
-from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.agent_memory import AgentPrivacy
@@ -127,16 +127,6 @@ async def _persist_message(
     if message_id == 0:
         dbg(f"群 {group_id} 消息缺少 message_id,跳过落库")
         return
-    duplicate = await session.scalar(
-        select(GroupAgentMessage).where(
-            GroupAgentMessage.bot_id == bot_id,
-            GroupAgentMessage.group_id == group_id,
-            GroupAgentMessage.message_id == message_id,
-        )
-    )
-    if duplicate is not None:
-        dbg(f"群 {group_id} 消息 {message_id} 已落库过,去重跳过")
-        return
     sender = event.sender
     config = await get_or_create_config(session, group_id)
     if config is None:
@@ -156,28 +146,36 @@ async def _persist_message(
             asset_ttl_seconds=retention * 86400,
         )
     stored = normalized.storage_dict()
-    session.add(
-        GroupAgentMessage(
-            bot_id=bot_id,
-            message_id=message_id,
-            group_id=group_id,
-            user_id=int(event.get_user_id()),
-            sender_name=sender.card or sender.nickname,
-            role=str(sender.role or "member"),
-            title=sender.title,
-            normalized_text=normalized.plain_text,
-            segments=stored.get("segments", []),
-            reply_chain=stored.get("reply_chain", []),
-            forward_tree=stored.get("forward_tree", []),
-            media_refs=stored.get("media_refs", []),
-            received_at=now_beijing(),
-            expires_at=now_beijing() + timedelta(days=retention),
-        )
+    received_at = now_beijing()
+    # 去重交给 uq_agent_message_bot_group_message 唯一约束：先 SELECT 再 INSERT
+    # 既多一次往返，又在并发投递同一条消息时仍会撞唯一约束。
+    insert_stmt = sqlite_insert(GroupAgentMessage).values(
+        bot_id=bot_id,
+        message_id=message_id,
+        group_id=group_id,
+        user_id=int(event.get_user_id()),
+        sender_name=sender.card or sender.nickname,
+        role=str(sender.role or "member"),
+        title=sender.title,
+        normalized_text=normalized.plain_text,
+        segments=stored.get("segments", []),
+        reply_chain=stored.get("reply_chain", []),
+        forward_tree=stored.get("forward_tree", []),
+        media_refs=stored.get("media_refs", []),
+        received_at=received_at,
+        expires_at=received_at + timedelta(days=retention),
     )
-    group = await session.get(BotGroup, group_id)
-    if group is not None:
-        group.last_active_at = now_beijing()
     try:
+        result = await session.execute(
+            insert_stmt.on_conflict_do_nothing(
+                index_elements=["bot_id", "group_id", "message_id"]
+            )
+        )
+        inserted = int(getattr(result, "rowcount", 0) or 0) > 0
+        if inserted:
+            group = await session.get(BotGroup, group_id)
+            if group is not None:
+                group.last_active_at = received_at
         await session.commit()
     except SQLAlchemyError:
         # 含 SQLite 锁超时等瞬时错误；必须回滚，否则处理器共享的
@@ -186,6 +184,9 @@ async def _persist_message(
         dbg_exc(f"群 {group_id} 消息 {message_id} 落库失败,已回滚")
         await session.rollback()
     else:
+        if not inserted:
+            dbg(f"群 {group_id} 消息 {message_id} 已落库过,去重跳过")
+            return
         dbg(
             f"群 {group_id} 消息 {message_id} 落库成功: user={int(event.get_user_id())} "
             f"保留天数={retention} 段数={len(stored.get('segments', []))} "

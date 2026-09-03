@@ -27,11 +27,19 @@ _locks: weakref.WeakValueDictionary[QueueKey, asyncio.Lock] = (
 
 
 def _prune_idle() -> None:
-    """长期运行的多群部署下，回收无 worker 且队列为空的群条目。"""
+    """长期运行的多群部署下，回收无 worker 且队列为空的群条目。
 
-    if len(_queues) <= _MAX_TRACKED_GROUPS:
+    只裁剪到阈值就停：一次清空全部空闲群会把仍在活跃时段、只是此刻队列为空的
+    群一并丢掉，下一条消息又要重建条目。``_locks`` 是 WeakValueDictionary，
+    没有强引用时自行回收，因此这里只处理 ``_queues`` / ``_workers``。
+    """
+
+    excess = len(_queues) - _MAX_TRACKED_GROUPS
+    if excess <= 0:
         return
     for key in list(_queues):
+        if excess <= 0:
+            break
         worker = _workers.get(key)
         queue = _queues.get(key)
         lock = _locks.get(key)
@@ -43,6 +51,7 @@ def _prune_idle() -> None:
         ):
             _queues.pop(key, None)
             _workers.pop(key, None)
+            excess -= 1
 
 
 def _key(

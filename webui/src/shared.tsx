@@ -48,7 +48,18 @@ export function useApiQuery<T>(load: () => Promise<T>, options: ApiQueryOptions 
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const generation = useRef(0);
   const hasData = useRef(false);
+  const inFlight = useRef(false);
+  const rerunRequested = useRef(false);
+  const runRef = useRef<() => void>(() => undefined);
   const run = useCallback(() => {
+    if (inFlight.current) {
+      // 极慢网络/轮询重叠时只保留一个“再跑一次”请求；同时让当前旧请求失效，
+      // 避免分页/搜索条件已经变化后旧响应覆盖新状态。
+      rerunRequested.current = true;
+      generation.current += 1;
+      return;
+    }
+    inFlight.current = true;
     const ticket = ++generation.current;
     if (hasData.current) setRefreshing(true);
     else setLoading(true);
@@ -67,12 +78,18 @@ export function useApiQuery<T>(load: () => Promise<T>, options: ApiQueryOptions 
         }
       })
       .finally(() => {
+        inFlight.current = false;
         if (ticket === generation.current) {
           setLoading(false);
           setRefreshing(false);
         }
+        if (rerunRequested.current) {
+          rerunRequested.current = false;
+          queueMicrotask(() => runRef.current());
+        }
       });
   }, [load]);
+  runRef.current = run;
   useEffect(() => { void run(); }, [run]);
   useEntityRefresh(run, options.resources ?? []);
   return { data, loading, refreshing, error, updatedAt, reload: run };

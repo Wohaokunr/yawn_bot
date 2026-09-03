@@ -47,6 +47,10 @@ _HIGH_CARDINALITY_LABEL_KEYS = frozenset(
         "user_id",
     }
 )
+_AGENT_PHASES = frozenset({"context", "capability", "media", "prompt", "llm", "tool"})
+_AGENT_CAPABILITY_PROBE_OUTCOMES = frozenset({"success", "degraded"})
+_AGENT_OPERATIONS = frozenset({"dialogue", "proactive", "followup"})
+_AGENT_DISCOVERY_OUTCOMES = frozenset({"called", "empty", "returned", "used"})
 
 _HISTOGRAM_BUCKETS = (
     0.005,
@@ -83,6 +87,30 @@ _METRIC_HELP = {
     "yawnbot_agent_turns_total": "Agent turns grouped by operation and outcome.",
     "yawnbot_agent_turn_duration_seconds": "Agent turn duration in seconds.",
     "yawnbot_agent_queue_wait_seconds": "Agent queue wait duration in seconds.",
+    "yawnbot_agent_phase_duration_seconds": "Agent phase duration in seconds.",
+    "yawnbot_agent_capability_probes_total": (
+        "Actual OneBot capability probes grouped by outcome."
+    ),
+    "yawnbot_agent_context_db_queries": (
+        "SQL statements used to assemble one Agent context."
+    ),
+    "yawnbot_agent_tool_rounds": "Model/tool loop rounds observed per Agent turn.",
+    "yawnbot_agent_tool_schema_chars": (
+        "Serialized Tool schema characters per Agent turn."
+    ),
+    "yawnbot_agent_tool_selected_count": (
+        "Tools selected by deterministic routing per Agent turn."
+    ),
+    "yawnbot_agent_tool_exposed_count": (
+        "Tools actually exposed to the model per Agent turn."
+    ),
+    "yawnbot_agent_tool_discovery_total": (
+        "discover_tools calls, non-empty results, and subsequently used "
+        "discovered tools."
+    ),
+    "yawnbot_agent_provider_cache_tokens": (
+        "Provider-reported cached and cache-miss input tokens per Agent turn."
+    ),
 }
 
 _Labels = tuple[tuple[str, str], ...]
@@ -336,6 +364,90 @@ def record_agent_turn(
             "yawnbot_agent_queue_wait_seconds",
             queue_wait_seconds,
             labels={"operation": operation},
+        )
+
+
+def record_agent_phase(phase: str, elapsed_seconds: float) -> None:
+    """记录 Agent 固定阶段耗时，供长期 p50/p95 分析。"""
+
+    if phase not in _AGENT_PHASES:
+        return
+    observe_histogram(
+        "yawnbot_agent_phase_duration_seconds",
+        elapsed_seconds,
+        labels={"phase": phase},
+    )
+
+
+def record_agent_capability_probe(outcome: str) -> None:
+    """只统计真实发往 OneBot 的能力探测；缓存命中不计入。"""
+
+    if outcome not in _AGENT_CAPABILITY_PROBE_OUTCOMES:
+        return
+    increment_counter(
+        "yawnbot_agent_capability_probes_total",
+        labels={"outcome": outcome},
+    )
+
+
+def record_agent_context_db_queries(value: int) -> None:
+    """记录一次上下文组装实际发出的 SQL 语句数量。"""
+
+    observe_histogram("yawnbot_agent_context_db_queries", float(value))
+
+
+def record_agent_tool_rounds(value: int, operation: str = "dialogue") -> None:
+    """记录一次 Agent 回合实际经历的模型/Tool 循环轮数。"""
+
+    if operation not in _AGENT_OPERATIONS or value < 0:
+        return
+    observe_histogram(
+        "yawnbot_agent_tool_rounds",
+        float(value),
+        labels={"operation": operation},
+    )
+
+
+def record_agent_tool_selection(
+    *,
+    schema_chars: int,
+    selected_count: int,
+    exposed_count: int,
+) -> None:
+    """记录每回合 Tool 路由和 schema 体积，不使用 Tool 名称作为标签。"""
+
+    for metric, value in (
+        ("yawnbot_agent_tool_schema_chars", schema_chars),
+        ("yawnbot_agent_tool_selected_count", selected_count),
+        ("yawnbot_agent_tool_exposed_count", exposed_count),
+    ):
+        if value < 0:
+            continue
+        observe_histogram(metric, float(value))
+
+
+def record_agent_tool_discovery(outcome: str, value: int = 1) -> None:
+    """记录动态工具发现漏斗：调用、返回、为空、以及发现后实际使用。"""
+
+    if outcome not in _AGENT_DISCOVERY_OUTCOMES or value <= 0:
+        return
+    increment_counter(
+        "yawnbot_agent_tool_discovery_total",
+        labels={"outcome": outcome},
+        value=value,
+    )
+
+
+def record_agent_provider_cache_tokens(*, cached: int, cache_miss: int) -> None:
+    """记录 provider usage 中真实 cached/cache-miss token，按回合聚合。"""
+
+    for source, value in (("cached", cached), ("cache_miss", cache_miss)):
+        if value < 0:
+            continue
+        observe_histogram(
+            "yawnbot_agent_provider_cache_tokens",
+            float(value),
+            labels={"source": source},
         )
 
 
@@ -668,6 +780,10 @@ __all__ = [
     "finish_game_phase",
     "increment_counter",
     "observe_histogram",
+    "record_agent_capability_probe",
+    "record_agent_context_db_queries",
+    "record_agent_phase",
+    "record_agent_tool_rounds",
     "record_agent_turn",
     "record_ai_degradation",
     "record_ai_request",

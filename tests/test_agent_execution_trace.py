@@ -17,7 +17,9 @@ from yawn_core.yawn_agent.execution_trace import (
     begin_execution_trace,
     bind_execution_trace,
     clear_execution_traces,
+    execution_trace_by_id,
     finish_execution_trace,
+    recent_execution_trace_summaries,
     recent_execution_traces,
     reset_execution_trace,
     trace_event,
@@ -107,3 +109,29 @@ def test_execution_trace_is_bounded_redacted_and_stored_per_group() -> None:
 
 def test_execution_trace_without_active_scope_is_noop() -> None:
     assert trace_event("llm", "no active trace") is None
+
+
+def test_execution_trace_collection_is_lightweight_and_detail_is_selective() -> None:
+    group_id = 987655
+    clear_execution_traces(group_id)
+
+    completed = begin_execution_trace(group_id, mode="dialogue", source="runtime")
+    trace_event("prompt", "Prompt 构建", trace=completed)
+    finish_execution_trace(completed, outcome="completed")
+    failed = begin_execution_trace(group_id, mode="dialogue", source="runtime")
+    finish_execution_trace(failed, outcome="error")
+
+    summaries = recent_execution_trace_summaries(group_id)
+    assert [item["traceId"] for item in summaries] == [
+        failed.trace_id,
+        completed.trace_id,
+    ]
+    assert summaries[0]["eventCount"] == 0
+    assert "events" not in summaries[0]
+    failed_summaries = recent_execution_trace_summaries(group_id, status="failed")
+    assert [item["traceId"] for item in failed_summaries] == [failed.trace_id]
+    detail = execution_trace_by_id(group_id, completed.trace_id)
+    assert detail is not None
+    assert detail["events"][0]["phase"] == "prompt"
+    assert execution_trace_by_id(group_id, "missing") is None
+    clear_execution_traces(group_id)

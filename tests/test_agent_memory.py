@@ -592,7 +592,9 @@ async def test_concurrent_compaction_for_same_group_is_mutually_exclusive(
 
 
 @pytest.mark.asyncio
-async def test_context_guarantees_profile_budget_and_cross_group_gates() -> None:
+async def test_context_guarantees_profile_budget_and_cross_group_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [
         bot_group_models.BotGroup.__table__,
@@ -685,7 +687,14 @@ async def test_context_guarantees_profile_budget_and_cross_group_gates() -> None
         target = await session.get(config_models.GroupAgentConfig, 100)
         assert target is not None
 
+        query_counts: list[int] = []
+        monkeypatch.setattr(
+            dialogue, "record_agent_context_db_queries", query_counts.append
+        )
         isolated = await dialogue._load_context(session, 100, target)
+        # 常规隔离群：scope/privacy + messages + members + local memories +
+        # relations + activity，共 6 次顺序 SQL 往返；旧实现约 10~11 次。
+        assert query_counts[-1] <= 6
         assert any(
             item["content"] == "speaker-profile-must-arrive"
             for item in isolated["memories"]
@@ -698,6 +707,8 @@ async def test_context_guarantees_profile_budget_and_cross_group_gates() -> None
         target.cross_group_visibility = "public_summary"
         await session.commit()
         shared = await dialogue._load_context(session, 100, target)
+        # 跨群公开摘要额外增加 shared summaries + source privacy 两次查询。
+        assert query_counts[-1] <= 8
         assert any(item["content"] == "shared-topic" for item in shared["memories"])
 
         source = await session.get(config_models.GroupAgentConfig, 200)
