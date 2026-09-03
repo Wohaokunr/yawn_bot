@@ -299,19 +299,14 @@ print(dst)'
 
 if [ -n "$container" ]; then
     migration_before=$(docker exec "$container" nb orm current 2>&1 || true)
-    if [ "$(docker inspect --format '{{.State.Running}}' "$container")" = "true" ]; then
-        backup_result=$(docker exec -i "$container" python - "$backup_container_path" "$keep_backups" <<PY
+    # Use a one-off container so a crash-looping application cannot block the
+    # pre-deploy backup between Docker state inspection and docker exec.
+    backup_result=$(docker run --rm -i --entrypoint python \
+        -v "$root/data:/app/data" "$previous_image" - \
+        "$backup_container_path" "$keep_backups" <<PY
 $backup_code
 PY
-        )
-    else
-        backup_result=$(docker run --rm -i --entrypoint python \
-            -v "$root/data:/app/data" "$previous_image" - \
-            "$backup_container_path" "$keep_backups" <<PY
-$backup_code
-PY
-        )
-    fi
+    )
     if [ "$backup_result" != "DB_ABSENT" ]; then
         backup_host_path="$root/data/backups/$backup_name"
         [ -s "$backup_host_path" ] || { echo "SQLite backup was not created" >&2; exit 4; }
@@ -345,8 +340,8 @@ else
     compose --profile fanqie-browser stop playwright >/dev/null 2>&1 || true
 fi
 
-if [ -n "$container" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container")" = "true" ]; then
-    docker stop "$container" >/dev/null
+if [ -n "$container" ]; then
+    docker stop "$container" >/dev/null 2>&1 || true
 fi
 
 echo "[deploy:migrate] start"

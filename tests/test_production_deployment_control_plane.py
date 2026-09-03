@@ -157,6 +157,15 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertIn('pull_image "$image" "application"', deploy)
         self.assertIn('pull_image "$browser_image" "browser"', deploy)
 
+    def test_backup_and_stop_tolerate_a_crash_looping_container(self) -> None:
+        deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("backup_result=$(docker exec", deploy)
+        self.assertIn("backup_result=$(docker run --rm -i --entrypoint python", deploy)
+        self.assertIn(
+            'docker stop "$container" >/dev/null 2>&1 || true',
+            deploy,
+        )
+
     def test_sync_control_plane_accepts_legacy_then_current_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "yawnbot"
