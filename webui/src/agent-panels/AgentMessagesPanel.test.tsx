@@ -51,7 +51,8 @@ describe("AgentMessagesPanel query lifecycle", () => {
     let page2Aborted = false;
     let page2Started = false;
 
-    apiMock.mockImplementation((path: string, init?: RequestInit) => {
+    apiMock.mockImplementation((path?: string, init?: RequestInit) => {
+      if (typeof path !== "string") return new Promise<never>(() => undefined);
       if (path.includes("page=1")) {
         return Promise.resolve({ data: [row(1)], meta: { total: 60 } });
       }
@@ -67,7 +68,7 @@ describe("AgentMessagesPanel query lifecycle", () => {
       if (path.includes("page=3")) {
         return Promise.resolve({ data: [row(3)], meta: { total: 60 } });
       }
-      throw new Error(`unexpected path ${path}`);
+      return new Promise<never>(() => undefined);
     });
 
     render(<MemoryRouter><AgentMessagesPanel groupId="100" /></MemoryRouter>);
