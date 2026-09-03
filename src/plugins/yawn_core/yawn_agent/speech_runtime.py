@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .context_history import effective_turn_from_context
 from .execution_trace import trace_event
 from .speech import (
     SPEECH_SCENE_TOOL_RESULT,
@@ -14,7 +15,11 @@ from .speech import (
     speech_plan_from_text,
 )
 from .speech_act import plan_speech_act
-from .speech_policy import resolve_speech_scene, resolve_speech_style
+from .speech_policy import (
+    classify_response_complexity,
+    resolve_speech_scene,
+    resolve_speech_style,
+)
 from .speech_quality import finalize_speech_plan
 from .topic_state import resolve_topic_transition, topic_state_from_prompt
 from .turn_taking import plan_turn_taking
@@ -53,13 +58,36 @@ def build_runtime_speech_plan(
         if after_tool
         else resolve_speech_scene(current_turn, source=source)
     )
-    style = resolve_speech_style(persona, scene=scene)
-    act_plan = plan_speech_act(current_turn, scene=scene)
+    effective_turn = (
+        effective_turn_from_context(current_turn, resolved_context)
+        if current_turn is not None
+        else None
+    )
+    act_plan = plan_speech_act(
+        current_turn,
+        scene=scene,
+        effective_turn=effective_turn,
+    )
+    complexity = classify_response_complexity(
+        current_turn,
+        act=act_plan.act,
+        effective_turn=effective_turn,
+    )
+    style = resolve_speech_style(
+        persona,
+        scene=scene,
+        act=act_plan.act,
+        complexity=complexity,
+    )
     turn_plan = plan_turn_taking(current_turn, scene=scene, context=resolved_context)
     topic_state = topic_state_from_prompt(resolved_context.get("topic_state"))
     transition = resolve_topic_transition(
         topic_state,
-        current_text=_turn_text(current_turn, str(text or "")),
+        current_text=(
+            effective_turn.primary
+            if effective_turn is not None and effective_turn.primary
+            else _turn_text(current_turn, str(text or ""))
+        ),
         suggested_topic=suggested_topic,
         close=str(action).lower() == "close" or act_plan.act == "close",
     )
