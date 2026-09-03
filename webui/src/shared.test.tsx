@@ -25,14 +25,16 @@ describe("useApiQuery", () => {
   });
 
   it("aborts an obsolete request immediately when queryKey changes", async () => {
-    let firstSignal: AbortSignal | null = null;
+    let firstRequestAborted = false;
     const { result, rerender } = renderHook(({ keyValue }) => useApiQuery({
       queryKey: ["page", keyValue],
       fetcher: (signal) => {
         if (keyValue === 1) {
-          firstSignal = signal;
           return new Promise<number>((_resolve, reject) => {
-            signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+            signal.addEventListener("abort", () => {
+              firstRequestAborted = true;
+              reject(new DOMException("aborted", "AbortError"));
+            });
           });
         }
         return Promise.resolve(2);
@@ -40,7 +42,7 @@ describe("useApiQuery", () => {
     }), { initialProps: { keyValue: 1 } });
 
     rerender({ keyValue: 2 });
-    expect(firstSignal?.aborted).toBe(true);
+    expect(firstRequestAborted).toBe(true);
     await waitFor(() => expect(result.current.data).toBe(2));
     expect(result.current.error).toBe("");
   });
