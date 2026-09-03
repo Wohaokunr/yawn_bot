@@ -171,20 +171,9 @@ def reconstruct_effective_current_turn(
     if actor_user_id <= 0:
         return current_turn
 
-    direct = effective_turn_query(
-        history,
-        focus_user_ids=[actor_user_id],
-        query_text=content,
-    )
-    if direct.used_history or direct.interaction_kind != "direct" or direct.media_binding:
-        if direct.primary:
-            return _replace_turn_effective(current_turn, direct)
-
-    # Dedicated-vision / unsupported-multimodal fallback appends only generated media
-    # status text to an otherwise empty @ trigger. Preserve that evidence, but restore
-    # the preceding human question as the semantic head of the current turn. Do not do
-    # this for a message that itself contains media, because that image is already the
-    # actual current turn rather than historical continuation.
+    # Dedicated-vision / unsupported-multimodal fallback appends generated media status
+    # to an otherwise empty trigger. Detect it before direct media classification so
+    # the word “图片” inside the fallback note cannot turn that note into a new task.
     media_types = payload.get("media_types") or ()
     stripped = content.lstrip()
     media_fallback_only = bool(
@@ -192,6 +181,20 @@ def reconstruct_effective_current_turn(
         and stripped
         and stripped.startswith(_MEDIA_FALLBACK_PREFIXES)
     )
+
+    direct = effective_turn_query(
+        history,
+        focus_user_ids=[actor_user_id],
+        query_text=content,
+    )
+    if not media_fallback_only and (
+        direct.used_history
+        or direct.interaction_kind != "direct"
+        or direct.media_binding
+    ):
+        if direct.primary:
+            return _replace_turn_effective(current_turn, direct)
+
     if not media_fallback_only or not history:
         return current_turn
     historical = effective_turn_query(
