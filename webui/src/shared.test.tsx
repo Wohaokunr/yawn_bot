@@ -47,6 +47,32 @@ describe("useApiQuery", () => {
     expect(result.current.error).toBe("");
   });
 
+  it("ignores a late stale completion even when the obsolete fetcher does not reject on abort", async () => {
+    let resolveFirst: ((value: number) => void) | null = null;
+    let firstRequestAborted = false;
+    const { result, rerender } = renderHook(({ keyValue }) => useApiQuery({
+      queryKey: ["page", keyValue],
+      fetcher: (signal) => {
+        if (keyValue === 1) {
+          return new Promise<number>((resolve) => {
+            resolveFirst = resolve;
+            signal.addEventListener("abort", () => { firstRequestAborted = true; });
+          });
+        }
+        return Promise.resolve(2);
+      },
+    }), { initialProps: { keyValue: 1 } });
+
+    rerender({ keyValue: 2 });
+    expect(firstRequestAborted).toBe(true);
+    await waitFor(() => expect(result.current.data).toBe(2));
+
+    act(() => resolveFirst?.(1));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(result.current.data).toBe(2);
+    expect(result.current.error).toBe("");
+  });
+
   it("only invalidates the matching resource and group scope", async () => {
     let calls = 0;
     const { result } = renderHook(() => useApiQuery({
@@ -58,7 +84,7 @@ describe("useApiQuery", () => {
 
     act(() => {
       window.dispatchEvent(new CustomEvent("yawnbot-entity-changed", {
-        detail: { resource: "agent_config", scope: { groupId: "200" }, entityId: "200" },
+        detail: { resource: "agent_config", scope: { groupId: "200" }, entityId: "100" },
       }));
     });
     await new Promise((resolve) => window.setTimeout(resolve, 0));
