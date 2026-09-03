@@ -25,6 +25,12 @@ export function TraceSidebar({ traces }: { traces: ExecutionTracesState }): Reac
         <Space size={6}><Switch size="small" checked={traces.autoRefresh} onChange={traces.setAutoRefresh} /><Text type="secondary">自动刷新（3 秒）</Text></Space>
       </Space>
       <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空；列表只加载摘要，选中后才请求事件详情。" description="完整 URL、本机路径、file 值与原始 OneBot payload 不会保留。" />
+      {traces.selectedTraceUnavailable && <Alert
+        type="info"
+        showIcon
+        message="当前选中的 Trace 已离开当前缓冲 / 不在当前筛选结果"
+        description="仍保留已加载的详情，不会自动跳回最新 Trace。你可以调整筛选条件，或手动选择列表中的另一条 Trace。"
+      />}
       {traces.listError && traces.summaries.length === 0
         ? <QueryErrorAlert error={traces.listError} onRetry={traces.reload} />
         : traces.summaries.length === 0

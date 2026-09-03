@@ -22,6 +22,13 @@ EXPECTED_INPUT_TOKENS = 240
 EXPECTED_OUTPUT_TOKENS = 40
 EXPECTED_CACHED_TOKENS = 160
 EXPECTED_CACHE_MISS_TOKENS = 80
+EXPECTED_AGENT_CONTEXT_QUERIES = 11
+EXPECTED_AGENT_TOOL_ROUNDS = 2
+EXPECTED_TOOL_SCHEMA_CHARS = 4200
+EXPECTED_SELECTED_TOOLS = 7
+EXPECTED_EXPOSED_TOOLS = 6
+EXPECTED_PROVIDER_CACHED = 900
+EXPECTED_PROVIDER_CACHE_MISS = 300
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +87,89 @@ def test_agent_turn_metrics_are_low_cardinality(
         {"operation": "followup"},
     )["count"] == 1
     metrics.reset_metrics_for_tests()
+
+
+def test_agent_phase_and_runtime_cost_metrics_are_low_cardinality(
+    runtime_modules: dict[str, Any],
+) -> None:
+    metrics = runtime_modules["metrics"]
+    metrics.record_agent_phase("context", 0.12)
+    metrics.record_agent_phase("llm", 0.8)
+    metrics.record_agent_capability_probe("success")
+    metrics.record_agent_context_db_queries(EXPECTED_AGENT_CONTEXT_QUERIES)
+    metrics.record_agent_tool_rounds(EXPECTED_AGENT_TOOL_ROUNDS, "dialogue")
+    metrics.record_agent_tool_selection(
+        schema_chars=EXPECTED_TOOL_SCHEMA_CHARS,
+        selected_count=EXPECTED_SELECTED_TOOLS,
+        exposed_count=EXPECTED_EXPOSED_TOOLS,
+    )
+    metrics.record_agent_tool_discovery("called")
+    metrics.record_agent_tool_discovery("returned")
+    metrics.record_agent_tool_discovery("used")
+    metrics.record_agent_provider_cache_tokens(
+        cached=EXPECTED_PROVIDER_CACHED,
+        cache_miss=EXPECTED_PROVIDER_CACHE_MISS,
+    )
+
+    snapshot = metrics.snapshot_metrics()
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_phase_duration_seconds",
+        {"phase": "context"},
+    )["count"] == 1
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_phase_duration_seconds",
+        {"phase": "llm"},
+    )["count"] == 1
+    assert _counter(
+        snapshot,
+        "yawnbot_agent_capability_probes_total",
+        {"outcome": "success"},
+    ) == 1
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_context_db_queries",
+        {},
+    )["sum"] == float(EXPECTED_AGENT_CONTEXT_QUERIES)
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_tool_rounds",
+        {"operation": "dialogue"},
+    )["sum"] == float(EXPECTED_AGENT_TOOL_ROUNDS)
+    assert _histogram(snapshot, "yawnbot_agent_tool_schema_chars", {})["sum"] == float(
+        EXPECTED_TOOL_SCHEMA_CHARS
+    )
+    selected_tools = _histogram(snapshot, "yawnbot_agent_tool_selected_count", {})
+    assert selected_tools["sum"] == float(EXPECTED_SELECTED_TOOLS)
+    assert _histogram(snapshot, "yawnbot_agent_tool_exposed_count", {})["sum"] == float(
+        EXPECTED_EXPOSED_TOOLS
+    )
+    assert _counter(
+        snapshot,
+        "yawnbot_agent_tool_discovery_total",
+        {"outcome": "called"},
+    ) == 1
+    assert _counter(
+        snapshot,
+        "yawnbot_agent_tool_discovery_total",
+        {"outcome": "returned"},
+    ) == 1
+    assert _counter(
+        snapshot,
+        "yawnbot_agent_tool_discovery_total",
+        {"outcome": "used"},
+    ) == 1
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_provider_cache_tokens",
+        {"source": "cached"},
+    )["sum"] == float(EXPECTED_PROVIDER_CACHED)
+    assert _histogram(
+        snapshot,
+        "yawnbot_agent_provider_cache_tokens",
+        {"source": "cache_miss"},
+    )["sum"] == float(EXPECTED_PROVIDER_CACHE_MISS)
 
 
 def test_ai_health_tracks_only_unrecovered_consecutive_failures(

@@ -14,6 +14,7 @@ export interface ExecutionTracesState {
   selectedTraceId: string;
   setSelectedTraceId: (value: string) => void;
   selectedTrace: AgentExecutionTrace | null;
+  selectedTraceUnavailable: boolean;
   listLoading: boolean;
   listRefreshing: boolean;
   listError: string;
@@ -31,6 +32,7 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const detailGeneration = useRef(0);
+  const userSelectedTrace = useRef(false);
 
   const loadSummaries = useCallback(
     () => {
@@ -46,14 +48,22 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
 
   useEffect(() => {
     const firstId = summaries[0]?.traceId ?? "";
-    if (!selectedTraceId) {
-      if (firstId) setSelectedTraceId(firstId);
-      return;
-    }
-    if (!summaries.some((item) => item.traceId === selectedTraceId)) {
-      setSelectedTraceId(firstId);
+    if (firstId && (!selectedTraceId || !userSelectedTrace.current)) {
+      if (selectedTraceId !== firstId) setSelectedTraceId(firstId);
     }
   }, [selectedTraceId, summaries]);
+
+  useEffect(() => {
+    userSelectedTrace.current = false;
+    setSelectedTraceId("");
+    setSelectedTrace(null);
+    setDetailError("");
+  }, [groupId]);
+
+  const selectTrace = useCallback((traceId: string) => {
+    userSelectedTrace.current = true;
+    setSelectedTraceId(traceId);
+  }, []);
 
   const loadDetail = useCallback(
     async (traceId: string) => {
@@ -74,7 +84,6 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
         if (ticket === detailGeneration.current) setSelectedTrace(response.data);
       } catch (error) {
         if (ticket === detailGeneration.current) {
-          setSelectedTrace(null);
           setDetailError(error instanceof Error ? error.message : "Trace 详情加载失败");
         }
       } finally {
@@ -99,6 +108,12 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
     if (selectedTraceId) void loadDetail(selectedTraceId);
   }, [listQuery.reload, loadDetail, selectedTraceId]);
 
+  const selectedTraceUnavailable = Boolean(
+    userSelectedTrace.current
+      && selectedTraceId
+      && !summaries.some((item) => item.traceId === selectedTraceId),
+  );
+
   return {
     summaries,
     status,
@@ -106,8 +121,9 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
     autoRefresh,
     setAutoRefresh,
     selectedTraceId,
-    setSelectedTraceId,
+    setSelectedTraceId: selectTrace,
     selectedTrace,
+    selectedTraceUnavailable,
     listLoading: listQuery.loading,
     listRefreshing: listQuery.refreshing,
     listError: listQuery.error,

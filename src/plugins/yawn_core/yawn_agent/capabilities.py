@@ -8,6 +8,7 @@ import os
 import time
 from typing import Any
 
+from ..metrics import record_agent_capability_probe
 from .log import dbg, dbg_exc
 
 
@@ -122,9 +123,11 @@ async def probe_group_capabilities(
     except Exception:  # noqa: BLE001
         degraded = True
         error_class = "probe_failed"
+        record_agent_capability_probe("degraded")
         dbg_exc(f"群 {group_id} 能力探测失败,按普通成员降级(短 TTL {_DEGRADED_TTL}s)")
     else:
         error_class = None
+        record_agent_capability_probe("success")
     actions = {
         "send_group_msg",
         "get_group_info",

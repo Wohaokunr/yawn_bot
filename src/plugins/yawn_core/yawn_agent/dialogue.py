@@ -4,9 +4,11 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
 import time
 from collections import OrderedDict
+from contextvars import ContextVar
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
@@ -28,6 +30,12 @@ from ..llm import (
     complete_with_tools_result,
     resolve_llm_request,
     vision_model_configured,
+)
+from ..metrics import (
+    record_agent_context_db_queries,
+    record_agent_phase,
+    record_agent_provider_cache_tokens,
+    record_agent_tool_rounds,
 )
 from .capabilities import (
     get_segment_capabilities,
@@ -53,6 +61,8 @@ from .context_history import (
     select_context_messages_only as _select_context_messages,
 )
 from .context_budget import pack_context
+from .context_repository import AgentContextRepository
+from .context_loader import activity_window_counts, load_context
 from .emotion import emotion_context_state
 from .execution_trace import (
     begin_execution_trace,
@@ -84,21 +94,34 @@ from .tools import (
     MAX_TOOL_ROUNDS,
     build_tool_schemas,
     dialogue_tool_round_limit,
-    execute_tool,
+    execute_tool_with_meta,
     select_dialogue_message_segment_types,
     select_dialogue_tool_names,
 )
+from .tool_execution import ToolExecutionContext
+from .turn_runtime import TOOL_ROUND_COUNT as _TOOL_ROUND_COUNT, TurnRuntimeHooks, run_dialogue_turn
+from .turn_fallbacks import (
+    FALLBACK_CURSOR_LIMIT as _FALLBACK_CURSOR_LIMIT,
+    FALLBACK_NOTICES as _FALLBACK_NOTICES,
+    WAIT_NOTICE as _WAIT_NOTICE,
+    WAIT_NOTICE_DEFAULT_DELAY as _WAIT_NOTICE_DEFAULT_DELAY,
+    WAIT_NOTICE_TASK as _WAIT_NOTICE_TASK,
+    WEEKDAY_NAMES as _WEEKDAY_NAMES,
+    _FALLBACK_CURSOR,
+    cancel_wait_notice as cancel_fallback_wait_notice,
+    contains_word as fallback_contains_word,
+    deterministic_reply as deterministic_fallback_reply,
+    fallback_notice as next_fallback_notice,
+    start_wait_notice as start_fallback_wait_notice,
+    wait_notice_delay as fallback_wait_notice_delay,
+)
 
-_GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "在吗", "在不在")
-_PROMPT_CACHE_KEYS: OrderedDict[str, None] = OrderedDict()
-_PROMPT_CACHE_LIMIT = 256
-_MAX_TURN_SECONDS = 120.0
-_FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
-_VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
-# 条目上限对齐各层最大配额（5+4+12+3），字符预算仍是实际约束。
 _MEMORY_CONTEXT_LIMIT = 24
+_TURN_PROVIDER_CACHE_USAGE: ContextVar[tuple[int, int]] = ContextVar(
+    "agent_dialogue_provider_cache_usage", default=(0, 0)
+)
 _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
     "不猜测身份、隐私或图片外的信息。"
@@ -130,6 +153,12 @@ def _accumulate_turn_usage(total: dict[str, int], result: Any) -> dict[str, Any]
                 record_ai_tokens("agent_dialogue_turn", source, value)
     except Exception:  # noqa: BLE001
         dbg_exc("累计 Agent 回合 token 指标失败(忽略)")
+    _TURN_PROVIDER_CACHE_USAGE.set(
+        (
+            total.get("cached_tokens", 0),
+            total.get("cache_miss_tokens", 0),
+        )
+    )
     return {
         "request": current,
         "turn": {
@@ -176,6 +205,42 @@ def _visible_tool_send_ends_turn(result: dict[str, Any]) -> bool:
     return result.get("sent") is True
 
 
+async def _commit_tool_batch(
+    session: Any,
+    config: GroupAgentConfig,
+    group_id: int,
+    round_index: int,
+    tool_names: list[str],
+    *,
+    immediate: bool = False,
+) -> bool:
+    """提交一批 Tool 产生的状态；常规路径每个模型轮次最多调用一次。"""
+
+    try:
+        await session.commit()
+    except SQLAlchemyError:
+        trace_event(
+            "state",
+            "高权限工具状态提交" if immediate else "工具批次状态提交",
+            status="failed",
+            detail="数据库提交失败并已回滚",
+            output={"tools": tool_names},
+            round_index=round_index,
+        )
+        dbg_exc(f"群 {group_id} 工具批次状态提交失败,已回滚")
+        await session.rollback()
+        return False
+    trace_event(
+        "state",
+        "高权限工具状态提交" if immediate else "工具批次状态提交",
+        output={"tools": tool_names, "count": len(tool_names)},
+        round_index=round_index,
+    )
+    # commit 会过期 ORM 对象；只在真正提交后刷新一次，而不是每 Tool 刷新。
+    await session.refresh(config)
+    return True
+
+
 def _extract_message_id(result: Any) -> int | None:
     """OneBot 实现对 send_group_msg 返回值不统一：dict、对象或裸 int；0 视为缺失。"""
 
@@ -199,13 +264,8 @@ async def _send_group_text(
 
 
 def contains_word(text: str, word: str) -> bool:
-    if not word:
-        return False
-    if re.fullmatch(r"[a-z0-9 ]+", word):
-        return (
-            re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
-        )
-    return word in text
+    return fallback_contains_word(text, word)
+
 
 
 def _current_turn_focus_ids(
@@ -253,14 +313,41 @@ def _is_recent_duplicate(
 
 
 def _deterministic_reply(text: str) -> str | None:
-    """无 AI key 时仅对简单问候给出稳定反馈。"""
+    return deterministic_fallback_reply(text, now=now_beijing())
 
-    normalized = " ".join(text.lower().split())
-    if any(contains_word(normalized, word) for word in _GREETING_WORDS):
-        return "我在呀，有事直接说～"
-    if "agent状态" in normalized or "群聊agent" in normalized:
-        return "群聊 Agent 在线；复杂对话需要配置 AI_API_KEY。"
-    return None
+
+
+def _fallback_notice(group_id: int) -> str:
+    return next_fallback_notice(group_id)
+
+
+
+def _wait_notice_delay() -> float:
+    return fallback_wait_notice_delay()
+
+
+
+def _cancel_wait_notice() -> None:
+    cancel_fallback_wait_notice()
+
+
+
+def _start_wait_notice(
+    bot: Bot,
+    group_id: int,
+    enqueued_at: float | None,
+    message_id: Any,
+) -> None:
+    start_fallback_wait_notice(
+        bot,
+        group_id,
+        enqueued_at,
+        message_id,
+        send_unless_expired=_send_unless_expired,
+        debug=dbg,
+        debug_exception=dbg_exc,
+    )
+
 
 
 async def _send_unless_expired(
@@ -274,9 +361,13 @@ async def _send_unless_expired(
     session: Any = None,
     actor_user_id: int | None = None,
     source: str = "dialogue",
+    cancel_wait_notice: bool = True,
 ) -> SendResult:
     """过期触发不发送；普通文本与复合 Message 统一走 sender。"""
 
+    if cancel_wait_notice:
+        # 正式输出即将出现，等待提示不该再冒出来。
+        _cancel_wait_notice()
     if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
         trace_event(
             "outbound",
@@ -371,118 +462,7 @@ async def persist_bot_reply(
     dbg(f"群 {group_id} bot 发言 {message_id} 已加入自言落库(role=bot)")
 
 
-async def _activity_window_counts(
-    session: Any,
-    group_id: int,
-    now: datetime,
-    *,
-    bot_id: int | None = None,
-    exclude_user_ids: set[int] | None = None,
-    retention_at: datetime | None = None,
-) -> dict[str, Any]:
-    """60 分钟窗口活跃度的一条 SQL 聚合；对话与主动发言路径共用。
-
-    旧实现从"最新 40/60 条消息"在 Python 侧数窗口，活跃群覆盖不全会
-    低估 messages_60m/participants_60m/member_messages_60m；聚合查询不受
-    加载条数截断影响。隐私退出用户统一排除（原主动发言路径未排除，
-    与对话读路径口径不一致）。last_message_at 不限窗口，供冷场判定。
-    """
-
-    clauses: list[Any] = [
-        GroupAgentMessage.group_id == group_id,
-        (
-            GroupAgentMessage.expires_at.is_(None)
-            | (GroupAgentMessage.expires_at >= (retention_at or now))
-        ),
-        GroupAgentMessage.received_at <= now,
-    ]
-    if exclude_user_ids is not None and exclude_user_ids:
-        clauses.append(GroupAgentMessage.user_id.not_in(exclude_user_ids))
-    elif exclude_user_ids is None:
-        opted_out = select(AgentPrivacy.user_id).where(
-            AgentPrivacy.group_id == group_id,
-            AgentPrivacy.user_id == GroupAgentMessage.user_id,
-            AgentPrivacy.opted_out.is_(True),
-        )
-        clauses.append(~exists(opted_out))
-    if bot_id is not None:
-        clauses.append(GroupAgentMessage.bot_id == bot_id)
-    in_window = GroupAgentMessage.received_at >= now - timedelta(hours=1)
-    in_5m = GroupAgentMessage.received_at >= now - timedelta(minutes=5)
-    is_member = GroupAgentMessage.role != "bot"
-    row = (
-        await session.execute(
-            select(
-                func.max(GroupAgentMessage.received_at),
-                func.max(
-                    case((in_window & is_member, GroupAgentMessage.received_at))
-                ),
-                func.sum(
-                    case(
-                        (
-                            GroupAgentMessage.received_at >= now - timedelta(minutes=5),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                func.sum(
-                    case(
-                        (
-                            GroupAgentMessage.received_at
-                            >= now - timedelta(minutes=20),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                func.sum(case((in_window, 1), else_=0)),
-                func.sum(case((in_window & is_member, 1), else_=0)),
-                func.sum(case((in_5m & is_member, 1), else_=0)),
-                func.count(
-                    func.distinct(
-                        case((in_5m & is_member, GroupAgentMessage.user_id))
-                    )
-                ),
-                func.count(func.distinct(case((in_window, GroupAgentMessage.user_id)))),
-                func.sum(
-                    case(
-                        (
-                            in_window & GroupAgentMessage.normalized_text.contains("@"),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                func.sum(
-                    case(
-                        (
-                            in_window
-                            & (
-                                func.json_array_length(GroupAgentMessage.reply_chain)
-                                > 0
-                            ),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-            ).where(*clauses)
-        )
-    ).one()
-    return {
-        "last_message_at": row[0],
-        "last_member_message_at": row[1],
-        "messages_5m": int(row[2] or 0),
-        "messages_20m": int(row[3] or 0),
-        "messages_60m": int(row[4] or 0),
-        "member_messages_60m": int(row[5] or 0),
-        "member_messages_5m": int(row[6] or 0),
-        "member_participants_5m": int(row[7] or 0),
-        "participants_60m": int(row[8] or 0),
-        "mentions_60m": int(row[9] or 0),
-        "replies_60m": int(row[10] or 0),
-    }
+_activity_window_counts = activity_window_counts
 
 
 async def _load_context(
@@ -504,531 +484,29 @@ async def _load_context(
     completion_reserve: int = 2048,
     context_token_limit: int | None = None,
 ) -> dict[str, Any]:
-    now = now_beijing()
-    context_now = reference_at or now
-    # 隐私退出是读路径级别的：历史消息同样不得进入提示词。
-    opted_out = set(
-        (
-            await session.execute(
-                select(AgentPrivacy.user_id).where(
-                    AgentPrivacy.group_id == group_id,
-                    AgentPrivacy.opted_out.is_(True),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    dbg(
-        f"群 {group_id} 加载上下文: 隐私退出用户数={len(opted_out)} ids={sorted(opted_out)}"
-    )
-    message_stmt = select(GroupAgentMessage).where(
-        GroupAgentMessage.group_id == group_id,
-        (
-            GroupAgentMessage.expires_at.is_(None)
-            | (GroupAgentMessage.expires_at >= now)
-        ),
-    )
-    if message_cutoff is not None:
-        message_stmt = message_stmt.where(
-            GroupAgentMessage.received_at <= message_cutoff
-        )
-    if opted_out:
-        message_stmt = message_stmt.where(GroupAgentMessage.user_id.not_in(opted_out))
-    if bot_id is not None:
-        message_stmt = message_stmt.where(GroupAgentMessage.bot_id == bot_id)
-    if exclude_message_id is not None:
-        message_stmt = message_stmt.where(
-            GroupAgentMessage.message_id != int(exclude_message_id)
-        )
-    rows = (
-        (
-            await session.execute(
-                message_stmt.order_by(GroupAgentMessage.id.desc()).limit(40)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    messages_unbounded: list[dict[str, Any]] = []
-    previous_at: datetime | None = None
-    for row in reversed(rows):
-        messages_unbounded.append(
-            _history_message_payload(
-                row,
-                context_now=context_now,
-                previous_at=previous_at,
-            )
-        )
-        previous_at = row.received_at
-    if query_text is None and not compact_history:
-        # 兼容内部/测试调用：没有当前回合查询、也没有主动会话语义时，
-        # 保持原来的有界历史行为。线上被动对话会显式传 query_text；
-        # 主动发言/短会话会显式传 compact_history=True。
-        messages = trim_context_messages(messages_unbounded)
-    else:
-        selection = select_context_messages(
-            messages_unbounded,
-            focus_user_ids=focus_user_ids,
-            query_text=query_text,
-        )
-        messages = selection.messages
-        if selection_trace is not None:
-            selection_trace.extend(selection.trace)
-    dbg(
-        f"群 {group_id} 加载上下文: 原始历史 {len(messages_unbounded)} 条 -> "
-        f"有效历史 {len(messages)} 条/"
-        f"{sum(len(str(item.get('text') or '')) for item in messages)} 字"
-    )
-    # 记忆相关性只看最终实际注入的历史，并显式加入当前回合文本。
-    recent_texts = [str(item["text"] or "") for item in messages[-6:]]
-    if query_text:
-        recent_texts.append(str(query_text)[:1000])
-    previous_speaker_id = next(
-        (
-            int(item["user_id"])
-            for item in reversed(messages)
-            if item.get("role") != "bot"
-        ),
-        None,
-    )
-    recent_member_ids: list[int] = []
-    for item in reversed(messages):
-        if item.get("role") == "bot":
-            continue
-        member_id = int(item["user_id"])
-        if member_id not in recent_member_ids:
-            recent_member_ids.append(member_id)
-    requested_focus = [int(user_id) for user_id in (focus_user_ids or [])]
-    speaker_id = requested_focus[0] if requested_focus else previous_speaker_id
-    focus_ids: list[int] = []
-    focus_candidates = [
-        *requested_focus,
-        *(
-            recent_member_ids
-            if include_active_profiles or requested_focus
-            else ([speaker_id] if speaker_id is not None else [])
-        ),
-    ]
-    for member_id in focus_candidates:
-        if member_id in opted_out or member_id in focus_ids:
-            continue
-        focus_ids.append(member_id)
-        if len(focus_ids) >= 4:
-            break
-    relevant_member_ids = {
-        int(item["user_id"])
-        for item in messages
-        if item.get("role") != "bot"
-    }
-    relevant_member_ids.update(focus_ids)
-    member_rows = (
-        (
-            await session.execute(
-                select(UserGroup)
-                .where(
-                    UserGroup.group_id == group_id,
-                    UserGroup.user_id.in_(relevant_member_ids),
-                )
-                .order_by(UserGroup.last_seen_at.desc())
-            )
-        )
-        .scalars()
-        .all()
-        if relevant_member_ids
-        else []
-    )
-    members = [
-        {
-            "user_id": row.user_id,
-            "name": row.group_nickname,
-            "role": row.role,
-            "title": row.title,
-            "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
-        }
-        for row in member_rows
-    ]
-    dbg(
-        f"群 {group_id} 加载上下文: 近期相关成员 {len(members)} 人"
-        f"(候选 {len(relevant_member_ids)})"
-    )
-    memory_clauses = [
-        AgentMemory.group_id == group_id,
-        AgentMemory.visibility.in_(("group", "public")),
-        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
-    ]
-    candidate_rows = (
-        (
-            await session.execute(
-                select(AgentMemory)
-                .where(*memory_clauses)
-                .order_by(AgentMemory.salience.desc(), AgentMemory.updated_at.desc())
-                .limit(160)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    # 复现池捞回显著度榜外但近期被再确认的记忆：只按 salience 取候选会
-    # 让安静复述的旧知识结构性不可见。
-    recency_rows = (
-        (
-            await session.execute(
-                select(AgentMemory)
-                .where(*memory_clauses)
-                .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
-                .limit(60)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    summary_rows = (
-        (
-            await session.execute(
-                select(AgentMemory)
-                .where(*memory_clauses, AgentMemory.memory_type == "summary")
-                .order_by(AgentMemory.updated_at.desc())
-                .limit(40)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    focus_rows: list[AgentMemory] = []
-    if focus_ids:
-        # 活跃成员画像独立查询，不能先和群级高显著记忆争抢 SQL LIMIT。
-        # core 行排最前；随后按成员轮转分配 12 条预算，避免一人占满。
-        focus_rows = list(
-            (
-                await session.execute(
-                    select(AgentMemory)
-                    .where(
-                        *memory_clauses,
-                        AgentMemory.subject_user_id.in_(focus_ids),
-                        AgentMemory.memory_type.in_(("core", "profile", "manual")),
-                    )
-                    .order_by(
-                        case(
-                            (AgentMemory.memory_type == "core", 0),
-                            (AgentMemory.memory_type == "profile", 1),
-                            else_=2,
-                        ),
-                        AgentMemory.salience.desc(),
-                        AgentMemory.updated_at.desc(),
-                    )
-                    .limit(96)
-                )
-            )
-            .scalars()
-            .all()
-        )
+    """兼容入口：实际数据库上下文装箱由 context_loader 负责。"""
 
-    memory_rows = [*focus_rows, *summary_rows, *candidate_rows, *recency_rows]
-    seen_local_ids: set[int] = set()
-    local_rows: list[AgentMemory] = []
-    for row in memory_rows:
-        row_id = int(row.id or 0)
-        if row_id in seen_local_ids:
-            continue
-        seen_local_ids.add(row_id)
-        if (
-            str(row.memory_key).startswith("public_daily:")
-            or int(row.subject_user_id or 0) in opted_out
-            or opted_out.intersection(set(row.related_user_ids or []))
-        ):
-            continue
-        local_rows.append(row)
-    focus_by_member: dict[int, list[AgentMemory]] = {user_id: [] for user_id in focus_ids}
-    for row in local_rows:
-        subject_id = int(row.subject_user_id or 0)
-        if (
-            subject_id in focus_by_member
-            and row.memory_type in {"core", "profile", "manual"}
-        ):
-            focus_by_member[subject_id].append(row)
-    focused_profiles: list[AgentMemory] = []
-    for position in range(32):
-        for member_id in focus_ids:
-            rows_for_member = focus_by_member[member_id]
-            if position < len(rows_for_member):
-                focused_profiles.append(rows_for_member[position])
-                if len(focused_profiles) >= 12:
-                    break
-        if len(focused_profiles) >= 12 or not any(
-            position + 1 < len(rows) for rows in focus_by_member.values()
-        ):
-            break
-    summaries = [row for row in local_rows if row.memory_type == "summary"]
-    ranked_local = rank_memories(
-        local_rows,
-        recent_texts,
-        speaker_id,
-        context_now,
-        limit=40,
-        topic_hint=str(config.active_topic or ""),
-    )
-
-    shared_rows: list[AgentMemory] = []
-    if config.cross_group_visibility == "public_summary":
-        shared_rows = list(
-            (
-                await session.execute(
-                    select(AgentMemory)
-                    .join(
-                        GroupAgentConfig,
-                        GroupAgentConfig.group_id == AgentMemory.group_id,
-                    )
-                    .where(
-                        AgentMemory.group_id != group_id,
-                        AgentMemory.memory_type == "summary",
-                        AgentMemory.visibility == "public",
-                        AgentMemory.memory_key.startswith("public_daily:"),
-                        AgentMemory.expires_at.is_not(None),
-                        AgentMemory.expires_at >= now,
-                        GroupAgentConfig.cross_group_visibility == "public_summary",
-                    )
-                    .order_by(AgentMemory.updated_at.desc())
-                    .limit(20)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        source_groups = {int(row.group_id or 0) for row in shared_rows}
-        shared_optouts = set(
-            (
-                await session.execute(
-                    select(AgentPrivacy.group_id, AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id.in_(source_groups),
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            ).all()
-        ) if source_groups else set()
-        shared_rows = [
-            row
-            for row in shared_rows
-            if not any(
-                (int(row.group_id or 0), int(user_id)) in shared_optouts
-                for user_id in row.related_user_ids or []
-            )
-        ]
-        # 跨群共享摘要按 updated_at 确定性取前 4：候选超过 4 条时若按
-        # 话题相关性重排，选择会随每条新消息翻转，击穿稳定层前缀缓存。
-        shared_rows = shared_rows[:4]
-
-    ordered: list[tuple[AgentMemory, str]] = []
-    seen_memory_ids: set[int] = set()
-    # source_scope 同时决定记忆进入提示词的稳定层（group_summary/shared_public，
-    # 只随整理变化、可被前缀缓存命中）还是易变层（speaker/topic，随请求变化）。
-    # 稳定来源排在前面：6000 字符预算从前往后消耗，稳定条目先入账，
-    # 其截断点才不会随发言人画像的长短浮动。
-    # 活跃成员画像总预算 12 条，按成员轮转；话题记忆维持最多 3 条。
-    topic_rows = ranked_local[:3]
-    for row, source in [
-        *((row, "group_summary") for row in summaries[:5]),
-        *((row, "shared_public") for row in shared_rows),
-        *((
-            row,
-            "speaker"
-            if speaker_id is not None
-            and int(row.subject_user_id or 0) == speaker_id
-            else "participant",
-        ) for row in focused_profiles),
-        *((row, "topic") for row in topic_rows),
-    ]:
-        row_id = int(row.id or 0)
-        if row_id in seen_memory_ids:
-            continue
-        seen_memory_ids.add(row_id)
-        ordered.append((row, source))
-
-    name_by_id = {
-        int(item["user_id"]): str(item.get("name") or item["user_id"])
-        for item in members
-    }
-    for item in messages:
-        user_id = int(item["user_id"])
-        if item.get("name") and user_id not in name_by_id:
-            name_by_id[user_id] = str(item["name"])
-    memories: list[dict[str, Any]] = []
-    # 以最终 JSON 数组的真实字符数计预算（含 [] 和条目间的 ", "）。
-    memory_chars = 2
-    for row, source in ordered:
-        content = str(row.content or "").strip()
-        if not content:
-            continue
-        if len(memories) >= _MEMORY_CONTEXT_LIMIT:
-            break
-        subject_id = int(row.subject_user_id or 0)
-        item: dict[str, Any] = {
-            "type": row.memory_type,
-            "subject_user_id": subject_id or None,
-            "subject_name": name_by_id.get(subject_id) if subject_id else None,
-            "key": row.memory_key,
-            "content": "",
-            "salience": row.salience,
-            "confidence": row.confidence,
-            "source": row.source_kind,
-            "evidence_count": len(row.evidence_message_ids or []),
-            "first_observed_date": (row.created_at or now).date().isoformat(),
-            "last_confirmed_date": (row.updated_at or row.created_at or now).date().isoformat(),
-            "source_scope": source,
-            "source_date": str(row.memory_key).rsplit(":", 1)[-1]
-            if "daily:" in str(row.memory_key)
-            else (row.updated_at or row.created_at or now).date().isoformat(),
-        }
-        overhead = len(json.dumps(item, ensure_ascii=False))
-        separator_chars = 2 if memories else 0
-        remaining = (
-            _MEMORY_CONTEXT_CHAR_BUDGET
-            - memory_chars
-            - separator_chars
-            - overhead
-        )
-        if remaining <= 0:
-            break
-        item["content"] = content[:remaining]
-        item_chars = len(json.dumps(item, ensure_ascii=False))
-        memories.append(item)
-        memory_chars += separator_chars + item_chars
-    dbg(
-        f"群 {group_id} 加载上下文: 记忆 {len(memories)} 条/"
-        f"{memory_chars} 字(预算 {_MEMORY_CONTEXT_CHAR_BUDGET},当前发言人={speaker_id})"
-    )
-    participant_ids = {
-        int(item["user_id"]) for item in messages if item.get("role") != "bot"
-    }
-    participant_ids.update(focus_ids)
-    relation_rows: list[AgentRelation] = []
-    if participant_ids:
-        # 先在 SQL 层限定当前上下文参与者，再取候选池，避免无关高置信边
-        # 把低一些但当前真正相关的关系挤出候选集。
-        relation_rows = list(
-            (
-                await session.execute(
-                    select(AgentRelation)
-                    .where(
-                        AgentRelation.group_id == group_id,
-                        AgentRelation.subject_user_id.not_in(opted_out),
-                        AgentRelation.object_user_id.not_in(opted_out),
-                        or_(
-                            AgentRelation.source_kind != "mention",
-                            AgentRelation.evidence_count >= 2,
-                        ),
-                        or_(
-                            AgentRelation.subject_user_id.in_(participant_ids),
-                            AgentRelation.object_user_id.in_(participant_ids),
-                        ),
-                    )
-                    .order_by(AgentRelation.confidence.desc())
-                    .limit(60)
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    def _relation_label(user_id: int) -> str:
-        # 只加载近期相关成员；解析不到名字时兜底 QQ 号，避免渲染成 null。
-        name = name_by_id.get(int(user_id))
-        return f"{name}({user_id})" if name else str(user_id)
-
-    # 生效置信度按"最后见到"分段降权：沉寂数月的老边让位给近期仍在互动的新边。
-    ranked_relations = sorted(
-        relation_rows,
-        key=lambda row: (
-            -effective_relation_confidence(
-                float(row.confidence or 0.0), row.last_seen_at, context_now
-            ),
-            -int(row.evidence_count or 0),
-            int(row.id or 0),
-        ),
-    )[:20]
-    relations: list[str] = []
-    for row in ranked_relations:
-        line = (
-            f"{_relation_label(int(row.subject_user_id))} "
-            f"—{row.relation_type}→ {_relation_label(int(row.object_user_id))}"
-        )
-        note = str(row.note or "").strip()
-        relations.append(f"{line}：{note}" if note else line)
-    context_pack = pack_context(
-        messages=messages,
-        members=members,
-        memories=memories,
-        relations=relations,
-        model=context_model,
-        completion_reserve=completion_reserve,
-        target_context_limit=context_token_limit,
-    )
-    messages = context_pack.messages
-    members = context_pack.members
-    memories = context_pack.memories
-    relations = context_pack.relations
-    if budget_trace is not None:
-        budget_trace.extend(context_pack.trace)
-    dbg(
-        f"群 {group_id} token 上下文装箱: model={context_pack.budget.model!r} "
-        f"window={context_pack.budget.context_window} "
-        f"context={context_pack.trace[0]['usedTokens']}/{context_pack.budget.context_limit} tokens"
-    )
-    dbg(
-        f"群 {group_id} 加载上下文: 关系 {len(relations)} 条"
-        f"(候选 {len(relation_rows)},上限 20)"
-    )
-    # 活跃度改用聚合查询精确统计 60 分钟窗口，不再受最新 40 条截断影响。
-    counts = await _activity_window_counts(
+    return await load_context(
         session,
         group_id,
-        context_now,
-        bot_id=bot_id,
-        exclude_user_ids=opted_out,
-        retention_at=now,
+        config,
+        bot_id,
+        focus_user_ids=focus_user_ids,
+        query_text=query_text,
+        compact_history=compact_history,
+        message_cutoff=message_cutoff,
+        include_active_profiles=include_active_profiles,
+        exclude_message_id=exclude_message_id,
+        reference_at=reference_at,
+        selection_trace=selection_trace,
+        budget_trace=budget_trace,
+        context_model=context_model,
+        completion_reserve=completion_reserve,
+        context_token_limit=context_token_limit,
+        _record_db_queries=record_agent_context_db_queries,
     )
-    activity = ActivitySnapshot(
-        counts["last_message_at"],
-        messages_5m=counts["messages_5m"],
-        messages_20m=counts["messages_20m"],
-        messages_60m=counts["messages_60m"],
-        participants_60m=counts["participants_60m"],
-        replies_60m=counts["replies_60m"],
-        mentions_60m=counts["mentions_60m"],
-        last_agent_at=config.last_agent_at,
-        proactive_today=config.proactive_count,
-        last_member_message_at=counts["last_member_message_at"],
-        member_messages_60m=counts["member_messages_60m"],
-        member_messages_5m=counts["member_messages_5m"],
-        member_participants_5m=counts["member_participants_5m"],
-    )
-    dbg(
-        f"群 {group_id} 活跃度快照: 5m={activity.messages_5m} 20m={activity.messages_20m} "
-        f"60m={activity.messages_60m} 参与人数={activity.participants_60m} "
-        f"回复数={activity.replies_60m} 提及数={activity.mentions_60m} "
-        f"5m真人={activity.member_messages_5m}/"
-        f"{activity.member_participants_5m}人 "
-        f"今日主动发言={activity.proactive_today} 最后消息={activity.last_message_at} "
-        f"最后发言={activity.last_agent_at}"
-    )
-    group = await session.get(BotGroup, group_id)
-    dbg(f"群 {group_id} 上下文组装完成: 群名={group.group_name if group else None!r}")
-    return build_context(
-        group_id=group_id,
-        group_name=group.group_name if group else None,
-        messages=messages,
-        members=members,
-        memories=memories,
-        relations=relations,
-        activity=activity,
-        active_topic=config.active_topic,
-        emotion_state=emotion_context_state(
-            config.emotion_state if isinstance(config.emotion_state, dict) else {},
-            now=context_now,
-            expressiveness=persona_editor_profile(config).expressiveness,
-        ),
-        reference_at=context_now,
-    )
+
+
 
 
 async def _caption_single_image(
@@ -1294,648 +772,35 @@ async def _process_group_message(
     *,
     enqueued_at: float | None = None,
 ) -> None:
-    group_id = int(event.group_id)
-    bot_id = int(bot.self_id)
-    turn_started_at = time.monotonic()
-    message_id = getattr(event, "message_id", None)
-    dbg(
-        f"群 {group_id} 开始处理消息: bot={bot_id} user={event.get_user_id()} "
-        f"message_id={message_id} 完整消息={normalized.prompt_text()!r}"
-    )
-    async with group_lock(group_id, bot_id):
-        if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
-            dbg(
-                f"群 {group_id} 触发在等待群锁期间过期,跳过回复: message_id={message_id}"
-            )
-            return
-        dbg(f"群 {group_id} 已取得群锁,开始处理")
-        async with get_session() as session:
-            config = await get_or_create_config(session, group_id)
-            if config is None or not await agent_runtime_enabled(
-                session, group_id, config=config
-            ):
-                dbg(
-                    f"群 {group_id} 处理中止: Agent 总开关"
-                    f"{'配置缺失' if config is None else '已关闭'}"
-                )
-                return
-            actor_user_id = int(event.get_user_id())
-            model = resolve_llm_request("agent_dialogue").model
-            context_started = time.monotonic()
-            context = await _load_context(
-                session,
-                group_id,
-                config,
-                bot_id,
-                focus_user_ids=_current_turn_focus_ids(
-                    actor_user_id, normalized, bot_id=bot_id
-                ),
-                query_text=normalized.prompt_text(),
-                exclude_message_id=int(message_id) if message_id is not None else None,
-                context_model=model,
-                completion_reserve=800,
-                context_token_limit=2400,
-            )
-            trace_event(
-                "context",
-                "上下文选择与装箱",
-                input={
-                    "focus_user_ids": _current_turn_focus_ids(
-                        actor_user_id, normalized, bot_id=bot_id
-                    ),
-                    "query_chars": len(normalized.prompt_text()),
-                    "query_preview": normalized.prompt_text()[:240],
-                    "context_token_limit": 2400,
-                    "completion_reserve": 800,
-                },
-                output={
-                    "messages": len(list(context.get("messages") or [])),
-                    "members": len(list(context.get("members") or [])),
-                    "memories": len(list(context.get("memories") or [])),
-                    "relations": len(list(context.get("relations") or [])),
-                    "model": model,
-                },
-                duration_ms=(time.monotonic() - context_started) * 1000,
-            )
-            capability_started = time.monotonic()
-            capabilities = await probe_group_capabilities(bot, group_id)
-            allow_admin_tools = await user_can_manage_group(
-                bot, group_id, actor_user_id
-            )
-            dbg(
-                f"群 {group_id} 能力探测完成: bot_role={capabilities.role!r} "
-                f"can_manage={capabilities.can_manage} actions={len(capabilities.actions)} 个 "
-                f"发起人 {actor_user_id} 管理工具权限={allow_admin_tools}"
-            )
-            has_target_mentions = any(
-                int(user_id) != int(bot_id) for user_id in normalized.mentions
-            )
-            tool_intent_text = normalized.intent_text()
-            has_reply_context = bool(normalized.reply_chain)
-            has_media_context = bool(normalized.media_refs)
-            selected_tool_names = select_dialogue_tool_names(
-                tool_intent_text,
-                has_reply=has_reply_context,
-                has_mentions=has_target_mentions,
-                has_media=has_media_context,
-                allow_admin_tools=allow_admin_tools,
-            )
-            message_segment_types = select_dialogue_message_segment_types(
-                tool_intent_text,
-                has_target_mentions=has_target_mentions,
-                has_reply=has_reply_context,
-                has_media=has_media_context,
-            )
-            tools = build_tool_schemas(
-                capabilities,
-                allow_admin_tools=allow_admin_tools,
-                segment_capabilities=get_segment_capabilities(bot, group_id),
-                privileged_allowlist=set(config.tool_allowlist or []),
-                include_names=selected_tool_names,
-                message_segment_types=(
-                    message_segment_types
-                    if "send_message" in selected_tool_names
-                    else None
-                ),
-            )
-            round_limit = dialogue_tool_round_limit(selected_tool_names)
-            trace_event(
-                "capability",
-                "协议能力与工具权限计算",
-                output={
-                    "bot_role": capabilities.role,
-                    "bot_can_manage": capabilities.can_manage,
-                    "onebot_actions": sorted(capabilities.actions),
-                    "actor_can_manage": allow_admin_tools,
-                    "round_limit": round_limit,
-                    "message_segment_types": sorted(message_segment_types),
-                    "selected_tool_names": sorted(selected_tool_names),
-                    "tool_names": [
-                        str(item.get("function", {}).get("name") or "")
-                        for item in tools
-                    ],
-                    "tool_schema_chars": len(
-                        json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-                    ),
-                    "tool_count": len(tools),
-                },
-                duration_ms=(time.monotonic() - capability_started) * 1000,
-            )
-            dbg(
-                f"群 {group_id} 本轮可用工具 {len(tools)} 个,"
-                f"模型轮次上限={round_limit}"
-            )
-            media_started = time.monotonic()
-            media_diagnostics: list[dict[str, Any]] = []
-            media_blocks, cached_captions, media_digests = await prepare_image_inputs(
-                bot,
-                group_id,
-                normalized.media_refs,
-                session=session,
-                cache_enabled=bool(config.media_cache_enabled),
-                diagnostics=media_diagnostics,
-            )
-            dbg(
-                f"群 {group_id} 媒体输入: media_blocks={len(media_blocks)} "
-                f"缓存字幕={len(cached_captions)} digests={media_digests}"
-            )
-            user_prompt, media_blocks = await _prepare_media_prompt(
-                group_id,
-                normalized,
-                session,
-                config,
-                media_blocks,
-                cached_captions,
-                media_digests,
-            )
-            trace_event(
-                "media",
-                "多模态输入准备",
-                input={
-                    "media": [
-                        {"type": item.get("type"), "source": item.get("source", "current")}
-                        for item in normalized.media_refs
-                    ]
-                },
-                output={
-                    "vision_blocks": len(media_blocks),
-                    "cached_captions": len(cached_captions),
-                    "content_hashes": [digest[:12] for digest in media_digests],
-                    "items": media_diagnostics,
-                    "cache_enabled": bool(config.media_cache_enabled),
-                    "multimodal_mode": resolve_llm_request("agent_dialogue").multimodal,
-                },
-                duration_ms=(time.monotonic() - media_started) * 1000,
-            )
-            current_turn: CurrentTurn = build_current_turn(
-                message_id=int(message_id) if message_id is not None else None,
-                user_id=actor_user_id,
-                name=event.sender.card or event.sender.nickname,
-                role=str(event.sender.role or "member"),
-                title=event.sender.title,
-                content=user_prompt,
-                mentions=normalized.mentions,
-                reply_chain=normalized.reply_chain,
-                trigger=normalized.trigger_source or "explicit_call",
-                received_at=now_beijing(),
-                media_refs=normalized.media_refs,
-                forward_nodes=len(normalized.forward_tree),
-                truncated=normalized.truncated,
-            )
-            dbg(f"群 {group_id} 对话模型={model!r}")
-            prompt_started = time.monotonic()
-            messages, _prefix_fingerprint = build_messages(
-                persona=resolve_persona(config),
-                tools=tools,
-                context=context,
-                user_prompt=user_prompt,
-                current_turn=current_turn,
-                media_inputs=media_blocks
-                if resolve_llm_request("agent_dialogue").multimodal
-                != "unsupported"
-                else None,
-            )
-            cache_key = prompt_cache_key(
-                persona=resolve_persona(config),
-                tools=tools,
-                model=model,
-                persona_version=config.persona_version,
-            )
-            stable_key = stable_context_key(context)
-            prompt_shape = _trace_prompt_shape(messages)
-            trace_event(
-                "prompt",
-                "Prompt 构建",
-                input={
-                    "tool_count": len(tools),
-                    "media_blocks": len(media_blocks),
-                    "persona_version": config.persona_version,
-                },
-                output={
-                    "message_count": len(messages),
-                    **prompt_shape,
-                    "current_turn_chars": len(user_prompt),
-                    "current_turn_preview": user_prompt[:240],
-                    "tool_names": [
-                        str(item.get("function", {}).get("name") or "")
-                        for item in tools
-                    ],
-                    "prefix_fingerprint": _prefix_fingerprint[:12],
-                    "prompt_cache": "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss",
-                    "context_cache": "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss",
-                },
-                duration_ms=(time.monotonic() - prompt_started) * 1000,
-            )
-            dbg(
-                f"群 {group_id} 提示词构建完成: messages={len(messages)} 条 "
-                f"prompt 前缀指纹={_prefix_fingerprint[:12]}… "
-                f"前缀稳定性={'复用' if cache_key in _PROMPT_CACHE_KEYS else '变化'} "
-                f"稳定上下文={'复用' if stable_key in _PROMPT_CACHE_KEYS else '变化'} "
-                f"用户 prompt={user_prompt!r}"
-            )
-            try:
-                from ..metrics import record_agent_cache
+    """兼容入口：实际单回合 LLM/Tool 编排由 turn_runtime 执行。"""
 
-                record_agent_cache(
-                    "prompt", "hit" if cache_key in _PROMPT_CACHE_KEYS else "miss"
-                )
-                # 只观测本地前缀是否稳定；服务商实际缓存 token 由 usage 指标记录。
-                record_agent_cache(
-                    "context", "hit" if stable_key in _PROMPT_CACHE_KEYS else "miss"
-                )
-            except Exception:  # noqa: BLE001
-                dbg_exc(f"群 {group_id} 上报 prompt 缓存指标失败(忽略)")
-            for key in (cache_key, stable_key):
-                _PROMPT_CACHE_KEYS[key] = None
-                _PROMPT_CACHE_KEYS.move_to_end(key)
-            while len(_PROMPT_CACHE_KEYS) > _PROMPT_CACHE_LIMIT:
-                _PROMPT_CACHE_KEYS.popitem(last=False)
-            fallback_attempted = False
-            deadline = time.monotonic() + _MAX_TURN_SECONDS
-            rounds = 0
-            turn_usage: dict[str, int] = {}
-            while rounds < round_limit:
-                if time.monotonic() > deadline:
-                    dbg(
-                        f"群 {group_id} 工具循环超过 {_MAX_TURN_SECONDS}s 时限,发送收尾提示"
-                    )
-                    await _send_unless_expired(
-                        bot,
-                        group_id,
-                        _TURN_END_NOTICE,
-                        enqueued_at,
-                        label="收尾",
-                        message_id=message_id,
-                    )
-                    return
-                llm_started = time.monotonic()
-                try:
-                    completion = await complete_with_tools_result(  # pyright: ignore[reportArgumentType]
-                        messages,  # pyright: ignore[reportArgumentType]
-                        tools,  # pyright: ignore[reportArgumentType]
-                        task="agent_dialogue",
-                        max_tokens=800,
-                        timeout=30,
-                        multimodal=bool(media_blocks),
-                        raise_on_unsupported=bool(media_blocks)
-                        and not fallback_attempted,
-                    )
-                except LLMMultimodalUnsupportedError:
-                    trace_event(
-                        "llm",
-                        "模型多模态请求",
-                        status="degraded",
-                        output={"model": model, "fallback": "vision_caption"},
-                        detail="模型不支持当前多模态输入，改用视觉转述后重建 Prompt",
-                        duration_ms=(time.monotonic() - llm_started) * 1000,
-                        round_index=rounds + 1,
-                    )
-                    dbg(
-                        f"群 {group_id} 模型不支持多模态,降级为视觉转述重建提示词(不占轮次)"
-                    )
-                    fallback_attempted = True
-                    user_prompt = f"{normalized.prompt_text()}\n{await _describe_images(group_id, normalized, media_blocks, session, config, cached_captions, media_digests)}"
-                    current_turn = CurrentTurn(
-                        **{**current_turn.as_dict(), "content": user_prompt}
-                    )
-                    messages, _prefix_fingerprint = build_messages(
-                        persona=resolve_persona(config),
-                        tools=tools,
-                        context=context,
-                        user_prompt=user_prompt,
-                        current_turn=current_turn,
-                    )
-                    media_blocks = []
-                    # 多模态降级重建提示词，不占用工具轮次。
-                    continue
-                rounds += 1
-                usage = _accumulate_turn_usage(turn_usage, completion)
-                response = completion.message
-                if response is None:
-                    trace_event(
-                        "llm",
-                        "模型调用",
-                        status="degraded",
-                        output={
-                            "model": model,
-                            "response": "none",
-                            "outcome": completion.outcome,
-                            "usage": usage,
-                        },
-                        detail="LLM 返回空结果，进入确定性兜底回复",
-                        duration_ms=(time.monotonic() - llm_started) * 1000,
-                        round_index=rounds,
-                    )
-                    fallback = (
-                        _deterministic_reply(normalized.plain_text) or _FALLBACK_NOTICE
-                    )
-                    dbg(
-                        f"群 {group_id} 第 {rounds} 轮 LLM 返回 None,降级回复={fallback!r}"
-                    )
-                    await _send_unless_expired(
-                        bot,
-                        group_id,
-                        fallback,
-                        enqueued_at,
-                        label="兜底回复",
-                        message_id=message_id,
-                    )
-                    return
-                content = (response.content or "").strip()
-                tool_calls = response.tool_calls or []
-                trace_event(
-                    "llm",
-                    "模型调用",
-                    output={
-                        "model": model,
-                        "content_chars": len(content),
-                        "tool_calls": [
-                            str(getattr(getattr(call, "function", None), "name", "") or "")
-                            for call in tool_calls
-                        ],
-                        "finish_reason": completion.finish_reason,
-                        "content_preview": content[:320],
-                        "usage": usage,
-                    },
-                    duration_ms=(time.monotonic() - llm_started) * 1000,
-                    round_index=rounds,
-                )
-                dbg(
-                    f"群 {group_id} 第 {rounds}/{round_limit} 轮 LLM 响应: "
-                    f"content={content!r} tool_calls={[getattr(getattr(c, 'function', None), 'name', None) for c in tool_calls]}"
-                )
-                if not tool_calls:
-                    if content:
-                        await _finalize_reply(
-                            bot,
-                            group_id,
-                            config,
-                            session,
-                            normalized,
-                            content,
-                            render_current_turn(current_turn),
-                            enqueued_at,
-                            message_id,
-                        )
-                    return
-                assistant: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": content or None,
-                    "tool_calls": [],
-                }
-                messages.append(assistant)
-                round_sent_message = False
-                discovered_tool_names: set[str] = set()
-                for call in tool_calls:
-                    function = getattr(call, "function", None)
-                    if function is None:
-                        dbg(
-                            f"群 {group_id} 跳过缺少 function 的 tool_call id={getattr(call, 'id', None)}"
-                        )
-                        continue
-                    tool_name = str(getattr(function, "name", "") or "")
-                    raw_args = getattr(function, "arguments", "{}") or "{}"
-                    tool_started = time.monotonic()
-                    dbg(
-                        f"群 {group_id} 第 {rounds} 轮工具调用: "
-                        f"name={tool_name!r} args={raw_args}"
-                    )
-                    try:
-                        args = json.loads(raw_args)
-                        if not isinstance(args, dict):
-                            raise ValueError("工具参数必须是对象")
-                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                        args = {}
-                        result = {"ok": False, "error": str(exc)}
-                        dbg(f"群 {group_id} 工具参数解析失败: {exc}")
-                    else:
-                        if (
-                            tool_name in _VISIBLE_SEND_TOOLS
-                            and enqueued_at is not None
-                            and is_pending_trigger_expired(enqueued_at)
-                        ):
-                            result = {
-                                "ok": False,
-                                "error": "触发消息已过期，取消发送",
-                                "expired": True,
-                            }
-                            dbg(
-                                f"群 {group_id} 工具 {tool_name} 发送前触发已过期,取消副作用"
-                            )
-                        else:
-                            result = await execute_tool(
-                                tool_name,
-                                args,
-                                bot=bot,
-                                group_id=group_id,
-                                actor_user_id=actor_user_id,
-                                session=session,
-                                capabilities=capabilities,
-                            )
-                    if tool_name == "discover_tools" and bool(result.get("ok")):
-                        discovery = result.get("result")
-                        discovery_rows = (
-                            discovery.get("tools", [])
-                            if isinstance(discovery, dict)
-                            else []
-                        )
-                        for item in discovery_rows:
-                            if isinstance(item, dict) and item.get("name"):
-                                discovered_tool_names.add(str(item["name"]))
-                    trace_event(
-                        "tool",
-                        f"工具 {tool_name or '[unknown]'}",
-                        status=(
-                            "success"
-                            if bool(result.get("ok"))
-                            else "failed"
-                        ),
-                        input={"arguments": args},
-                        output={
-                            "ok": bool(result.get("ok")),
-                            "error": result.get("error"),
-                            "ends_turn": _visible_tool_send_ends_turn(result),
-                        },
-                        duration_ms=(time.monotonic() - tool_started) * 1000,
-                        round_index=rounds,
-                    )
-                    dbg(
-                        f"群 {group_id} 工具 {tool_name!r} 返回: "
-                        f"{json.dumps(result, ensure_ascii=False)}"
-                    )
-                    if _visible_tool_send_ends_turn(result):
-                        round_sent_message = True
-                        payload = (
-                            result.get("result", {}).get("outbound", {})
-                            if isinstance(result.get("result"), dict)
-                            else {}
-                        )
-                        if isinstance(payload, dict):
-                            await persist_bot_reply(
-                                session,
-                                int(bot.self_id),
-                                group_id,
-                                _extract_message_id(payload.get("message_id")),
-                                str(payload.get("text") or ""),
-                                int(config.raw_retention_days),
-                                segments=(
-                                    payload.get("segments")
-                                    if isinstance(payload.get("segments"), list)
-                                    else []
-                                ),
-                                reply_chain=(
-                                    payload.get("reply_chain")
-                                    if isinstance(payload.get("reply_chain"), list)
-                                    else []
-                                ),
-                                forward_tree=(
-                                    payload.get("forward_tree")
-                                    if isinstance(payload.get("forward_tree"), list)
-                                    else []
-                                ),
-                                media_refs=(
-                                    payload.get("media_refs")
-                                    if isinstance(payload.get("media_refs"), list)
-                                    else []
-                                ),
-                            )
-                            now = now_beijing()
-                            fingerprint_source = str(payload.get("text") or "") or json.dumps(
-                                {
-                                    "segments": payload.get("segments", []),
-                                    "forward_tree": payload.get("forward_tree", []),
-                                },
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            )
-                            response_fingerprint = hashlib.sha256(
-                                fingerprint_source.casefold().encode("utf-8")
-                            ).hexdigest()
-                            input_fingerprint = hashlib.sha256(
-                                render_current_turn(current_turn).casefold().encode("utf-8")
-                            ).hexdigest()
-                            recent = list(config.recent_response_fingerprints or [])
-                            recent.append(
-                                {
-                                    "input": input_fingerprint,
-                                    "response": response_fingerprint,
-                                    "text": str(payload.get("text") or "")[:500],
-                                    "at": now.isoformat(),
-                                }
-                            )
-                            config.recent_response_fingerprints = recent[-8:]
-                            config.last_response_fingerprint = response_fingerprint
-                            config.last_response_input_fingerprint = input_fingerprint
-                            config.last_response_at = now
-                            config.last_agent_at = now
-                            if config.short_conversation_enabled:
-                                mark_bot_reply(
-                                    int(bot.self_id),
-                                    group_id,
-                                    topic=str(config.active_topic or normalized.plain_text or ""),
-                                    source="dialogue",
-                                    max_bot_turns=persona_behavior(
-                                        config
-                                    ).max_followup_bot_turns,
-                                )
-                    assistant["tool_calls"].append(
-                        {
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "arguments": raw_args,
-                            },
-                        }
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": json.dumps(result, ensure_ascii=False),
-                        }
-                    )
-                    try:
-                        await session.commit()
-                    except SQLAlchemyError:
-                        trace_event(
-                            "state",
-                            "工具轮状态提交",
-                            status="failed",
-                            detail="数据库提交失败并已回滚",
-                            round_index=rounds,
-                        )
-                        dbg_exc(f"群 {group_id} 工具轮状态提交失败,已回滚")
-                        await session.rollback()
-                    else:
-                        trace_event(
-                            "state",
-                            "工具轮状态提交",
-                            output={"tool": tool_name},
-                            round_index=rounds,
-                        )
-                    # 提交会过期会话内对象；后续轮次还要读取 config 属性，
-                    # 先刷新避免同步惰性加载（MissingGreenlet）。
-                    await session.refresh(config)
-                    if round_sent_message:
-                        # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
-                        # 同时调用 send_message/send_forward 连发多条。
-                        break
-                if discovered_tool_names and not round_sent_message:
-                    selected_tool_names = frozenset(
-                        set(selected_tool_names) | discovered_tool_names
-                    )
-                    tools = build_tool_schemas(
-                        capabilities,
-                        allow_admin_tools=allow_admin_tools,
-                        segment_capabilities=get_segment_capabilities(bot, group_id),
-                        privileged_allowlist=set(config.tool_allowlist or []),
-                        include_names=selected_tool_names,
-                        message_segment_types=(
-                            message_segment_types
-                            if "send_message" in selected_tool_names
-                            else None
-                        ),
-                    )
-                    loaded_names = {
-                        str(item.get("function", {}).get("name") or "")
-                        for item in tools
-                    }
-                    loaded_discoveries = sorted(
-                        name for name in discovered_tool_names if name in loaded_names
-                    )
-                    round_limit = max(
-                        round_limit,
-                        min(MAX_TOOL_ROUNDS, rounds + 2),
-                    )
-                    trace_event(
-                        "capability",
-                        "动态工具发现",
-                        output={
-                            "requested": sorted(discovered_tool_names),
-                            "loaded": loaded_discoveries,
-                            "tool_count": len(tools),
-                            "round_limit": round_limit,
-                        },
-                        round_index=rounds,
-                    )
-                if round_sent_message:
-                    dbg(f"群 {group_id} 工具已发送用户可见消息,结束本轮避免重复回复")
-                    return
-            # 走到这里说明所有轮次都被工具调用耗尽、始终没有最终回复。
-            # 其余分支均已 return；给用户一个交代，不能静默。
-            dbg(
-                f"群 {group_id} {round_limit} 轮全部被工具调用耗尽,无最终回复,"
-                f"发送收尾提示;整轮耗时 {time.monotonic() - turn_started_at:.1f}s"
-            )
-            await _send_unless_expired(
-                bot,
-                group_id,
-                _TURN_END_NOTICE,
-                enqueued_at,
-                label="工具收尾",
-                message_id=message_id,
-            )
+    hooks = TurnRuntimeHooks(
+        load_context=_load_context,
+        current_turn_focus_ids=_current_turn_focus_ids,
+        prepare_media_prompt=_prepare_media_prompt,
+        trace_prompt_shape=_trace_prompt_shape,
+        accumulate_turn_usage=_accumulate_turn_usage,
+        describe_images=_describe_images,
+        deterministic_reply=_deterministic_reply,
+        fallback_notice=_fallback_notice,
+        send_unless_expired=_send_unless_expired,
+        finalize_reply=_finalize_reply,
+        cancel_wait_notice=_cancel_wait_notice,
+        commit_tool_batch=_commit_tool_batch,
+        visible_tool_send_ends_turn=_visible_tool_send_ends_turn,
+        persist_bot_reply=persist_bot_reply,
+        extract_message_id=_extract_message_id,
+        start_wait_notice=_start_wait_notice,
+    )
+    await run_dialogue_turn(
+        bot,
+        event,
+        normalized,
+        hooks=hooks,
+        enqueued_at=enqueued_at,
+    )
+
+
 
 
 async def process_group_message(
@@ -1962,6 +827,8 @@ async def process_group_message(
         ),
     )
     token = bind_execution_trace(trace)
+    tool_round_token = _TOOL_ROUND_COUNT.set(0)
+    provider_cache_token = _TURN_PROVIDER_CACHE_USAGE.set((0, 0))
     for stage in normalized.parse_trace:
         if not isinstance(stage, dict):
             continue
@@ -2027,6 +894,18 @@ async def process_group_message(
         )
         raise
     finally:
+        # 兜底：任何退出路径都不留下待发的等待提示。
+        _cancel_wait_notice()
+        tool_rounds = _TOOL_ROUND_COUNT.get()
+        record_agent_tool_rounds(tool_rounds, "dialogue")
+        cached_tokens, cache_miss_tokens = _TURN_PROVIDER_CACHE_USAGE.get()
+        if tool_rounds > 0:
+            record_agent_provider_cache_tokens(
+                cached=cached_tokens,
+                cache_miss=cache_miss_tokens,
+            )
+        _TOOL_ROUND_COUNT.reset(tool_round_token)
+        _TURN_PROVIDER_CACHE_USAGE.reset(provider_cache_token)
         trace_event(
             "turn",
             "回合结束",
