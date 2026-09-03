@@ -125,7 +125,9 @@ describe("AgentConfigPanel regression safety", () => {
   it("preserves the local draft after a 409 and reloads the conflict only as a remote update", async () => {
     let getCount = 0;
     apiMock.mockImplementation((path?: string, init?: RequestInit) => {
-      if (path !== "/agent/groups/100/config") return new Promise<never>(() => undefined);
+      if (path !== "/agent/groups/100/config") {
+        return Promise.resolve({ data: baseConfig, meta: {} });
+      }
       if (init?.method === "PATCH") return Promise.reject(new ApiError(409, "配置已被其他管理员修改"));
       getCount += 1;
       return Promise.resolve({
