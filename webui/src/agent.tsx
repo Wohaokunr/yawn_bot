@@ -36,7 +36,6 @@ import { api, ApiError } from "./api";
 import { nodeDisplayName, relationTypeColor } from "./relation-meta";
 import {
   AdminEmpty,
-  confirmDiscardChanges,
   DangerActionButton,
   formatTime,
   PageHeader,
@@ -88,10 +87,26 @@ export { MemberProfilesPanel } from "./agent-panels/MemberProfilesPanel";
 export { RelationsPanel } from "./agent-panels/RelationsPanel";
 export { debugMessageLabel } from "./agent-debug/debug-utils";
 
+const AGENT_TAB_KEYS = new Set([
+  "overview",
+  "config",
+  "persona",
+  "memories",
+  "profiles",
+  "relations",
+  "messages",
+  "debug",
+  "privacy",
+  "audit",
+]);
+
 export function AgentGroupsPage(): React.JSX.Element {
   const [page, setPage] = useState(1); const [search, setSearch] = useState("");
-  const load = useCallback(() => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [page, search]);
-  const query = useApiQuery(load, { resources: ["agent_config"] });
+  const query = useApiQuery({
+    queryKey: ["agent-groups", page, search],
+    fetcher: (signal) => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`, { signal }).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })),
+    invalidation: { resources: ["agent_config"] },
+  });
   return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" onRefresh={query.reload} refreshing={query.refreshing} extra={<Input.Search placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />} /><Card>{
     query.error && !query.data
       ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
@@ -102,13 +117,25 @@ export function AgentGroupsPage(): React.JSX.Element {
 export function AgentDetailPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = searchParams.get("tab") ?? "overview";
+  const requestedTab = searchParams.get("tab") ?? "overview";
+  const tab = AGENT_TAB_KEYS.has(requestedTab) ? requestedTab : "overview";
+
+  useEffect(() => {
+    if (requestedTab === tab) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("tab");
+    setSearchParams(next, { replace: true });
+  }, [requestedTab, searchParams, setSearchParams, tab]);
+
   const changeTab = (key: string) => {
-    if (!confirmDiscardChanges()) return;
-    setSearchParams(key === "overview" ? {} : { tab: key }, { replace: true });
+    if (!AGENT_TAB_KEYS.has(key)) return;
+    const next = new URLSearchParams(searchParams);
+    if (key === "overview") next.delete("tab"); else next.set("tab", key);
+    setSearchParams(next, { replace: true });
   };
-  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={changeTab} items={[
-    { key: "overview", label: "运行诊断", children: <AgentOverviewPanel groupId={groupId} /> },
+
+  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs activeKey={tab} onChange={changeTab} items={[
+    { key: "overview", label: "运行诊断", children: <AgentOverviewPanel groupId={groupId} onNavigate={changeTab} /> },
     { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
     { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
     { key: "memories", label: "记忆", children: <MemoriesPanel groupId={groupId} /> },
@@ -128,17 +155,20 @@ const LLM_TASK_LABELS: Record<string, string> = {
   agent_image: "图片理解",
 };
 
-function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const load = useCallback(
-    () => api<AgentDiagnostics>(`/agent/groups/${groupId}/diagnostics`).then((r) => r.data),
-    [groupId],
-  );
-  const loadCapabilities = useCallback(
-    () => api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities`).then((r) => r.data),
-    [groupId],
-  );
-  const query = useApiQuery(load, { resources: ["agent_config", "agent_memory", "agent_group_data"] });
-  const capabilityQuery = useApiQuery(loadCapabilities, { resources: ["agent_config"] });
+function AgentOverviewPanel({ groupId, onNavigate }: { groupId: string; onNavigate: (tab: string) => void }): React.JSX.Element {
+  const query = useApiQuery({
+    queryKey: ["agent-diagnostics", groupId],
+    fetcher: (signal) => api<AgentDiagnostics>(`/agent/groups/${groupId}/diagnostics`, { signal }).then((r) => r.data),
+    invalidation: {
+      resources: ["agent_config", "agent_memory", "agent_group_data"],
+      scope: { groupId },
+    },
+  });
+  const capabilityQuery = useApiQuery({
+    queryKey: ["agent-capabilities", groupId],
+    fetcher: (signal) => api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities`, { signal }).then((r) => r.data),
+    invalidation: { resources: ["agent_config"], scope: { groupId } },
+  });
   const [capabilityRefreshing, setCapabilityRefreshing] = useState(false);
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
@@ -150,7 +180,7 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
     setCapabilityRefreshing(true);
     try {
       await api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities/refresh`, { method: "POST" });
-      await capabilityQuery.reload();
+      capabilityQuery.reload();
     } finally {
       setCapabilityRefreshing(false);
     }
@@ -217,8 +247,8 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
           ))}
         </Space>}
       <Space wrap className="section-row">
-        <Link to={`?tab=config`}>调整运行配置</Link>
-        <Link to={`?tab=memories`}>检查记忆治理</Link>
+        <Button type="link" onClick={() => onNavigate("config")}>调整运行配置</Button>
+        <Button type="link" onClick={() => onNavigate("memories")}>检查记忆治理</Button>
         <Link to="/environment">检查 LLM Provider / 模型路由</Link>
       </Space>
     </Card>
