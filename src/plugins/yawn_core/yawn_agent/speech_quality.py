@@ -20,6 +20,13 @@ from .speech import (
     SpeechPlan,
     SpeechQualityIssue,
 )
+from .speech_act import (
+    SPEECH_ACT_ACKNOWLEDGE,
+    SPEECH_ACT_CLOSE,
+    SPEECH_ACT_PING_ACK,
+    SPEECH_ACT_REACT,
+    SPEECH_ACT_REPAIR,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -42,6 +49,15 @@ _SHORT_SCENES = frozenset(
         SPEECH_SCENE_WARMUP,
         SPEECH_SCENE_FOLLOWUP,
         SPEECH_SCENE_REACTION,
+    }
+)
+_SHORT_ACTS = frozenset(
+    {
+        SPEECH_ACT_PING_ACK,
+        SPEECH_ACT_REPAIR,
+        SPEECH_ACT_ACKNOWLEDGE,
+        SPEECH_ACT_REACT,
+        SPEECH_ACT_CLOSE,
     }
 )
 _MIN_ECHO_TEXT_CHARS = 12
@@ -128,7 +144,8 @@ def _strip_user_echo(text: str, user_text: str) -> tuple[str, bool]:
 
 def _trim_short_scene(text: str, plan: SpeechPlan) -> tuple[str, bool]:
     target = plan.style.soft_target_chars
-    if plan.scene not in _SHORT_SCENES or not target or len(text) <= target * 2:
+    short_turn = plan.scene in _SHORT_SCENES or plan.act in _SHORT_ACTS
+    if not short_turn or not target or len(text) <= target * 2:
         return text, False
     hard_limit = min(max(target * 2, 48), 360)
     window = text[:hard_limit]
@@ -232,7 +249,7 @@ def _polish_text(  # noqa: C901
         issues.append(
             _issue(
                 "scene_overlong",
-                "短发言场景明显超过 Persona 的软长度目标",
+                "短发言场景或短话语动作明显超过本轮软长度目标",
                 autofixed=autofix,
             )
         )
