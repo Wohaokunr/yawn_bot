@@ -153,7 +153,7 @@ describe("AgentDetailPage information architecture", () => {
   it("maps legacy leaf deep links into the correct top-level group", async () => {
     renderPage("/agent/1?tab=relations&relations.view=graph");
     await screen.findByText("relations mock");
-    expect(screen.getByText("知识").closest(".ant-tabs-tab")?.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "知识" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByLabelText("location").textContent).toContain("tab=relations");
     expect(screen.getByLabelText("location").textContent).toContain("relations.view=graph");
   });
