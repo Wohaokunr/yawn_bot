@@ -1,9 +1,18 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+class ResizeObserverMock {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+beforeAll(() => vi.stubGlobal("ResizeObserver", ResizeObserverMock));
+afterAll(() => vi.unstubAllGlobals());
 
 vi.mock("./api", () => ({
-  api: vi.fn(() => new Promise(() => undefined)),
+  api: vi.fn(() => new Promise<never>(() => undefined)),
   ApiError: class ApiError extends Error {
     status = 500;
     fields = {};
