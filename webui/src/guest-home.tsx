@@ -50,41 +50,65 @@ export function GuestGroupsPage(): React.JSX.Element {
     <PageHeader
       title="可查看群聊"
       subtitle="这里只展示管理员明确开放给访客的群聊；权限变化会在下一次请求时立即生效。"
+      status={<Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>}
       onRefresh={query.reload}
       refreshing={query.refreshing}
-      extra={<Input.Search placeholder="搜索群聊" allowClear onSearch={(value) => { setSearch(value); setPage(1); }} />}
+      extra={<Input.Search
+        allowClear
+        placeholder="搜索群名或群号"
+        style={{ width: 240 }}
+        onSearch={(value) => { setSearch(value.trim()); setPage(1); }}
+      />}
     />
-    <Card>
-      {query.error && !query.data
-        ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table
-            rowKey="groupId"
-            loading={query.loading}
-            dataSource={query.data?.rows ?? []}
-            locale={{ emptyText: <Empty description="暂无可查看群聊" /> }}
-            pagination={{
-              current: page,
-              pageSize: 20,
-              total: query.data?.total ?? 0,
-              showSizeChanger: false,
-              onChange: setPage,
-            }}
-            columns={[
-              {
-                title: "群聊",
-                render: (_, row: GuestGroupSummary) => <>
-                  <Text strong>{row.groupName || "未命名群"}</Text><br />
-                  <Text type="secondary">{row.groupId}</Text>
-                </>,
-              },
-              { title: "成员", dataIndex: "memberCount", width: 120 },
-              {
-                title: "操作",
-                width: 120,
-                render: (_, row: GuestGroupSummary) => <Link to={`/guest/${row.groupId}`}>查看</Link>,
-              },
-            ]}
-          />}
+    <Alert
+      type="info"
+      showIcon
+      className="section-alert"
+      title="访客视图不会加载运维功能"
+      description="进入群聊后仅提供记忆、成员画像和关系边三个只读页面，不提供 Agent 配置、人设、消息记录、调试、隐私治理或工具审计。"
+    />
+    <Card className="guest-groups-card">
+      {query.error && !query.data ? (
+        <QueryErrorAlert error={query.error} onRetry={query.reload} />
+      ) : (
+        <Table
+          rowKey="groupId"
+          loading={query.loading}
+          dataSource={query.data?.rows ?? []}
+          locale={{ emptyText: <Empty description="管理员暂未开放任何群聊" /> }}
+          pagination={{
+            current: page,
+            pageSize: 20,
+            total: query.data?.total ?? 0,
+            showSizeChanger: false,
+            onChange: setPage,
+          }}
+          columns={[
+            {
+              title: "群聊",
+              render: (_, row: GuestGroupSummary) => <Space direction="vertical" size={0}>
+                <Text strong>{row.groupName || "未命名群"}</Text>
+                <Text type="secondary" copyable>{row.groupId}</Text>
+              </Space>,
+            },
+            { title: "成员", dataIndex: "memberCount", width: 120, render: (value: number) => `${value} 人` },
+            {
+              title: "可查看内容",
+              width: 300,
+              render: () => <Space wrap>
+                <Tag icon={<ReadOutlined />}>记忆</Tag>
+                <Tag icon={<IdcardOutlined />}>成员画像</Tag>
+                <Tag icon={<ApartmentOutlined />}>关系边</Tag>
+              </Space>,
+            },
+            {
+              title: "操作",
+              width: 120,
+              render: (_, row: GuestGroupSummary) => <Link to={`/guest/${row.groupId}?tab=memories`}>进入查看</Link>,
+            },
+          ]}
+        />
+      )}
     </Card>
   </>;
 }
@@ -94,69 +118,59 @@ export function GuestGroupPage(): React.JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab") ?? "memories";
   const tab = GUEST_TABS.has(requestedTab) ? requestedTab : "memories";
-  const detailQuery = useApiQuery(() => api<GuestGroupDetail>(`/guest/groups/${groupId}`).then((response) => response.data));
 
   useEffect(() => {
-    if (requestedTab === tab) return;
+    if (GUEST_TABS.has(requestedTab)) return;
     const next = new URLSearchParams(searchParams);
-    next.delete("tab");
+    next.set("tab", "memories");
     setSearchParams(next, { replace: true });
-  }, [requestedTab, searchParams, setSearchParams, tab]);
+  }, [requestedTab, searchParams, setSearchParams]);
 
-  if (detailQuery.error && !detailQuery.data) {
-    const forbidden = detailQuery.error.includes("403") || detailQuery.error.includes("权限") || detailQuery.error.includes("访客");
+  const groupLoad = useCallback(
+    () => api<GuestGroupDetail>(`/groups/${groupId}`).then((response) => response.data),
+    [groupId],
+  );
+  const groupQuery = useApiQuery(groupLoad);
+  const forbidden = groupQuery.error && groupQuery.error.includes("未向访客开放");
+
+  if (forbidden) {
     return <>
-      <PageHeader title="群聊不可访问" subtitle="这个群聊当前不在你的访客可见范围内。" extra={<Link to="/guest">返回群聊列表</Link>} />
+      <PageHeader title="群聊访问已收回" subtitle="管理员已经取消该群聊的访客授权。" />
       <Alert
-        type={forbidden ? "warning" : "error"}
+        type="warning"
         showIcon
-        message={forbidden ? "访问权限已变化" : "无法加载群聊"}
-        description={detailQuery.error}
-        action={<Button onClick={detailQuery.reload}>重试</Button>}
+        title="当前访客会话不能再查看这个群聊"
+        action={<Link to="/guest"><Button size="small">返回可查看群聊</Button></Link>}
       />
     </>;
   }
 
-  const detail = detailQuery.data;
-  const groupName = detail?.groupName || `群 ${groupId}`;
-  const changeTab = (key: string) => {
-    if (!GUEST_TABS.has(key)) return;
-    const next = new URLSearchParams(searchParams);
-    if (key === "memories") next.delete("tab"); else next.set("tab", key);
-    setSearchParams(next, { replace: true });
-  };
-
+  const groupName = groupQuery.data?.groupName || `群 ${groupId}`;
   return <>
     <PageHeader
       title={groupName}
-      subtitle="访客视图只展示管理员开放的只读 Agent 数据。"
-      status={<Tag color="blue" icon={<EyeOutlined />}>只读访客</Tag>}
+      subtitle={`群 ${groupId} · ${groupQuery.data ? `${groupQuery.data.memberCount} 名成员 · ` : ""}访客只读视图`}
+      status={<Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>}
       extra={<Link to="/guest">返回群聊列表</Link>}
     />
-    <Space wrap className="section-row">
-      <Tag icon={<ApartmentOutlined />}>群 {groupId}</Tag>
-      {detail && <Tag>{detail.memberCount} 名成员</Tag>}
-    </Space>
+    {groupQuery.error && !groupQuery.data && <QueryErrorAlert error={groupQuery.error} onRetry={groupQuery.reload} />}
     <Tabs
+      destroyOnHidden
       activeKey={tab}
-      onChange={changeTab}
+      onChange={(key) => setSearchParams({ tab: key }, { replace: true })}
       items={[
-        {
-          key: "memories",
-          label: <span><ReadOutlined /> 记忆</span>,
-          children: <MemoriesPanel groupId={groupId} readOnly />,
-        },
-        {
-          key: "profiles",
-          label: <span><IdcardOutlined /> 成员画像</span>,
-          children: <MemberProfilesPanel groupId={groupId} readOnly />,
-        },
-        {
-          key: "relations",
-          label: <span><ApartmentOutlined /> 关系</span>,
-          children: <RelationsPanel groupId={groupId} readOnly />,
-        },
+        { key: "memories", label: <Space size={6}><ReadOutlined />记忆</Space>, children: <MemoriesPanel groupId={groupId} readOnly /> },
+        { key: "profiles", label: <Space size={6}><IdcardOutlined />成员画像</Space>, children: <MemberProfilesPanel groupId={groupId} readOnly /> },
+        { key: "relations", label: <Space size={6}><ApartmentOutlined />关系边</Space>, children: <RelationsPanel groupId={groupId} readOnly /> },
       ]}
     />
   </>;
+}
+
+export function isGuestTabAllowed(tab: string | null): boolean {
+  return tab === null || GUEST_TABS.has(tab);
+}
+
+export function isGuestAccessError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403;
 }
