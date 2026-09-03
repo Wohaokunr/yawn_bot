@@ -1,60 +1,52 @@
 import {
-  Alert, App as AntApp, AutoComplete, Button, Card, Col, Descriptions, Drawer, Empty,
-  Form, Input, InputNumber, List, Popconfirm, Progress, Row, Segmented, Select, Space,
-  Spin, Statistic, Switch, Table, Tag, Timeline, Typography,
+  Alert, App as AntApp, AutoComplete, Button, Card, Empty, List, Popconfirm,
+  Progress, Space, Spin, Table, Tag, Typography,
 } from "antd";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { AgentAuditTable } from "../agent-audit-table";
-import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
-import { nodeDisplayName, relationTypeColor } from "../relation-meta";
-import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
-  useApiQuery, useUnsavedChanges,
-} from "../shared";
-import type {
-  AgentAudit, AgentConfig, AgentDebugResponse, AgentMemoryStatus, AgentMessageItem,
-  AgentRelationGraph, AgentRelationItem, MemoryItem, MemorySubjectItem, Persona,
-  PersonaProfile, PrivacyItem,
-} from "../types";
-import {
-  MEMORY_ROLE_OPTIONS, MEMORY_TYPE_META, PERSONA_SOCIAL_TRAITS, PERSONA_STYLE_TRAITS,
-  PERSONA_TRAIT_META, PERSONA_TRIAL_SCENARIOS, PROFILE_KEY_META, PROFILE_KEY_META as _PROFILE_KEY_META,
-  RELATION_SOURCE_META, RELATION_TYPE_PRESETS, memberDisplayName, mergePersonaPreset,
-  personaBehaviorPreview, personaDraftSummary, personaEmotionExpressionPreview,
-  profileKeyLabel, memoryTypeLabel,
-} from "../agent-meta";
-
+import { formatTime, QueryErrorAlert, useApiQuery } from "../shared";
+import type { MemoryItem, MemorySubjectItem } from "../types";
+import { MEMORY_TYPE_META, memberDisplayName, memoryTypeLabel, profileKeyLabel } from "../agent-meta";
 import { MemoryEditDrawer, type MemoryFormValues } from "./MemoriesPanel";
 
 const { Text, Paragraph } = Typography;
-const LazyRelationGraphView = lazy(() =>
-  import("../relation-graph").then(({ RelationGraphView }) => ({ default: RelationGraphView })),
-);
-
 const PROFILE_TYPE_ORDER = ["core", "profile", "manual"];
 
 export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: string; readOnly?: boolean }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
-  const userId = searchParams.get("userId") ?? "";
+  const userId = searchParams.get("profiles.userId") ?? "";
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<MemoryItem | null>(null);
   const [saving, setSaving] = useState(false);
   useEffect(() => { setDraft(userId); }, [userId]);
+
   const setUserId = (value: string) => {
     const next = new URLSearchParams(searchParams);
-    if (value) next.set("userId", value); else next.delete("userId");
+    if (value) next.set("profiles.userId", value); else next.delete("profiles.userId");
     setSearchParams(next, { replace: true });
   };
-  const subjectsLoad = useCallback(() => api<MemorySubjectItem[]>(`/agent/groups/${groupId}/memories/subjects`).then((r) => r.data), [groupId]);
-  const subjectsQuery = useApiQuery(subjectsLoad, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
+
+  const subjectsQuery = useApiQuery({
+    queryKey: ["agent-memory-subjects", groupId],
+    fetcher: (signal) => api<MemorySubjectItem[]>(`/agent/groups/${groupId}/memories/subjects`, { signal }).then((r) => r.data),
+    invalidation: {
+      resources: ["agent_memory", "agent_member_data", "agent_group_data"],
+      scope: { groupId },
+    },
+  });
   const subjects = subjectsQuery.data ?? [];
-  const memberLoad = useCallback(() => userId
-    ? api<MemoryItem[]>(`/agent/groups/${groupId}/memories?subjectUserId=${userId}&pageSize=100`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 }))
-    : Promise.resolve({ rows: [] as MemoryItem[], total: 0 }), [groupId, userId]);
-  const memberQuery = useApiQuery(memberLoad, { resources: ["agent_memory", "agent_member_data", "agent_group_data"] });
+  const memberQuery = useApiQuery({
+    queryKey: ["agent-member-profile", groupId, userId],
+    fetcher: (signal) => userId
+      ? api<MemoryItem[]>(`/agent/groups/${groupId}/memories?subjectUserId=${userId}&pageSize=100`, { signal }).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 }))
+      : Promise.resolve({ rows: [] as MemoryItem[], total: 0 }),
+    invalidation: {
+      resources: ["agent_memory", "agent_member_data", "agent_group_data"],
+      scope: { groupId },
+    },
+  });
   const rows = memberQuery.data?.rows ?? [];
   const grouped = PROFILE_TYPE_ORDER
     .map((type) => ({ type, items: rows.filter((row) => row.type === type) }))
@@ -66,14 +58,15 @@ export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: st
     value: item.userId,
     label: `${memberDisplayName(item.groupNickname, item.nickname, item.userId)}（${item.userId}）· 画像 ${item.counts.profile} / 核心 ${item.counts.core}`,
   }));
+
   const remove = async (id: string) => {
-    if (readOnly) return;
+    if (readOnly || memberQuery.transitioning) return;
     await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" });
     message.success("记忆已删除");
     memberQuery.reload(); subjectsQuery.reload();
   };
   const saveEdit = async (values: MemoryFormValues) => {
-    if (readOnly || !editing) return;
+    if (readOnly || !editing || memberQuery.transitioning) return;
     setSaving(true);
     try {
       await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.updatedAt }) });
@@ -85,6 +78,7 @@ export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: st
       else message.error((error as Error).message);
     } finally { setSaving(false); }
   };
+
   return <>
     <Card title="成员画像" extra={<Space wrap>
       <AutoComplete
@@ -122,8 +116,8 @@ export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: st
                 : grouped.map((group) => <Card key={group.type} size="small" className="section-row" title={<Space size={8}><Tag color={MEMORY_TYPE_META[group.type]?.color}>{memoryTypeLabel(group.type)}</Tag><Text type="secondary">{group.items.length} 条</Text></Space>}>
                   <List dataSource={group.items} renderItem={(row) => (
                     <List.Item actions={readOnly ? undefined : [
-                      <Button key="edit" type="link" size="small" onClick={() => setEditing(row)}>编辑</Button>,
-                      <Popconfirm key="remove" title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" size="small" danger>删除</Button></Popconfirm>,
+                      <Button key="edit" type="link" size="small" disabled={memberQuery.stale} onClick={() => setEditing(row)}>编辑</Button>,
+                      <Popconfirm key="remove" title="删除这一条记忆？" onConfirm={() => remove(row.id)}><Button type="link" size="small" danger disabled={memberQuery.stale}>删除</Button></Popconfirm>,
                     ]}>
                       <List.Item.Meta
                         title={<Space wrap size={[8, 4]}>
@@ -151,7 +145,7 @@ export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: st
             { title: "核心记忆", dataIndex: ["counts", "core"], width: 100 },
             { title: "置顶事实", dataIndex: ["counts", "manual"], width: 100 },
             { title: "最近更新", dataIndex: "updatedAt", render: formatTime, width: 170 },
-            { title: "操作", width: 110, render: (_, row: MemorySubjectItem) => <Button type="link" onClick={() => setUserId(row.userId)}>查看画像</Button> },
+            { title: "操作", width: 110, render: (_, row: MemorySubjectItem) => <Button type="link" disabled={subjectsQuery.stale} onClick={() => setUserId(row.userId)}>查看画像</Button> },
           ]} />)}
     </Card>
     {!readOnly && <MemoryEditDrawer memory={editing} saving={saving} onClose={() => setEditing(null)} onSave={saveEdit} />}
