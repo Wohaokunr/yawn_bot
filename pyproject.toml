@@ -120,6 +120,9 @@ ignore = [
 allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "【", "】", "《", "》", "…", "—", "（", "）", "、", "〔", "〕", "×", "｜", "＋", "－", "›", "０", "９"]
 
 [tool.ruff.lint.per-file-ignores]
+# Context-history exports are grouped by domain (types, interaction constants, helpers)
+# so diagnostic APIs remain easy to scan; alphabetical reordering adds no value here.
+"src/plugins/yawn_core/yawn_agent/context_history.py" = ["RUF022"]
 # This test asserts exact deployment YAML/shell literals; wrapping those strings
 # would make the contract harder to compare with the production files.
 "tests/test_production_deployment_control_plane.py" = ["E501"]
