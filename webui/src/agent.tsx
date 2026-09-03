@@ -69,6 +69,34 @@ const AGENT_TAB_KEYS = new Set([
   "audit",
 ]);
 
+type AgentSectionKey = "runtime" | "knowledge" | "debug" | "governance";
+
+const AGENT_SECTION_BY_TAB: Record<string, AgentSectionKey> = {
+  overview: "runtime",
+  config: "runtime",
+  persona: "runtime",
+  memories: "knowledge",
+  profiles: "knowledge",
+  relations: "knowledge",
+  messages: "knowledge",
+  debug: "debug",
+  privacy: "governance",
+  audit: "governance",
+};
+
+const AGENT_SECTION_DEFAULT: Record<AgentSectionKey, string> = {
+  runtime: "overview",
+  knowledge: "memories",
+  debug: "debug",
+  governance: "privacy",
+};
+
+interface AgentGroupDetail {
+  groupId: string;
+  groupName?: string | null;
+  memberCount: number;
+}
+
 function AgentPanelFallback(): React.JSX.Element {
   return <div style={{ display: "grid", minHeight: 180, placeItems: "center" }}><Spin /></div>;
 }
@@ -153,6 +181,18 @@ export function AgentDetailPage(): React.JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab") ?? "overview";
   const tab = AGENT_TAB_KEYS.has(requestedTab) ? requestedTab : "overview";
+  const section = AGENT_SECTION_BY_TAB[tab] ?? "runtime";
+  const [lastLeafBySection, setLastLeafBySection] = useState<Record<AgentSectionKey, string>>({
+    ...AGENT_SECTION_DEFAULT,
+  });
+  const groupQuery = useApiQuery({
+    queryKey: ["agent-group-detail", groupId],
+    fetcher: (signal) => api<AgentGroupDetail>(`/groups/${groupId}`, { signal }).then((response) => response.data),
+    invalidation: {
+      resources: ["agent_group_data", "agent_config"],
+      scope: { groupId },
+    },
+  });
 
   useEffect(() => {
     if (requestedTab === tab) return;
@@ -161,72 +201,129 @@ export function AgentDetailPage(): React.JSX.Element {
     setSearchParams(next, { replace: true });
   }, [requestedTab, searchParams, setSearchParams, tab]);
 
+  useEffect(() => {
+    setLastLeafBySection((current) => current[section] === tab
+      ? current
+      : { ...current, [section]: tab });
+  }, [section, tab]);
+
   const changeTab = (key: string) => {
     if (!AGENT_TAB_KEYS.has(key)) return;
     const next = new URLSearchParams(searchParams);
     if (key === "overview") next.delete("tab"); else next.set("tab", key);
     setSearchParams(next, { replace: true });
   };
+  const changeSection = (key: string) => {
+    if (!(key in AGENT_SECTION_DEFAULT)) return;
+    const sectionKey = key as AgentSectionKey;
+    changeTab(lastLeafBySection[sectionKey] ?? AGENT_SECTION_DEFAULT[sectionKey]);
+  };
+
+  const groupName = groupQuery.data?.groupName?.trim() || "未命名群";
+  const title = groupQuery.data ? `Agent · ${groupName}（${groupId}）` : `Agent · ${groupId}`;
 
   return <>
     <PageHeader
-      title={`Agent · ${groupId}`}
-      subtitle="群级运行状态、配置、人设、记忆与数据治理"
+      title={title}
+      subtitle="群级运行状态、知识、调试与数据治理"
       extra={<Link to="/agent">返回 Agent 列表</Link>}
     />
     <Tabs
-      activeKey={tab}
-      onChange={changeTab}
+      className="agent-ia-tabs"
+      activeKey={section}
+      onChange={changeSection}
       items={[
         {
-          key: "overview",
-          label: "运行诊断",
-          children: <AgentOverviewPanel groupId={groupId} onNavigate={changeTab} />,
+          key: "runtime",
+          label: "运行",
+          children: <div className="agent-ia-section">
+            <Tabs
+              className="agent-ia-subtabs"
+              activeKey={tab}
+              onChange={changeTab}
+              items={[
+                {
+                  key: "overview",
+                  label: "诊断",
+                  children: <AgentOverviewPanel groupId={groupId} onNavigate={changeTab} />,
+                },
+                {
+                  key: "config",
+                  label: "配置",
+                  children: panel(<LazyAgentConfigPanel groupId={groupId} />),
+                },
+                {
+                  key: "persona",
+                  label: "人设",
+                  children: panel(<LazyPersonaPanel groupId={groupId} />),
+                },
+              ]}
+            />
+          </div>,
         },
         {
-          key: "config",
-          label: "运行配置",
-          children: panel(<LazyAgentConfigPanel groupId={groupId} />),
-        },
-        {
-          key: "persona",
-          label: "人设",
-          children: panel(<LazyPersonaPanel groupId={groupId} />),
-        },
-        {
-          key: "memories",
-          label: "记忆",
-          children: panel(<LazyMemoriesPanel groupId={groupId} />),
-        },
-        {
-          key: "profiles",
-          label: "成员画像",
-          children: panel(<LazyMemberProfilesPanel groupId={groupId} />),
-        },
-        {
-          key: "relations",
-          label: "关系边",
-          children: panel(<LazyRelationsPanel groupId={groupId} />),
-        },
-        {
-          key: "messages",
-          label: "消息记录",
-          children: panel(<LazyAgentMessagesPanel groupId={groupId} />),
+          key: "knowledge",
+          label: "知识",
+          children: <div className="agent-ia-section">
+            <Tabs
+              className="agent-ia-subtabs"
+              activeKey={tab}
+              onChange={changeTab}
+              items={[
+                {
+                  key: "memories",
+                  label: "记忆",
+                  children: panel(<LazyMemoriesPanel groupId={groupId} />),
+                },
+                {
+                  key: "profiles",
+                  label: "画像",
+                  children: panel(<LazyMemberProfilesPanel groupId={groupId} />),
+                },
+                {
+                  key: "relations",
+                  label: "关系",
+                  children: panel(<LazyRelationsPanel groupId={groupId} />),
+                },
+                {
+                  key: "messages",
+                  label: "消息",
+                  children: panel(<LazyAgentMessagesPanel groupId={groupId} />),
+                },
+              ]}
+            />
+          </div>,
         },
         {
           key: "debug",
-          label: "对话调试",
-          children: panel(<LazyAgentDebugger groupId={groupId} />),
+          label: "调试",
+          children: <div className="agent-ia-section agent-ia-single">
+            <div className="agent-ia-section-label">Dialogue Debug</div>
+            {panel(<LazyAgentDebugger groupId={groupId} />)}
+          </div>,
         },
         {
-          key: "privacy",
-          label: "隐私退出",
-          children: panel(<LazyPrivacyPanel groupId={groupId} />),
-        },
-        {
-          key: "audit",
-          label: "工具审计",
-          children: panel(<LazyAgentAuditsPanel groupId={groupId} />),
+          key: "governance",
+          label: "治理",
+          children: <div className="agent-ia-section">
+            <Tabs
+              className="agent-ia-subtabs"
+              activeKey={tab}
+              onChange={changeTab}
+              items={[
+                {
+                  key: "privacy",
+                  label: "隐私",
+                  children: panel(<LazyPrivacyPanel groupId={groupId} />),
+                },
+                {
+                  key: "audit",
+                  label: "审计",
+                  children: panel(<LazyAgentAuditsPanel groupId={groupId} />),
+                },
+              ]}
+            />
+          </div>,
         },
       ]}
     />
