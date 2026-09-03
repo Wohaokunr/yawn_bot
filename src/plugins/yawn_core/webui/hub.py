@@ -90,7 +90,11 @@ class WebUIHub:
             if group_id is not None
             else _legacy_group_scope(resource, entity_id)
         )
-        scope = {"groupId": resolved_group_id} if resolved_group_id is not None else None
+        scope = (
+            {"groupId": resolved_group_id}
+            if resolved_group_id is not None
+            else None
+        )
         await self.broadcast(
             {
                 "type": "entity.changed",
