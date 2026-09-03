@@ -299,7 +299,11 @@ def build_speech_instruction(
     context: dict[str, Any] | None = None,
 ) -> str:
     scene = resolve_speech_scene(current_turn, source=source)
-    effective = effective_turn_from_context(current_turn, context)
+    effective = (
+        effective_turn_from_context(current_turn, context)
+        if current_turn is not None
+        else EffectiveTurn(primary="")
+    )
     act_plan = plan_speech_act(current_turn, scene=scene, effective_turn=effective)
     complexity = classify_response_complexity(
         current_turn,
