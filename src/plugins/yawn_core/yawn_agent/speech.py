@@ -68,6 +68,7 @@ class SpeechStyle:
     verbosity: int = 1
     expressiveness: int = 1
     soft_target_chars: int | None = None
+    response_complexity: str = "normal"
     allow_spontaneous_reaction: bool = True
 
     def as_dict(self) -> dict[str, Any]:
@@ -78,6 +79,7 @@ class SpeechStyle:
             "verbosity": self.verbosity,
             "expressiveness": self.expressiveness,
             "softTargetChars": self.soft_target_chars,
+            "responseComplexity": self.response_complexity,
             "allowSpontaneousReaction": self.allow_spontaneous_reaction,
         }
 
