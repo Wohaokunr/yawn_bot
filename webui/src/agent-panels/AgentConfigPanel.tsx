@@ -47,7 +47,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
 
   const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
     form.setFieldsValue(value);
-    baseVersion.current = value.version;
+    baseVersion.current = value.version ?? undefined;
     setDirty(false);
   });
 
