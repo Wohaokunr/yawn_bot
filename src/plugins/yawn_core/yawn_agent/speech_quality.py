@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 """Deterministic speech-quality checks for user-visible Agent output.
 
-The linter is deliberately conservative.  It may remove obvious assistant-like
+The linter is deliberately conservative. It may remove obvious assistant-like
 boilerplate from model prose, but structured tool messages default to lint-only
 unless a caller explicitly enables autofix.
 """
@@ -20,6 +20,13 @@ from .speech import (
     SpeechPlan,
     SpeechQualityIssue,
 )
+from .speech_act import (
+    SPEECH_ACT_ACKNOWLEDGE,
+    SPEECH_ACT_CLOSE,
+    SPEECH_ACT_PING_ACK,
+    SPEECH_ACT_REACT,
+    SPEECH_ACT_REPAIR,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -35,6 +42,31 @@ _GENERIC_CTA_SUFFIXES = (
     re.compile(r"(?:还需要我(?:帮你)?[^。！？!?]{0,36}吗)[？?。！!]*$"),
     re.compile(r"(?:有(?:其他|别的)问题(?:也)?可以继续问我)[。！？!?]*$"),
 )
+_ANSWER_STRATEGY_PREFIXES = (
+    re.compile(
+        r"^(?:我|那我|我这次|这里我)(?:先|就|接下来|这次|这里)?(?:来|会|准备|打算)?"
+        r"(?:看(?:一眼|一下)?|分析(?:一下)?|解释(?:一下)?|说(?:一下)?|讲(?:一下)?|回答(?:一下)?)"
+        r"[^。！？!?]{0,42}[，,：:]\s*(?:顺便说(?:一|两)?句[，,]\s*)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:那我|我这次|我就|接下来我)[^。！？!?]{0,28}"
+        r"(?:不整|不说|少说|不复述|不反问|直接说|简单说|简短说|换个说法)"
+        r"[^。！？!?]{0,42}[。！？!?，,]\s*",
+        re.IGNORECASE,
+    ),
+)
+_ANSWER_STRATEGY_META_RE = re.compile(
+    r"(?:我|那我|我这次|接下来我|这里我)[^。！？!?]{0,36}"
+    r"(?:怎么回答|回答方式|表达方式|描述方式|说话方式|"
+    r"不整|不说那些|少说|不复述|不反问|直接说|简单说|简短说|换个说法)",
+    re.IGNORECASE,
+)
+_FORCED_CHOICE_SUFFIX_RE = re.compile(
+    r"(?:你(?:就)?说|你想|你是想|你是要|要我|是要我)[^。！？!?]{0,84}"
+    r"(?:还是|或者)[^。！？!?]{0,84}[？?。！!]*$",
+    re.IGNORECASE,
+)
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?])\s*")
 _SHORT_SCENES = frozenset(
     {
@@ -44,11 +76,23 @@ _SHORT_SCENES = frozenset(
         SPEECH_SCENE_REACTION,
     }
 )
+_SHORT_ACTS = frozenset(
+    {
+        SPEECH_ACT_PING_ACK,
+        SPEECH_ACT_REPAIR,
+        SPEECH_ACT_ACKNOWLEDGE,
+        SPEECH_ACT_REACT,
+        SPEECH_ACT_CLOSE,
+    }
+)
 _MIN_ECHO_TEXT_CHARS = 12
 _MIN_ECHO_SENTENCES = 2
 _MIN_SIMILARITY_CHARS = 8
 _ECHO_SIMILARITY_THRESHOLD = 0.72
 _REPEAT_SIMILARITY_THRESHOLD = 0.82
+_SOCIAL_MONOLOGUE_MULTIPLIER = 1.6
+_SOCIAL_MONOLOGUE_MIN_CHARS = 56
+_SOCIAL_MONOLOGUE_MAX_CHARS = 140
 
 
 def _clean_lines(text: object) -> str:
@@ -108,6 +152,26 @@ def _strip_generic_cta(text: str) -> tuple[str, bool]:
     return cleaned, False
 
 
+def _strip_answer_strategy_prefix(text: str) -> tuple[str, bool]:
+    cleaned = text.lstrip()
+    for pattern in _ANSWER_STRATEGY_PREFIXES:
+        updated = pattern.sub("", cleaned, count=1).lstrip()
+        if updated != cleaned and updated:
+            return updated, True
+    return text, False
+
+
+def _strip_forced_choice_followup(text: str, plan: SpeechPlan) -> tuple[str, bool]:
+    if plan.act not in _SHORT_ACTS:
+        return text, False
+    cleaned = text.rstrip()
+    match = _FORCED_CHOICE_SUFFIX_RE.search(cleaned)
+    if match is None or match.start() <= 0:
+        return text, False
+    prefix = cleaned[: match.start()].rstrip(" \n，,；;：:")
+    return (prefix, True) if prefix else (text, False)
+
+
 def _strip_user_echo(text: str, user_text: str) -> tuple[str, bool]:
     if not user_text.strip() or len(text) < _MIN_ECHO_TEXT_CHARS:
         return text, False
@@ -126,16 +190,42 @@ def _strip_user_echo(text: str, user_text: str) -> tuple[str, bool]:
     return (remainder, True) if remainder else (text, False)
 
 
+def _trim_to_boundary(text: str, hard_limit: int, *, minimum_boundary: int) -> str:
+    window = text[:hard_limit]
+    boundary = max(
+        window.rfind(mark) for mark in ("。", "！", "？", "!", "?", "\n")
+    )
+    if boundary >= minimum_boundary:
+        return window[: boundary + 1].rstrip()
+    return window.rstrip() + ("…" if len(text) > len(window) else "")
+
+
+def _trim_social_monologue(text: str, plan: SpeechPlan) -> tuple[str, bool]:
+    target = plan.style.soft_target_chars
+    if plan.act not in _SHORT_ACTS or not target:
+        return text, False
+    hard_limit = min(
+        max(int(target * _SOCIAL_MONOLOGUE_MULTIPLIER), _SOCIAL_MONOLOGUE_MIN_CHARS),
+        _SOCIAL_MONOLOGUE_MAX_CHARS,
+    )
+    if len(text) <= hard_limit:
+        return text, False
+    return (
+        _trim_to_boundary(text, hard_limit, minimum_boundary=max(16, target // 2)),
+        True,
+    )
+
+
 def _trim_short_scene(text: str, plan: SpeechPlan) -> tuple[str, bool]:
     target = plan.style.soft_target_chars
-    if plan.scene not in _SHORT_SCENES or not target or len(text) <= target * 2:
+    short_turn = plan.scene in _SHORT_SCENES or plan.act in _SHORT_ACTS
+    if not short_turn or not target or len(text) <= target * 2:
         return text, False
     hard_limit = min(max(target * 2, 48), 360)
-    window = text[:hard_limit]
-    boundary = max(window.rfind(mark) for mark in ("。", "！", "？", "!", "?", "\n"))
-    if boundary >= max(20, target // 2):
-        return window[: boundary + 1].rstrip(), True
-    return window.rstrip() + ("…" if len(text) > len(window) else ""), True
+    return (
+        _trim_to_boundary(text, hard_limit, minimum_boundary=max(20, target // 2)),
+        True,
+    )
 
 
 def _recent_repeat(text: str, recent_texts: Iterable[str]) -> float:
@@ -176,7 +266,7 @@ def _dedupe_issues(items: list[SpeechQualityIssue]) -> tuple[SpeechQualityIssue,
     return tuple(result)
 
 
-def _polish_text(  # noqa: C901
+def _polish_text(  # noqa: C901,PLR0912
     text: str,
     plan: SpeechPlan,
     *,
@@ -203,6 +293,20 @@ def _polish_text(  # noqa: C901
         if autofix:
             cleaned = candidate
 
+    strategy_detected = bool(_ANSWER_STRATEGY_META_RE.search(cleaned))
+    candidate, strategy_prefix = _strip_answer_strategy_prefix(cleaned)
+    if strategy_prefix or strategy_detected:
+        issues.append(
+            _issue(
+                "answer_strategy_meta",
+                "检测到解释“自己准备怎么回答”的元话语；群聊里应直接做出调整，而不是讲回答策略",
+                autofixed=autofix and strategy_prefix,
+                severity="warning",
+            )
+        )
+        if autofix and strategy_prefix:
+            cleaned = candidate
+
     candidate, echoed = _strip_user_echo(cleaned, user_text)
     if echoed:
         issues.append(
@@ -227,12 +331,41 @@ def _polish_text(  # noqa: C901
         if autofix:
             cleaned = candidate
 
+    forced_choice_detected = bool(
+        plan.act in _SHORT_ACTS and _FORCED_CHOICE_SUFFIX_RE.search(cleaned)
+    )
+    candidate, forced_choice = _strip_forced_choice_followup(cleaned, plan)
+    if forced_choice_detected:
+        issues.append(
+            _issue(
+                "forced_choice_followup",
+                "短社交回合末尾强行追加“是要……还是……”式二选一反问",
+                autofixed=autofix and forced_choice,
+                severity="warning",
+            )
+        )
+        if autofix and forced_choice:
+            cleaned = candidate
+
+    candidate, social_trimmed = _trim_social_monologue(cleaned, plan)
+    if social_trimmed:
+        issues.append(
+            _issue(
+                "social_monologue",
+                "repair/ping/ack 等短社交动作被展开成小作文",
+                autofixed=autofix,
+                severity="warning",
+            )
+        )
+        if autofix:
+            cleaned = candidate
+
     candidate, trimmed = _trim_short_scene(cleaned, plan)
     if trimmed:
         issues.append(
             _issue(
                 "scene_overlong",
-                "短发言场景明显超过 Persona 的软长度目标",
+                "短发言场景或短话语动作明显超过本轮软长度目标",
                 autofixed=autofix,
             )
         )
@@ -300,18 +433,21 @@ def finalize_speech_plan(
     last_index = text_indices[-1]
     first_text = _clean_lines(segments[first_index].get("text"))
     first_text, _ = _strip_boilerplate(first_text)
+    first_text, _ = _strip_answer_strategy_prefix(first_text)
     first_text, _ = _strip_user_echo(first_text, user_text)
     if first_text:
         segments[first_index]["text"] = first_text
 
     last_text = _clean_lines(segments[last_index].get("text"))
     last_text, _ = _strip_generic_cta(last_text)
+    last_text, _ = _strip_forced_choice_followup(last_text, plan)
     if last_text:
         segments[last_index]["text"] = last_text
 
     if len(text_indices) == 1:
         only = str(segments[first_index].get("text") or "")
-        trimmed, _ = _trim_short_scene(only, plan)
+        social_trimmed, _ = _trim_social_monologue(only, plan)
+        trimmed, _ = _trim_short_scene(social_trimmed, plan)
         if trimmed:
             segments[first_index]["text"] = trimmed
 
@@ -335,7 +471,9 @@ def finalize_speech_plan(
         )
         for item in issues
     ]
-    merged.extend(item for item in fixed_issues if item.code not in {old.code for old in merged})
+    merged.extend(
+        item for item in fixed_issues if item.code not in {old.code for old in merged}
+    )
     return plan.with_content(segments=tuple(segments), issues=_dedupe_issues(merged))
 
 

@@ -15,7 +15,9 @@ from .speech_act import (
     SPEECH_ACT_ACKNOWLEDGE,
     SPEECH_ACT_ANSWER,
     SPEECH_ACT_CLOSE,
+    SPEECH_ACT_PING_ACK,
     SPEECH_ACT_REACT,
+    SPEECH_ACT_REPAIR,
 )
 from .speech_quality import finalize_speech_plan
 from .turn_taking import TURN_PRESSURE_HIGH
@@ -28,6 +30,8 @@ _PASS_SCORE = 80
 _MIN_ANSWER_CHARS = 4
 _MAX_ACK_CHARS = 80
 _MAX_REACTION_CHARS = 48
+_MAX_REPAIR_CHARS = 88
+_MAX_PING_ACK_CHARS = 56
 _MAX_HIGH_PRESSURE_CHARS = 120
 
 _QUALITY_PENALTIES = {
@@ -35,6 +39,9 @@ _QUALITY_PENALTIES = {
     "boilerplate_opening": 15,
     "user_echo": 20,
     "generic_followup_cta": 15,
+    "answer_strategy_meta": 25,
+    "forced_choice_followup": 25,
+    "social_monologue": 25,
     "scene_overlong": 10,
     "recent_repeat": 25,
 }
@@ -102,7 +109,7 @@ def _deduct(
     return max(score - amount, 0)
 
 
-def score_speech_output(  # noqa: PLR0913
+def score_speech_output(  # noqa: C901,PLR0913
     text: str,
     *,
     scene: str = "conversation",
@@ -115,6 +122,7 @@ def score_speech_output(  # noqa: PLR0913
         text,
         scene=scene,
         style=SpeechStyle(soft_target_chars=_MAX_HIGH_PRESSURE_CHARS),
+        act=expected_act or "continue",
     )
     checked = finalize_speech_plan(
         plan,
@@ -136,6 +144,10 @@ def score_speech_output(  # noqa: PLR0913
         score = _deduct(score, 20, "act:ack_overexpanded", deductions)
     elif expected_act == SPEECH_ACT_REACT and len(visible) > _MAX_REACTION_CHARS:
         score = _deduct(score, 25, "act:reaction_overexpanded", deductions)
+    elif expected_act == SPEECH_ACT_REPAIR and len(visible) > _MAX_REPAIR_CHARS:
+        score = _deduct(score, 30, "act:repair_overexpanded", deductions)
+    elif expected_act == SPEECH_ACT_PING_ACK and len(visible) > _MAX_PING_ACK_CHARS:
+        score = _deduct(score, 30, "act:ping_ack_overexpanded", deductions)
     elif expected_act == SPEECH_ACT_CLOSE and visible.endswith(("?", "？")):
         score = _deduct(score, 30, "act:close_reopened", deductions)
 

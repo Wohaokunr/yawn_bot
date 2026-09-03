@@ -2,7 +2,7 @@
 """Unified user-visible speech plan shared by dialogue and proactive paths.
 
 A SpeechPlan describes *what the Agent intends to say* before OneBot-specific
-validation and delivery.  It deliberately contains no raw CQ/OneBot payload;
+validation and delivery. It deliberately contains no raw CQ/OneBot payload;
 `outbound.py` remains the only protocol boundary.
 """
 
@@ -68,6 +68,7 @@ class SpeechStyle:
     verbosity: int = 1
     expressiveness: int = 1
     soft_target_chars: int | None = None
+    response_complexity: str = "normal"
     allow_spontaneous_reaction: bool = True
 
     def as_dict(self) -> dict[str, Any]:
@@ -78,6 +79,7 @@ class SpeechStyle:
             "verbosity": self.verbosity,
             "expressiveness": self.expressiveness,
             "softTargetChars": self.soft_target_chars,
+            "responseComplexity": self.response_complexity,
             "allowSpontaneousReaction": self.allow_spontaneous_reaction,
         }
 
@@ -114,6 +116,7 @@ class SpeechPlan:
     turn_pressure: str = "low"
     topic: str | None = None
     topic_action: str = "continue"
+    interaction_plan: dict[str, Any] = field(default_factory=dict)
     issues: tuple[SpeechQualityIssue, ...] = ()
 
     @property
@@ -160,6 +163,7 @@ class SpeechPlan:
             "topic": self.topic,
             "topic_action": self.topic_action,
             "reason": self.reason,
+            "interaction_plan": dict(self.interaction_plan),
             "quality": [item.as_dict() for item in self.issues],
             "confidence": max(0.0, min(float(self.confidence), 1.0)),
         }
@@ -178,6 +182,7 @@ def speech_plan_from_text(
     turn_pressure: str = "low",
     topic: str | None = None,
     topic_action: str = "continue",
+    interaction_plan: dict[str, Any] | None = None,
 ) -> SpeechPlan:
     return SpeechPlan(
         scene=normalize_speech_scene(scene),
@@ -191,6 +196,7 @@ def speech_plan_from_text(
         turn_pressure=str(turn_pressure or "low").strip().lower() or "low",
         topic=str(topic or "").strip()[:240] or None,
         topic_action=str(topic_action or "continue").strip().lower() or "continue",
+        interaction_plan=dict(interaction_plan or {}),
     )
 
 
@@ -207,6 +213,7 @@ def speech_plan_from_segments(
     turn_pressure: str = "low",
     topic: str | None = None,
     topic_action: str = "continue",
+    interaction_plan: dict[str, Any] | None = None,
 ) -> SpeechPlan:
     safe_segments = tuple(dict(item) for item in segments if isinstance(item, dict))
     return SpeechPlan(
@@ -221,6 +228,7 @@ def speech_plan_from_segments(
         turn_pressure=str(turn_pressure or "low").strip().lower() or "low",
         topic=str(topic or "").strip()[:240] or None,
         topic_action=str(topic_action or "continue").strip().lower() or "continue",
+        interaction_plan=dict(interaction_plan or {}),
     )
 
 
