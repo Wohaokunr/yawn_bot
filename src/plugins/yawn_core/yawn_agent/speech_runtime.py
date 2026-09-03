@@ -132,6 +132,29 @@ def _interaction_plan_payload(
     }
 
 
+def _interaction_plan_summary(plan: dict[str, Any]) -> str:
+    if not plan:
+        return ""
+    why = plan.get("why")
+    reasons = why if isinstance(why, dict) else {}
+    kind = str(plan.get("kind") or "unknown")
+    primary = str(plan.get("primary") or "").strip()
+    task = str(reasons.get("task") or "").strip()
+    media = str(reasons.get("media") or "").strip()
+    length = str(reasons.get("length") or "").strip()
+    head = f"Interaction Plan：kind={kind}"
+    if primary:
+        head += f"；primary={primary[:120]}"
+    parts = [head]
+    if task:
+        parts.append(f"任务：{task}")
+    if media:
+        parts.append(f"媒体：{media}")
+    if length:
+        parts.append(f"长度：{length}")
+    return " ".join(parts)
+
+
 def build_runtime_speech_plan(
     *,
     text: object = "",
@@ -260,6 +283,14 @@ def speech_simulation_payload(
         autofix=not preview_only,
     )
     payload = resolved.trace_payload()
+    interaction_summary = _interaction_plan_summary(resolved.interaction_plan)
+    existing_reason = str(payload.get("reason") or "").strip()
+    if interaction_summary:
+        payload["reason"] = (
+            f"{existing_reason}；{interaction_summary}"
+            if existing_reason
+            else interaction_summary
+        )
     payload.update(
         {
             "status": "policy_only" if preview_only else "final",
