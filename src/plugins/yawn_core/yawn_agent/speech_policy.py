@@ -1,5 +1,5 @@
 # ruff: noqa: E501
-"""Scene and Persona policy for Agent speech.
+"""Scene, interaction and Persona policy for Agent speech.
 
 This module is intentionally deterministic and zero-AI-cost. It tells the
 model how to express an already-authorized turn; it never decides permissions
@@ -8,8 +8,10 @@ or executes OneBot actions.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
+from .context_history import EffectiveTurn, effective_turn_from_context
 from .persona import persona_trait_label
 from .speech import (
     SPEECH_SCENE_ACTIVE_INTERJECT,
@@ -24,7 +26,17 @@ from .speech import (
     SpeechStyle,
     normalize_speech_scene,
 )
-from .speech_act import plan_speech_act, speech_act_instruction
+from .speech_act import (
+    SPEECH_ACT_ACKNOWLEDGE,
+    SPEECH_ACT_ANSWER,
+    SPEECH_ACT_CLOSE,
+    SPEECH_ACT_PING_ACK,
+    SPEECH_ACT_REACT,
+    SPEECH_ACT_REPAIR,
+    SPEECH_ACT_TOOL_REPORT,
+    plan_speech_act,
+    speech_act_instruction,
+)
 from .speech_native import native_expression_instruction, plan_native_expression
 from .turn_taking import plan_turn_taking, turn_taking_instruction
 
@@ -33,9 +45,13 @@ if TYPE_CHECKING:
 
 _REACTION_AUTO_MIN = 2
 
+RESPONSE_COMPLEXITY_SIMPLE = "simple"
+RESPONSE_COMPLEXITY_NORMAL = "normal"
+RESPONSE_COMPLEXITY_COMPLEX = "complex"
+
 _SCENE_RULES: dict[str, str] = {
     SPEECH_SCENE_DIRECT_REPLY: (
-        "这是明确呼叫。先完整解决当前问题；角色再安静也不能省掉必要事实、步骤或风险说明。"
+        "这是明确呼叫。先完成当前话语动作：answer 才需要完整解决问题；repair/ping_ack 要以短互动为先。"
         "简单问题直接答，复杂问题可以展开，但不要先复述问题。"
     ),
     SPEECH_SCENE_REPLY_THREAD: (
@@ -70,11 +86,10 @@ _SCENE_RULES: dict[str, str] = {
     ),
 }
 
-_SOFT_TARGETS: dict[str, tuple[int | None, ...]] = {
-    # 明确回答只给软目标，不做硬截断；复杂问题必须允许完整回答。
-    SPEECH_SCENE_DIRECT_REPLY: (160, 260, 420, 700, 1000),
-    SPEECH_SCENE_REPLY_THREAD: (140, 240, 380, 620, 900),
-    SPEECH_SCENE_CONVERSATION: (100, 180, 300, 480, 720),
+_SCENE_CONTINUE_TARGETS: dict[str, tuple[int | None, ...]] = {
+    SPEECH_SCENE_DIRECT_REPLY: (100, 180, 300, 480, 720),
+    SPEECH_SCENE_REPLY_THREAD: (90, 160, 260, 420, 640),
+    SPEECH_SCENE_CONVERSATION: (70, 120, 200, 320, 480),
     SPEECH_SCENE_ACTIVE_INTERJECT: (36, 56, 80, 120, 160),
     SPEECH_SCENE_WARMUP: (40, 64, 90, 130, 180),
     SPEECH_SCENE_FOLLOWUP: (40, 68, 100, 150, 200),
@@ -82,6 +97,26 @@ _SOFT_TARGETS: dict[str, tuple[int | None, ...]] = {
     SPEECH_SCENE_REACTION: (12, 20, 32, 48, 64),
     SPEECH_SCENE_FALLBACK: (50, 90, 140, 220, 300),
 }
+
+_ACT_TARGETS: dict[str, tuple[int | None, ...]] = {
+    SPEECH_ACT_PING_ACK: (18, 30, 40, 55, 70),
+    SPEECH_ACT_REPAIR: (35, 55, 80, 110, 150),
+    SPEECH_ACT_ACKNOWLEDGE: (18, 28, 42, 60, 80),
+    SPEECH_ACT_REACT: (12, 20, 32, 48, 64),
+    SPEECH_ACT_CLOSE: (18, 30, 50, 70, 100),
+    SPEECH_ACT_TOOL_REPORT: (50, 90, 140, 220, 320),
+}
+_ANSWER_TARGETS: dict[str, tuple[int | None, ...]] = {
+    RESPONSE_COMPLEXITY_SIMPLE: (60, 100, 160, 240, 360),
+    RESPONSE_COMPLEXITY_NORMAL: (100, 180, 300, 480, 720),
+    RESPONSE_COMPLEXITY_COMPLEX: (220, 420, 700, 1000, 1400),
+}
+_COMPLEX_HINT_RE = re.compile(
+    r"(?:仔细|深入|详细|全面|系统|研究|分析|原因|根因|方案|计划|设计|架构|比较|对比|"
+    r"证明|推导|论证|步骤|流程|实现|修复|排查|审计|优化|重构|为什么.+为什么)",
+    re.IGNORECASE,
+)
+_LIST_HINT_RE = re.compile(r"(?:\n|[；;]|(?:^|\s)[一二三四五六七八九十\d]+[.、)])")
 
 
 def _turn_payload(current_turn: CurrentTurn | dict[str, Any] | None) -> dict[str, Any]:
@@ -145,10 +180,76 @@ def _persona_level(persona: dict[str, str], field: str, fallback: int) -> int:
     return fallback
 
 
+def classify_response_complexity(
+    current_turn: CurrentTurn | dict[str, Any] | None,
+    *,
+    act: str,
+    effective_turn: EffectiveTurn | None = None,
+) -> str:
+    """Estimate how much information the current conversational job actually needs."""
+
+    if act in {
+        SPEECH_ACT_PING_ACK,
+        SPEECH_ACT_REPAIR,
+        SPEECH_ACT_ACKNOWLEDGE,
+        SPEECH_ACT_REACT,
+        SPEECH_ACT_CLOSE,
+    }:
+        return RESPONSE_COMPLEXITY_SIMPLE
+    if act == SPEECH_ACT_TOOL_REPORT:
+        return RESPONSE_COMPLEXITY_NORMAL
+
+    payload = _turn_payload(current_turn)
+    text = (
+        effective_turn.primary
+        if effective_turn is not None and effective_turn.primary
+        else str(payload.get("content") or "")
+    )
+    compact = " ".join(text.split())
+    if not compact:
+        return RESPONSE_COMPLEXITY_SIMPLE
+
+    score = 0
+    if len(compact) >= 80:
+        score += 2
+    elif len(compact) >= 40:
+        score += 1
+    if _COMPLEX_HINT_RE.search(compact):
+        score += 2
+    if len(_LIST_HINT_RE.findall(text)) >= 2:
+        score += 1
+    if compact.count("？") + compact.count("?") >= 2:
+        score += 1
+
+    if score >= 2:
+        return RESPONSE_COMPLEXITY_COMPLEX
+    if act == SPEECH_ACT_ANSWER and len(compact) <= 24:
+        return RESPONSE_COMPLEXITY_SIMPLE
+    return RESPONSE_COMPLEXITY_NORMAL
+
+
+def _soft_target_chars(
+    *,
+    scene: str,
+    act: str,
+    complexity: str,
+    verbosity: int,
+) -> int | None:
+    index = max(0, min(4, int(verbosity)))
+    if act == SPEECH_ACT_ANSWER:
+        targets = _ANSWER_TARGETS.get(complexity, _ANSWER_TARGETS[RESPONSE_COMPLEXITY_NORMAL])
+        return targets[index]
+    if act in _ACT_TARGETS:
+        return _ACT_TARGETS[act][index]
+    return _SCENE_CONTINUE_TARGETS[normalize_speech_scene(scene)][index]
+
+
 def resolve_speech_style(
     persona: dict[str, str] | None,
     *,
     scene: str,
+    act: str = "continue",
+    complexity: str = RESPONSE_COMPLEXITY_NORMAL,
 ) -> SpeechStyle:
     resolved = persona or {}
     normalized_scene = normalize_speech_scene(scene)
@@ -158,16 +259,36 @@ def resolve_speech_style(
     verbosity = _persona_level(resolved, "verbosity", 1)
     expressiveness = _persona_level(resolved, "expressiveness", 1)
     reaction = _persona_level(resolved, "reaction_tendency", 2)
-    targets = _SOFT_TARGETS[normalized_scene]
     return SpeechStyle(
         warmth=warmth,
         humor=humor,
         directness=directness,
         verbosity=verbosity,
         expressiveness=expressiveness,
-        soft_target_chars=targets[verbosity],
+        soft_target_chars=_soft_target_chars(
+            scene=normalized_scene,
+            act=act,
+            complexity=complexity,
+            verbosity=verbosity,
+        ),
+        response_complexity=complexity,
         allow_spontaneous_reaction=reaction >= _REACTION_AUTO_MIN,
     )
+
+
+def _interaction_instruction(effective: EffectiveTurn) -> str:
+    parts = [f"Effective Turn 类型={effective.interaction_kind}。"]
+    if effective.support:
+        parts.append("support 只用于理解 primary，不是第二个待回答任务。")
+    if effective.resumed_task:
+        parts.append("本轮已明确恢复一个未完成任务，可以继续完成 resumed_task。")
+    elif effective.trigger_only:
+        parts.append("本轮没有 resumed_task；不得因为历史里曾有问题就自行重新执行旧任务。")
+    if effective.media_binding:
+        parts.append("media_binding=true：仅本轮允许按媒体投影层恢复匹配的历史媒体。")
+    else:
+        parts.append("media_binding=false：不要把历史图片/截图重新解释成当前任务。")
+    return "".join(parts)
 
 
 def build_speech_instruction(
@@ -178,37 +299,54 @@ def build_speech_instruction(
     context: dict[str, Any] | None = None,
 ) -> str:
     scene = resolve_speech_scene(current_turn, source=source)
-    style = resolve_speech_style(persona, scene=scene)
+    effective = effective_turn_from_context(current_turn, context)
+    act_plan = plan_speech_act(current_turn, scene=scene, effective_turn=effective)
+    complexity = classify_response_complexity(
+        current_turn,
+        act=act_plan.act,
+        effective_turn=effective,
+    )
+    style = resolve_speech_style(
+        persona,
+        scene=scene,
+        act=act_plan.act,
+        complexity=complexity,
+    )
     target = (
-        f"本场景建议控制在约 {style.soft_target_chars} 字内；复杂问题以完整正确为先，字数只是软目标。"
+        f"本轮按话语动作与信息复杂度建议控制在约 {style.soft_target_chars} 字内；复杂问题以完整正确为先，字数只是软目标。"
         if style.soft_target_chars
-        else "按问题复杂度决定长度。"
+        else "按话语动作与问题复杂度决定长度。"
     )
     style_rule = (
         f"角色表达参数：温暖度 {style.warmth}/4、幽默 {style.humor}/4、"
         f"直接度 {style.directness}/4、详略 {style.verbosity}/4、"
-        f"表现力 {style.expressiveness}/4。{target}"
+        f"表现力 {style.expressiveness}/4；响应复杂度={complexity}。{target}"
     )
     quality_rule = (
         "发言质量：不要用“好的/当然可以/没问题/我来帮你”作为无意义开场；"
         "不要先复述用户刚说的话；不要用“还需要我帮你吗/如果还有问题可以继续问”之类"
         "通用结尾强行续聊。只有真正缺少关键信息时才反问。"
     )
-    act_rule = speech_act_instruction(plan_speech_act(current_turn, scene=scene))
+    act_rule = speech_act_instruction(act_plan)
     turn_rule = turn_taking_instruction(
         plan_turn_taking(current_turn, scene=scene, context=context)
     )
     native_rule = native_expression_instruction(
         plan_native_expression(current_turn, scene=scene, style=style)
     )
+    interaction_rule = _interaction_instruction(effective)
     return (
-        f"发言场景={scene}。{_SCENE_RULES[scene]}{act_rule}{turn_rule}"
+        f"发言场景={scene}。{_SCENE_RULES[scene]}{interaction_rule}{act_rule}{turn_rule}"
         f"{style_rule}{quality_rule}{native_rule}"
     )
 
 
 __all__ = [
+    "RESPONSE_COMPLEXITY_COMPLEX",
+    "RESPONSE_COMPLEXITY_NORMAL",
+    "RESPONSE_COMPLEXITY_SIMPLE",
     "build_speech_instruction",
+    "classify_response_complexity",
     "resolve_speech_scene",
     "resolve_speech_style",
 ]
