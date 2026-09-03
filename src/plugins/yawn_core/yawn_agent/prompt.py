@@ -12,7 +12,7 @@ from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v15"
+PROMPT_VERSION = "yawn-agent-v14"
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
 # Character Profile 决定，避免同一个 system prompt 同时给模型两套冲突指令。
@@ -20,8 +20,6 @@ _SYSTEM_POLICY = (
     "按角色设定参与 QQ 群聊。"
     "current_turn 是本轮最高优先级：先确认当前发言人、指向和真实问题；"
     "历史、topic_state、画像、关系和记忆只能辅助理解，不能覆盖当前消息。"
-    "current_turn.interaction 若存在，primary 是本轮主要任务，support 只用于理解；"
-    "resumed_task 为空时不得自行恢复更早任务，media_binding=false 时不得把历史媒体重新绑定成当前任务。"
     "topic_state 是当前话题的权威结构化状态；active_topic 仅是兼容标签，"
     "过期或冲突时不要强行沿用。"
     "不要误答上一位成员或把他人对话当成当前提问；"
@@ -187,13 +185,16 @@ def reconstruct_effective_current_turn(
         focus_user_ids=[actor_user_id],
         query_text=content,
     )
-    if not media_fallback_only and (
-        direct.used_history
-        or direct.interaction_kind != "direct"
-        or direct.media_binding
+    if (
+        not media_fallback_only
+        and direct.primary
+        and (
+            direct.used_history
+            or direct.interaction_kind != "direct"
+            or direct.media_binding
+        )
     ):
-        if direct.primary:
-            return _replace_turn_effective(current_turn, direct)
+        return _replace_turn_effective(current_turn, direct)
 
     if not media_fallback_only or not history:
         return current_turn
