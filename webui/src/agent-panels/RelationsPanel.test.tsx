@@ -9,7 +9,23 @@ class ResizeObserverMock {
   disconnect(): void {}
 }
 
-beforeAll(() => vi.stubGlobal("ResizeObserver", ResizeObserverMock));
+function matchMediaMock(query: string): MediaQueryList {
+  return {
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(() => false),
+  };
+}
+
+beforeAll(() => {
+  vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+  vi.stubGlobal("matchMedia", matchMediaMock);
+});
 afterAll(() => vi.unstubAllGlobals());
 
 const apiMock = vi.hoisted(() => vi.fn());
