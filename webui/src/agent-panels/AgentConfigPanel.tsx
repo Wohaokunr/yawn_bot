@@ -1,35 +1,16 @@
-import {
-  Alert, App as AntApp, AutoComplete, Button, Card, Col, Descriptions, Drawer, Empty,
-  Form, Input, InputNumber, List, Popconfirm, Progress, Row, Segmented, Select, Space,
-  Spin, Statistic, Switch, Table, Tag, Timeline, Typography,
-} from "antd";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { AgentAuditTable } from "../agent-audit-table";
-import { TraceCompareView } from "../agent-debug/TraceWorkspace";
+import { App as AntApp, Button, Form, InputNumber, Segmented, Select, Spin, Switch } from "antd";
+import { useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
-  useApiQuery, useUnsavedChanges,
+  DraftDiffModal,
+  QueryErrorAlert,
+  SaveStatus,
+  ServerDraftUpdateAlert,
+  useApiQuery,
+  useDraftSafeServerData,
+  useUnsavedChanges,
 } from "../shared";
-import type {
-  AgentAudit, AgentConfig, AgentDebugResponse, AgentMemoryStatus, AgentMessageItem,
-  AgentRelationGraph, AgentRelationItem, MemoryItem, MemorySubjectItem, Persona,
-  PersonaProfile, PrivacyItem,
-} from "../types";
-import {
-  MEMORY_ROLE_OPTIONS, MEMORY_TYPE_META, PERSONA_SOCIAL_TRAITS, PERSONA_STYLE_TRAITS,
-  PERSONA_TRAIT_META, PERSONA_TRIAL_SCENARIOS, PROFILE_KEY_META, PROFILE_KEY_META as _PROFILE_KEY_META,
-  RELATION_SOURCE_META, RELATION_TYPE_PRESETS, memberDisplayName, mergePersonaPreset,
-  personaBehaviorPreview, personaDraftSummary, personaEmotionExpressionPreview,
-  profileKeyLabel, memoryTypeLabel,
-} from "../agent-meta";
-
-const { Text, Paragraph } = Typography;
-const LazyRelationGraphView = lazy(() =>
-  import("../relation-graph").then(({ RelationGraphView }) => ({ default: RelationGraphView })),
-);
+import type { AgentConfig } from "../types";
 
 type ParticipationIntensity = "restrained" | "balanced" | "active" | "custom";
 
@@ -47,26 +28,49 @@ function participationIntensity(warmup: number, interject: number): Participatio
 }
 
 export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
-  const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load, { resources: ["agent_config"] });
+  const { message } = AntApp.useApp();
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const baseVersion = useRef<string | undefined>(undefined);
+
+  const query = useApiQuery({
+    queryKey: ["agent-config", groupId],
+    fetcher: (signal) => api<AgentConfig>(`/agent/groups/${groupId}/config`, { signal }).then((r) => r.data),
+    invalidation: { resources: ["agent_config"], scope: { groupId } },
+  });
   const watchedProactiveEnabled = Form.useWatch("proactiveEnabled", form) as boolean | undefined;
   const watchedWarmupProbability = Form.useWatch("proactiveProbability", form) as number | undefined;
   const watchedInterjectProbability = Form.useWatch("proactiveActiveProbability", form) as number | undefined;
   useUnsavedChanges(dirty);
-  useEffect(() => { if (query.data) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data]);
+
+  const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
+    form.setFieldsValue(value);
+    baseVersion.current = value.version;
+    setDirty(false);
+  });
+
   const save = async (values: Record<string, unknown>) => {
     setSaving(true);
     try {
-      const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, { method: "PATCH", body: JSON.stringify({ ...values, version: query.data?.version }) });
-      form.setFieldsValue(result.data);
-      setDirty(false);
+      const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...values, version: baseVersion.current }),
+      });
+      serverState.acceptServerData(result.data);
       message.success("Agent 配置已保存");
       query.reload();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);
-    } finally { setSaving(false); }
+      if (error instanceof ApiError && error.status === 409) {
+        message.warning(`${error.message}；你的草稿仍然保留，请比较服务器新版本后再决定。`);
+        query.reload();
+      } else message.error((error as Error).message);
+    } finally {
+      setSaving(false);
+    }
   };
+
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
   const intensity = participationIntensity(
@@ -82,6 +86,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
     });
     setDirty(true);
   };
+
   return (
     <Form
       form={form}
@@ -91,6 +96,20 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
       className="agent-config-form"
     >
       <div className="agent-config-page agent-studio-page agent-studio-runtime">
+        {serverState.remoteUpdate && (
+          <ServerDraftUpdateAlert
+            onKeep={serverState.keepDraft}
+            onCompare={() => setDiffOpen(true)}
+            onReload={serverState.reloadRemote}
+          />
+        )}
+        <DraftDiffModal
+          open={diffOpen}
+          draft={form.getFieldsValue(true)}
+          server={serverState.remoteUpdate}
+          onClose={() => setDiffOpen(false)}
+        />
+
         <section className="agent-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="agent-config-hero-copy">
             <div className="agent-config-eyebrow">GROUP AGENT</div>
