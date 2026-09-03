@@ -42,8 +42,9 @@ from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
+    execution_trace_by_id,
     finish_execution_trace,
-    recent_execution_traces,
+    recent_execution_trace_summaries,
     trace_event,
 )
 from ..yawn_agent.memory import (
@@ -198,9 +199,11 @@ async def get_agent_capabilities(
 
 @router.get("/agent/groups/{group_id}/execution-traces")
 async def get_agent_execution_traces(
-    group_id: int, _session: AdminReadSession
+    group_id: int,
+    _session: AdminReadSession,
+    status: str | None = Query(default=None, max_length=24),
 ) -> dict[str, Any]:
-    """返回当前进程内最近的真实 Agent 执行时间线。
+    """返回当前进程内最近真实 Agent 执行的轻量摘要。
 
     Trace 是短生命周期诊断缓冲，不从数据库重建，也不携带原始媒体 URL、
     本机路径或裸 OneBot payload。
@@ -208,7 +211,21 @@ async def get_agent_execution_traces(
 
     async with get_session() as db:
         await require_group(db, group_id)
-    return ok(recent_execution_traces(group_id))
+    return ok(recent_execution_trace_summaries(group_id, status=status))
+
+
+@router.get("/agent/groups/{group_id}/execution-traces/{trace_id}")
+async def get_agent_execution_trace(
+    group_id: int, trace_id: str, _session: AdminReadSession
+) -> dict[str, Any]:
+    """返回一条 Trace 的完整事件详情。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+    trace = execution_trace_by_id(group_id, trace_id)
+    if trace is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "执行 Trace 不存在")
+    return ok(trace)
 
 
 @router.post("/agent/groups/{group_id}/capabilities/refresh")
