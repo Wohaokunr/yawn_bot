@@ -41,21 +41,74 @@ _TRIGGER_MARKUP_RE = re.compile(
     r"(?:@[\w\-\u4e00-\u9fff]+|\[(?:at|提及|@)[^\]]*\])",
     re.IGNORECASE,
 )
+_PING_QUERY_RE = re.compile(
+    r"(?:怎么(?:还)?不说话|咋(?:还)?不说话|怎么没(?:回|回复|反应)|为什么不回|"
+    r"在吗|人呢|说话[呀啊嘛]?|回话|理我|没反应|掉线了|还在吗|喂+)",
+    re.IGNORECASE,
+)
+_REPAIR_QUERY_RE = re.compile(
+    r"(?:AI味|ai味|机器人味|太像(?:个)?AI|像机器人|别这么|不要这么|"
+    r"说人话|自然点|自然一点|太生硬|太官方|太模板|太客套|别复述|不要复述|"
+    r"别反问|不要反问|理解错|你理解错|不是这个意思|答非所问|跑题|"
+    r"你刚才.{0,24}(?:不对|错了|说错|没懂|没理解))",
+    re.IGNORECASE,
+)
+_TASK_QUERY_RE = re.compile(
+    r"(?:[?？]|怎么|为什么|为何|如何|什么|哪个|哪种|能不能|可不可以|可以帮|"
+    r"帮我|帮忙|看看|分析|解释|告诉我|给我|继续|接着|再说|评价|总结|对比|"
+    r"证明|推导|写一下|做一下|修复|解决|排查|设计|制定)",
+    re.IGNORECASE,
+)
+
+INTERACTION_DIRECT = "direct"
+INTERACTION_RESUME_TASK = "resume_task"
+INTERACTION_REPAIR = "repair"
+INTERACTION_REPAIR_PING = "repair_ping"
+INTERACTION_PING_ACK = "ping_ack"
 
 
 @dataclass(frozen=True, slots=True)
 class EffectiveTurn:
-    """由当前触发与紧邻的同一发言人消息重建出的语义回合。"""
+    """由当前触发与近期同一发言人消息重建出的语义回合。
 
-    text: str
+    ``primary`` 是本轮真正要回应的内容；``support`` 只帮助理解 primary，绝不能
+    与 primary 粗暴拼成一个新问题。``resumed_task`` 仅在纯触发确实恢复了一个
+    未完成任务时存在；``media_binding`` 明确决定是否允许重新绑定历史媒体。
+    """
+
+    primary: str
+    support: tuple[str, ...] = ()
+    resumed_task: str | None = None
+    media_binding: bool = False
+    interaction_kind: str = INTERACTION_DIRECT
     message_ids: tuple[int, ...] = ()
     media_message_ids: tuple[int, ...] = ()
     trigger_only: bool = False
     used_history: bool = False
 
     @property
+    def text(self) -> str:
+        """兼容旧调用；语义文本只返回 primary，不再拼接 support。"""
+
+        return self.primary
+
+    @property
     def media_requested(self) -> bool:
-        return query_requests_media(self.text)
+        """兼容旧调用；历史媒体是否可恢复由 media_binding 单一决定。"""
+
+        return self.media_binding
+
+    def interaction_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.interaction_kind,
+            "primary": self.primary,
+            "media_binding": self.media_binding,
+        }
+        if self.support:
+            payload["support"] = list(self.support)
+        if self.resumed_task:
+            payload["resumed_task"] = self.resumed_task
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,27 +164,84 @@ def _latest_actor_id(
     return None
 
 
+def _semantic_history_text(item: dict[str, Any]) -> str:
+    text = " ".join(str(item.get("text") or "").split())
+    return "" if text in LOW_INFO_HISTORY_TEXTS else text
+
+
+def _looks_like_ping(text: str) -> bool:
+    compact = " ".join(str(text or "").split()).strip()
+    return bool(compact and _PING_QUERY_RE.search(compact))
+
+
+def _looks_like_repair(text: str) -> bool:
+    compact = " ".join(str(text or "").split()).strip()
+    return bool(compact and _REPAIR_QUERY_RE.search(compact))
+
+
+def _looks_like_task(text: str) -> bool:
+    compact = " ".join(str(text or "").split()).strip()
+    return bool(compact and _TASK_QUERY_RE.search(compact))
+
+
+def _interaction_kind(
+    primary: str,
+    support: Sequence[str],
+    *,
+    trigger_only: bool,
+    media_binding: bool,
+) -> str:
+    if _looks_like_ping(primary):
+        if any(_looks_like_repair(item) for item in support):
+            return INTERACTION_REPAIR_PING
+        return INTERACTION_PING_ACK
+    if _looks_like_repair(primary):
+        return INTERACTION_REPAIR
+    if trigger_only:
+        if media_binding or _looks_like_task(primary):
+            return INTERACTION_RESUME_TASK
+        return INTERACTION_PING_ACK
+    return INTERACTION_DIRECT
+
+
 def effective_turn_query(
     messages: Sequence[dict[str, Any]],
     *,
     focus_user_ids: Sequence[int] | None = None,
     query_text: str | None = None,
 ) -> EffectiveTurn:
-    """把“图片 → 问题 → @机器人”重建成一个语义回合。
+    """把 QQ 的“前置内容 → 单独触发”恢复成有角色分工的语义回合。
 
-    只在当前触发本身没有语义正文时回溯；回溯严格限制为最近两分钟、连续、同一
-    发言人且最多四条，遇到机器人或其他群成员立即停止，避免把群里别人的图片误
-    绑定到当前用户。
+    纯 @ 不再把多条历史文本拼成一个问题。恢复时只读取当前 Bot 发言之后、连续、
+    同一发言人的近期消息；遇到 Bot 或其他真人立即停止。最后一条有效文本成为
+    ``primary``，前文只在确有必要时进入 ``support``。这样“图片问题”和“催促/纠正
+    Bot”不会被混成同一个任务，也不会跨过 Bot 已经回复过的边界重新执行旧任务。
     """
 
     query = " ".join(str(query_text or "").split())
     trigger_only = _trigger_only_query(query)
     if not trigger_only:
-        return EffectiveTurn(text=query, trigger_only=False)
+        media_binding = query_requests_media(query)
+        kind = _interaction_kind(
+            query,
+            (),
+            trigger_only=False,
+            media_binding=media_binding,
+        )
+        return EffectiveTurn(
+            primary=query,
+            media_binding=media_binding,
+            interaction_kind=kind,
+            trigger_only=False,
+        )
 
     actor_user_id = _latest_actor_id(messages, focus_user_ids)
     if actor_user_id is None:
-        return EffectiveTurn(text=query, trigger_only=True)
+        return EffectiveTurn(
+            primary=query,
+            interaction_kind=INTERACTION_PING_ACK,
+            trigger_only=True,
+        )
 
     collected: list[dict[str, Any]] = []
     continuation_trigger = query == "[用户仅@机器人，没有附加正文]"
@@ -148,10 +258,6 @@ def effective_turn_query(
         if _minutes_ago(item) > max_age:
             break
         if str(item.get("role") or "member") == "bot":
-            # A bare @ commonly means “continue what we were just discussing”.
-            # Skip recent bot replies, but never cross another human speaker.
-            if continuation_trigger:
-                continue
             break
         user_id = _optional_positive_int(item.get("user_id"))
         if user_id != actor_user_id:
@@ -159,29 +265,88 @@ def effective_turn_query(
         collected.append(item)
 
     if not collected:
-        return EffectiveTurn(text=query, trigger_only=True)
+        return EffectiveTurn(
+            primary=query,
+            interaction_kind=INTERACTION_PING_ACK,
+            trigger_only=True,
+        )
 
     collected.reverse()
-    parts: list[str] = []
     message_ids: list[int] = []
     media_message_ids: list[int] = []
+    semantic_texts: list[str] = []
     for item in collected:
         message_id = _optional_positive_int(item.get("message_id"))
         if message_id is not None:
             message_ids.append(message_id)
             if item.get("media_types"):
                 media_message_ids.append(message_id)
-        text = " ".join(str(item.get("text") or "").split())
-        if text and text not in LOW_INFO_HISTORY_TEXTS:
-            parts.append(text)
+        text = _semantic_history_text(item)
+        if text:
+            semantic_texts.append(text)
 
-    effective_text = "\n".join(parts[-3:]).strip() or query
+    primary = semantic_texts[-1] if semantic_texts else query
+    previous_texts = semantic_texts[:-1]
+    support: tuple[str, ...] = ()
+    if _looks_like_ping(primary):
+        repair_support = [item for item in previous_texts if _looks_like_repair(item)]
+        support = tuple(repair_support[-1:])
+    elif len(primary) <= 8 and previous_texts and not _looks_like_task(primary):
+        support = tuple(previous_texts[-1:])
+
+    media_binding = query_requests_media(primary)
+    kind = _interaction_kind(
+        primary,
+        support,
+        trigger_only=True,
+        media_binding=media_binding,
+    )
+    resumed_task = primary if kind == INTERACTION_RESUME_TASK else None
+    used_history = bool(primary and primary != query) or bool(support)
     return EffectiveTurn(
-        text=effective_text,
+        primary=primary,
+        support=support,
+        resumed_task=resumed_task,
+        media_binding=media_binding,
+        interaction_kind=kind,
         message_ids=tuple(message_ids),
         media_message_ids=tuple(media_message_ids),
         trigger_only=True,
-        used_history=bool(effective_text and effective_text != query),
+        used_history=used_history,
+    )
+
+
+def effective_turn_from_context(
+    current_turn: object,
+    context: dict[str, Any] | None,
+) -> EffectiveTurn:
+    """用与 Prompt/媒体选择相同的规则给 Speech 层恢复语义回合。"""
+
+    payload: dict[str, Any] = {}
+    if isinstance(current_turn, dict):
+        payload = dict(current_turn)
+    else:
+        prompt_dict = getattr(current_turn, "prompt_dict", None)
+        if callable(prompt_dict):
+            value = prompt_dict()
+            if isinstance(value, dict):
+                payload = dict(value)
+        if not payload:
+            as_dict = getattr(current_turn, "as_dict", None)
+            if callable(as_dict):
+                value = as_dict()
+                if isinstance(value, dict):
+                    payload = dict(value)
+    actor_user_id = _optional_positive_int(payload.get("user_id"))
+    history = [
+        dict(item)
+        for item in list((context or {}).get("messages") or [])
+        if isinstance(item, dict)
+    ]
+    return effective_turn_query(
+        history,
+        focus_user_ids=[actor_user_id] if actor_user_id else None,
+        query_text=str(payload.get("content") or ""),
     )
 
 
@@ -404,11 +569,14 @@ def _trace_effective_turn(
             },
             output={
                 "used_history": effective.used_history,
-                "effective_query_preview": effective.text[:320],
+                "primary": effective.primary[:320],
+                "support": [item[:240] for item in effective.support],
+                "resumed_task": (effective.resumed_task or "")[:320] or None,
+                "media_binding": effective.media_binding,
+                "interaction_kind": effective.interaction_kind,
                 "turn_message_ids": list(effective.message_ids),
                 "media_candidate_ids": list(effective.media_message_ids),
                 "selected_media_ids": list(selected_media_ids),
-                "media_requested": effective.media_requested,
             },
         )
     except Exception:
@@ -436,9 +604,9 @@ def select_context_messages(
         focus_user_ids=focus_user_ids,
         query_text=query_text,
     )
-    query = effective.text
+    query = effective.primary
     query_tokens = extract_bigrams(query[:1000]) if query else set()
-    media_query = effective.media_requested
+    media_query = effective.media_binding
     effective_turn_ids = set(effective.message_ids)
     effective_media_ids = set(effective.media_message_ids)
     selected: set[int] = set()
@@ -538,7 +706,7 @@ def select_context_messages(
             reason, score = reasons.get(index, ("selected", None))
             if key in kept_key_set:
                 trace.append(_trace_row(item, selected=True, reason=reason, score=score))
-                if item.get("media_types") and reason in {"effective_turn_media", "media_reference", "recent_cluster", "effective_turn"}:
+                if media_query and item.get("media_types") and reason in {"effective_turn_media", "media_reference", "recent_cluster", "effective_turn"}:
                     message_id = _optional_positive_int(item.get("message_id"))
                     if message_id is not None and message_id not in selected_media_ids:
                         selected_media_ids.append(message_id)
@@ -586,7 +754,13 @@ def select_context_messages_only(
 __all__ = [
     "ContextSelection",
     "EffectiveTurn",
+    "INTERACTION_DIRECT",
+    "INTERACTION_PING_ACK",
+    "INTERACTION_REPAIR",
+    "INTERACTION_REPAIR_PING",
+    "INTERACTION_RESUME_TASK",
     "bot_message_meta",
+    "effective_turn_from_context",
     "effective_turn_query",
     "history_message_meta",
     "history_message_payload",
