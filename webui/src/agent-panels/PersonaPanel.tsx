@@ -59,7 +59,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       mode: value.enabled ? "custom" : "inherit",
       profile: value.profile,
     });
-    baseVersion.current = value.version;
+    baseVersion.current = value.version ?? undefined;
     setDirty(false);
     setTrialResult(null);
     setTrialError(null);
