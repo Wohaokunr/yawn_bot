@@ -23,6 +23,11 @@ interface RelationSummary {
   lastSeenAt: string | null;
 }
 
+type RelationListItem = AgentRelationItem & {
+  subjectDisplayName?: string;
+  objectDisplayName?: string;
+};
+
 function RelationGraphPane({
   groupId,
   typeFilter,
@@ -99,7 +104,7 @@ export function RelationsPanel({
 
   const query = useApiQuery({
     queryKey: ["agent-relations", groupId, page, search, typeFilter],
-    fetcher: (signal) => api<AgentRelationItem[]>(
+    fetcher: (signal) => api<RelationListItem[]>(
       `/agent/groups/${groupId}/relations?page=${page}&pageSize=20&search=${encodeURIComponent(search)}${typeFilter ? `&type=${encodeURIComponent(typeFilter)}` : ""}`,
       { signal },
     ).then((response) => ({ rows: response.data, total: response.meta.total ?? 0 })),
@@ -190,7 +195,10 @@ export function RelationsPanel({
       setSaving(false);
     }
   };
-  const renderMemberCell = (value: string) => <Text copyable>{value}</Text>;
+  const renderMemberCell = (displayName: string | undefined, userId: string) => <div>
+    <Text>{displayName || userId}</Text><br />
+    <Text type="secondary" copyable>{userId}</Text>
+  </div>;
 
   return <>
     <Row gutter={[12, 12]} className="section-row">
@@ -269,25 +277,25 @@ export function RelationsPanel({
               }}
               locale={{ emptyText: <Empty description="暂无关系记忆" /> }}
               columns={readOnly ? [
-                { title: "主体", dataIndex: "subjectUserId", render: renderMemberCell },
-                { title: "客体", dataIndex: "objectUserId", render: renderMemberCell },
+                { title: "主体", dataIndex: "subjectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.subjectDisplayName, value) },
+                { title: "客体", dataIndex: "objectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.objectDisplayName, value) },
                 { title: "类型", dataIndex: "type", render: (value: string) => <Tag color={relationTypeColor(value)}>{value}</Tag> },
                 { title: "备注", dataIndex: "note", ellipsis: true, render: (value: string) => value || <Text type="secondary">—</Text> },
-                { title: "置信度", render: (_, row: AgentRelationItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
+                { title: "置信度", render: (_, row: RelationListItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
                 { title: "最后见到", dataIndex: "lastSeenAt", render: formatTime, width: 170 },
               ] : [
-                { title: "主体", dataIndex: "subjectUserId", render: renderMemberCell },
-                { title: "客体", dataIndex: "objectUserId", render: renderMemberCell },
+                { title: "主体", dataIndex: "subjectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.subjectDisplayName, value) },
+                { title: "客体", dataIndex: "objectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.objectDisplayName, value) },
                 { title: "类型", dataIndex: "type", render: (value: string) => <Tag color={relationTypeColor(value)}>{value}</Tag> },
                 { title: "备注", dataIndex: "note", ellipsis: true, render: (value: string) => value || <Text type="secondary">—</Text> },
                 { title: "来源", dataIndex: "sourceKind", width: 90, render: (value: string) => <Tag color={RELATION_SOURCE_META[value]?.color}>{RELATION_SOURCE_META[value]?.label ?? value}</Tag> },
-                { title: "置信度", render: (_, row: AgentRelationItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
+                { title: "置信度", render: (_, row: RelationListItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
                 { title: "证据数", dataIndex: "evidenceCount", width: 80 },
                 { title: "最后见到", dataIndex: "lastSeenAt", render: formatTime, width: 170 },
                 {
                   title: "操作",
                   width: 120,
-                  render: (_, row: AgentRelationItem) => <Space>
+                  render: (_, row: RelationListItem) => <Space>
                     <Button type="link" size="small" disabled={query.stale} onClick={() => openEdit(row)}>编辑</Button>
                     <Popconfirm title="删除这条关系边？" onConfirm={() => remove(row.id)}>
                       <Button type="link" size="small" danger disabled={query.stale}>删除</Button>
