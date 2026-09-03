@@ -109,7 +109,7 @@ def _deduct(
     return max(score - amount, 0)
 
 
-def score_speech_output(  # noqa: PLR0913
+def score_speech_output(  # noqa: C901,PLR0913
     text: str,
     *,
     scene: str = "conversation",
