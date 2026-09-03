@@ -242,3 +242,8 @@ def test_speech_simulation_payload_exposes_interaction_plan() -> None:
     assert payload["interaction_plan"]["kind"] == "ping_ack"
     assert payload["interaction_plan"]["speech_act"] == "ping_ack"
     assert payload["interaction_plan"]["soft_target_chars"] is not None
+    visible_reason = str(payload["reason"])
+    assert "Interaction Plan" in visible_reason
+    assert "任务：" in visible_reason
+    assert "媒体：" in visible_reason
+    assert "长度：" in visible_reason
