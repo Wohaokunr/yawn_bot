@@ -381,6 +381,21 @@ export interface AgentExecutionTraceEvent {
   round: number | null;
 }
 
+export interface AgentExecutionTraceSummary {
+  traceId: string;
+  groupId: string;
+  mode: string;
+  source: "debug" | "runtime" | string;
+  triggerSource: string | null;
+  actorUserId: string | null;
+  messageId: string | null;
+  startedAt: string;
+  status: string;
+  outcome: string | null;
+  durationMs: number | null;
+  eventCount: number;
+}
+
 export interface AgentExecutionTrace {
   traceId: string;
   groupId: string;
