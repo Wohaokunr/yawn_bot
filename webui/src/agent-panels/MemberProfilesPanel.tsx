@@ -8,7 +8,7 @@ import { api, ApiError } from "../api";
 import { formatTime, QueryErrorAlert, useApiQuery } from "../shared";
 import type { MemoryItem, MemorySubjectItem } from "../types";
 import { MEMORY_TYPE_META, memberDisplayName, memoryTypeLabel, profileKeyLabel } from "../agent-meta";
-import { MemoryEditDrawer, type MemoryFormValues } from "./MemoriesPanel";
+import { MemoryEditDrawer, type MemoryFormValues } from "./MemoryEditDrawer";
 
 const { Text, Paragraph } = Typography;
 const PROFILE_TYPE_ORDER = ["core", "profile", "manual"];
