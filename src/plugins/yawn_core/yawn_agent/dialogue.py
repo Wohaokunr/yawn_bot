@@ -48,6 +48,11 @@ from .dialogue_support import (
     send_group_text as _send_group_text,
     send_unless_expired as _send_unless_expired,
 )
+from .dialogue_turn_support import (
+    DiscoveryRoundGuard,
+    semantic_query_text as _semantic_query_text,
+    trace_message_shape as _trace_message_shape,
+)
 from .context import (
     ActivitySnapshot,
     CurrentTurn,
@@ -400,71 +405,6 @@ async def _finalize_reply(
     )
 
 
-def _semantic_query_text(normalized: Any) -> str:
-    semantic = getattr(normalized, "semantic_query_text", None)
-    if callable(semantic):
-        return str(semantic())
-    prompt = getattr(normalized, "prompt_text", None)
-    return str(prompt()) if callable(prompt) else ""
-
-
-def _trace_message_shape(
-    normalized: NormalizedMessage,
-    *,
-    bot_id: int,
-) -> dict[str, Any]:
-    """Project one consistent @ view for execution traces.
-
-    NoneBot/adapter preprocessing may consume the raw ``at`` segment while leaving
-    ``event.to_me`` as the trigger signal. Trace should expose both what the parser
-    physically observed and the effective dialogue semantics instead of contradicting
-    itself with ``mention=true`` plus ``mentions=[]``.
-    """
-
-    observed_types: list[str] = []
-    for item in normalized.segments:
-        segment_type = str(item.type or "").strip()
-        if not segment_type:
-            continue
-        if segment_type == "text" and not str(
-            item.data.get("text") or item.text or ""
-        ).strip():
-            continue
-        if segment_type not in observed_types:
-            observed_types.append(segment_type)
-
-    observed_mentions: list[int] = []
-    for raw in normalized.mentions:
-        try:
-            user_id = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if user_id > 0 and user_id not in observed_mentions:
-            observed_mentions.append(user_id)
-
-    mention_bot = bool(normalized.trigger_signals.get("mention"))
-    effective_mentions = list(observed_mentions)
-    if mention_bot and bot_id > 0 and bot_id not in effective_mentions:
-        effective_mentions.append(bot_id)
-
-    effective_types = list(observed_types)
-    if mention_bot and "at" not in effective_types:
-        effective_types.append("at")
-
-    mention_recovered = mention_bot and (
-        bot_id not in observed_mentions or "at" not in observed_types
-    )
-    return {
-        "mention_bot": mention_bot,
-        "original_segment_types": observed_types,
-        "observed_segment_types": observed_types,
-        "effective_segment_types": effective_types,
-        "observed_mentions": observed_mentions,
-        "effective_mentions": effective_mentions,
-        "mention_stripped_for_prompt": mention_bot and "at" not in observed_types,
-        "mention_recovered_from_trigger": mention_recovered,
-    }
-
 
 async def _process_group_message(
     bot: Bot,
@@ -797,10 +737,7 @@ async def _process_group_message(
             deadline = time.monotonic() + _MAX_TURN_SECONDS
             rounds = 0
             had_tool_results = False
-            discovery_attempts = 0
-            discovery_fingerprints: set[str] = set()
-            discovery_known_names: set[str] = set(selected_tool_names)
-            disable_discovery = False
+            discovery_guard = DiscoveryRoundGuard(set(selected_tool_names))
             turn_usage: dict[str, int] = {}
             while rounds < round_limit:
                 if time.monotonic() > deadline:
@@ -982,42 +919,13 @@ async def _process_group_message(
                                 f"群 {group_id} 工具 {tool_name} 发送前触发已过期,取消副作用"
                             )
                         else:
-                            discovery_fingerprint = ""
-                            if tool_name == "discover_tools":
-                                discovery_fingerprint = json.dumps(
-                                    {
-                                        "query": str(args.get("query") or "").strip().casefold(),
-                                        "family": str(args.get("family") or "").strip().casefold(),
-                                    },
-                                    ensure_ascii=False,
-                                    sort_keys=True,
-                                )
-                                repeated = discovery_fingerprint in discovery_fingerprints
-                                if repeated or discovery_attempts >= 2:
-                                    disable_discovery = True
-                                    result = {
-                                        "ok": True,
-                                        "result": {
-                                            "mode": "guarded",
-                                            "tools": [],
-                                            "toolpacks": [],
-                                            "count": 0,
-                                            "no_new_tools": True,
-                                            "message": "本回合没有新的工具可加载；请使用已加载工具或直接回答，不要再次调用 discover_tools。",
-                                        },
-                                    }
-                                else:
-                                    discovery_attempts += 1
-                                    discovery_fingerprints.add(discovery_fingerprint)
-                                    result = await execute_tool(
-                                        tool_name,
-                                        args,
-                                        bot=bot,
-                                        group_id=group_id,
-                                        actor_user_id=actor_user_id,
-                                        session=session,
-                                        capabilities=capabilities,
-                                    )
+                            guarded_result = (
+                                discovery_guard.preflight(args)
+                                if tool_name == "discover_tools"
+                                else None
+                            )
+                            if guarded_result is not None:
+                                result = guarded_result
                             else:
                                 result = await execute_tool(
                                     tool_name,
@@ -1030,35 +938,13 @@ async def _process_group_message(
                                 )
                     had_tool_results = True
                     if tool_name == "discover_tools" and bool(result.get("ok")):
-                        discovery = result.get("result")
-                        discovery_rows = (
-                            discovery.get("tools", [])
-                            if isinstance(discovery, dict)
-                            else []
+                        new_names, requires_admin = discovery_guard.observe(
+                            result.get("result")
                         )
-                        returned_names: set[str] = set()
-                        for item in discovery_rows:
-                            if isinstance(item, dict) and item.get("name"):
-                                name = str(item["name"])
-                                returned_names.add(name)
-                                if name not in discovery_known_names:
-                                    discovered_tool_names.add(name)
-                                if str(item.get("permission") or "") in {
-                                    "privileged",
-                                    "critical",
-                                }:
-                                    discovered_requires_admin = True
-                        new_names = returned_names - discovery_known_names
-                        discovery_known_names.update(returned_names)
-                        if not new_names or discovery_attempts >= 2:
-                            disable_discovery = True
-                            if isinstance(discovery, dict):
-                                discovery["no_new_tools"] = not bool(new_names)
-                                discovery["message"] = (
-                                    "没有发现新的工具；请使用已加载工具或直接回答，不要再次调用 discover_tools。"
-                                    if not new_names
-                                    else "已达到本回合工具发现上限；请使用已加载工具或直接回答。"
-                                )
+                        discovered_tool_names.update(new_names)
+                        discovered_requires_admin = (
+                            discovered_requires_admin or requires_admin
+                        )
                     tool_media_diagnostics: list[dict[str, Any]] = []
                     tool_media_inputs = await resolve_media_context(
                         bot,
@@ -1358,7 +1244,7 @@ async def _process_group_message(
                             ],
                         }
                     )
-                if disable_discovery and not round_sent_message:
+                if discovery_guard.disabled and not round_sent_message:
                     selected_tool_names = frozenset(
                         name for name in selected_tool_names if name != "discover_tools"
                     )
@@ -1378,7 +1264,7 @@ async def _process_group_message(
                         "capability",
                         "动态工具发现保护",
                         output={
-                            "discovery_attempts": discovery_attempts,
+                            "discovery_attempts": discovery_guard.attempts,
                             "discover_tools_disabled": True,
                             "tool_count": len(tools),
                         },
@@ -1480,9 +1366,10 @@ async def process_group_message(
         if not isinstance(stage, dict):
             continue
         stage_label = str(stage.get("label") or "消息解析")
-        stage_output = (
-            dict(stage.get("output"))
-            if isinstance(stage.get("output"), dict)
+        raw_stage_output = stage.get("output")
+        stage_output: dict[str, Any] = (
+            {str(key): value for key, value in raw_stage_output.items()}
+            if isinstance(raw_stage_output, dict)
             else {}
         )
         if stage_label == "消息段归一化":
