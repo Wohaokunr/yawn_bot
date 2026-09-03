@@ -66,9 +66,14 @@ def test_effective_turn_reconstructs_image_question_then_at_trigger() -> None:
 
     assert effective.trigger_only is True
     assert effective.used_history is True
+    assert effective.primary == "这张图片怎么样"
     assert effective.text == "这张图片怎么样"
+    assert effective.support == ()
+    assert effective.resumed_task == "这张图片怎么样"
+    assert effective.interaction_kind == context_history.INTERACTION_RESUME_TASK
     assert effective.message_ids == (101, 102)
     assert effective.media_message_ids == (101,)
+    assert effective.media_binding is True
     assert effective.media_requested is True
 
 
@@ -144,7 +149,7 @@ def test_direct_media_query_keeps_existing_history_behavior() -> None:
 
 
 def test_prompt_promotes_split_question_into_current_turn() -> None:
-    _context_history, _media_context = _load_modules()
+    context_history, _media_context = _load_modules()
     from src.plugins.yawn_core.yawn_agent import prompt
 
     context = {
@@ -173,11 +178,18 @@ def test_prompt_promotes_split_question_into_current_turn() -> None:
     rebuilt = prompt.reconstruct_effective_current_turn(turn, context)
 
     assert rebuilt is not None
+    assert isinstance(rebuilt, dict)
     assert rebuilt["content"] == "这张图片怎么样"
+    assert rebuilt["interaction"] == {
+        "kind": context_history.INTERACTION_RESUME_TASK,
+        "primary": "这张图片怎么样",
+        "media_binding": True,
+        "resumed_task": "这张图片怎么样",
+    }
 
 
 def test_prompt_preserves_media_fallback_and_prepends_split_question() -> None:
-    _context_history, _media_context = _load_modules()
+    context_history, _media_context = _load_modules()
     from src.plugins.yawn_core.yawn_agent import prompt
 
     context = {
@@ -206,7 +218,10 @@ def test_prompt_preserves_media_fallback_and_prepends_split_question() -> None:
     rebuilt = prompt.reconstruct_effective_current_turn(turn, context)
 
     assert rebuilt is not None
+    assert isinstance(rebuilt, dict)
     assert rebuilt["content"] == "这张图片怎么样\n[图片转述] 一张黑白插画"
+    assert rebuilt["interaction"]["kind"] == context_history.INTERACTION_RESUME_TASK
+    assert rebuilt["interaction"]["media_binding"] is True
 
 
 @pytest.mark.asyncio
@@ -306,7 +321,7 @@ def test_real_media_keeps_nontext_media_semantics_even_when_mentioned() -> None:
     assert "媒体" in normalized.semantic_query_text()
 
 
-def test_bare_mention_continues_across_recent_bot_reply() -> None:
+def test_bare_mention_stops_at_recent_bot_reply() -> None:
     context_history, _media_context = _load_modules()
     messages = [
         _text_message(201, 20001, "你AI味太强了", minutes_ago=3),
@@ -327,9 +342,93 @@ def test_bare_mention_continues_across_recent_bot_reply() -> None:
     )
 
     assert effective.trigger_only is True
-    assert effective.used_history is True
-    assert effective.text == "你AI味太强了\n怎么不说话了"
+    assert effective.used_history is False
+    assert effective.primary == "[用户仅@机器人，没有附加正文]"
+    assert effective.support == ()
+    assert effective.resumed_task is None
+    assert effective.media_binding is False
+    assert effective.interaction_kind == context_history.INTERACTION_PING_ACK
+    assert effective.message_ids == ()
+
+
+def test_bare_mention_repair_ping_separates_primary_support_and_media() -> None:
+    context_history, _media_context = _load_modules()
+    messages = [
+        _image_message(198, 20001, minutes_ago=4),
+        {
+            "message_id": 199,
+            "user_id": 50001,
+            "role": "bot",
+            "text": "这双鞋看起来像一张惨叫的脸……",
+            "minutes_ago": 3,
+        },
+        _text_message(201, 20001, "你这个AI味有点大呀", minutes_ago=2),
+        _text_message(202, 20001, "你怎么不说话？", minutes_ago=1),
+    ]
+
+    effective = context_history.effective_turn_query(
+        messages,
+        focus_user_ids=[20001],
+        query_text="[用户仅@机器人，没有附加正文]",
+    )
+
+    assert effective.primary == "你怎么不说话？"
+    assert effective.text == "你怎么不说话？"
+    assert effective.support == ("你这个AI味有点大呀",)
+    assert effective.resumed_task is None
+    assert effective.media_binding is False
+    assert effective.media_requested is False
+    assert effective.interaction_kind == context_history.INTERACTION_REPAIR_PING
     assert effective.message_ids == (201, 202)
+    assert effective.media_message_ids == ()
+
+
+def test_repair_ping_prompt_does_not_rebind_older_image() -> None:
+    context_history, _media_context = _load_modules()
+    from src.plugins.yawn_core.yawn_agent import prompt
+
+    context = {
+        "messages": [
+            _image_message(198, 20001, minutes_ago=4),
+            {
+                "message_id": 199,
+                "user_id": 50001,
+                "role": "bot",
+                "text": "旧的图片回答",
+                "minutes_ago": 3,
+            },
+            _text_message(201, 20001, "你这个AI味有点大呀", minutes_ago=2),
+            _text_message(202, 20001, "你怎么不说话？", minutes_ago=1),
+        ]
+    }
+    turn = {
+        "message_id": 203,
+        "user_id": 20001,
+        "name": "用户",
+        "role": "member",
+        "title": None,
+        "content": "[用户仅@机器人，没有附加正文]",
+        "mentions": (),
+        "reply_to": None,
+        "trigger": "at",
+        "received_at": None,
+        "media_types": (),
+        "media": (),
+        "forward_nodes": 0,
+        "truncated": False,
+    }
+
+    rebuilt = prompt.reconstruct_effective_current_turn(turn, context)
+
+    assert rebuilt is not None
+    assert isinstance(rebuilt, dict)
+    assert rebuilt["content"] == "你怎么不说话？"
+    assert rebuilt["interaction"] == {
+        "kind": context_history.INTERACTION_REPAIR_PING,
+        "primary": "你怎么不说话？",
+        "media_binding": False,
+        "support": ["你这个AI味有点大呀"],
+    }
 
 
 def test_bare_mention_never_crosses_another_human() -> None:
