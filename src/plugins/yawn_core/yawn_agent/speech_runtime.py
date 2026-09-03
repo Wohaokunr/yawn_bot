@@ -1,4 +1,4 @@
-# ruff: noqa: PLR0913
+# ruff: noqa: E501,PLR0913
 """Common speech runtime shared by dialogue, proactive and WebUI dry-runs."""
 
 from __future__ import annotations
