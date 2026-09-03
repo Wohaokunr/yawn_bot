@@ -181,5 +181,5 @@ def test_quality_guard_trims_overlong_direct_repair() -> None:
 
     final = modules["speech_quality"].finalize_speech_plan(plan, autofix=True)
 
-    assert len(final.visible_text) <= 110
-    assert any(item.code == "scene_overlong" and item.autofixed for item in final.issues)
+    assert len(final.visible_text) <= 88
+    assert any(item.code == "social_monologue" and item.autofixed for item in final.issues)
