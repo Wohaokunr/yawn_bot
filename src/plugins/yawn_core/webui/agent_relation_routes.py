@@ -143,6 +143,38 @@ async def _visible_relation_clauses(
     return clauses
 
 
+async def _relation_member_labels(
+    db: Any,
+    group_id: int,
+    rows: list[AgentRelation],
+) -> dict[int, str]:
+    """Load labels only for members referenced by the current relation page."""
+
+    user_ids = {
+        int(user_id)
+        for row in rows
+        for user_id in (row.subject_user_id, row.object_user_id)
+    }
+    if not user_ids:
+        return {}
+    memberships = (
+        await db.execute(
+            select(UserGroup.user_id, UserGroup.group_nickname, BotUser.nickname)
+            .outerjoin(BotUser, BotUser.user_id == UserGroup.user_id)
+            .where(
+                UserGroup.group_id == group_id,
+                UserGroup.user_id.in_(user_ids),
+            )
+        )
+    ).all()
+    return {
+        int(user_id): (
+            str(group_nickname or nickname or "").strip() or str(user_id)
+        )
+        for user_id, group_nickname, nickname in memberships
+    }
+
+
 @router.get("/agent/groups/{group_id}/relations")
 async def get_relations(
     group_id: int,
@@ -189,10 +221,19 @@ async def get_relations(
             .scalars()
             .all()
         )
+        member_labels = await _relation_member_labels(db, group_id, rows)
     serializer = (
         serialize_guest_relation if _is_guest_view(_session) else serialize_relation
     )
-    return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = serializer(row)
+        subject_id = int(row.subject_user_id)
+        object_id = int(row.object_user_id)
+        item["subjectDisplayName"] = member_labels.get(subject_id, str(subject_id))
+        item["objectDisplayName"] = member_labels.get(object_id, str(object_id))
+        result.append(item)
+    return ok(result, page_meta(page, page_size, total))
 
 
 @router.get("/agent/groups/{group_id}/relations/summary")
