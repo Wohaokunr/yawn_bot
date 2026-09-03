@@ -351,7 +351,7 @@ def test_bare_mention_never_crosses_another_human() -> None:
 
 def test_trace_shape_recovers_adapter_consumed_bot_mention() -> None:
     _context_history, _media_context = _load_modules()
-    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent import dialogue_turn_support
     from src.plugins.yawn_core.yawn_agent.message_parser import (
         NormalizedMessage,
         SegmentNode,
@@ -364,7 +364,7 @@ def test_trace_shape_recovers_adapter_consumed_bot_mention() -> None:
     normalized.trigger_source = "mention"
     normalized.trigger_signals = {"mention": True, "reply": False, "wake_word": False}
 
-    shape = dialogue._trace_message_shape(normalized, bot_id=50001)
+    shape = dialogue_turn_support.trace_message_shape(normalized, bot_id=50001)
 
     assert shape["mention_bot"] is True
     assert shape["original_segment_types"] == []
@@ -378,7 +378,7 @@ def test_trace_shape_recovers_adapter_consumed_bot_mention() -> None:
 
 def test_trace_shape_keeps_real_at_without_marking_recovery() -> None:
     _context_history, _media_context = _load_modules()
-    from src.plugins.yawn_core.yawn_agent import dialogue
+    from src.plugins.yawn_core.yawn_agent import dialogue_turn_support
     from src.plugins.yawn_core.yawn_agent.message_parser import (
         NormalizedMessage,
         SegmentNode,
@@ -392,7 +392,7 @@ def test_trace_shape_keeps_real_at_without_marking_recovery() -> None:
     normalized.trigger_source = "mention"
     normalized.trigger_signals = {"mention": True, "reply": False, "wake_word": False}
 
-    shape = dialogue._trace_message_shape(normalized, bot_id=50001)
+    shape = dialogue_turn_support.trace_message_shape(normalized, bot_id=50001)
 
     assert shape["observed_segment_types"] == ["at"]
     assert shape["effective_segment_types"] == ["at"]
