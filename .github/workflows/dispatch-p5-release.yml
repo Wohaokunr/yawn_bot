@@ -1,0 +1,28 @@
+name: Dispatch P5 release
+
+on:
+  push:
+    branches:
+      - feat/webui-agent-p0-p2
+    paths:
+      - ".github/workflows/dispatch-p5-release.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch immutable P5 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref deploy/p5-20260904 \
+            -f version=v0.1.6-rc.7 \
+            -f deploy_production=true \
+            -f skip_quality_gates=false
