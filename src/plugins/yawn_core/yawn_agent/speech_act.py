@@ -147,36 +147,43 @@ def plan_speech_act(
 
 def speech_act_instruction(plan: SpeechActPlan) -> str:
     if plan.act == SPEECH_ACT_ANSWER:
-        return (
+        instruction = (
             "话语动作=answer：先直接解决当前问题；只有确实缺少决定答案的关键信息时才反问，"
             "不能用反问代替回答。"
         )
-    if plan.act == SPEECH_ACT_REPAIR:
-        return (
+    elif plan.act == SPEECH_ACT_REPAIR:
+        instruction = (
             "话语动作=repair：用户正在纠正 Bot 的表达、理解或互动方式。先短句接住反馈，"
             "并立刻按反馈改变这条回复；不要解释内部策略，不要复盘自己准备怎么回答，"
             "不要重新执行更早的旧任务，也不要用二选一反问来证明自己会聊天。"
         )
-    if plan.act == SPEECH_ACT_PING_ACK:
-        return (
-            "话语动作=ping_ack：用户是在叫你、催你或确认你是否还在。先用很短的自然回应表明已接到；"
-            "只有 effective turn 明确恢复了 resumed_task 才顺带继续那个任务，否则不要自行翻出更早话题。"
+    elif plan.act == SPEECH_ACT_PING_ACK:
+        instruction = (
+            "话语动作=ping_ack：用户是在叫你、催你或确认你是否还在。"
+            "先用很短的自然回应表明已接到；只有 effective turn 明确恢复了 "
+            "resumed_task 才顺带继续那个任务，否则不要自行翻出更早话题。"
         )
-    if plan.act == SPEECH_ACT_ACKNOWLEDGE:
-        return "话语动作=acknowledge：自然确认即可，不要把一句确认扩写成解释或新话题。"
-    if plan.act == SPEECH_ACT_REACT:
-        return "话语动作=react：一个自然短反应就够，不重复同义文字。"
-    if plan.act == SPEECH_ACT_TOOL_REPORT:
-        return "话语动作=tool_report：只报告真实结果与必要下一步，不展开后台过程。"
-    if plan.act == SPEECH_ACT_CLOSE:
-        return (
+    elif plan.act == SPEECH_ACT_ACKNOWLEDGE:
+        instruction = (
+            "话语动作=acknowledge：自然确认即可，不要把一句确认扩写成解释或新话题。"
+        )
+    elif plan.act == SPEECH_ACT_REACT:
+        instruction = "话语动作=react：一个自然短反应就够，不重复同义文字。"
+    elif plan.act == SPEECH_ACT_TOOL_REPORT:
+        instruction = (
+            "话语动作=tool_report：只报告真实结果与必要下一步，不展开后台过程。"
+        )
+    elif plan.act == SPEECH_ACT_CLOSE:
+        instruction = (
             "话语动作=close：自然收束，不追加新问题，"
             "不用客套 CTA 把已经结束的话题重新打开。"
         )
-    return (
-        "话语动作=continue：只承接当前最相关的一点并贡献新信息；"
-        "不要为了维持对话机械反问或重复上一轮。"
-    )
+    else:
+        instruction = (
+            "话语动作=continue：只承接当前最相关的一点并贡献新信息；"
+            "不要为了维持对话机械反问或重复上一轮。"
+        )
+    return instruction
 
 
 __all__ = [
