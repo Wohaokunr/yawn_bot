@@ -11,7 +11,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from .context_history import EffectiveTurn, effective_turn_from_context
+from .context_history import (
+    INTERACTION_PING_ACK,
+    INTERACTION_REPAIR_PING,
+    INTERACTION_RESUME_TASK,
+    EffectiveTurn,
+    effective_turn_from_context,
+)
 from .persona import persona_trait_label
 from .speech import (
     SPEECH_SCENE_ACTIVE_INTERJECT,
@@ -133,6 +139,40 @@ def _turn_payload(current_turn: CurrentTurn | dict[str, Any] | None) -> dict[str
         value = as_dict()
         return dict(value) if isinstance(value, dict) else {}
     return {}
+
+
+def _effective_for_speech(
+    current_turn: CurrentTurn | dict[str, Any] | None,
+    context: dict[str, Any] | None,
+) -> EffectiveTurn:
+    if current_turn is None:
+        return EffectiveTurn(primary="")
+    payload = _turn_payload(current_turn)
+    raw = payload.get("interaction")
+    if isinstance(raw, dict):
+        support = tuple(
+            str(item)[:240]
+            for item in list(raw.get("support") or [])[:2]
+            if str(item).strip()
+        )
+        kind = str(raw.get("kind") or "direct").strip() or "direct"
+        resumed_task = str(raw.get("resumed_task") or "").strip() or None
+        primary = str(raw.get("primary") or payload.get("content") or "").strip()
+        trigger_only = kind in {
+            INTERACTION_PING_ACK,
+            INTERACTION_REPAIR_PING,
+            INTERACTION_RESUME_TASK,
+        }
+        return EffectiveTurn(
+            primary=primary,
+            support=support,
+            resumed_task=resumed_task,
+            media_binding=bool(raw.get("media_binding")),
+            interaction_kind=kind,
+            trigger_only=trigger_only,
+            used_history=bool(support or resumed_task),
+        )
+    return effective_turn_from_context(current_turn, context)
 
 
 def resolve_speech_scene(
@@ -299,11 +339,7 @@ def build_speech_instruction(
     context: dict[str, Any] | None = None,
 ) -> str:
     scene = resolve_speech_scene(current_turn, source=source)
-    effective = (
-        effective_turn_from_context(current_turn, context)
-        if current_turn is not None
-        else EffectiveTurn(primary="")
-    )
+    effective = _effective_for_speech(current_turn, context)
     act_plan = plan_speech_act(current_turn, scene=scene, effective_turn=effective)
     complexity = classify_response_complexity(
         current_turn,
