@@ -7,12 +7,12 @@ import json
 from typing import Any
 
 from .context import CurrentTurn
-from .context_history import effective_turn_query
+from .context_history import EffectiveTurn, effective_turn_query
 from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v14"
+PROMPT_VERSION = "yawn-agent-v15"
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
 # Character Profile 决定，避免同一个 system prompt 同时给模型两套冲突指令。
@@ -20,6 +20,8 @@ _SYSTEM_POLICY = (
     "按角色设定参与 QQ 群聊。"
     "current_turn 是本轮最高优先级：先确认当前发言人、指向和真实问题；"
     "历史、topic_state、画像、关系和记忆只能辅助理解，不能覆盖当前消息。"
+    "current_turn.interaction 若存在，primary 是本轮主要任务，support 只用于理解；"
+    "resumed_task 为空时不得自行恢复更早任务，media_binding=false 时不得把历史媒体重新绑定成当前任务。"
     "topic_state 是当前话题的权威结构化状态；active_topic 仅是兼容标签，"
     "过期或冲突时不要强行沿用。"
     "不要误答上一位成员或把他人对话当成当前提问；"
@@ -112,13 +114,22 @@ def _turn_payload(current_turn: CurrentTurn | dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _replace_turn_content(
-    current_turn: CurrentTurn | dict[str, Any], content: str
-) -> CurrentTurn | dict[str, Any]:
+def _replace_turn_effective(
+    current_turn: CurrentTurn | dict[str, Any],
+    effective: EffectiveTurn,
+    *,
+    content: str | None = None,
+) -> dict[str, Any]:
+    """Return a prompt-safe turn carrying separated interaction semantics.
+
+    A dict is returned even when the source is ``CurrentTurn`` because the runtime
+    dataclass intentionally stays a protocol-fact container; reconstructed interaction
+    metadata belongs only to the prompt/speech projection.
+    """
+
     payload = _turn_payload(current_turn)
-    payload["content"] = content
-    if isinstance(current_turn, CurrentTurn):
-        return CurrentTurn(**payload)
+    payload["content"] = effective.primary if content is None else content
+    payload["interaction"] = effective.interaction_payload()
     return payload
 
 
@@ -139,8 +150,9 @@ def reconstruct_effective_current_turn(
     The history selector already limits reconstruction to a short contiguous block from
     the same actor. Repeating that deterministic projection here prevents the final
     prompt from saying ``current_turn.content=''`` while the real question lives only
-    in history. Media-caption fallback text is preserved and gets the recovered
-    question prepended when the trigger itself carried no current media.
+    in history. ``primary/support/resumed_task/media_binding`` remain separate instead
+    of being concatenated into a synthetic user question. Media-caption fallback text
+    is preserved when it is the only provider-visible evidence for a recovered image.
     """
 
     if current_turn is None:
@@ -156,7 +168,7 @@ def reconstruct_effective_current_turn(
         for item in list(context.get("messages") or [])
         if isinstance(item, dict)
     ]
-    if not history or actor_user_id <= 0:
+    if actor_user_id <= 0:
         return current_turn
 
     direct = effective_turn_query(
@@ -164,8 +176,9 @@ def reconstruct_effective_current_turn(
         focus_user_ids=[actor_user_id],
         query_text=content,
     )
-    if direct.used_history and direct.text:
-        return _replace_turn_content(current_turn, direct.text)
+    if direct.used_history or direct.interaction_kind != "direct" or direct.media_binding:
+        if direct.primary:
+            return _replace_turn_effective(current_turn, direct)
 
     # Dedicated-vision / unsupported-multimodal fallback appends only generated media
     # status text to an otherwise empty @ trigger. Preserve that evidence, but restore
@@ -179,7 +192,7 @@ def reconstruct_effective_current_turn(
         and stripped
         and stripped.startswith(_MEDIA_FALLBACK_PREFIXES)
     )
-    if not media_fallback_only:
+    if not media_fallback_only or not history:
         return current_turn
     historical = effective_turn_query(
         history,
@@ -188,9 +201,10 @@ def reconstruct_effective_current_turn(
     )
     if not (historical.used_history and historical.media_requested and historical.text):
         return current_turn
-    return _replace_turn_content(
+    return _replace_turn_effective(
         current_turn,
-        f"{historical.text}\n{content}".strip(),
+        historical,
+        content=f"{historical.primary}\n{content}".strip(),
     )
 
 
