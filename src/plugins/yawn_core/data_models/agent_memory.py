@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -63,6 +64,14 @@ class AgentMemory(Model):
         server_default=func.current_timestamp(), onupdate=func.current_timestamp()
     )
     expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+
+
+Index(
+    "ix_agent_memory_group_type_updated_desc",
+    AgentMemory.group_id,
+    AgentMemory.memory_type,
+    AgentMemory.updated_at.desc(),
+)
 
 
 class AgentRelation(Model):

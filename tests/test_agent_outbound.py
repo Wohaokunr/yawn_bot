@@ -1,6 +1,7 @@
 # ruff: noqa: PLR2004
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -812,3 +813,149 @@ async def test_outbound_audit_redacts_share_url(
     assert audit.result == "success"
     assert "safe.example" not in repr(audit.arguments)
     assert "secret" not in repr(audit.arguments)
+
+
+# ── 慢回合等待提示 ────────────────────────────────────────────────
+
+
+def _wait_notice_sends(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """捕获等待提示实际走到 sender 的调用（含 session/来源等副作用参数）。"""
+
+    sends: list[dict[str, Any]] = []
+
+    async def _capture(
+        _bot: Any,
+        group_id: int,
+        prepared: Any,
+        *,
+        session: Any = None,
+        actor_user_id: int | None = None,
+        source: str = "agent",
+    ) -> outbound.SendResult:
+        sends.append(
+            {
+                "group_id": group_id,
+                "text": prepared.normalized_text,
+                "session": session,
+                "actor_user_id": actor_user_id,
+                "source": source,
+            }
+        )
+        return outbound.SendResult(
+            sent=True,
+            message_id=1,
+            normalized_text=prepared.normalized_text,
+            segment_types=("text",),
+        )
+
+    monkeypatch.setattr(dialogue, "send_prepared_outbound", _capture)
+    return sends
+
+
+@pytest.mark.asyncio
+async def test_wait_notice_is_not_sent_when_turn_finishes_before_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快回合不该出现等待提示。"""
+
+    sends = _wait_notice_sends(monkeypatch)
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "0.2")
+    bot = SimpleNamespace(self_id="100")
+
+    dialogue._start_wait_notice(bot, 1, None, 123)
+    await asyncio.sleep(0.02)
+    dialogue._cancel_wait_notice()
+    await asyncio.sleep(0.25)
+
+    assert sends == []
+
+
+@pytest.mark.asyncio
+async def test_wait_notice_fires_once_on_slow_turn_without_touching_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """慢回合只提示一次；不写消息历史、不带 session（因此不落审计行）。"""
+
+    sends = _wait_notice_sends(monkeypatch)
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "0.05")
+    persisted: list[Any] = []
+
+    async def _persist(*args: Any, **kwargs: Any) -> None:
+        persisted.append((args, kwargs))
+
+    monkeypatch.setattr(dialogue, "persist_bot_reply", _persist)
+    bot = SimpleNamespace(self_id="100")
+
+    dialogue._start_wait_notice(bot, 1, None, 123)
+    await asyncio.sleep(0.25)
+
+    assert len(sends) == 1
+    assert sends[0]["text"] == dialogue._WAIT_NOTICE
+    assert sends[0]["session"] is None
+    assert persisted == []
+    # 提示发过之后不再重复。
+    await asyncio.sleep(0.1)
+    assert len(sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_notice_is_skipped_when_trigger_already_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """触发在排队期间过期时，等待提示不能发出去。"""
+
+    sends = _wait_notice_sends(monkeypatch)
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "0.05")
+    monkeypatch.setattr(dialogue, "is_pending_trigger_expired", lambda _at: True)
+    bot = SimpleNamespace(self_id="100")
+
+    dialogue._start_wait_notice(bot, 1, 1.0, 123)
+    await asyncio.sleep(0.2)
+
+    assert sends == []
+
+
+@pytest.mark.asyncio
+async def test_visible_send_cancels_pending_wait_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正文发送会顺带取消未发出的等待提示，避免提示压在正文后面。"""
+
+    sends = _wait_notice_sends(monkeypatch)
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "0.15")
+    bot = SimpleNamespace(self_id="100")
+
+    dialogue._start_wait_notice(bot, 1, None, 123)
+    await asyncio.sleep(0.02)
+    await dialogue._send_unless_expired(bot, 1, "正文", None, label="正文发送")
+    await asyncio.sleep(0.25)
+
+    assert [item["text"] for item in sends] == ["正文"]
+
+
+@pytest.mark.asyncio
+async def test_wait_notice_disabled_by_non_positive_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """阈值 <=0 表示关闭该提示。"""
+
+    sends = _wait_notice_sends(monkeypatch)
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "0")
+    bot = SimpleNamespace(self_id="100")
+
+    dialogue._start_wait_notice(bot, 1, None, 123)
+    await asyncio.sleep(0.1)
+
+    assert sends == []
+    assert dialogue._WAIT_NOTICE_TASK.get() is None
+
+
+def test_wait_notice_delay_falls_back_on_invalid_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "abc")
+    assert dialogue._wait_notice_delay() == dialogue._WAIT_NOTICE_DEFAULT_DELAY
+    monkeypatch.delenv("AGENT_AI_WAIT_NOTICE_DELAY", raising=False)
+    assert dialogue._wait_notice_delay() == dialogue._WAIT_NOTICE_DEFAULT_DELAY
+    monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "2.5")
+    assert dialogue._wait_notice_delay() == 2.5

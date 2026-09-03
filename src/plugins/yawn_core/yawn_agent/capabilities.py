@@ -8,6 +8,7 @@ import os
 import time
 from typing import Any
 
+from ..metrics import record_agent_capability_probe
 from .log import dbg, dbg_exc
 
 
@@ -247,12 +248,14 @@ async def probe_group_capabilities(
     except Exception:  # noqa: BLE001
         degraded = True
         error_class = "role_probe_failed"
+        record_agent_capability_probe("degraded")
         dbg_exc(
             f"群 {group_id} 机器人角色双路径探测失败,仅管理工具按普通成员降级"
             f"(其它 action 继续使用,短 TTL {_DEGRADED_TTL}s)"
         )
     else:
         error_class = None
+        record_agent_capability_probe("success")
     result = local_group_capabilities(bot, role=role)
     if len(_capability_cache) >= _MAX_CACHE_ENTRIES:
         oldest = min(_capability_cache, key=lambda item: _capability_cache[item][0])

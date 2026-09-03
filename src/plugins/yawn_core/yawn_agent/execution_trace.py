@@ -148,6 +148,25 @@ class ExecutionTrace:
     duration_ms: float | None = None
     events: list[TraceEvent] = field(default_factory=list)
 
+    def as_summary(self) -> dict[str, Any]:
+        """Return the small representation used by the trace collection API."""
+        return {
+            "traceId": self.trace_id,
+            "groupId": str(self.group_id),
+            "mode": self.mode,
+            "source": self.source,
+            "triggerSource": self.trigger_source,
+            "actorUserId": (
+                str(self.actor_user_id) if self.actor_user_id is not None else None
+            ),
+            "messageId": str(self.message_id) if self.message_id is not None else None,
+            "startedAt": self.started_at.isoformat(),
+            "status": self.status,
+            "outcome": self.outcome,
+            "durationMs": self.duration_ms,
+            "eventCount": len(self.events),
+        }
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "traceId": self.trace_id,
@@ -331,6 +350,32 @@ def recent_execution_traces(group_id: int) -> list[dict[str, Any]]:
     return [trace.as_dict() for trace in reversed(_recent_traces.get(int(group_id), ()))]
 
 
+def recent_execution_trace_summaries(
+    group_id: int,
+    *,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent traces without their event payloads.
+
+    The status filter is intentionally applied in the in-memory buffer so the
+    collection endpoint never needs to serialize event diagnostics just to filter
+    or render the list.
+    """
+    normalized_status = status.strip() if status else None
+    return [
+        trace.as_summary()
+        for trace in reversed(_recent_traces.get(int(group_id), ()))
+        if normalized_status is None or trace.status == normalized_status
+    ]
+
+
+def execution_trace_by_id(group_id: int, trace_id: str) -> dict[str, Any] | None:
+    for trace in _recent_traces.get(int(group_id), ()):
+        if trace.trace_id == trace_id:
+            return trace.as_dict()
+    return None
+
+
 def clear_execution_traces(group_id: int) -> None:
     _recent_traces.pop(int(group_id), None)
 
@@ -341,7 +386,9 @@ __all__ = [
     "bind_execution_trace",
     "clear_execution_traces",
     "current_execution_trace",
+    "execution_trace_by_id",
     "finish_execution_trace",
+    "recent_execution_trace_summaries",
     "recent_execution_traces",
     "reset_execution_trace",
     "safe_summary",

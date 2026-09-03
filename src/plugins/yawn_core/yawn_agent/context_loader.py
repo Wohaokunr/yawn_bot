@@ -1,29 +1,27 @@
-# ruff: noqa: E501,TID252,PLR0912,PLR0913,PLR0915,PLR2004,C901,TC003
-"""Prompt context loading; kept outside dialogue orchestration by design."""
+# ruff: noqa: E501, PLR0912, PLR0913, PLR0915, PLR2004, C901, TC001, TC003, TID252
+"""Agent 对话上下文加载器。
+
+只负责从 Repository 读取、筛选并装箱 Prompt Context；不负责 LLM 或 Tool 循环。
+"""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, or_, select
+from sqlalchemy import case, exists, func, select
 
-from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
-from ..data_models.bot_group import BotGroup
+from ..data_models.agent_memory import AgentMemory, AgentPrivacy
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
-from ..data_models.user_group import UserGroup
-from .activity import activity_window_counts as _activity_window_counts
+from ..metrics import record_agent_context_db_queries
 from .context import ActivitySnapshot, build_context, now_beijing, trim_context_messages
 from .context_budget import pack_context
-from .context_history import (
-    history_message_payload as _history_message_payload,
-)
-from .context_history import (
-    select_context_messages,
-)
+from .context_history import history_message_payload as _history_message_payload
+from .context_history import select_context_messages
+from .context_repository import AgentContextRepository
 from .emotion import emotion_context_state
 from .log import dbg
 from .memory import effective_relation_confidence, rank_memories
@@ -31,6 +29,120 @@ from .persona import persona_editor_profile
 
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 _MEMORY_CONTEXT_LIMIT = 24
+
+
+async def activity_window_counts(
+    session: Any,
+    group_id: int,
+    now: datetime,
+    *,
+    bot_id: int | None = None,
+    exclude_user_ids: set[int] | None = None,
+    retention_at: datetime | None = None,
+) -> dict[str, Any]:
+    """60 分钟窗口活跃度的一条 SQL 聚合；对话与主动发言路径共用。
+
+    旧实现从"最新 40/60 条消息"在 Python 侧数窗口，活跃群覆盖不全会
+    低估 messages_60m/participants_60m/member_messages_60m；聚合查询不受
+    加载条数截断影响。隐私退出用户统一排除（原主动发言路径未排除，
+    与对话读路径口径不一致）。last_message_at 不限窗口，供冷场判定。
+    """
+
+    clauses: list[Any] = [
+        GroupAgentMessage.group_id == group_id,
+        (
+            GroupAgentMessage.expires_at.is_(None)
+            | (GroupAgentMessage.expires_at >= (retention_at or now))
+        ),
+        GroupAgentMessage.received_at <= now,
+    ]
+    if exclude_user_ids is not None and exclude_user_ids:
+        clauses.append(GroupAgentMessage.user_id.not_in(exclude_user_ids))
+    elif exclude_user_ids is None:
+        opted_out = select(AgentPrivacy.user_id).where(
+            AgentPrivacy.group_id == group_id,
+            AgentPrivacy.user_id == GroupAgentMessage.user_id,
+            AgentPrivacy.opted_out.is_(True),
+        )
+        clauses.append(~exists(opted_out))
+    if bot_id is not None:
+        clauses.append(GroupAgentMessage.bot_id == bot_id)
+    in_window = GroupAgentMessage.received_at >= now - timedelta(hours=1)
+    in_5m = GroupAgentMessage.received_at >= now - timedelta(minutes=5)
+    is_member = GroupAgentMessage.role != "bot"
+    row = (
+        await session.execute(
+            select(
+                func.max(GroupAgentMessage.received_at),
+                func.max(
+                    case((in_window & is_member, GroupAgentMessage.received_at))
+                ),
+                func.sum(
+                    case(
+                        (
+                            GroupAgentMessage.received_at >= now - timedelta(minutes=5),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            GroupAgentMessage.received_at
+                            >= now - timedelta(minutes=20),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(case((in_window, 1), else_=0)),
+                func.sum(case((in_window & is_member, 1), else_=0)),
+                func.sum(case((in_5m & is_member, 1), else_=0)),
+                func.count(
+                    func.distinct(
+                        case((in_5m & is_member, GroupAgentMessage.user_id))
+                    )
+                ),
+                func.count(func.distinct(case((in_window, GroupAgentMessage.user_id)))),
+                func.sum(
+                    case(
+                        (
+                            in_window & GroupAgentMessage.normalized_text.contains("@"),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            in_window
+                            & (
+                                func.json_array_length(GroupAgentMessage.reply_chain)
+                                > 0
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+            ).where(*clauses)
+        )
+    ).one()
+    return {
+        "last_message_at": row[0],
+        "last_member_message_at": row[1],
+        "messages_5m": int(row[2] or 0),
+        "messages_20m": int(row[3] or 0),
+        "messages_60m": int(row[4] or 0),
+        "member_messages_60m": int(row[5] or 0),
+        "member_messages_5m": int(row[6] or 0),
+        "member_participants_5m": int(row[7] or 0),
+        "participants_60m": int(row[8] or 0),
+        "mentions_60m": int(row[9] or 0),
+        "replies_60m": int(row[10] or 0),
+    }
 
 
 async def load_context(
@@ -51,52 +163,24 @@ async def load_context(
     context_model: str | None = None,
     completion_reserve: int = 2048,
     context_token_limit: int | None = None,
+    _record_db_queries: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     now = now_beijing()
     context_now = reference_at or now
-    # 隐私退出是读路径级别的：历史消息同样不得进入提示词。
-    opted_out = set(
-        (
-            await session.execute(
-                select(AgentPrivacy.user_id).where(
-                    AgentPrivacy.group_id == group_id,
-                    AgentPrivacy.opted_out.is_(True),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    repo = AgentContextRepository(session)
+    scope = await repo.load_scope_metadata(group_id)
+    group = scope.group
+    opted_out = set(scope.opted_out_user_ids)
     dbg(
         f"群 {group_id} 加载上下文: 隐私退出用户数={len(opted_out)} ids={sorted(opted_out)}"
     )
-    message_stmt = select(GroupAgentMessage).where(
-        GroupAgentMessage.group_id == group_id,
-        (
-            GroupAgentMessage.expires_at.is_(None)
-            | (GroupAgentMessage.expires_at >= now)
-        ),
-    )
-    if message_cutoff is not None:
-        message_stmt = message_stmt.where(
-            GroupAgentMessage.received_at <= message_cutoff
-        )
-    if opted_out:
-        message_stmt = message_stmt.where(GroupAgentMessage.user_id.not_in(opted_out))
-    if bot_id is not None:
-        message_stmt = message_stmt.where(GroupAgentMessage.bot_id == bot_id)
-    if exclude_message_id is not None:
-        message_stmt = message_stmt.where(
-            GroupAgentMessage.message_id != int(exclude_message_id)
-        )
-    rows = (
-        (
-            await session.execute(
-                message_stmt.order_by(GroupAgentMessage.id.desc()).limit(40)
-            )
-        )
-        .scalars()
-        .all()
+    rows = await repo.load_recent_messages(
+        group_id,
+        now,
+        bot_id=bot_id,
+        opted_out=opted_out,
+        message_cutoff=message_cutoff,
+        exclude_message_id=exclude_message_id,
     )
     messages_unbounded: list[dict[str, Any]] = []
     previous_at: datetime | None = None
@@ -165,25 +249,12 @@ async def load_context(
         if len(focus_ids) >= 4:
             break
     relevant_member_ids = {
-        int(item["user_id"]) for item in messages if item.get("role") != "bot"
+        int(item["user_id"])
+        for item in messages
+        if item.get("role") != "bot"
     }
     relevant_member_ids.update(focus_ids)
-    member_rows = (
-        (
-            await session.execute(
-                select(UserGroup)
-                .where(
-                    UserGroup.group_id == group_id,
-                    UserGroup.user_id.in_(relevant_member_ids),
-                )
-                .order_by(UserGroup.last_seen_at.desc())
-            )
-        )
-        .scalars()
-        .all()
-        if relevant_member_ids
-        else []
-    )
+    member_rows = await repo.load_members(group_id, relevant_member_ids)
     members = [
         {
             "user_id": row.user_id,
@@ -198,79 +269,11 @@ async def load_context(
         f"群 {group_id} 加载上下文: 近期相关成员 {len(members)} 人"
         f"(候选 {len(relevant_member_ids)})"
     )
-    memory_clauses = [
-        AgentMemory.group_id == group_id,
-        AgentMemory.visibility.in_(("group", "public")),
-        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now)),
-    ]
-    candidate_rows = (
-        (
-            await session.execute(
-                select(AgentMemory)
-                .where(*memory_clauses)
-                .order_by(AgentMemory.salience.desc(), AgentMemory.updated_at.desc())
-                .limit(160)
-            )
-        )
-        .scalars()
-        .all()
+    memory_rows = await repo.load_local_memories(
+        group_id,
+        now,
+        focus_ids=focus_ids,
     )
-    # 复现池捞回显著度榜外但近期被再确认的记忆：只按 salience 取候选会
-    # 让安静复述的旧知识结构性不可见。
-    recency_rows = (
-        (
-            await session.execute(
-                select(AgentMemory)
-                .where(*memory_clauses)
-                .order_by(AgentMemory.updated_at.desc(), AgentMemory.id.desc())
-                .limit(60)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    summary_rows = (
-        (
-            await session.execute(
-                select(AgentMemory)
-                .where(*memory_clauses, AgentMemory.memory_type == "summary")
-                .order_by(AgentMemory.updated_at.desc())
-                .limit(40)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    focus_rows: list[AgentMemory] = []
-    if focus_ids:
-        # 活跃成员画像独立查询，不能先和群级高显著记忆争抢 SQL LIMIT。
-        # core 行排最前；随后按成员轮转分配 12 条预算，避免一人占满。
-        focus_rows = list(
-            (
-                await session.execute(
-                    select(AgentMemory)
-                    .where(
-                        *memory_clauses,
-                        AgentMemory.subject_user_id.in_(focus_ids),
-                        AgentMemory.memory_type.in_(("core", "profile", "manual")),
-                    )
-                    .order_by(
-                        case(
-                            (AgentMemory.memory_type == "core", 0),
-                            (AgentMemory.memory_type == "profile", 1),
-                            else_=2,
-                        ),
-                        AgentMemory.salience.desc(),
-                        AgentMemory.updated_at.desc(),
-                    )
-                    .limit(96)
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    memory_rows = [*focus_rows, *summary_rows, *candidate_rows, *recency_rows]
     seen_local_ids: set[int] = set()
     local_rows: list[AgentMemory] = []
     for row in memory_rows:
@@ -285,16 +288,13 @@ async def load_context(
         ):
             continue
         local_rows.append(row)
-    focus_by_member: dict[int, list[AgentMemory]] = {
-        user_id: [] for user_id in focus_ids
-    }
+    focus_by_member: dict[int, list[AgentMemory]] = {user_id: [] for user_id in focus_ids}
     for row in local_rows:
         subject_id = int(row.subject_user_id or 0)
-        if subject_id in focus_by_member and row.memory_type in {
-            "core",
-            "profile",
-            "manual",
-        }:
+        if (
+            subject_id in focus_by_member
+            and row.memory_type in {"core", "profile", "manual"}
+        ):
             focus_by_member[subject_id].append(row)
     focused_profiles: list[AgentMemory] = []
     for position in range(32):
@@ -320,45 +320,9 @@ async def load_context(
 
     shared_rows: list[AgentMemory] = []
     if config.cross_group_visibility == "public_summary":
-        shared_rows = list(
-            (
-                await session.execute(
-                    select(AgentMemory)
-                    .join(
-                        GroupAgentConfig,
-                        GroupAgentConfig.group_id == AgentMemory.group_id,
-                    )
-                    .where(
-                        AgentMemory.group_id != group_id,
-                        AgentMemory.memory_type == "summary",
-                        AgentMemory.visibility == "public",
-                        AgentMemory.memory_key.startswith("public_daily:"),
-                        AgentMemory.expires_at.is_not(None),
-                        AgentMemory.expires_at >= now,
-                        GroupAgentConfig.cross_group_visibility == "public_summary",
-                    )
-                    .order_by(AgentMemory.updated_at.desc())
-                    .limit(20)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        shared_rows = await repo.load_shared_public_summaries(group_id, now)
         source_groups = {int(row.group_id or 0) for row in shared_rows}
-        shared_optouts = (
-            set(
-                (
-                    await session.execute(
-                        select(AgentPrivacy.group_id, AgentPrivacy.user_id).where(
-                            AgentPrivacy.group_id.in_(source_groups),
-                            AgentPrivacy.opted_out.is_(True),
-                        )
-                    )
-                ).all()
-            )
-            if source_groups
-            else set()
-        )
+        shared_optouts = await repo.load_shared_optouts(source_groups)
         shared_rows = [
             row
             for row in shared_rows
@@ -382,16 +346,13 @@ async def load_context(
     for row, source in [
         *((row, "group_summary") for row in summaries[:5]),
         *((row, "shared_public") for row in shared_rows),
-        *(
-            (
-                row,
-                "speaker"
-                if speaker_id is not None
-                and int(row.subject_user_id or 0) == speaker_id
-                else "participant",
-            )
-            for row in focused_profiles
-        ),
+        *((
+            row,
+            "speaker"
+            if speaker_id is not None
+            and int(row.subject_user_id or 0) == speaker_id
+            else "participant",
+        ) for row in focused_profiles),
         *((row, "topic") for row in topic_rows),
     ]:
         row_id = int(row.id or 0)
@@ -429,9 +390,7 @@ async def load_context(
             "source": row.source_kind,
             "evidence_count": len(row.evidence_message_ids or []),
             "first_observed_date": (row.created_at or now).date().isoformat(),
-            "last_confirmed_date": (row.updated_at or row.created_at or now)
-            .date()
-            .isoformat(),
+            "last_confirmed_date": (row.updated_at or row.created_at or now).date().isoformat(),
             "source_scope": source,
             "source_date": str(row.memory_key).rsplit(":", 1)[-1]
             if "daily:" in str(row.memory_key)
@@ -440,7 +399,10 @@ async def load_context(
         overhead = len(json.dumps(item, ensure_ascii=False))
         separator_chars = 2 if memories else 0
         remaining = (
-            _MEMORY_CONTEXT_CHAR_BUDGET - memory_chars - separator_chars - overhead
+            _MEMORY_CONTEXT_CHAR_BUDGET
+            - memory_chars
+            - separator_chars
+            - overhead
         )
         if remaining <= 0:
             break
@@ -456,34 +418,11 @@ async def load_context(
         int(item["user_id"]) for item in messages if item.get("role") != "bot"
     }
     participant_ids.update(focus_ids)
-    relation_rows: list[AgentRelation] = []
-    if participant_ids:
-        # 先在 SQL 层限定当前上下文参与者，再取候选池，避免无关高置信边
-        # 把低一些但当前真正相关的关系挤出候选集。
-        relation_rows = list(
-            (
-                await session.execute(
-                    select(AgentRelation)
-                    .where(
-                        AgentRelation.group_id == group_id,
-                        AgentRelation.subject_user_id.not_in(opted_out),
-                        AgentRelation.object_user_id.not_in(opted_out),
-                        or_(
-                            AgentRelation.source_kind != "mention",
-                            AgentRelation.evidence_count >= 2,
-                        ),
-                        or_(
-                            AgentRelation.subject_user_id.in_(participant_ids),
-                            AgentRelation.object_user_id.in_(participant_ids),
-                        ),
-                    )
-                    .order_by(AgentRelation.confidence.desc())
-                    .limit(60)
-                )
-            )
-            .scalars()
-            .all()
-        )
+    relation_rows = await repo.load_relations(
+        group_id,
+        opted_out=opted_out,
+        participant_ids=participant_ids,
+    )
 
     def _relation_label(user_id: int) -> str:
         # 只加载近期相关成员；解析不到名字时兜底 QQ 号，避免渲染成 null。
@@ -533,9 +472,8 @@ async def load_context(
         f"群 {group_id} 加载上下文: 关系 {len(relations)} 条"
         f"(候选 {len(relation_rows)},上限 20)"
     )
-    # 活跃度改用聚合查询精确统计 60 分钟窗口，不再受最新 40 条截断影响。
-    counts = await _activity_window_counts(
-        session,
+    # 活跃度由 Repository 用一条聚合 SQL 精确统计 60 分钟窗口。
+    counts = await repo.load_activity_window(
         group_id,
         context_now,
         bot_id=bot_id,
@@ -566,7 +504,7 @@ async def load_context(
         f"今日主动发言={activity.proactive_today} 最后消息={activity.last_message_at} "
         f"最后发言={activity.last_agent_at}"
     )
-    group = await session.get(BotGroup, group_id)
+    (_record_db_queries or record_agent_context_db_queries)(repo.query_count)
     dbg(f"群 {group_id} 上下文组装完成: 群名={group.group_name if group else None!r}")
     return build_context(
         group_id=group_id,
@@ -586,4 +524,4 @@ async def load_context(
     )
 
 
-__all__ = ["load_context"]
+__all__ = ["activity_window_counts", "load_context"]

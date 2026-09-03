@@ -7,6 +7,7 @@ import json
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,7 +15,6 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot_plugin_orm import get_session
 from sqlalchemy import case, exists, func, or_, select
-from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.bot_group import BotGroup
@@ -27,6 +27,13 @@ from ..llm import (
     resolve_llm_request,
     vision_model_configured,
 )
+from ..metrics import (
+    record_agent_context_db_queries,
+    record_agent_provider_cache_tokens,
+    record_agent_tool_discovery,
+    record_agent_tool_rounds,
+    record_agent_tool_selection,
+)
 from .capabilities import (
     BotGroupCapabilities,
     get_segment_capabilities,
@@ -38,20 +45,28 @@ from .collector import group_lock, is_pending_trigger_expired
 from .config_store import agent_runtime_enabled, get_or_create_config
 from .conversation import mark_bot_reply
 from .activity import activity_window_counts as _activity_window_counts
-from .context_loader import load_context as _load_context
+from .context_loader import load_context as _load_context_impl
 from .dialogue_support import (
     contains_word,
     current_turn_focus_ids as _current_turn_focus_ids,
-    deterministic_reply as _deterministic_reply,
+    deterministic_reply as _legacy_deterministic_reply,
     is_recent_duplicate as _is_recent_duplicate,
     persist_bot_reply,
     send_group_text as _send_group_text,
-    send_unless_expired as _send_unless_expired,
 )
 from .dialogue_turn_support import (
     DiscoveryRoundGuard,
     semantic_query_text as _semantic_query_text,
     trace_message_shape as _trace_message_shape,
+)
+from .dialogue_runtime_support import (
+    accumulate_turn_usage as _accumulate_turn_usage_impl,
+    commit_tool_batch as _commit_tool_batch,
+    extract_message_id as _extract_message_id,
+    resolve_turn_tool_capabilities as _resolve_turn_tool_capabilities,
+    send_unless_expired as _send_unless_expired_impl,
+    trace_prompt_shape as _trace_prompt_shape,
+    visible_tool_send_ends_turn as _visible_tool_send_ends_turn,
 )
 from .context import (
     ActivitySnapshot,
@@ -95,7 +110,6 @@ from .outbound import (
     DELIVERY_CONFIRMED_FAILURE,
     PreparedOutboundMessage,
     SendResult,
-    extract_message_id as extract_outbound_message_id,
     prepare_text_message,
     send_prepared_outbound,
 )
@@ -117,9 +131,24 @@ from .tools import (
     MAX_TOOL_ROUNDS,
     build_tool_schemas,
     dialogue_tool_round_limit,
-    execute_tool,
+    execute_tool_with_meta,
     select_dialogue_message_segment_types,
     select_dialogue_tool_names,
+)
+from .tool_execution import ToolExecutionContext
+from .turn_fallbacks import (
+    FALLBACK_CURSOR_LIMIT as _FALLBACK_CURSOR_LIMIT,
+    FALLBACK_NOTICES as _FALLBACK_NOTICES,
+    WAIT_NOTICE as _WAIT_NOTICE,
+    WAIT_NOTICE_DEFAULT_DELAY as _WAIT_NOTICE_DEFAULT_DELAY,
+    WAIT_NOTICE_TASK as _WAIT_NOTICE_TASK,
+    WEEKDAY_NAMES as _WEEKDAY_NAMES,
+    _FALLBACK_CURSOR,
+    cancel_wait_notice as _cancel_wait_notice,
+    deterministic_reply as _deterministic_fallback_reply,
+    fallback_notice as _fallback_notice,
+    start_wait_notice as _start_wait_notice_impl,
+    wait_notice_delay as _wait_notice_delay,
 )
 
 _PROMPT_CACHE_KEYS: OrderedDict[str, None] = OrderedDict()
@@ -128,113 +157,53 @@ _MAX_TURN_SECONDS = 120.0
 _FALLBACK_NOTICE = "现在有点忙，稍后再试～"
 _TURN_END_NOTICE = "这个话题我先记下了，稍后再继续聊～"
 _VISIBLE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
+_TOOL_ROUND_COUNT: ContextVar[int] = ContextVar("agent_dialogue_tool_round_count", default=0)
+_TURN_PROVIDER_CACHE_USAGE: ContextVar[tuple[int, int]] = ContextVar(
+    "agent_dialogue_provider_cache_usage", default=(0, 0)
+)
 
+def _load_context(*args: Any, **kwargs: Any) -> Any:
+    kwargs.setdefault("_record_db_queries", record_agent_context_db_queries)
+    return _load_context_impl(*args, **kwargs)
 
-async def _resolve_turn_tool_capabilities(
-    bot: Bot,
-    group_id: int,
-    actor_user_id: int,
-    tool_intent_text: str,
-    *,
-    has_reply: bool,
-    has_mentions: bool,
-    has_media: bool,
-) -> tuple[BotGroupCapabilities, bool, frozenset[str], str]:
-    """Return the minimal first-round capability bundle.
-
-    Progressive disclosure deliberately avoids actor/bot role probes before the
-    model asks for a non-core capability. ``discover_tools`` performs permission
-    resolution lazily, and only discovered privileged tools trigger a live bot
-    capability upgrade for the next LLM round.
-    """
-
-    del actor_user_id
-    baseline = local_group_capabilities(bot)
-    bootstrap_names = select_dialogue_tool_names(
-        tool_intent_text,
-        has_reply=has_reply,
-        has_mentions=has_mentions,
-        has_media=has_media,
-        allow_admin_tools=False,
-    )
-    return baseline, False, bootstrap_names, "progressive_bootstrap"
-
+def _deterministic_reply(text: str) -> str | None:
+    return _deterministic_fallback_reply(text, now=now_beijing())
 
 def _accumulate_turn_usage(total: dict[str, int], result: Any) -> dict[str, Any]:
-    """累计一次用户回合内多次 LLM 请求的真实 token 用量。"""
-
-    total["rounds"] = total.get("rounds", 0) + 1
-    fields = (
-        ("prompt_tokens", "input"),
-        ("completion_tokens", "output"),
-        ("cached_tokens", "cached"),
-        ("cache_miss_tokens", "cache_miss"),
+    return _accumulate_turn_usage_impl(
+        total, result, cache_usage=_TURN_PROVIDER_CACHE_USAGE
     )
-    current: dict[str, int | None] = {}
-    try:
-        from ..metrics import record_ai_tokens
 
-        for field, source in fields:
-            raw = getattr(result, field, None)
-            value = int(raw) if isinstance(raw, int) and raw >= 0 else None
-            current[field] = value
-            if value is None:
-                continue
-            total[field] = total.get(field, 0) + value
-            if value > 0:
-                record_ai_tokens("agent_dialogue_turn", source, value)
-    except Exception:  # noqa: BLE001
-        dbg_exc("累计 Agent 回合 token 指标失败(忽略)")
-    return {
-        "request": current,
-        "turn": {
-            "rounds": total.get("rounds", 0),
-            **{field: total.get(field, 0) for field, _source in fields},
-        },
-    }
+async def _send_unless_expired(
+    bot: Bot,
+    group_id: int,
+    message: str | PreparedOutboundMessage,
+    enqueued_at: float | None,
+    **kwargs: Any,
+) -> SendResult:
+    return await _send_unless_expired_impl(
+        bot,
+        group_id,
+        message,
+        enqueued_at,
+        sender=send_prepared_outbound,
+        expiry_checker=is_pending_trigger_expired,
+        cancel_wait=_cancel_wait_notice,
+        **kwargs,
+    )
 
-
-def _trace_prompt_shape(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return useful prompt diagnostics without retaining the full prompt."""
-
-    roles: dict[str, int] = {}
-    text_chars = 0
-    media_blocks = 0
-    tool_call_messages = 0
-    for message in messages:
-        role = str(message.get("role") or "unknown")
-        roles[role] = roles.get(role, 0) + 1
-        if message.get("tool_calls"):
-            tool_call_messages += 1
-        content = message.get("content")
-        if isinstance(content, str):
-            text_chars += len(content)
-        elif isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text":
-                    text_chars += len(str(block.get("text") or ""))
-                elif str(block.get("type") or "").startswith("image"):
-                    media_blocks += 1
-    return {
-        "roles": roles,
-        "text_chars": text_chars,
-        "media_blocks": media_blocks,
-        "tool_call_messages": tool_call_messages,
-    }
-
-
-def _visible_tool_send_ends_turn(result: dict[str, Any]) -> bool:
-    """用户可见发送一旦成功，本轮必须结束，禁止再追加最终纯文本。"""
-
-    return result.get("sent") is True
-
-
-def _extract_message_id(result: Any) -> int | None:
-    """OneBot 实现对 send_group_msg 返回值不统一：dict、对象或裸 int；0 视为缺失。"""
-
-    return extract_outbound_message_id(result)
+def _start_wait_notice(
+    bot: Bot, group_id: int, enqueued_at: float | None, message_id: Any
+) -> None:
+    _start_wait_notice_impl(
+        bot,
+        group_id,
+        enqueued_at,
+        message_id,
+        send_unless_expired=_send_unless_expired,
+        debug=dbg,
+        debug_exception=dbg_exc,
+    )
 
 
 async def _prepare_media_prompt(
@@ -438,6 +407,7 @@ async def _process_group_message(
                     f"{'配置缺失' if config is None else '已关闭'}"
                 )
                 return
+            _start_wait_notice(bot, group_id, enqueued_at, message_id)
             actor_user_id = int(event.get_user_id())
             model = resolve_llm_request("agent_dialogue").model
             context_started = time.monotonic()
@@ -521,6 +491,14 @@ async def _process_group_message(
                     else None
                 ),
             )
+            tool_schema_chars = len(
+                json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+            )
+            record_agent_tool_selection(
+                schema_chars=tool_schema_chars,
+                selected_count=len(selected_tool_names),
+                exposed_count=len(tools),
+            )
             round_limit = dialogue_tool_round_limit(selected_tool_names)
             trace_event(
                 "capability",
@@ -538,9 +516,7 @@ async def _process_group_message(
                         str(item.get("function", {}).get("name") or "")
                         for item in tools
                     ],
-                    "tool_schema_chars": len(
-                        json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-                    ),
+                    "tool_schema_chars": tool_schema_chars,
                     "tool_count": len(tools),
                 },
                 duration_ms=(time.monotonic() - capability_started) * 1000,
@@ -738,6 +714,15 @@ async def _process_group_message(
             rounds = 0
             had_tool_results = False
             discovery_guard = DiscoveryRoundGuard(set(selected_tool_names))
+            tool_execution_context = ToolExecutionContext(
+                bot=bot,
+                group_id=group_id,
+                actor_user_id=actor_user_id,
+                session=session,
+                capabilities=capabilities,
+                actor_can_manage=(True if allow_admin_tools else None),
+                privileged_allowlist=frozenset(config.tool_allowlist or []),
+            )
             turn_usage: dict[str, int] = {}
             while rounds < round_limit:
                 if time.monotonic() > deadline:
@@ -815,7 +800,7 @@ async def _process_group_message(
                         round_index=rounds,
                     )
                     fallback = (
-                        _deterministic_reply(normalized.plain_text) or _FALLBACK_NOTICE
+                        _deterministic_reply(normalized.plain_text) or _fallback_notice(group_id)
                     )
                     dbg(
                         f"群 {group_id} 第 {rounds} 轮 LLM 返回 None,降级回复={fallback!r}"
@@ -879,6 +864,8 @@ async def _process_group_message(
                 }
                 messages.append(assistant)
                 round_sent_message = False
+                round_needs_commit = False
+                round_commit_tools: list[str] = []
                 discovered_tool_names: set[str] = set()
                 discovered_requires_admin = False
                 round_tool_media_blocks: list[dict[str, Any]] = []
@@ -927,17 +914,39 @@ async def _process_group_message(
                             if guarded_result is not None:
                                 result = guarded_result
                             else:
-                                result = await execute_tool(
+                                execution_result = await execute_tool_with_meta(
                                     tool_name,
                                     args,
-                                    bot=bot,
-                                    group_id=group_id,
-                                    actor_user_id=actor_user_id,
-                                    session=session,
-                                    capabilities=capabilities,
+                                    context=tool_execution_context,
                                 )
+                                result = execution_result.payload
+                                if execution_result.needs_commit:
+                                    round_needs_commit = True
+                                    round_commit_tools.append(tool_name)
+                                if execution_result.immediate_commit:
+                                    await _commit_tool_batch(
+                                        session,
+                                        config,
+                                        group_id,
+                                        rounds,
+                                        [tool_name],
+                                        immediate=True,
+                                    )
+                                    round_needs_commit = False
+                                    round_commit_tools.clear()
                     had_tool_results = True
+                    if tool_name == "discover_tools":
+                        record_agent_tool_discovery("called")
                     if tool_name == "discover_tools" and bool(result.get("ok")):
+                        discovery_payload = result.get("result")
+                        discovery_rows = (
+                            discovery_payload.get("tools", [])
+                            if isinstance(discovery_payload, dict)
+                            else []
+                        )
+                        record_agent_tool_discovery(
+                            "returned" if discovery_rows else "empty"
+                        )
                         new_names, requires_admin = discovery_guard.observe(
                             result.get("result")
                         )
@@ -1205,32 +1214,18 @@ async def _process_group_message(
                             "content": json.dumps(tool_payload, ensure_ascii=False),
                         }
                     )
-                    try:
-                        await session.commit()
-                    except SQLAlchemyError:
-                        trace_event(
-                            "state",
-                            "工具轮状态提交",
-                            status="failed",
-                            detail="数据库提交失败并已回滚",
-                            round_index=rounds,
-                        )
-                        dbg_exc(f"群 {group_id} 工具轮状态提交失败,已回滚")
-                        await session.rollback()
-                    else:
-                        trace_event(
-                            "state",
-                            "工具轮状态提交",
-                            output={"tool": tool_name},
-                            round_index=rounds,
-                        )
-                    # 提交会过期会话内对象；后续轮次还要读取 config 属性，
-                    # 先刷新避免同步惰性加载（MissingGreenlet）。
-                    await session.refresh(config)
                     if round_sent_message:
                         # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
                         # 同时调用 send_message/send_forward 连发多条。
                         break
+                if round_needs_commit:
+                    await _commit_tool_batch(
+                        session,
+                        config,
+                        group_id,
+                        rounds,
+                        round_commit_tools,
+                    )
                 if round_tool_media_blocks and not round_sent_message:
                     messages.append(
                         {
@@ -1278,6 +1273,9 @@ async def _process_group_message(
                         # Re-read the cached/live bot capability object so the
                         # discovered schema can be injected for the next round.
                         capabilities = await probe_group_capabilities(bot, group_id)
+                        tool_execution_context = tool_execution_context.with_capabilities(
+                            capabilities
+                        )
                         allow_admin_tools = True
                         capability_source = "progressive_discovery_live_probe"
                     selected_tool_names = frozenset(
@@ -1302,6 +1300,8 @@ async def _process_group_message(
                     loaded_discoveries = sorted(
                         name for name in discovered_tool_names if name in loaded_names
                     )
+                    if loaded_discoveries:
+                        record_agent_tool_discovery("used", len(loaded_discoveries))
                     round_limit = max(
                         round_limit,
                         min(MAX_TOOL_ROUNDS, rounds + 2),
@@ -1361,6 +1361,8 @@ async def process_group_message(
         ),
     )
     token = bind_execution_trace(trace)
+    tool_round_token = _TOOL_ROUND_COUNT.set(0)
+    provider_cache_token = _TURN_PROVIDER_CACHE_USAGE.set((0, 0))
     trace_shape = _trace_message_shape(normalized, bot_id=int(bot.self_id))
     for stage in normalized.parse_trace:
         if not isinstance(stage, dict):
@@ -1462,6 +1464,17 @@ async def process_group_message(
         )
         raise
     finally:
+        _cancel_wait_notice()
+        tool_rounds = _TOOL_ROUND_COUNT.get()
+        record_agent_tool_rounds(tool_rounds, "dialogue")
+        cached_tokens, cache_miss_tokens = _TURN_PROVIDER_CACHE_USAGE.get()
+        if tool_rounds > 0:
+            record_agent_provider_cache_tokens(
+                cached=cached_tokens,
+                cache_miss=cache_miss_tokens,
+            )
+        _TOOL_ROUND_COUNT.reset(tool_round_token)
+        _TURN_PROVIDER_CACHE_USAGE.reset(provider_cache_token)
         trace_event(
             "turn",
             "回合结束",

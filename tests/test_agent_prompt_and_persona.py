@@ -1,9 +1,10 @@
-# ruff: noqa: TC001,TC002,TC003,PLR2004
+# ruff: noqa: TC001,TC002,TC003,PLR2004,RUF001
 from __future__ import annotations
 
 import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2190,3 +2191,71 @@ def test_complete_with_tools_omits_empty_tools_param() -> None:
         assert fake_client.chat.completions.calls[1]["tools"] == tools
     finally:
         llm_module.get_client = original
+
+
+# ── 降级模式下的确定性回复 ──────────────────────────────────────
+
+
+def test_deterministic_reply_covers_no_ai_intents() -> None:
+    """没配 AI_API_KEY 时，常见提问也要给出有用回答而不是同一句"有点忙"。"""
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    assert dialogue._deterministic_reply("你好呀") == "我在呀，有事直接说～"
+    assert dialogue._deterministic_reply("谢谢你") == "不客气～"
+    assert "命令" in (dialogue._deterministic_reply("你会什么") or "")
+    assert "/Agent记忆" in (dialogue._deterministic_reply("看看群记忆") or "")
+    assert "/Agent画像" in (dialogue._deterministic_reply("我的画像呢") or "")
+    # 未命中任何确定性意图时交还给轮换兜底句。
+    assert dialogue._deterministic_reply("帮我写一段快速排序") is None
+
+
+def test_deterministic_reply_answers_time_and_date_locally() -> None:
+    """时间/日期不需要 AI，本地直接答。"""
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    now = dialogue.now_beijing()
+    time_reply = dialogue._deterministic_reply("现在几点了")
+    assert time_reply is not None
+    assert f"{now:%H:%M}" in time_reply
+
+    date_reply = dialogue._deterministic_reply("今天星期几")
+    assert date_reply is not None
+    assert f"{now:%Y年%m月%d日}" in date_reply
+    assert dialogue._WEEKDAY_NAMES[now.weekday()] in date_reply
+
+
+def test_fallback_notice_rotates_per_group() -> None:
+    """同一群连续降级不会收到同一句；不同群各自独立轮换。"""
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    dialogue._FALLBACK_CURSOR.clear()
+    try:
+        first = [dialogue._fallback_notice(1) for _ in range(3)]
+        assert len(set(first)) == len(dialogue._FALLBACK_NOTICES)
+        # 相邻两次不重复。
+        assert all(a != b for a, b in pairwise(first))
+        # 其他群从头开始轮换，互不影响。
+        assert dialogue._fallback_notice(2) == dialogue._FALLBACK_NOTICES[0]
+    finally:
+        dialogue._FALLBACK_CURSOR.clear()
+
+
+def test_fallback_cursor_is_bounded() -> None:
+    """群数很多时游标表不能无界增长。"""
+
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import dialogue
+
+    dialogue._FALLBACK_CURSOR.clear()
+    try:
+        for group_id in range(dialogue._FALLBACK_CURSOR_LIMIT + 20):
+            dialogue._fallback_notice(group_id)
+        assert len(dialogue._FALLBACK_CURSOR) <= dialogue._FALLBACK_CURSOR_LIMIT
+    finally:
+        dialogue._FALLBACK_CURSOR.clear()

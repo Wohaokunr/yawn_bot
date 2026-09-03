@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -51,3 +52,11 @@ class GroupAgentMessage(Model):
     expires_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True, index=True
     )
+
+
+Index(
+    "ix_agent_message_group_bot_id_desc",
+    GroupAgentMessage.group_id,
+    GroupAgentMessage.bot_id,
+    GroupAgentMessage.id.desc(),
+)

@@ -27,18 +27,31 @@ describe("useApiQuery", () => {
     await waitFor(() => expect(result.current.error).toBe("加载失败"));
   });
 
-  it("keeps the newest response when an older request resolves late", async () => {
+  it("queues the newest load instead of overlapping a slow request", async () => {
     let resolveFirst!: (value: number) => void;
+    let active = 0;
+    let maxActive = 0;
     const loads = [
-      () => new Promise<number>((resolve) => { resolveFirst = resolve; }),
-      () => Promise.resolve(2),
+      () => new Promise<number>((resolve) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        resolveFirst = (value) => { active -= 1; resolve(value); };
+      }),
+      () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        active -= 1;
+        return Promise.resolve(2);
+      },
     ];
     const { result, rerender } = renderHook(({ index }) => useApiQuery(loads[index]), { initialProps: { index: 0 } });
     rerender({ index: 1 });
-    await waitFor(() => expect(result.current.data).toBe(2));
+    expect(maxActive).toBe(1);
     await act(async () => { resolveFirst(1); });
+    await waitFor(() => expect(result.current.data).toBe(2));
     expect(result.current.data).toBe(2);
     expect(result.current.error).toBe("");
+    expect(maxActive).toBe(1);
   });
 
   it("reloads on demand and only for subscribed entity.changed resources", async () => {

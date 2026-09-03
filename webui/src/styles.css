@@ -2845,6 +2845,19 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
 }
 .agent-debug-details[open] summary { margin-bottom: 8px; }
 .agent-debug-detail-card > .ant-card-body { padding-top: 8px; }
+.agent-trace-list-item {
+  cursor: pointer;
+  padding-inline: 10px !important;
+  border-radius: 12px;
+  transition: background-color 0.2s ease;
+}
+.agent-trace-list-item:hover,
+.agent-trace-list-item.is-selected { background: rgba(255, 255, 255, 0.62); }
+.agent-debug-inspector-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
+  gap: 16px;
+}
 
 /* Agent Studio 收敛：功能布局保留，视觉材质统一回全局 Card/玻璃体系。 */
 .agent-studio-page::before,
@@ -2953,4 +2966,5 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
   .agent-debug-control-row { grid-template-columns: 1fr; gap: 8px; }
   .agent-debug-run-row { align-items: stretch; flex-direction: column; }
   .agent-debug-run-row .ant-btn { width: 100%; }
+  .agent-debug-inspector-grid { grid-template-columns: 1fr; }
 }

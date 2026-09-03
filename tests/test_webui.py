@@ -528,6 +528,7 @@ def test_split_route_modules_are_all_registered() -> None:
         ("GET", "/webui/api/v1/users"),
         ("GET", "/webui/api/v1/agent/groups/{group_id}/diagnostics"),
         ("GET", "/webui/api/v1/agent/groups/{group_id}/execution-traces"),
+        ("GET", "/webui/api/v1/agent/groups/{group_id}/execution-traces/{trace_id}"),
         ("POST", "/webui/api/v1/agent/groups/{group_id}/debug/run"),
         ("GET", "/webui/api/v1/web-audits"),
         ("PATCH", "/webui/api/v1/environment"),
