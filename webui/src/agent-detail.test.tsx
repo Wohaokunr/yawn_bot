@@ -11,6 +11,18 @@ class ResizeObserverMock {
 beforeAll(() => vi.stubGlobal("ResizeObserver", ResizeObserverMock));
 afterAll(() => vi.unstubAllGlobals());
 
+const panelLoads = vi.hoisted(() => ({
+  config: 0,
+  persona: 0,
+  memories: 0,
+  profiles: 0,
+  relations: 0,
+  messages: 0,
+  debug: 0,
+  privacy: 0,
+  audits: 0,
+}));
+
 vi.mock("./api", () => ({
   api: vi.fn(() => new Promise<never>(() => undefined)),
   ApiError: class ApiError extends Error {
@@ -18,33 +30,42 @@ vi.mock("./api", () => ({
     fields = {};
   },
 }));
-vi.mock("./agent-panels/AgentConfigPanel", () => ({
-  AgentConfigPanel: () => <input aria-label="config draft" defaultValue="draft" />,
-}));
-vi.mock("./agent-panels/PersonaPanel", () => ({
-  PersonaPanel: () => <div>persona mock</div>,
-}));
-vi.mock("./agent-panels/MemoriesPanel", () => ({
-  MemoriesPanel: () => <div>memories mock</div>,
-}));
-vi.mock("./agent-panels/MemberProfilesPanel", () => ({
-  MemberProfilesPanel: () => <div>profiles mock</div>,
-}));
-vi.mock("./agent-panels/RelationsPanel", () => ({
-  RelationsPanel: () => <div>relations mock</div>,
-}));
-vi.mock("./agent-panels/AgentMessagesPanel", () => ({
-  AgentMessagesPanel: () => <div>messages mock</div>,
-}));
-vi.mock("./agent-panels/PrivacyPanel", () => ({
-  PrivacyPanel: () => <div>privacy mock</div>,
-}));
-vi.mock("./agent-panels/AgentAuditsPanel", () => ({
-  AgentAuditsPanel: () => <div>audits mock</div>,
-}));
-vi.mock("./agent-debug/AgentDebugger", () => ({
-  AgentDebugger: () => <div>debug mock</div>,
-}));
+vi.mock("./agent-panels/AgentConfigPanel", () => {
+  panelLoads.config += 1;
+  return { AgentConfigPanel: () => <input aria-label="config draft" defaultValue="draft" /> };
+});
+vi.mock("./agent-panels/PersonaPanel", () => {
+  panelLoads.persona += 1;
+  return { PersonaPanel: () => <div>persona mock</div> };
+});
+vi.mock("./agent-panels/MemoriesPanel", () => {
+  panelLoads.memories += 1;
+  return { MemoriesPanel: () => <div>memories mock</div> };
+});
+vi.mock("./agent-panels/MemberProfilesPanel", () => {
+  panelLoads.profiles += 1;
+  return { MemberProfilesPanel: () => <div>profiles mock</div> };
+});
+vi.mock("./agent-panels/RelationsPanel", () => {
+  panelLoads.relations += 1;
+  return { RelationsPanel: () => <div>relations mock</div> };
+});
+vi.mock("./agent-panels/AgentMessagesPanel", () => {
+  panelLoads.messages += 1;
+  return { AgentMessagesPanel: () => <div>messages mock</div> };
+});
+vi.mock("./agent-panels/PrivacyPanel", () => {
+  panelLoads.privacy += 1;
+  return { PrivacyPanel: () => <div>privacy mock</div> };
+});
+vi.mock("./agent-panels/AgentAuditsPanel", () => {
+  panelLoads.audits += 1;
+  return { AgentAuditsPanel: () => <div>audits mock</div> };
+});
+vi.mock("./agent-debug/AgentDebugger", () => {
+  panelLoads.debug += 1;
+  return { AgentDebugger: () => <div>debug mock</div> };
+});
 
 import { AgentDetailPage } from "./agent";
 
@@ -64,6 +85,28 @@ function renderPage(entry: string): void {
 }
 
 describe("AgentDetailPage tab lifecycle", () => {
+  it("keeps Studio panel modules unloaded while the overview is active", async () => {
+    renderPage("/agent/1");
+    await screen.findByText("运行诊断");
+    expect(panelLoads).toEqual({
+      config: 0,
+      persona: 0,
+      memories: 0,
+      profiles: 0,
+      relations: 0,
+      messages: 0,
+      debug: 0,
+      privacy: 0,
+      audits: 0,
+    });
+
+    fireEvent.click(screen.getByText("运行配置"));
+    await screen.findByLabelText("config draft");
+    expect(panelLoads.config).toBe(1);
+    expect(panelLoads.persona).toBe(0);
+    expect(panelLoads.debug).toBe(0);
+  });
+
   it("keeps a visited panel mounted and preserves namespaced URL state across tab switches", async () => {
     renderPage("/agent/1?tab=config&profiles.userId=42&debug.trace=trace-a");
     const input = await screen.findByLabelText("config draft");
