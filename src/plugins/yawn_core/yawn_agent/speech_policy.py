@@ -57,8 +57,8 @@ RESPONSE_COMPLEXITY_COMPLEX = "complex"
 
 _SCENE_RULES: dict[str, str] = {
     SPEECH_SCENE_DIRECT_REPLY: (
-        "这是明确呼叫。先完成当前话语动作：answer 才需要完整解决问题；repair/ping_ack 要以短互动为先。"
-        "简单问题直接答，复杂问题可以展开，但不要先复述问题。"
+        "这是明确呼叫。answer 需要完整解决当前问题，角色再安静也不能省掉必要事实、步骤或风险说明；"
+        "repair/ping_ack 则以短互动为先。简单问题直接答，复杂问题可以展开，但不要先复述问题。"
     ),
     SPEECH_SCENE_REPLY_THREAD: (
         "这是回复链承接。优先回答被引用消息和当前发言人的真实问题；多人聊天时要保持对象清楚，"
@@ -123,6 +123,11 @@ _COMPLEX_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _LIST_HINT_RE = re.compile(r"(?:\n|[；;]|(?:^|\s)[一二三四五六七八九十\d]+[.、)])")
+_COMPLEX_TEXT_CHARS = 80
+_NORMAL_TEXT_CHARS = 40
+_MULTI_SIGNAL_COUNT = 2
+_COMPLEX_SCORE_THRESHOLD = 2
+_SIMPLE_ANSWER_MAX_CHARS = 24
 
 
 def _turn_payload(current_turn: CurrentTurn | dict[str, Any] | None) -> dict[str, Any]:
@@ -220,7 +225,7 @@ def _persona_level(persona: dict[str, str], field: str, fallback: int) -> int:
     return fallback
 
 
-def classify_response_complexity(
+def classify_response_complexity(  # noqa: C901
     current_turn: CurrentTurn | dict[str, Any] | None,
     *,
     act: str,
@@ -250,20 +255,20 @@ def classify_response_complexity(
         return RESPONSE_COMPLEXITY_SIMPLE
 
     score = 0
-    if len(compact) >= 80:
-        score += 2
-    elif len(compact) >= 40:
+    if len(compact) >= _COMPLEX_TEXT_CHARS:
+        score += _COMPLEX_SCORE_THRESHOLD
+    elif len(compact) >= _NORMAL_TEXT_CHARS:
         score += 1
     if _COMPLEX_HINT_RE.search(compact):
-        score += 2
-    if len(_LIST_HINT_RE.findall(text)) >= 2:
+        score += _COMPLEX_SCORE_THRESHOLD
+    if len(_LIST_HINT_RE.findall(text)) >= _MULTI_SIGNAL_COUNT:
         score += 1
-    if compact.count("？") + compact.count("?") >= 2:
+    if compact.count("？") + compact.count("?") >= _MULTI_SIGNAL_COUNT:
         score += 1
 
-    if score >= 2:
+    if score >= _COMPLEX_SCORE_THRESHOLD:
         return RESPONSE_COMPLEXITY_COMPLEX
-    if act == SPEECH_ACT_ANSWER and len(compact) <= 24:
+    if act == SPEECH_ACT_ANSWER and len(compact) <= _SIMPLE_ANSWER_MAX_CHARS:
         return RESPONSE_COMPLEXITY_SIMPLE
     return RESPONSE_COMPLEXITY_NORMAL
 
