@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useApiQuery } from "../shared";
 import type { AgentExecutionTrace, AgentExecutionTraceSummary } from "../types";
@@ -25,77 +26,66 @@ export interface ExecutionTracesState {
 }
 
 export function useExecutionTraces(groupId: string): ExecutionTracesState {
-  const [status, setStatus] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = searchParams.get("debug.status") ?? "";
+  const selectedTraceId = searchParams.get("debug.trace") ?? "";
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [selectedTraceId, setSelectedTraceId] = useState("");
-  const [selectedTrace, setSelectedTrace] = useState<AgentExecutionTrace | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState("");
-  const detailGeneration = useRef(0);
-  const userSelectedTrace = useRef(false);
+  const userSelectedTrace = useRef(Boolean(selectedTraceId));
 
-  const loadSummaries = useCallback(
-    () => {
+  const updateParam = useCallback((key: string, value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value); else next.delete(key);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  const setStatus = useCallback((value: string) => {
+    updateParam("debug.status", value);
+  }, [updateParam]);
+
+  const setSelectedTraceId = useCallback((traceId: string) => {
+    userSelectedTrace.current = true;
+    updateParam("debug.trace", traceId);
+  }, [updateParam]);
+
+  const listQuery = useApiQuery({
+    queryKey: ["agent-execution-traces", groupId, status],
+    fetcher: (signal) => {
       const query = status ? `?status=${encodeURIComponent(status)}` : "";
       return api<AgentExecutionTraceSummary[]>(
         `/agent/groups/${groupId}/execution-traces${query}`,
+        { signal },
       ).then((response) => response.data);
     },
-    [groupId, status],
-  );
-  const listQuery = useApiQuery(loadSummaries);
+  });
   const summaries = listQuery.data ?? [];
 
   useEffect(() => {
     const firstId = summaries[0]?.traceId ?? "";
     if (firstId && (!selectedTraceId || !userSelectedTrace.current)) {
-      if (selectedTraceId !== firstId) setSelectedTraceId(firstId);
+      if (selectedTraceId !== firstId) updateParam("debug.trace", firstId);
     }
-  }, [selectedTraceId, summaries]);
+  }, [selectedTraceId, summaries, updateParam]);
 
+  const previousGroupId = useRef(groupId);
   useEffect(() => {
+    if (previousGroupId.current === groupId) return;
+    previousGroupId.current = groupId;
     userSelectedTrace.current = false;
-    setSelectedTraceId("");
-    setSelectedTrace(null);
-    setDetailError("");
-  }, [groupId]);
+    const next = new URLSearchParams(searchParams);
+    next.delete("debug.trace");
+    next.delete("debug.messageId");
+    setSearchParams(next, { replace: true });
+  }, [groupId, searchParams, setSearchParams]);
 
-  const selectTrace = useCallback((traceId: string) => {
-    userSelectedTrace.current = true;
-    setSelectedTraceId(traceId);
-  }, []);
-
-  const loadDetail = useCallback(
-    async (traceId: string) => {
-      const ticket = ++detailGeneration.current;
-      if (!traceId) {
-        setSelectedTrace(null);
-        setDetailError("");
-        setDetailLoading(false);
-        return;
-      }
-      setSelectedTrace(null);
-      setDetailLoading(true);
-      setDetailError("");
-      try {
-        const response = await api<AgentExecutionTrace>(
-          `/agent/groups/${groupId}/execution-traces/${encodeURIComponent(traceId)}`,
-        );
-        if (ticket === detailGeneration.current) setSelectedTrace(response.data);
-      } catch (error) {
-        if (ticket === detailGeneration.current) {
-          setDetailError(error instanceof Error ? error.message : "Trace 详情加载失败");
-        }
-      } finally {
-        if (ticket === detailGeneration.current) setDetailLoading(false);
-      }
-    },
-    [groupId],
-  );
-
-  useEffect(() => {
-    void loadDetail(selectedTraceId);
-  }, [loadDetail, selectedTraceId]);
+  const detailQuery = useApiQuery({
+    queryKey: ["agent-execution-trace-detail", groupId, selectedTraceId],
+    fetcher: (signal) => selectedTraceId
+      ? api<AgentExecutionTrace>(
+        `/agent/groups/${groupId}/execution-traces/${encodeURIComponent(selectedTraceId)}`,
+        { signal },
+      ).then((response) => response.data)
+      : Promise.resolve(null),
+  });
 
   useEffect(() => {
     if (!autoRefresh) return undefined;
@@ -105,8 +95,8 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
 
   const reloadSelected = useCallback(() => {
     listQuery.reload();
-    if (selectedTraceId) void loadDetail(selectedTraceId);
-  }, [listQuery.reload, loadDetail, selectedTraceId]);
+    if (selectedTraceId) detailQuery.reload();
+  }, [detailQuery.reload, listQuery.reload, selectedTraceId]);
 
   const selectedTraceUnavailable = Boolean(
     userSelectedTrace.current
@@ -121,14 +111,14 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
     autoRefresh,
     setAutoRefresh,
     selectedTraceId,
-    setSelectedTraceId: selectTrace,
-    selectedTrace,
+    setSelectedTraceId,
+    selectedTrace: detailQuery.data,
     selectedTraceUnavailable,
     listLoading: listQuery.loading,
     listRefreshing: listQuery.refreshing,
     listError: listQuery.error,
-    detailLoading,
-    detailError,
+    detailLoading: detailQuery.loading,
+    detailError: detailQuery.error,
     reload: listQuery.reload,
     reloadSelected,
   };
