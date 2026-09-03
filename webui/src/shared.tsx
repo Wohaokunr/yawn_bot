@@ -23,6 +23,12 @@ export interface EntityInvalidation {
   scope?: EntityChangeScope;
 }
 
+function isEntityInvalidation(
+  value: EntityInvalidation | readonly string[],
+): value is EntityInvalidation {
+  return !Array.isArray(value);
+}
+
 function scopeMatches(actual: EntityChangeScope | null | undefined, expected?: EntityChangeScope): boolean {
   if (!expected) return true;
   return Object.entries(expected).every(([key, value]) => {
@@ -35,8 +41,8 @@ export function useEntityRefresh(
   callback: () => void,
   invalidation: EntityInvalidation | readonly string[] = [],
 ): void {
-  const resources = Array.isArray(invalidation) ? invalidation : invalidation.resources;
-  const scope = Array.isArray(invalidation) ? undefined : invalidation.scope;
+  const resources = isEntityInvalidation(invalidation) ? invalidation.resources : invalidation;
+  const scope = isEntityInvalidation(invalidation) ? invalidation.scope : undefined;
   const resourcesKey = resources.join("\u001f");
   const scopeKey = JSON.stringify(scope ?? null);
   const callbackRef = useRef(callback);
@@ -54,8 +60,6 @@ export function useEntityRefresh(
     };
     window.addEventListener("yawnbot-entity-changed", listener);
     return () => window.removeEventListener("yawnbot-entity-changed", listener);
-    // resources/scope are represented by stable scalar keys so callers can use inline arrays/objects.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resourcesKey, scopeKey]);
 }
 
@@ -208,6 +212,7 @@ export function useDraftSafeServerData<T extends VersionedServerData>(
   hydrate: (value: T) => void,
 ): DraftSafeServerState<T> {
   const [remoteUpdate, setRemoteUpdate] = useState<T | null>(null);
+  const hasApplied = useRef(false);
   const appliedVersion = useRef<string | null>(null);
   const ignoredVersion = useRef<string | null>(null);
   const dirtyRef = useRef(dirty);
@@ -217,6 +222,7 @@ export function useDraftSafeServerData<T extends VersionedServerData>(
 
   const acceptServerData = useCallback((value: T) => {
     hydrateRef.current(value);
+    hasApplied.current = true;
     appliedVersion.current = value.version ?? null;
     ignoredVersion.current = null;
     setRemoteUpdate(null);
@@ -225,7 +231,7 @@ export function useDraftSafeServerData<T extends VersionedServerData>(
   useEffect(() => {
     if (!data) return;
     const version = data.version ?? null;
-    if (version === appliedVersion.current) return;
+    if (hasApplied.current && version === appliedVersion.current) return;
     if (dirtyRef.current) {
       if (version !== ignoredVersion.current) setRemoteUpdate(data);
       return;
