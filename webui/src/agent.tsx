@@ -22,7 +22,6 @@ import {
   Statistic,
   Switch,
   Table,
-  Tabs,
   Tag,
   Timeline,
   Typography,
@@ -33,6 +32,7 @@ import { AgentAuditTable } from "./agent-audit-table";
 import { AgentDebugger } from "./agent-debug/AgentDebugger";
 import { TraceCompareView } from "./agent-debug/TraceWorkspace";
 import { api, ApiError } from "./api";
+import { PageFrame, PanelStack } from "./layout";
 import { nodeDisplayName, relationTypeColor } from "./relation-meta";
 import {
   AdminEmpty,
@@ -99,26 +99,88 @@ export function AgentGroupsPage(): React.JSX.Element {
   }</Card></>;
 }
 
+const AGENT_DETAIL_NAV = [
+  { key: "overview", label: "运行诊断" },
+  { key: "config", label: "运行配置" },
+  { key: "persona", label: "人设" },
+  { key: "memories", label: "记忆" },
+  { key: "profiles", label: "成员画像" },
+  { key: "relations", label: "关系边" },
+  { key: "messages", label: "消息记录" },
+  { key: "debug", label: "对话调试" },
+  { key: "privacy", label: "隐私退出" },
+  { key: "audit", label: "工具审计" },
+] as const;
+
+type AgentDetailTab = typeof AGENT_DETAIL_NAV[number]["key"];
+
 export function AgentDetailPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = searchParams.get("tab") ?? "overview";
+  const requestedTab = searchParams.get("tab") ?? "overview";
+  const activeTab = (AGENT_DETAIL_NAV.some((item) => item.key === requestedTab) ? requestedTab : "overview") as AgentDetailTab;
   const changeTab = (key: string) => {
+    if (key === activeTab) return;
     if (!confirmDiscardChanges()) return;
-    setSearchParams(key === "overview" ? {} : { tab: key }, { replace: true });
+    const next = new URLSearchParams(searchParams);
+    if (key === "overview") next.delete("tab");
+    else next.set("tab", key);
+    setSearchParams(next, { replace: true });
   };
-  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={changeTab} items={[
-    { key: "overview", label: "运行诊断", children: <AgentOverviewPanel groupId={groupId} /> },
-    { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
-    { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
-    { key: "memories", label: "记忆", children: <MemoriesPanel groupId={groupId} /> },
-    { key: "profiles", label: "成员画像", children: <MemberProfilesPanel groupId={groupId} /> },
-    { key: "relations", label: "关系边", children: <RelationsPanel groupId={groupId} /> },
-    { key: "messages", label: "消息记录", children: <AgentMessagesPanel groupId={groupId} /> },
-    { key: "debug", label: "对话调试", children: <AgentDebugger groupId={groupId} /> },
-    { key: "privacy", label: "隐私退出", children: <PrivacyPanel groupId={groupId} /> },
-    { key: "audit", label: "工具审计", children: <AgentAuditsPanel groupId={groupId} /> },
-  ]} /></>;
+
+  const panel = (() => {
+    switch (activeTab) {
+      case "config": return <AgentConfigPanel groupId={groupId} />;
+      case "persona": return <PersonaPanel groupId={groupId} />;
+      case "memories": return <MemoriesPanel groupId={groupId} />;
+      case "profiles": return <MemberProfilesPanel groupId={groupId} />;
+      case "relations": return <RelationsPanel groupId={groupId} />;
+      case "messages": return <AgentMessagesPanel groupId={groupId} />;
+      case "debug": return <AgentDebugger groupId={groupId} />;
+      case "privacy": return <PrivacyPanel groupId={groupId} />;
+      case "audit": return <AgentAuditsPanel groupId={groupId} />;
+      default: return <AgentOverviewPanel groupId={groupId} />;
+    }
+  })();
+
+  return (
+    <PageFrame className="agent-detail-page">
+      <div className="agent-detail-heading">
+        <PageHeader
+          title={`Agent · ${groupId}`}
+          subtitle="群级运行状态、配置、人设、记忆与数据治理"
+          extra={<Link to="/agent">返回 Agent 列表</Link>}
+        />
+      </div>
+      <nav className="agent-studio-nav-shell" aria-label="Agent 功能导航">
+        <div className="agent-studio-nav-scroll" role="tablist" aria-label="Agent 功能">
+          {AGENT_DETAIL_NAV.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === item.key}
+              aria-controls="agent-studio-panel"
+              className={`agent-studio-nav-button${activeTab === item.key ? " is-active" : ""}`}
+              onClick={() => changeTab(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <Select
+          className="agent-studio-nav-select"
+          value={activeTab}
+          onChange={changeTab}
+          options={AGENT_DETAIL_NAV.map((item) => ({ value: item.key, label: item.label }))}
+          aria-label="选择 Agent 功能"
+        />
+      </nav>
+      <div id="agent-studio-panel" className="agent-studio-panel" role="tabpanel">
+        {panel}
+      </div>
+    </PageFrame>
+  );
 }
 
 const LLM_TASK_LABELS: Record<string, string> = {
@@ -155,7 +217,7 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
       setCapabilityRefreshing(false);
     }
   };
-  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
+  return <PanelStack>
     <Card
       title="实际生效配置"
       extra={<Button onClick={query.reload} loading={query.refreshing}>刷新诊断</Button>}
@@ -279,5 +341,5 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
         )}
       />
     </Card>
-  </Space>;
+  </PanelStack>;
 }
