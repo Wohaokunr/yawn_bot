@@ -1,0 +1,250 @@
+name: Sync PR44 with main v2
+
+on:
+  push:
+    branches:
+      - feat/webui-agent-p0-p2
+    paths:
+      - ".github/workflows/sync-pr44-main-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Merge main and resolve reviewed conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "PR44 Main Sync"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin main
+          set +e
+          git merge --no-commit --no-ff origin/main
+          merge_status=$?
+          set -e
+          [[ "$merge_status" -ne 0 ]] || { echo "Expected reviewed conflicts"; exit 1; }
+
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          expected=(
+            "src/plugins/yawn_core/webui/agent_relation_routes.py"
+            "webui/src/agent-panels/AgentConfigPanel.tsx"
+            "webui/src/agent-panels/PersonaPanel.tsx"
+            "webui/src/agent-panels/RelationsPanel.test.tsx"
+            "webui/src/agent-panels/RelationsPanel.tsx"
+            "webui/src/agent.tsx"
+            "webui/src/main.tsx"
+          )
+          [[ "$(printf '%s\n' "${conflicts[@]}")" == "$(printf '%s\n' "${expected[@]}")" ]] || {
+            printf 'Unexpected conflicts:\n%s\n' "${conflicts[*]}"; exit 1;
+          }
+
+          # Keep main's relation visibility/summary naming, but restore PR44's group scope.
+          git checkout --theirs -- src/plugins/yawn_core/webui/agent_relation_routes.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/plugins/yawn_core/webui/agent_relation_routes.py")
+          s = p.read_text()
+          s = s.replace(
+              'await hub.notify_change("agent_relation", str(row.id))',
+              'await hub.notify_change("agent_relation", str(row.id), group_id=group_id)',
+          )
+          s = s.replace(
+              'await hub.notify_change("agent_relation", str(relation_id))',
+              'await hub.notify_change("agent_relation", str(relation_id), group_id=group_id)',
+          )
+          if s.count('hub.notify_change("agent_relation"') != 3:
+              raise SystemExit("unexpected relation notification count")
+          if s.count('hub.notify_change("agent_relation"') != s.count('hub.notify_change("agent_relation"'):
+              raise SystemExit("unreachable")
+          p.write_text(s)
+          PY
+
+          # Draft safety and query lifecycle are PR44's core semantics; do not replace them
+          # with main's older useEffect hydration while resolving a visual-layout conflict.
+          git checkout --ours -- webui/src/agent-panels/AgentConfigPanel.tsx
+          git checkout --ours -- webui/src/agent-panels/PersonaPanel.tsx
+          git checkout --ours -- webui/src/agent.tsx
+
+          # PR44 owns namespaced URL/query/lazy graph lifecycle. Adapt it to main's API
+          # names and port main's asynchronous drawer-focus accessibility fix.
+          git checkout --ours -- webui/src/agent-panels/RelationsPanel.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/agent-panels/RelationsPanel.tsx")
+          s = p.read_text()
+          s = s.replace('  App as AntApp,', '  Alert, App as AntApp,', 1)
+          for old, new in (
+              ("relationCount", "edgeCount"),
+              ("memberCount", "linkedMemberCount"),
+              ("subjectDisplayName", "subjectName"),
+              ("objectDisplayName", "objectName"),
+          ):
+              s = s.replace(old, new)
+          marker = "type RelationListItem = AgentRelationItem & {\n  subjectName?: string;\n  objectName?: string;\n};\n"
+          if marker not in s:
+              raise SystemExit("relation row marker changed")
+          helper = marker + '''
+          function focusDrawerField(selector: string): void {
+            window.requestAnimationFrame(() => {
+              const target = document.querySelector<HTMLElement>(`${selector} input, ${selector} textarea`);
+              target?.focus();
+            });
+          }
+          '''
+          s = s.replace(marker, helper, 1)
+          create = '<Drawer open={creating} width={520} title="新增关系边" onClose={() => setCreating(false)}>'
+          if create not in s:
+              raise SystemExit("create drawer marker changed")
+          s = s.replace(create, '''<Drawer
+                className="relations-editor-drawer relations-create-drawer"
+                open={creating}
+                width={520}
+                title="新增关系边"
+                onClose={() => setCreating(false)}
+                afterOpenChange={(open) => { if (open) focusDrawerField(".relations-create-drawer"); }}
+              >''', 1)
+          edit = '<Drawer open={!!editing} width={520} title={`编辑关系边 · ${editing?.type ?? ""}`} onClose={() => setEditing(null)}>'
+          if edit not in s:
+              raise SystemExit("edit drawer marker changed")
+          s = s.replace(edit, '''<Drawer
+                className="relations-editor-drawer relations-edit-drawer"
+                open={!!editing}
+                width={520}
+                title={`编辑关系边 · ${editing?.type ?? ""}`}
+                onClose={() => setEditing(null)}
+                afterOpenChange={(open) => { if (open) focusDrawerField(".relations-edit-drawer"); }}
+              >''', 1)
+          edit_form = '<Form form={editForm} layout="vertical" onFinish={saveEdit}>\n'
+          if edit_form not in s:
+              raise SystemExit("edit form marker changed")
+          s = s.replace(edit_form, edit_form + '          <Alert type="info" showIcon className="section-alert" message="类型与两端成员属于边的唯一身份，如需调整请删除后重新新增。" />\n', 1)
+          p.write_text(s)
+          PY
+
+          # Keep PR44 graph-load test; add main's async requestAnimationFrame regression.
+          git checkout --ours -- webui/src/agent-panels/RelationsPanel.test.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/agent-panels/RelationsPanel.test.tsx")
+          s = p.read_text()
+          s = s.replace("relationCount", "edgeCount").replace("memberCount", "linkedMemberCount")
+          needle = '''beforeEach(() => {
+            apiMock.mockReset();'''
+          repl = '''beforeEach(() => {
+            vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+              window.setTimeout(() => callback(performance.now()), 0));
+            vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
+            apiMock.mockReset();'''
+          if needle not in s:
+              raise SystemExit("RelationsPanel test beforeEach marker changed")
+          s = s.replace(needle, repl, 1)
+          closing = '''  });
+          });
+          '''
+          if not s.endswith(closing):
+              raise SystemExit("RelationsPanel test closing marker changed")
+          drawer_test = r'''
+            it("moves focus into the create drawer after opening on an async animation frame", async () => {
+              apiMock.mockImplementation((path: string) => {
+                if (path.endsWith("/relations/summary")) {
+                  return envelope({ edgeCount: 1, linkedMemberCount: 2, typeCounts: [{ type: "好友", count: 1 }], lastSeenAt: null });
+                }
+                if (path.endsWith("/relations/types")) return envelope(["好友"]);
+                if (path.includes("/relations?")) {
+                  return envelope([{
+                    id: "r1",
+                    groupId: "100",
+                    subjectUserId: "1",
+                    objectUserId: "2",
+                    subjectName: "甲",
+                    objectName: "乙",
+                    type: "好友",
+                    sourceKind: "manual",
+                    note: "常聊天",
+                    confidence: 0.9,
+                    evidenceCount: 1,
+                    lastSeenAt: null,
+                  }], { total: 1 });
+                }
+                if (path.endsWith("/relations/graph")) {
+                  return envelope({ nodes: [], edges: [], meta: { relationTruncated: false, memberTruncated: false } });
+                }
+                throw new Error(`unexpected api path: ${path}`);
+              });
+
+              render(
+                <AntApp>
+                  <MemoryRouter initialEntries={["/agent/100?tab=relations"]}>
+                    <RelationsPanel groupId="100" />
+                  </MemoryRouter>
+                </AntApp>,
+              );
+
+              expect(await screen.findByText("常聊天")).toBeInTheDocument();
+              fireEvent.click(screen.getByRole("button", { name: "新增关系边" }));
+              await waitFor(() => {
+                const firstInput = document.querySelector<HTMLElement>(".relations-create-drawer input");
+                expect(firstInput).not.toBeNull();
+                expect(document.activeElement).toBe(firstInput);
+              });
+            });
+          '''
+          s = s[:-len(closing)] + drawer_test + "  });\n});\n"
+          p.write_text(s)
+          PY
+
+          # CSS imports are additive: preserve both PR reduced-motion/interaction and main layout/design.
+          git checkout --ours -- webui/src/main.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/main.tsx")
+          s = p.read_text()
+          marker = 'import "./interaction.css";'
+          if marker not in s:
+              raise SystemExit("interaction.css import missing")
+          s = s.replace(marker, marker + '\nimport "./layout.css";\nimport "./design-system.css";', 1)
+          p.write_text(s)
+          PY
+
+          git add src/plugins/yawn_core/webui/agent_relation_routes.py \
+            webui/src/agent-panels/AgentConfigPanel.tsx \
+            webui/src/agent-panels/PersonaPanel.tsx \
+            webui/src/agent-panels/RelationsPanel.test.tsx \
+            webui/src/agent-panels/RelationsPanel.tsx \
+            webui/src/agent.tsx webui/src/main.tsx
+
+          test -z "$(git diff --name-only --diff-filter=U)"
+          ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- ':!*.lock'
+          git diff --check --cached
+
+      - name: Install dependencies
+        working-directory: webui
+        run: npm ci
+      - name: Test
+        working-directory: webui
+        run: npm test -- --run
+      - name: Typecheck
+        working-directory: webui
+        run: npm run typecheck
+      - name: Build
+        working-directory: webui
+        run: npm run build
+      - name: Commit and push merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git commit -m "Merge main into feat/webui-agent-p0-p2"
+          git push origin HEAD:feat/webui-agent-p0-p2
