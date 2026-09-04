@@ -1,0 +1,46 @@
+name: PR44 format scope lint fixes
+
+on:
+  push:
+    branches:
+      - feat/webui-agent-p0-p2
+    paths:
+      - .github/workflows/pr44-format-scope-lint.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/webui-agent-p0-p2
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Format only affected Python files
+        run: |
+          uvx ruff format \
+            src/plugins/yawn_core/webui/agent_config_routes.py \
+            src/plugins/yawn_core/webui/agent_memory_routes.py \
+            src/plugins/yawn_core/webui/groups.py \
+            tests/test_webui_hub.py
+          uvx ruff check src tests tools/rpg_module_editor tools/rpg_playtest tools/repo_guard.py tools/repository_content_test.py
+          uvx ruff format --check \
+            src/plugins/yawn_core/webui/agent_config_routes.py \
+            src/plugins/yawn_core/webui/agent_memory_routes.py \
+            src/plugins/yawn_core/webui/groups.py \
+            tests/test_webui_hub.py
+      - name: Commit lint-only formatting and remove temporary workflow
+        run: |
+          rm .github/workflows/pr44-format-scope-lint.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "style(webui): format scoped invalidation changes"
+          git push origin HEAD:feat/webui-agent-p0-p2
