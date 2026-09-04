@@ -34,6 +34,7 @@ jobs:
       - name: Verify backend scope contract
         run: |
           uv sync --all-groups --locked --python 3.10
+          uv run --python 3.10 ruff format src/plugins/yawn_core/webui/hub.py tests/test_webui_hub.py
           uv run --python 3.10 pytest -q tests/test_webui_hub.py
           uv run --python 3.10 ruff check src/plugins/yawn_core/webui/hub.py tests/test_webui_hub.py
       - name: Verify directly affected WebUI regressions
