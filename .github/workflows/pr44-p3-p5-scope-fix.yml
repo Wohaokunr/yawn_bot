@@ -29,7 +29,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: webui/package-lock.json
-      - name: Apply strict group scope migration
+      - name: Apply strict group scope and stale-mutation migration
         run: python tools/pr44_scope_fix.py
       - name: Verify backend scope contract
         run: |
@@ -43,12 +43,12 @@ jobs:
           npm test -- --run src/shared.test.tsx src/agent-panels/AgentConfigPanel.test.tsx src/agent-panels/AgentMessagesPanel.test.tsx src/agent-detail-regression.test.tsx src/agent-panels/RelationsPanel.test.tsx src/agent-panels/RelationsPanel.lazy.test.tsx
           npm run typecheck
           npm run build
-      - name: Commit hardened scope contract and remove temporary helpers
+      - name: Commit hardened safety contract and remove temporary helpers
         run: |
           rm .github/workflows/pr44-p3-p5-scope-fix.yml tools/pr44_scope_fix.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --check
-          git commit -m "fix(webui): require explicit entity change scope"
+          git commit -m "fix(webui): harden scoped invalidation and stale mutations"
           git push origin HEAD:feat/webui-agent-p0-p2
