@@ -1,4 +1,4 @@
-name: Diagnose PR44 main merge
+name: Sync PR44 with main
 
 on:
   push:
@@ -8,33 +8,606 @@ on:
       - ".github/workflows/diagnose-pr44-main-merge.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Attempt three-way merge and print conflicts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Merge main and resolve the seven reviewed conflicts
         shell: bash
         run: |
-          set +e
-          git config user.name "PR44 Merge Diagnostics"
+          set -euo pipefail
+          git config user.name "PR44 Main Sync"
           git config user.email "actions@users.noreply.github.com"
           git fetch origin main
+
+          set +e
           git merge --no-commit --no-ff origin/main
           merge_status=$?
-          echo "MERGE_STATUS=$merge_status"
-          echo "--- unmerged files ---"
-          git diff --name-only --diff-filter=U
-          echo "--- status ---"
+          set -e
+          if [[ "$merge_status" -eq 0 ]]; then
+            echo "Expected reviewed conflicts, but merge completed automatically. Refusing to guess."
+            exit 1
+          fi
+
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          expected=(
+            "src/plugins/yawn_core/webui/agent_relation_routes.py"
+            "webui/src/agent-panels/AgentConfigPanel.tsx"
+            "webui/src/agent-panels/PersonaPanel.tsx"
+            "webui/src/agent-panels/RelationsPanel.test.tsx"
+            "webui/src/agent-panels/RelationsPanel.tsx"
+            "webui/src/agent.tsx"
+            "webui/src/main.tsx"
+          )
+          printf '%s\n' "${conflicts[@]}" > /tmp/actual-conflicts
+          printf '%s\n' "${expected[@]}" > /tmp/expected-conflicts
+          if ! diff -u /tmp/expected-conflicts /tmp/actual-conflicts; then
+            echo "Conflict set changed; refusing an unreviewed merge."
+            exit 1
+          fi
+
+          # Backend relation API: start from current main's consistency/performance fix,
+          # then restore PR44's group-scoped invalidation contract.
+          git checkout --theirs -- src/plugins/yawn_core/webui/agent_relation_routes.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/plugins/yawn_core/webui/agent_relation_routes.py")
+          s = p.read_text()
+          old = '''    members = (
+                  await db.execute(
+                      select(UserGroup, BotUser)
+                      .join(BotUser, BotUser.user_id == UserGroup.user_id)
+                      .where(
+                          UserGroup.group_id == group_id,
+                          UserGroup.user_id.in_(user_ids),
+                      )
+                  )
+              ).all()
+              return {
+                  int(user.user_id): (
+                      membership.group_nickname or user.nickname or str(user.user_id)
+                  )
+                  for membership, user in members
+              }
+          '''
+          new = '''    memberships = (
+                  await db.execute(
+                      select(UserGroup.user_id, UserGroup.group_nickname, BotUser.nickname)
+                      .outerjoin(BotUser, BotUser.user_id == UserGroup.user_id)
+                      .where(
+                          UserGroup.group_id == group_id,
+                          UserGroup.user_id.in_(user_ids),
+                      )
+                  )
+              ).all()
+              return {
+                  int(user_id): (
+                      str(group_nickname or nickname or "").strip() or str(user_id)
+                  )
+                  for user_id, group_nickname, nickname in memberships
+              }
+          '''
+          if old not in s:
+              raise SystemExit("relation member-name block no longer matches reviewed main")
+          s = s.replace(old, new, 1)
+          s = s.replace(
+              'await hub.notify_change("agent_relation", str(row.id))',
+              'await hub.notify_change("agent_relation", str(row.id), group_id=group_id)',
+          )
+          s = s.replace(
+              'await hub.notify_change("agent_relation", str(relation_id))',
+              'await hub.notify_change("agent_relation", str(relation_id), group_id=group_id)',
+          )
+          if s.count('hub.notify_change("agent_relation"') != 3:
+              raise SystemExit("unexpected agent_relation notification count")
+          if s.count("group_id=group_id") < 3:
+              raise SystemExit("group-scoped relation invalidation was not restored")
+          p.write_text(s)
+          PY
+
+          # Config: keep main's SplitWorkspace/SectionNav/StickyActions UI, restore
+          # PR44 draft-safe hydration, accepted base version and scoped cancellable query.
+          git checkout --theirs -- webui/src/agent-panels/AgentConfigPanel.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/agent-panels/AgentConfigPanel.tsx")
+          s = p.read_text()
+          s = s.replace(
+              'import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";',
+              'import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";',
+              1,
+          )
+          needle = '  useApiQuery, useUnsavedChanges,\n} from "../shared";'
+          repl = '  DraftDiffModal, ServerDraftUpdateAlert, useApiQuery, useDraftSafeServerData, useUnsavedChanges,\n} from "../shared";'
+          if needle not in s:
+              raise SystemExit("AgentConfig shared import changed")
+          s = s.replace(needle, repl, 1)
+          old = '''  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
+              const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
+              const query = useApiQuery(load, { resources: ["agent_config"] });
+          '''
+          new = '''  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
+              const [diffOpen, setDiffOpen] = useState(false);
+              const baseVersion = useRef<string | undefined>(undefined);
+              const query = useApiQuery({
+                queryKey: ["agent-config", groupId],
+                fetcher: (signal) => api<AgentConfig>(`/agent/groups/${groupId}/config`, { signal }).then((r) => r.data),
+                invalidation: { resources: ["agent_config"], scope: { groupId } },
+              });
+          '''
+          if old not in s:
+              raise SystemExit("AgentConfig query block changed")
+          s = s.replace(old, new, 1)
+          old = '  useEffect(() => { if (query.data) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data]);'
+          new = '''  const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
+              form.setFieldsValue(value);
+              baseVersion.current = value.version ?? undefined;
+              setDirty(false);
+            });'''
+          if old not in s:
+              raise SystemExit("AgentConfig hydration block changed")
+          s = s.replace(old, new, 1)
+          s = s.replace('version: query.data?.version', 'version: baseVersion.current', 1)
+          old = '''      form.setFieldsValue(result.data);
+                  setDirty(false);
+                  message.success("Agent 配置已保存");'''
+          new = '''      serverState.acceptServerData(result.data);
+                  message.success("Agent 配置已保存");'''
+          if old not in s:
+              raise SystemExit("AgentConfig save hydration block changed")
+          s = s.replace(old, new, 1)
+          old = '      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);'
+          new = '''      if (error instanceof ApiError && error.status === 409) {
+                  message.warning(`${error.message}；你的草稿仍然保留，请比较服务器新版本后再决定。`);
+                  query.reload();
+                } else message.error((error as Error).message);'''
+          if old not in s:
+              raise SystemExit("AgentConfig 409 block changed")
+          s = s.replace(old, new, 1)
+          marker = '      <div className="agent-config-page agent-studio-page agent-studio-runtime editor-page-with-sticky-actions">\n'
+          insert = '''      <div className="agent-config-page agent-studio-page agent-studio-runtime editor-page-with-sticky-actions">
+                {serverState.remoteUpdate && (
+                  <ServerDraftUpdateAlert
+                    onKeep={serverState.keepDraft}
+                    onCompare={() => setDiffOpen(true)}
+                    onReload={serverState.reloadRemote}
+                  />
+                )}
+                <DraftDiffModal
+                  open={diffOpen}
+                  draft={form.getFieldsValue(true)}
+                  server={serverState.remoteUpdate}
+                  onClose={() => setDiffOpen(false)}
+                />
+          '''
+          if marker not in s:
+              raise SystemExit("AgentConfig page marker changed")
+          s = s.replace(marker, insert, 1)
+          p.write_text(s)
+          PY
+
+          # Persona: same strategy as Config — main editor layout plus PR44 draft safety.
+          git checkout --theirs -- webui/src/agent-panels/PersonaPanel.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/agent-panels/PersonaPanel.tsx")
+          s = p.read_text()
+          s = s.replace(
+              'import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";',
+              'import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";',
+              1,
+          )
+          needle = '  useApiQuery, useUnsavedChanges,\n} from "../shared";'
+          repl = '  DraftDiffModal, ServerDraftUpdateAlert, useApiQuery, useDraftSafeServerData, useUnsavedChanges,\n} from "../shared";'
+          if needle not in s:
+              raise SystemExit("Persona shared import changed")
+          s = s.replace(needle, repl, 1)
+          marker = '  const [dirty, setDirty] = useState(false);\n'
+          if marker not in s:
+              raise SystemExit("Persona dirty state marker changed")
+          s = s.replace(marker, marker + '  const [diffOpen, setDiffOpen] = useState(false);\n  const baseVersion = useRef<string | undefined>(undefined);\n', 1)
+          old = '''  const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
+              const query = useApiQuery(load, { resources: ["agent_persona"] });
+              useUnsavedChanges(dirty);
+
+              useEffect(() => {
+                if (query.data) {
+                  form.setFieldsValue({
+                    mode: query.data.enabled ? "custom" : "inherit",
+                    profile: query.data.profile,
+                  });
+                  setDirty(false);
+                  setTrialResult(null);
+                  setTrialError(null);
+                }
+              }, [form, query.data]);
+          '''
+          new = '''  const query = useApiQuery({
+                queryKey: ["agent-persona", groupId],
+                fetcher: (signal) => api<Persona>(`/agent/groups/${groupId}/persona`, { signal }).then((r) => r.data),
+                invalidation: { resources: ["agent_persona"], scope: { groupId } },
+              });
+              useUnsavedChanges(dirty);
+
+              const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
+                form.setFieldsValue({
+                  mode: value.enabled ? "custom" : "inherit",
+                  profile: value.profile,
+                });
+                baseVersion.current = value.version ?? undefined;
+                setDirty(false);
+                setTrialResult(null);
+                setTrialError(null);
+              });
+          '''
+          if old not in s:
+              raise SystemExit("Persona query/hydration block changed")
+          s = s.replace(old, new, 1)
+          old = '''      await api<Persona>(`/agent/groups/${groupId}/persona`, {
+                  method: "PUT",'''
+          new = '''      const result = await api<Persona>(`/agent/groups/${groupId}/persona`, {
+                  method: "PUT",'''
+          if old not in s:
+              raise SystemExit("Persona PUT block changed")
+          s = s.replace(old, new, 1)
+          s = s.replace('version: data.version,', 'version: baseVersion.current,', 1)
+          old = '''      });
+                  setDirty(false);
+                  message.success(values.mode === "custom" ? "当前群人设已保存" : "已切换为跟随全局人设");'''
+          new = '''      });
+                  serverState.acceptServerData(result.data);
+                  message.success(values.mode === "custom" ? "当前群人设已保存" : "已切换为跟随全局人设");'''
+          if old not in s:
+              raise SystemExit("Persona save hydration block changed")
+          s = s.replace(old, new, 1)
+          old = '''      if (error instanceof ApiError && error.status === 409) {
+                  message.warning(error.message);
+                  query.reload();
+                } else message.error((error as Error).message);'''
+          new = '''      if (error instanceof ApiError && error.status === 409) {
+                  message.warning(`${error.message}；你的草稿仍然保留，请比较服务器新版本后再决定。`);
+                  query.reload();
+                } else message.error((error as Error).message);'''
+          if old not in s:
+              raise SystemExit("Persona save 409 block changed")
+          s = s.replace(old, new, 1)
+          old = '''      await api<Persona>(`/agent/groups/${groupId}/persona`, {
+                  method: "DELETE",
+                  headers: data.version ? { "If-Match": data.version } : {},
+                });
+                setDirty(false);
+                message.success("已清除当前群自定义并恢复全局人设");'''
+          new = '''      const result = await api<Persona>(`/agent/groups/${groupId}/persona`, {
+                  method: "DELETE",
+                  headers: baseVersion.current ? { "If-Match": baseVersion.current } : {},
+                });
+                serverState.acceptServerData(result.data);
+                message.success("已清除当前群自定义并恢复全局人设");'''
+          if old not in s:
+              raise SystemExit("Persona reset block changed")
+          s = s.replace(old, new, 1)
+          old = '''    } catch (error) {
+                  message.error((error as Error).message);
+                } finally {
+                  setResetting(false);
+                }
+              };'''
+          new = '''    } catch (error) {
+                  if (error instanceof ApiError && error.status === 409) {
+                    message.warning(`${error.message}；当前草稿未被清除。`);
+                    query.reload();
+                  } else message.error((error as Error).message);
+                } finally {
+                  setResetting(false);
+                }
+              };'''
+          if old not in s:
+              raise SystemExit("Persona reset catch block changed")
+          s = s.replace(old, new, 1)
+          marker = '      <div className="persona-config-page agent-studio-page agent-studio-persona editor-page-with-sticky-actions">\n'
+          insert = '''      <div className="persona-config-page agent-studio-page agent-studio-persona editor-page-with-sticky-actions">
+                {serverState.remoteUpdate && (
+                  <ServerDraftUpdateAlert
+                    onKeep={serverState.keepDraft}
+                    onCompare={() => setDiffOpen(true)}
+                    onReload={serverState.reloadRemote}
+                  />
+                )}
+                <DraftDiffModal
+                  open={diffOpen}
+                  draft={{
+                    enabled: form.getFieldValue("mode") === "custom",
+                    profile: form.getFieldValue("profile"),
+                  }}
+                  server={serverState.remoteUpdate}
+                  onClose={() => setDiffOpen(false)}
+                />
+          '''
+          if marker not in s:
+              raise SystemExit("Persona page marker changed")
+          s = s.replace(marker, insert, 1)
+          p.write_text(s)
+          PY
+
+          # Relations: PR44 owns query/URL/lazy-graph lifecycle. Port main's API naming
+          # and the latest accessible Drawer focus behavior into that architecture.
+          git checkout --ours -- webui/src/agent-panels/RelationsPanel.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/agent-panels/RelationsPanel.tsx")
+          s = p.read_text()
+          s = s.replace('  App as AntApp,', '  Alert, App as AntApp,', 1)
+          for a, b in (
+              ("relationCount", "edgeCount"),
+              ("memberCount", "linkedMemberCount"),
+              ("subjectDisplayName", "subjectName"),
+              ("objectDisplayName", "objectName"),
+          ):
+              s = s.replace(a, b)
+          marker = '''type RelationListItem = AgentRelationItem & {
+              subjectName?: string;
+              objectName?: string;
+            };
+          '''
+          helper = marker + '''
+            function focusDrawerField(selector: string): void {
+              window.requestAnimationFrame(() => {
+                const target = document.querySelector<HTMLElement>(`${selector} input, ${selector} textarea`);
+                target?.focus();
+              });
+            }
+          '''
+          if marker not in s:
+              raise SystemExit("Relations row type marker changed")
+          s = s.replace(marker, helper, 1)
+          old = '<Drawer open={creating} width={520} title="新增关系边" onClose={() => setCreating(false)}>'
+          new = '''<Drawer
+                    className="relations-editor-drawer relations-create-drawer"
+                    open={creating}
+                    width={520}
+                    title="新增关系边"
+                    onClose={() => setCreating(false)}
+                    afterOpenChange={(open) => { if (open) focusDrawerField(".relations-create-drawer"); }}
+                  >'''
+          if old not in s:
+              raise SystemExit("Relations create Drawer marker changed")
+          s = s.replace(old, new, 1)
+          old = '<Drawer open={!!editing} width={520} title={`编辑关系边 · ${editing?.type ?? ""}`} onClose={() => setEditing(null)}>'
+          new = '''<Drawer
+                    className="relations-editor-drawer relations-edit-drawer"
+                    open={!!editing}
+                    width={520}
+                    title={`编辑关系边 · ${editing?.type ?? ""}`}
+                    onClose={() => setEditing(null)}
+                    afterOpenChange={(open) => { if (open) focusDrawerField(".relations-edit-drawer"); }}
+                  >'''
+          if old not in s:
+              raise SystemExit("Relations edit Drawer marker changed")
+          s = s.replace(old, new, 1)
+          old = '<Form form={editForm} layout="vertical" onFinish={saveEdit}>\n'
+          new = old + '          <Alert type="info" showIcon className="section-alert" message="类型与两端成员属于边的唯一身份，如需调整请删除后重新新增。" />\n'
+          if old not in s:
+              raise SystemExit("Relations edit form marker changed")
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          # Combine PR44's lazy graph regression with main's asynchronous rAF drawer focus regression.
+          cat > webui/src/agent-panels/RelationsPanel.test.tsx <<'EOF'
+          import { App as AntApp } from "antd";
+          import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+          import { MemoryRouter } from "react-router-dom";
+          import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+          class ResizeObserverMock {
+            observe(): void {}
+            unobserve(): void {}
+            disconnect(): void {}
+          }
+
+          function matchMediaMock(query: string): MediaQueryList {
+            return {
+              matches: false,
+              media: query,
+              onchange: null,
+              addListener: vi.fn(),
+              removeListener: vi.fn(),
+              addEventListener: vi.fn(),
+              removeEventListener: vi.fn(),
+              dispatchEvent: vi.fn(() => false),
+            };
+          }
+
+          const state = vi.hoisted(() => ({ api: vi.fn() }));
+          const graphModuleLoads = vi.hoisted(() => ({ count: 0 }));
+
+          vi.mock("../api", () => ({
+            api: state.api,
+            ApiError: class ApiError extends Error {
+              status: number;
+              fields = {};
+              constructor(status = 500, message = "error") {
+                super(message);
+                this.status = status;
+              }
+            },
+          }));
+
+          vi.mock("../relation-graph", () => {
+            graphModuleLoads.count += 1;
+            return { RelationGraphView: () => <div>relation graph mock</div> };
+          });
+
+          import { RelationsPanel } from "./RelationsPanel";
+
+          beforeAll(() => {
+            vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+            vi.stubGlobal("matchMedia", matchMediaMock);
+          });
+
+          afterAll(() => vi.unstubAllGlobals());
+
+          beforeEach(() => {
+            vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+              window.setTimeout(() => callback(performance.now()), 0));
+            vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
+            state.api.mockReset();
+            state.api.mockImplementation((path: string) => {
+              if (path.includes("/relations?")) {
+                const withRow = path.includes("/groups/100/");
+                return Promise.resolve({
+                  data: withRow ? [{
+                    id: "r1",
+                    groupId: "100",
+                    subjectUserId: "1",
+                    objectUserId: "2",
+                    subjectName: "甲",
+                    objectName: "乙",
+                    type: "好友",
+                    sourceKind: "manual",
+                    note: "常聊天",
+                    confidence: 0.9,
+                    evidenceCount: 1,
+                    lastSeenAt: null,
+                  }] : [],
+                  meta: { total: withRow ? 1 : 0 },
+                });
+              }
+              if (path.endsWith("/relations/summary")) {
+                return Promise.resolve({
+                  data: { edgeCount: 1, linkedMemberCount: 2, typeCounts: [{ type: "好友", count: 1 }], lastSeenAt: null },
+                  meta: {},
+                });
+              }
+              if (path.endsWith("/relations/types")) return Promise.resolve({ data: ["好友"], meta: {} });
+              if (path.endsWith("/relations/graph")) {
+                return Promise.resolve({
+                  data: { nodes: [], edges: [], meta: { relationTruncated: false, memberTruncated: false } },
+                  meta: {},
+                });
+              }
+              return Promise.reject(new Error(`unexpected API: ${path}`));
+            });
+          });
+
+          describe("RelationsPanel regressions", () => {
+            it("does not request or import the full graph until graph view is selected", async () => {
+              render(
+                <AntApp>
+                  <MemoryRouter initialEntries={["/agent/1?tab=relations"]}>
+                    <RelationsPanel groupId="1" />
+                  </MemoryRouter>
+                </AntApp>,
+              );
+
+              await waitFor(() => {
+                expect(state.api.mock.calls.some(([path]) => String(path).endsWith("/relations/summary"))).toBe(true);
+                expect(state.api.mock.calls.some(([path]) => String(path).includes("/relations?"))).toBe(true);
+              });
+              expect(state.api.mock.calls.some(([path]) => String(path).endsWith("/relations/graph"))).toBe(false);
+              expect(graphModuleLoads.count).toBe(0);
+
+              fireEvent.click(screen.getByText("图谱视图"));
+
+              await waitFor(() => {
+                expect(state.api.mock.calls.some(([path]) => String(path).endsWith("/relations/graph"))).toBe(true);
+                expect(screen.getByText("relation graph mock")).toBeTruthy();
+              });
+              expect(graphModuleLoads.count).toBe(1);
+            });
+
+            it("moves focus into the create drawer after opening on an async animation frame", async () => {
+              render(
+                <AntApp>
+                  <MemoryRouter initialEntries={["/agent/100?tab=relations"]}>
+                    <RelationsPanel groupId="100" />
+                  </MemoryRouter>
+                </AntApp>,
+              );
+
+              expect(await screen.findByText("常聊天")).toBeInTheDocument();
+              fireEvent.click(screen.getByRole("button", { name: "新增关系边" }));
+
+              await waitFor(() => {
+                const firstInput = document.querySelector<HTMLElement>(".relations-create-drawer input");
+                expect(firstInput).not.toBeNull();
+                expect(document.activeElement).toBe(firstInput);
+              });
+            });
+          });
+          EOF
+
+          # Agent IA/lifecycle/lazy-splitting belongs to PR44. Taking main's flat static-import
+          # version would undo the exact lifecycle and chunking guarantees under test.
+          git checkout --ours -- webui/src/agent.tsx
+
+          # Styles are additive: keep PR44 interaction/reduced-motion CSS and main layout/design CSS.
+          git checkout --ours -- webui/src/main.tsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("webui/src/main.tsx")
+          s = p.read_text()
+          marker = 'import "./interaction.css";'
+          if marker not in s:
+              raise SystemExit("main.tsx interaction.css marker missing")
+          if 'import "./layout.css";' not in s:
+              s = s.replace(marker, marker + '\nimport "./layout.css";\nimport "./design-system.css";', 1)
+          p.write_text(s)
+          PY
+
+          git add \
+            src/plugins/yawn_core/webui/agent_relation_routes.py \
+            webui/src/agent-panels/AgentConfigPanel.tsx \
+            webui/src/agent-panels/PersonaPanel.tsx \
+            webui/src/agent-panels/RelationsPanel.test.tsx \
+            webui/src/agent-panels/RelationsPanel.tsx \
+            webui/src/agent.tsx \
+            webui/src/main.tsx
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "Unresolved conflicts remain"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+          if git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- ':!*.lock'; then
+            echo "Conflict markers remain"
+            exit 1
+          fi
+          git diff --check --cached
+
+      - name: Install WebUI dependencies
+        working-directory: webui
+        run: npm ci
+
+      - name: Run WebUI regression suite
+        working-directory: webui
+        run: npm test -- --run
+
+      - name: Typecheck WebUI
+        working-directory: webui
+        run: npm run typecheck
+
+      - name: Build WebUI
+        working-directory: webui
+        run: npm run build
+
+      - name: Commit and push reviewed merge
+        shell: bash
+        run: |
+          set -euo pipefail
           git status --short
-          echo "--- combined conflict diffs ---"
-          for path in $(git diff --name-only --diff-filter=U); do
-            echo "===== $path ====="
-            git diff --cc -- "$path" || true
-          done
-          git merge --abort >/dev/null 2>&1 || true
-          exit "$merge_status"
+          git commit -m "Merge main into feat/webui-agent-p0-p2"
+          git push origin HEAD:feat/webui-agent-p0-p2
