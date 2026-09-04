@@ -166,7 +166,9 @@ async def _relation_page_names(
         )
     ).all()
     return {
-        int(user.user_id): (membership.group_nickname or user.nickname or str(user.user_id))
+        int(user.user_id): (
+            membership.group_nickname or user.nickname or str(user.user_id)
+        )
         for membership, user in members
     }
 
@@ -262,7 +264,10 @@ async def get_relation_summary(
                 select(AgentRelation.relation_type, func.count(AgentRelation.id))
                 .where(*clauses)
                 .group_by(AgentRelation.relation_type)
-                .order_by(func.count(AgentRelation.id).desc(), AgentRelation.relation_type)
+                .order_by(
+                    func.count(AgentRelation.id).desc(),
+                    AgentRelation.relation_type,
+                )
             )
         ).all()
     return ok(
