@@ -37,10 +37,9 @@ describe("RelationsPanel drawer focus", () => {
       removeEventListener: vi.fn(),
       dispatchEvent: vi.fn(),
     })));
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-      callback(0);
-      return 1;
-    });
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+      window.setTimeout(() => callback(performance.now()), 0));
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
     state.api.mockReset();
     state.api.mockImplementation((path: string) => {
       if (path.startsWith("/agent/groups/100/relations?")) {

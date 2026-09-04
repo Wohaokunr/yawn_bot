@@ -1,5 +1,9 @@
+// Vitest executes this contract test from the WebUI project root in Node.
+// @ts-ignore -- node:fs is available at test runtime without widening production browser types.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import designCss from "./design-system.css?raw";
+
+const designCss = readFileSync("src/design-system.css", "utf8");
 
 const VIEWPORTS = [
   { width: 1920, height: 1080, mode: "wide", desktopSider: true, debuggerInternalScroll: true, mobileTabSelect: false },
