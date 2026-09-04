@@ -184,9 +184,22 @@
   z-index: var(--z-sticky-toolbar);
 }
 
-/* Default rows start at their own natural height. Equal-height is explicit opt-in only. */
-.app-content .ant-row {
+/* Content/stat rows opt into natural-height alignment. Ant Row align props remain authoritative. */
+.app-content .section-row,
+.app-content .relations-summary-row {
   align-items: flex-start;
+}
+
+.app-content .ant-row.ant-row-top {
+  align-items: flex-start;
+}
+
+.app-content .ant-row.ant-row-middle {
+  align-items: center;
+}
+
+.app-content .ant-row.ant-row-bottom {
+  align-items: flex-end;
 }
 
 .equal-height-row {
