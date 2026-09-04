@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Flex, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Empty, Flex, Modal, Space, Table, Tag, Typography } from "antd";
 import type { TablePaginationConfig } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -8,91 +8,305 @@ export function formatTime(value?: string | null): string {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
 }
 
-export interface EntityChangeDetail {
-  resource: string;
-  resourceId?: string | null;
+export interface EntityChangeScope {
+  groupId?: string | null;
 }
 
-export function useEntityRefresh(callback: () => void, resources: readonly string[] = []): void {
+export interface EntityChangeDetail {
+  resource: string;
+  scope?: EntityChangeScope | null;
+  entityId?: string | null;
+}
+
+export interface EntityInvalidation {
+  resources: readonly string[];
+  scope?: EntityChangeScope;
+}
+
+function isEntityInvalidation(
+  value: EntityInvalidation | readonly string[],
+): value is EntityInvalidation {
+  return !Array.isArray(value);
+}
+
+function scopeMatches(actual: EntityChangeScope | null | undefined, expected?: EntityChangeScope): boolean {
+  if (!expected) return true;
+  return Object.entries(expected).every(([key, value]) => {
+    if (value == null) return true;
+    return actual?.[key as keyof EntityChangeScope] === value;
+  });
+}
+
+export function useEntityRefresh(
+  callback: () => void,
+  invalidation: EntityInvalidation | readonly string[] = [],
+): void {
+  const resources = isEntityInvalidation(invalidation) ? invalidation.resources : invalidation;
+  const scope = isEntityInvalidation(invalidation) ? invalidation.scope : undefined;
+  const resourcesKey = resources.join("\u001f");
+  const scopeKey = JSON.stringify(scope ?? null);
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+
   useEffect(() => {
     if (resources.length === 0) return undefined;
     const listener = (event: Event) => {
       const detail = (event as CustomEvent<EntityChangeDetail>).detail;
-      if (detail && resources.includes(detail.resource)) callback();
+      if (
+        detail
+        && resources.includes(detail.resource)
+        && scopeMatches(detail.scope, scope)
+      ) callbackRef.current();
     };
     window.addEventListener("yawnbot-entity-changed", listener);
     return () => window.removeEventListener("yawnbot-entity-changed", listener);
-  }, [callback, resources]);
+  }, [resourcesKey, scopeKey]);
 }
 
 export interface ApiQuery<T> {
   data: T | null;
   loading: boolean;
+  initialLoading: boolean;
   refreshing: boolean;
+  transitioning: boolean;
+  stale: boolean;
   error: string;
   updatedAt: number | null;
   reload: () => void;
 }
 
-export interface ApiQueryOptions {
+export interface ApiQueryConfig<T> {
+  queryKey: readonly unknown[];
+  fetcher: (signal: AbortSignal) => Promise<T>;
+  invalidation?: EntityInvalidation;
+  keepPreviousData?: boolean;
+}
+
+interface LegacyApiQueryOptions {
   resources?: readonly string[];
 }
 
-// 统一取数 Hook:接管加载/错误状态,随 entity.changed 自动刷新;
-// 用代次号拦截乱序返回,避免快速翻页/搜索时旧响应覆盖新响应。
-export function useApiQuery<T>(load: () => Promise<T>, options: ApiQueryOptions = {}): ApiQuery<T> {
+function isAbortError(reason: unknown): boolean {
+  return reason instanceof DOMException && reason.name === "AbortError";
+}
+
+// 统一取数 Hook：queryKey 决定数据身份，fetcher 接收 AbortSignal；
+// queryKey 变化立即取消旧请求并进入 transitioning，普通 reload/entity.changed 进入 refreshing。
+// 保留旧签名仅供尚未迁移的页面过渡，Agent 管理页使用新配置对象。
+export function useApiQuery<T>(config: ApiQueryConfig<T>): ApiQuery<T>;
+export function useApiQuery<T>(load: () => Promise<T>, options?: LegacyApiQueryOptions): ApiQuery<T>;
+export function useApiQuery<T>(
+  configOrLoad: ApiQueryConfig<T> | (() => Promise<T>),
+  legacyOptions: LegacyApiQueryOptions = {},
+): ApiQuery<T> {
+  const modern = typeof configOrLoad !== "function";
+  const fetcher = modern
+    ? configOrLoad.fetcher
+    : (_signal: AbortSignal) => configOrLoad();
+  const invalidation = modern
+    ? configOrLoad.invalidation
+    : legacyOptions.resources
+      ? { resources: legacyOptions.resources }
+      : undefined;
+  const keepPreviousData = modern ? configOrLoad.keepPreviousData !== false : true;
+  const keyToken: unknown = modern ? JSON.stringify(configOrLoad.queryKey) : configOrLoad;
+
   const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [transitioning, setTransitioning] = useState(false);
+  const [stale, setStale] = useState(false);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const dataRef = useRef<T | null>(null);
+  const fetcherRef = useRef(fetcher);
+  const controllerRef = useRef<AbortController | null>(null);
   const generation = useRef(0);
-  const hasData = useRef(false);
-  const inFlight = useRef(false);
-  const rerunRequested = useRef(false);
-  const runRef = useRef<() => void>(() => undefined);
-  const run = useCallback(() => {
-    if (inFlight.current) {
-      // 极慢网络/轮询重叠时只保留一个“再跑一次”请求；同时让当前旧请求失效，
-      // 避免分页/搜索条件已经变化后旧响应覆盖新状态。
-      rerunRequested.current = true;
-      generation.current += 1;
-      return;
-    }
-    inFlight.current = true;
+  fetcherRef.current = fetcher;
+
+  const run = useCallback((mode: "initial" | "transition" | "refresh") => {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
     const ticket = ++generation.current;
-    if (hasData.current) setRefreshing(true);
-    else setLoading(true);
-    load()
+    const hasData = dataRef.current !== null;
+
+    if (mode === "transition" && hasData) {
+      setTransitioning(true);
+      setRefreshing(false);
+      setStale(true);
+      if (!keepPreviousData) {
+        dataRef.current = null;
+        setData(null);
+        setInitialLoading(true);
+      }
+    } else if (mode === "refresh" && hasData) {
+      setRefreshing(true);
+      setStale(true);
+    } else {
+      setInitialLoading(true);
+    }
+
+    setError("");
+    fetcherRef.current(controller.signal)
       .then((value) => {
-        if (ticket === generation.current) {
-          setData(value);
-          hasData.current = true;
-          setError("");
-          setUpdatedAt(Date.now());
-        }
+        if (ticket !== generation.current || controller.signal.aborted) return;
+        dataRef.current = value;
+        setData(value);
+        setError("");
+        setUpdatedAt(Date.now());
+        setStale(false);
       })
       .catch((reason: unknown) => {
-        if (ticket === generation.current) {
-          setError(reason instanceof Error ? reason.message : "加载失败");
-        }
+        if (ticket !== generation.current || controller.signal.aborted || isAbortError(reason)) return;
+        setError(reason instanceof Error ? reason.message : "加载失败");
       })
       .finally(() => {
-        inFlight.current = false;
-        if (ticket === generation.current) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-        if (rerunRequested.current) {
-          rerunRequested.current = false;
-          queueMicrotask(() => runRef.current());
-        }
+        if (ticket !== generation.current) return;
+        setInitialLoading(false);
+        setRefreshing(false);
+        setTransitioning(false);
       });
-  }, [load]);
-  runRef.current = run;
-  useEffect(() => { void run(); }, [run]);
-  useEntityRefresh(run, options.resources ?? []);
-  return { data, loading, refreshing, error, updatedAt, reload: run };
+  }, [keepPreviousData]);
+
+  const mounted = useRef(false);
+  useEffect(() => {
+    const mode = mounted.current && dataRef.current !== null ? "transition" : "initial";
+    mounted.current = true;
+    run(mode);
+    return () => controllerRef.current?.abort();
+  }, [keyToken, run]);
+
+  const reload = useCallback(() => run(dataRef.current === null ? "initial" : "refresh"), [run]);
+  useEntityRefresh(reload, invalidation ?? []);
+
+  return {
+    data,
+    loading: initialLoading || transitioning,
+    initialLoading,
+    refreshing,
+    transitioning,
+    stale,
+    error,
+    updatedAt,
+    reload,
+  };
+}
+
+export interface VersionedServerData {
+  version?: string | null;
+}
+
+export interface DraftSafeServerState<T> {
+  remoteUpdate: T | null;
+  keepDraft: () => void;
+  reloadRemote: () => void;
+  acceptServerData: (value: T) => void;
+}
+
+// 表单 hydration 只允许在首次加载、无草稿的远端更新、或用户明确重新载入时发生。
+// dirty=true 时的新服务端版本仅进入 remoteUpdate，不会改表单，也不会清 dirty。
+export function useDraftSafeServerData<T extends VersionedServerData>(
+  data: T | null,
+  dirty: boolean,
+  hydrate: (value: T) => void,
+): DraftSafeServerState<T> {
+  const [remoteUpdate, setRemoteUpdate] = useState<T | null>(null);
+  const hasApplied = useRef(false);
+  const appliedVersion = useRef<string | null>(null);
+  const ignoredVersion = useRef<string | null>(null);
+  const dirtyRef = useRef(dirty);
+  const hydrateRef = useRef(hydrate);
+  dirtyRef.current = dirty;
+  hydrateRef.current = hydrate;
+
+  const acceptServerData = useCallback((value: T) => {
+    hydrateRef.current(value);
+    hasApplied.current = true;
+    appliedVersion.current = value.version ?? null;
+    ignoredVersion.current = null;
+    setRemoteUpdate(null);
+  }, []);
+
+  useEffect(() => {
+    if (!data) return;
+    const version = data.version ?? null;
+    if (hasApplied.current && version === appliedVersion.current) return;
+    if (dirtyRef.current) {
+      if (version !== ignoredVersion.current) setRemoteUpdate(data);
+      return;
+    }
+    acceptServerData(data);
+  }, [acceptServerData, data]);
+
+  const keepDraft = useCallback(() => {
+    ignoredVersion.current = remoteUpdate?.version ?? null;
+    setRemoteUpdate(null);
+  }, [remoteUpdate]);
+
+  const reloadRemote = useCallback(() => {
+    if (remoteUpdate) acceptServerData(remoteUpdate);
+  }, [acceptServerData, remoteUpdate]);
+
+  return { remoteUpdate, keepDraft, reloadRemote, acceptServerData };
+}
+
+export function ServerDraftUpdateAlert({
+  onKeep,
+  onCompare,
+  onReload,
+}: {
+  onKeep: () => void;
+  onCompare: () => void;
+  onReload: () => void;
+}): React.JSX.Element {
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      className="section-alert"
+      message="服务器配置已更新"
+      description="检测到当前群的服务端版本发生变化。你的未保存草稿已保留，系统没有自动覆盖表单。"
+      action={<Space wrap>
+        <Button size="small" onClick={onKeep}>保留我的草稿</Button>
+        <Button size="small" onClick={onCompare}>查看差异</Button>
+        <Button size="small" danger onClick={onReload}>重新载入</Button>
+      </Space>}
+    />
+  );
+}
+
+export function DraftDiffModal({
+  open,
+  draft,
+  server,
+  onClose,
+}: {
+  open: boolean;
+  draft: unknown;
+  server: unknown;
+  onClose: () => void;
+}): React.JSX.Element {
+  const paneStyle: React.CSSProperties = {
+    flex: "1 1 320px",
+    minWidth: 0,
+    maxHeight: 440,
+    overflow: "auto",
+    padding: 12,
+    borderRadius: 12,
+    background: "rgba(255,255,255,.62)",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+  };
+  return (
+    <Modal open={open} title="草稿与服务器版本差异" width={900} footer={null} onCancel={onClose}>
+      <Text type="secondary">左侧是你当前未保存的表单，右侧是服务器最新版本。重新载入只会在你明确点击后发生。</Text>
+      <Flex gap={12} wrap style={{ marginTop: 16 }}>
+        <div style={paneStyle}><Text strong>我的草稿</Text><pre>{JSON.stringify(draft, null, 2)}</pre></div>
+        <div style={paneStyle}><Text strong>服务器版本</Text><pre>{JSON.stringify(server, null, 2)}</pre></div>
+      </Flex>
+    </Modal>
+  );
 }
 
 export function QueryErrorAlert({ error, onRetry }: { error: string; onRetry: () => void }): React.JSX.Element {

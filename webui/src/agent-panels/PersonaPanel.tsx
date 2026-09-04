@@ -1,46 +1,33 @@
 import {
-  Alert, App as AntApp, AutoComplete, Button, Card, Col, Descriptions, Drawer, Empty,
-  Form, Input, InputNumber, List, Popconfirm, Progress, Row, Segmented, Select, Space,
-  Spin, Statistic, Switch, Table, Tag, Timeline, Typography,
+  Alert, App as AntApp, Button, Card, Col, Descriptions, Form, Input, Popconfirm,
+  Progress, Row, Segmented, Select, Space, Spin, Switch, Tag, Typography,
 } from "antd";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { AgentAuditTable } from "../agent-audit-table";
+import { useRef, useState } from "react";
 import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
-import { SectionNav, SplitWorkspace, StickyActions, type SectionNavItem } from "../layout";
-import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
-  useApiQuery, useUnsavedChanges,
+  DraftDiffModal,
+  QueryErrorAlert,
+  SaveStatus,
+  ServerDraftUpdateAlert,
+  useApiQuery,
+  useDraftSafeServerData,
+  useUnsavedChanges,
 } from "../shared";
-import type {
-  AgentAudit, AgentConfig, AgentDebugResponse, AgentMemoryStatus, AgentMessageItem,
-  AgentRelationGraph, AgentRelationItem, MemoryItem, MemorySubjectItem, Persona,
-  PersonaProfile, PrivacyItem,
-} from "../types";
+import type { AgentDebugResponse, Persona, PersonaProfile } from "../types";
 import {
-  MEMORY_ROLE_OPTIONS, MEMORY_TYPE_META, PERSONA_SOCIAL_TRAITS, PERSONA_STYLE_TRAITS,
-  PERSONA_TRAIT_META, PERSONA_TRIAL_SCENARIOS, PROFILE_KEY_META, PROFILE_KEY_META as _PROFILE_KEY_META,
-  RELATION_SOURCE_META, RELATION_TYPE_PRESETS, memberDisplayName, mergePersonaPreset,
-  personaBehaviorPreview, personaDraftSummary, personaEmotionExpressionPreview,
-  profileKeyLabel, memoryTypeLabel,
+  PERSONA_SOCIAL_TRAITS,
+  PERSONA_STYLE_TRAITS,
+  PERSONA_TRAIT_META,
+  PERSONA_TRIAL_SCENARIOS,
+  mergePersonaPreset,
+  personaBehaviorPreview,
+  personaDraftSummary,
+  personaEmotionExpressionPreview,
 } from "../agent-meta";
 import type { PersonaFormValues, PersonaTraitKey } from "../agent-meta";
 
 const { Text, Paragraph } = Typography;
-const LazyRelationGraphView = lazy(() =>
-  import("../relation-graph").then(({ RelationGraphView }) => ({ default: RelationGraphView })),
-);
-
-const PERSONA_SECTIONS: SectionNavItem[] = [
-  { id: "persona-preset", label: "角色模板", hint: "选择角色起点" },
-  { id: "persona-identity", label: "它是谁", hint: "名字、群内角色与身份" },
-  { id: "persona-voice", label: "怎么说话", hint: "表达风格档位" },
-  { id: "persona-social", label: "怎么参与", hint: "社交与续聊倾向" },
-  { id: "persona-notes", label: "自定义补充", hint: "少量自由文本" },
-  { id: "persona-trial", label: "草稿试演", hint: "不保存、不执行工具" },
-];
 
 export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp();
@@ -48,6 +35,8 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const baseVersion = useRef<string | undefined>(undefined);
   const [trialActorUserId, setTrialActorUserId] = useState("");
   const [trialScenario, setTrialScenario] = useState("ordinary");
   const [trialCustomText, setTrialCustomText] = useState("");
@@ -58,21 +47,23 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const [trialError, setTrialError] = useState<string | null>(null);
   const watchedMode = Form.useWatch("mode", form) as PersonaFormValues["mode"] | undefined;
   const watchedProfile = Form.useWatch("profile", form) as PersonaProfile | undefined;
-  const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load, { resources: ["agent_persona"] });
+  const query = useApiQuery({
+    queryKey: ["agent-persona", groupId],
+    fetcher: (signal) => api<Persona>(`/agent/groups/${groupId}/persona`, { signal }).then((r) => r.data),
+    invalidation: { resources: ["agent_persona"], scope: { groupId } },
+  });
   useUnsavedChanges(dirty);
 
-  useEffect(() => {
-    if (query.data) {
-      form.setFieldsValue({
-        mode: query.data.enabled ? "custom" : "inherit",
-        profile: query.data.profile,
-      });
-      setDirty(false);
-      setTrialResult(null);
-      setTrialError(null);
-    }
-  }, [form, query.data]);
+  const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
+    form.setFieldsValue({
+      mode: value.enabled ? "custom" : "inherit",
+      profile: value.profile,
+    });
+    baseVersion.current = value.version ?? undefined;
+    setDirty(false);
+    setTrialResult(null);
+    setTrialError(null);
+  });
 
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
@@ -96,20 +87,20 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const save = async (values: PersonaFormValues) => {
     setSaving(true);
     try {
-      await api<Persona>(`/agent/groups/${groupId}/persona`, {
+      const result = await api<Persona>(`/agent/groups/${groupId}/persona`, {
         method: "PUT",
         body: JSON.stringify({
-          version: data.version,
+          version: baseVersion.current,
           enabled: values.mode === "custom",
           profile: values.profile,
         }),
       });
-      setDirty(false);
+      serverState.acceptServerData(result.data);
       message.success(values.mode === "custom" ? "当前群人设已保存" : "已切换为跟随全局人设");
       query.reload();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        message.warning(error.message);
+        message.warning(`${error.message}；你的草稿仍然保留，请比较服务器新版本后再决定。`);
         query.reload();
       } else message.error((error as Error).message);
     } finally {
@@ -120,15 +111,18 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const reset = async () => {
     setResetting(true);
     try {
-      await api<Persona>(`/agent/groups/${groupId}/persona`, {
+      const result = await api<Persona>(`/agent/groups/${groupId}/persona`, {
         method: "DELETE",
-        headers: data.version ? { "If-Match": data.version } : {},
+        headers: baseVersion.current ? { "If-Match": baseVersion.current } : {},
       });
-      setDirty(false);
+      serverState.acceptServerData(result.data);
       message.success("已清除当前群自定义并恢复全局人设");
       query.reload();
     } catch (error) {
-      message.error((error as Error).message);
+      if (error instanceof ApiError && error.status === 409) {
+        message.warning(`${error.message}；当前草稿未被清除。`);
+        query.reload();
+      } else message.error((error as Error).message);
     } finally {
       setResetting(false);
     }
@@ -199,7 +193,24 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       onValuesChange={() => { setDirty(true); setTrialResult(null); }}
       className="persona-config-form"
     >
-      <div className="persona-config-page agent-studio-page agent-studio-persona editor-page-with-sticky-actions">
+      <div className="persona-config-page agent-studio-page agent-studio-persona">
+        {serverState.remoteUpdate && (
+          <ServerDraftUpdateAlert
+            onKeep={serverState.keepDraft}
+            onCompare={() => setDiffOpen(true)}
+            onReload={serverState.reloadRemote}
+          />
+        )}
+        <DraftDiffModal
+          open={diffOpen}
+          draft={{
+            enabled: form.getFieldValue("mode") === "custom",
+            profile: form.getFieldValue("profile"),
+          }}
+          server={serverState.remoteUpdate}
+          onClose={() => setDiffOpen(false)}
+        />
+
         <section className="persona-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="persona-config-hero-copy">
             <div className="persona-config-eyebrow">PERSONA STUDIO · V2</div>
@@ -240,12 +251,9 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
           />
         )}
 
-        <SplitWorkspace
-          className="persona-config-layout"
-          primaryClassName="persona-config-main"
-          secondaryClassName="persona-config-aside"
-          primary={<>
-            <section id="persona-preset" tabIndex={-1} className="persona-config-section liquid-glass agent-config-floating editor-section-anchor">
+        <div className="persona-config-layout">
+          <div className="persona-config-main">
+            <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">PRESET</div><h3>角色模板</h3><p>模板给出一套完整起点，选择后仍可继续微调；不会改变系统安全规则。</p></div>
                 <Tag>{data.presets.length} 个模板</Tag>
@@ -265,7 +273,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               </div>
             </section>
 
-            <section id="persona-identity" tabIndex={-1} className="persona-config-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">IDENTITY</div><h3>它是谁</h3><p>这里只保留真正需要文字表达的身份信息，不要求你写 Prompt。</p></div>
               </div>
@@ -276,21 +284,21 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               <Form.Item name={["profile", "identity"]} label="身份定位"><Input.TextArea maxLength={240} showCount autoSize={{ minRows: 2, maxRows: 5 }} placeholder="例如：熟悉群聊节奏、自然简洁的普通群友" /></Form.Item>
             </section>
 
-            <section id="persona-voice" tabIndex={-1} className="persona-config-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">VOICE</div><h3>怎么说话</h3><p>用 0–4 档位微调常见表达特征，避免自由文本互相打架。</p></div>
               </div>
               <div className="persona-trait-grid">{PERSONA_STYLE_TRAITS.map(renderTrait)}</div>
             </section>
 
-            <section id="persona-social" tabIndex={-1} className="persona-config-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">SOCIAL</div><h3>怎么参与群聊</h3><p>这些倾向会直接参与主动候选、短会话续聊和主动 reaction 决策；“运行设置”的开关、概率、冷却和每日上限始终是硬边界。</p></div>
               </div>
               <div className="persona-trait-grid">{PERSONA_SOCIAL_TRAITS.map(renderTrait)}</div>
             </section>
 
-            <section id="persona-notes" tabIndex={-1} className="persona-config-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">NOTES</div><h3>自定义补充</h3><p>只写模板和档位无法表达的角色细节。不要在这里重复隐私、知识或工具安全规则。</p></div>
               </div>
@@ -299,7 +307,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               </Form.Item>
             </section>
 
-            <section id="persona-trial" tabIndex={-1} className="persona-config-section persona-trial-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="persona-config-section persona-trial-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">TRY IT</div><h3>未保存草稿试演</h3><p>直接用当前表单草稿调用同一套 Agent Debug。不会保存人设、不会执行工具、不会发 QQ、不会写记忆或主动状态。</p></div>
                 <Tag color="blue">personaDraft</Tag>
@@ -349,22 +357,25 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                 </Card>
               )}
             </section>
-          </>}
-          secondary={<>
-            <div className="persona-note-card liquid-glass agent-config-floating">
-              <SectionNav items={PERSONA_SECTIONS} title="人设编辑章节" />
-            </div>
+          </div>
+
+          <aside className="persona-config-aside">
             <div className="persona-note-card liquid-glass agent-config-floating">
               <div className="persona-note-title">当前草稿</div>
               <strong className="persona-draft-summary">{draftSummary}</strong>
               <p>{profile.identity}</p>
-              <div className="editor-rail-status">
-                <div className="editor-rail-status-line"><span>模式</span><strong>{mode === "custom" ? "当前群自定义" : "跟随全局"}</strong></div>
-                <div className="editor-rail-status-line"><span>主动候选</span><strong>× {draftBehavior.activeProbabilityScale.toFixed(2)}</strong></div>
-                <div className="editor-rail-status-line"><span>自动续聊</span><strong>{Math.max(0, draftBehavior.maxFollowupBotTurns - 1)} 次</strong></div>
-                <div className="editor-rail-status-line"><span>情绪表达</span><strong>{Math.round(draftEmotionExpression * 100)}%</strong></div>
-                <div className="editor-rail-status-line"><span>草稿</span><strong>{dirty ? "未保存" : "已同步"}</strong></div>
+              <div className="persona-summary-tags">
+                <Tag>{PERSONA_TRAIT_META.directness.levels[profile.directness]}</Tag>
+                <Tag>{PERSONA_TRAIT_META.expressiveness.levels[profile.expressiveness]}</Tag>
+                <Tag>{PERSONA_TRAIT_META.followupTendency.levels[profile.followupTendency]}</Tag>
+                <Tag>{PERSONA_TRAIT_META.reactionTendency.levels[profile.reactionTendency]}</Tag>
               </div>
+            </div>
+            <div className="persona-note-card persona-behavior-card liquid-glass agent-config-floating">
+              <div className="persona-note-title">实际行为影响</div>
+              <p>主动候选：现有运行策略 × {draftBehavior.activeProbabilityScale.toFixed(2)}。Persona 只能收窄，不能突破运行配置。</p>
+              <p>自动续聊：{draftBehavior.maxFollowupBotTurns <= 1 ? "首轮回复后结束" : `最多再续 ${draftBehavior.maxFollowupBotTurns - 1} 次`}。</p>
+              <p>主动 reaction：{draftBehavior.allowSpontaneousReaction ? `允许 · ${draftBehavior.reactionMode}` : "关闭（明确用户请求不受影响）"}。</p>
             </div>
             <div className="persona-note-card persona-emotion-card liquid-glass agent-config-floating">
               <div className="persona-note-title">动态情绪</div>
@@ -374,15 +385,24 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               </Space>
               <Progress percent={Math.round(draftEmotionExpression * 100)} size="small" showInfo={false} />
               <p>{data.emotion.reason || "近期没有明显情绪事件，保持 Persona 的基础气质。"}</p>
+              <p>{data.emotion.expressionHint}</p>
+              {data.emotion.updatedAt && (
+                <Text type="secondary">约 {data.emotion.ageMinutesBucket} 分钟前更新 · 会自动衰减回平静</Text>
+              )}
             </div>
             <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
-              <div className="persona-note-title">边界</div>
-              <p>人设只决定“像谁、怎么说、倾向怎么参与”；事实、隐私、权限、工具能力和安全策略始终由系统强制执行。</p>
+              <div className="persona-note-title">已保存版本</div>
+              <p>{data.summary}</p>
+              {dirty && <Tag color="orange">草稿尚未保存</Tag>}
             </div>
-          </>}
-        />
+            <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
+              <div className="persona-note-title">系统策略不可覆盖</div>
+              <p>事实性、隐私、权限、工具能力和 Prompt 注入防护永远不由人设控制。人设只决定“像谁、怎么说、倾向怎么参与”。</p>
+            </div>
+          </aside>
+        </div>
 
-        <StickyActions className={`persona-config-savebar liquid-glass agent-config-floating ${dirty ? "is-dirty" : "is-clean"}`}>
+        <div className="persona-config-savebar liquid-glass agent-config-floating">
           <div className="persona-save-state">
             <strong>{dirty ? "当前人设有未保存草稿" : "人设配置已同步"}</strong>
             <span>{dirty ? draftSummary : data.summary}</span>
@@ -401,10 +421,8 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               保存人设
             </Button>
           </Space>
-        </StickyActions>
+        </div>
       </div>
     </Form>
   );
 }
-
-// 记忆表单的可编辑字段；expiresInDays 为空表示永久有效。

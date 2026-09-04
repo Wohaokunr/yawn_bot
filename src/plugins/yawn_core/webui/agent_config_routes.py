@@ -1,7 +1,6 @@
 # ruff: noqa: C901, F401, TC001, TID252
 """Split Agent WebUI route module."""
 
-
 from __future__ import annotations
 
 import asyncio
@@ -111,6 +110,7 @@ from .service import (
 
 router = APIRouter(prefix=API_PATH)
 
+
 @router.get("/agent/groups/{group_id}/config")
 async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
     async with get_session() as db:
@@ -118,9 +118,7 @@ async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[st
         row = await db.get(GroupAgentConfig, group_id)
         result = serialize_agent_config(row, group_id)
         if row is not None:
-            result["enabled"] = await agent_runtime_enabled(
-                db, group_id, config=row
-            )
+            result["enabled"] = await agent_runtime_enabled(db, group_id, config=row)
         else:
             features = await group_feature_rows(db, group_id)
             result["enabled"] = bool(
@@ -129,6 +127,7 @@ async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[st
                 ]
             )
         return ok(result)
+
 
 @router.patch("/agent/groups/{group_id}/config")
 async def patch_agent_config(
@@ -192,7 +191,9 @@ async def patch_agent_config(
             close_group_conversations(group_id, reason="WebUI 关闭 Agent 总开关")
         elif updates.get("short_conversation_enabled") is False:
             close_group_conversations(group_id, reason="WebUI 关闭短会话续聊")
-    await hub.notify_change("agent_config", str(group_id))
+    await hub.notify_change("agent_config", str(group_id), group_id=group_id)
     if "enabled" in updates:
-        await hub.notify_change("group_feature", f"{group_id}:group_agent")
+        await hub.notify_change(
+            "group_feature", f"{group_id}:group_agent", group_id=group_id
+        )
     return ok(result)

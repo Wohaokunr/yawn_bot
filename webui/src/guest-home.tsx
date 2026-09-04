@@ -18,7 +18,9 @@ import {
 } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { MemoriesPanel, MemberProfilesPanel, RelationsPanel } from "./agent";
+import { MemoriesPanel } from "./agent-panels/MemoriesPanel";
+import { MemberProfilesPanel } from "./agent-panels/MemberProfilesPanel";
+import { RelationsPanel } from "./agent-panels/RelationsPanel";
 import { api, ApiError } from "./api";
 import { PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
 

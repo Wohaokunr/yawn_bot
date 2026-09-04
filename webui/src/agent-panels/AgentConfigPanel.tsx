@@ -1,36 +1,16 @@
-import {
-  Alert, App as AntApp, AutoComplete, Button, Card, Col, Descriptions, Drawer, Empty,
-  Form, Input, InputNumber, List, Popconfirm, Progress, Row, Segmented, Select, Space,
-  Spin, Statistic, Switch, Table, Tag, Timeline, Typography,
-} from "antd";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { AgentAuditTable } from "../agent-audit-table";
-import { TraceCompareView } from "../agent-debug/TraceWorkspace";
+import { App as AntApp, Button, Form, InputNumber, Segmented, Select, Spin, Switch } from "antd";
+import { useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { SectionNav, SplitWorkspace, StickyActions, type SectionNavItem } from "../layout";
-import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
-  useApiQuery, useUnsavedChanges,
+  DraftDiffModal,
+  QueryErrorAlert,
+  SaveStatus,
+  ServerDraftUpdateAlert,
+  useApiQuery,
+  useDraftSafeServerData,
+  useUnsavedChanges,
 } from "../shared";
-import type {
-  AgentAudit, AgentConfig, AgentDebugResponse, AgentMemoryStatus, AgentMessageItem,
-  AgentRelationGraph, AgentRelationItem, MemoryItem, MemorySubjectItem, Persona,
-  PersonaProfile, PrivacyItem,
-} from "../types";
-import {
-  MEMORY_ROLE_OPTIONS, MEMORY_TYPE_META, PERSONA_SOCIAL_TRAITS, PERSONA_STYLE_TRAITS,
-  PERSONA_TRAIT_META, PERSONA_TRIAL_SCENARIOS, PROFILE_KEY_META, PROFILE_KEY_META as _PROFILE_KEY_META,
-  RELATION_SOURCE_META, RELATION_TYPE_PRESETS, memberDisplayName, mergePersonaPreset,
-  personaBehaviorPreview, personaDraftSummary, personaEmotionExpressionPreview,
-  profileKeyLabel, memoryTypeLabel,
-} from "../agent-meta";
-
-const { Text, Paragraph } = Typography;
-const LazyRelationGraphView = lazy(() =>
-  import("../relation-graph").then(({ RelationGraphView }) => ({ default: RelationGraphView })),
-);
+import type { AgentConfig } from "../types";
 
 type ParticipationIntensity = "restrained" | "balanced" | "active" | "custom";
 
@@ -40,12 +20,6 @@ const PARTICIPATION_PRESETS: Record<Exclude<ParticipationIntensity, "custom">, {
   active: { warmup: 0.55, interject: 0.45 },
 };
 
-const CONFIG_BASE_SECTIONS: SectionNavItem[] = [
-  { id: "agent-config-conversation", label: "聊天参与", hint: "唤醒、续聊与主动参与" },
-  { id: "agent-config-memory", label: "记忆与媒体", hint: "保留周期与跨群边界" },
-  { id: "agent-config-tools", label: "特权工具", hint: "高副作用能力与额度" },
-];
-
 function participationIntensity(warmup: number, interject: number): ParticipationIntensity {
   const entry = Object.entries(PARTICIPATION_PRESETS).find(([, preset]) =>
     Math.abs(preset.warmup - warmup) < 0.001 && Math.abs(preset.interject - interject) < 0.001,
@@ -54,37 +28,55 @@ function participationIntensity(warmup: number, interject: number): Participatio
 }
 
 export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
-  const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load, { resources: ["agent_config"] });
-  const watchedEnabled = Form.useWatch("enabled", form) as boolean | undefined;
+  const { message } = AntApp.useApp();
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const baseVersion = useRef<string | undefined>(undefined);
+
+  const query = useApiQuery({
+    queryKey: ["agent-config", groupId],
+    fetcher: (signal) => api<AgentConfig>(`/agent/groups/${groupId}/config`, { signal }).then((r) => r.data),
+    invalidation: { resources: ["agent_config"], scope: { groupId } },
+  });
   const watchedProactiveEnabled = Form.useWatch("proactiveEnabled", form) as boolean | undefined;
   const watchedWarmupProbability = Form.useWatch("proactiveProbability", form) as number | undefined;
   const watchedInterjectProbability = Form.useWatch("proactiveActiveProbability", form) as number | undefined;
   useUnsavedChanges(dirty);
-  useEffect(() => { if (query.data) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data]);
+
+  const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
+    form.setFieldsValue(value);
+    baseVersion.current = value.version ?? undefined;
+    setDirty(false);
+  });
+
   const save = async (values: Record<string, unknown>) => {
     setSaving(true);
     try {
-      const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, { method: "PATCH", body: JSON.stringify({ ...values, version: query.data?.version }) });
-      form.setFieldsValue(result.data);
-      setDirty(false);
+      const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...values, version: baseVersion.current }),
+      });
+      serverState.acceptServerData(result.data);
       message.success("Agent 配置已保存");
       query.reload();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);
-    } finally { setSaving(false); }
+      if (error instanceof ApiError && error.status === 409) {
+        message.warning(`${error.message}；你的草稿仍然保留，请比较服务器新版本后再决定。`);
+        query.reload();
+      } else message.error((error as Error).message);
+    } finally {
+      setSaving(false);
+    }
   };
+
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
-  const proactiveEnabled = watchedProactiveEnabled ?? data.proactiveEnabled;
   const intensity = participationIntensity(
     watchedWarmupProbability ?? data.proactiveProbability,
     watchedInterjectProbability ?? data.proactiveActiveProbability,
   );
-  const configSections = proactiveEnabled
-    ? [CONFIG_BASE_SECTIONS[0], { id: "agent-config-participation", label: "主动策略", hint: "强度、冷却与高级概率" }, ...CONFIG_BASE_SECTIONS.slice(1)]
-    : CONFIG_BASE_SECTIONS;
   const setParticipationIntensity = (value: string | number): void => {
     const preset = PARTICIPATION_PRESETS[String(value) as Exclude<ParticipationIntensity, "custom">];
     if (!preset) return;
@@ -94,6 +86,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
     });
     setDirty(true);
   };
+
   return (
     <Form
       form={form}
@@ -102,7 +95,21 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
       onValuesChange={() => setDirty(true)}
       className="agent-config-form"
     >
-      <div className="agent-config-page agent-studio-page agent-studio-runtime editor-page-with-sticky-actions">
+      <div className="agent-config-page agent-studio-page agent-studio-runtime">
+        {serverState.remoteUpdate && (
+          <ServerDraftUpdateAlert
+            onKeep={serverState.keepDraft}
+            onCompare={() => setDiffOpen(true)}
+            onReload={serverState.reloadRemote}
+          />
+        )}
+        <DraftDiffModal
+          open={diffOpen}
+          draft={form.getFieldsValue(true)}
+          server={serverState.remoteUpdate}
+          onClose={() => setDiffOpen(false)}
+        />
+
         <section className="agent-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="agent-config-hero-copy">
             <div className="agent-config-eyebrow">GROUP AGENT</div>
@@ -147,12 +154,9 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
           </div>
         </section>
 
-        <SplitWorkspace
-          className="agent-config-layout"
-          primaryClassName="agent-config-main"
-          secondaryClassName="agent-config-aside"
-          primary={<>
-            <section id="agent-config-conversation" tabIndex={-1} className="agent-config-section liquid-glass agent-config-floating editor-section-anchor">
+        <div className="agent-config-layout">
+          <div className="agent-config-main">
+            <section className="agent-config-section liquid-glass agent-config-floating">
               <div className="agent-config-section-head">
                 <div>
                   <div className="agent-config-section-kicker">CONVERSATION</div>
@@ -191,7 +195,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
               </div>
             </section>
 
-            {proactiveEnabled && <section id="agent-config-participation" tabIndex={-1} className="agent-config-section liquid-glass agent-config-floating editor-section-anchor">
+            {(watchedProactiveEnabled ?? data.proactiveEnabled) && <section className="agent-config-section liquid-glass agent-config-floating">
               <div className="agent-config-section-head">
                 <div>
                   <div className="agent-config-section-kicker">PARTICIPATION</div>
@@ -236,7 +240,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                 </Form.Item>
               </div>
               <details className="agent-debug-details">
-                <summary>高级参数（默认收起）</summary>
+                <summary>精细调节（高级）</summary>
                 <div className="agent-config-grid agent-config-grid-3 section-row">
                   <Form.Item name="proactiveProbability" label="暖场基础概率" extra="满足冷场条件后的基础概率">
                     <InputNumber min={0} max={1} step={0.05} />
@@ -251,7 +255,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
               </details>
             </section>}
 
-            <section id="agent-config-memory" tabIndex={-1} className="agent-config-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="agent-config-section liquid-glass agent-config-floating">
               <div className="agent-config-section-head">
                 <div>
                   <div className="agent-config-section-kicker">MEMORY & MEDIA</div>
@@ -283,7 +287,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
               </div>
             </section>
 
-            <section id="agent-config-tools" tabIndex={-1} className="agent-config-section liquid-glass agent-config-floating editor-section-anchor">
+            <section className="agent-config-section liquid-glass agent-config-floating">
               <div className="agent-config-section-head">
                 <div>
                   <div className="agent-config-section-kicker">TOOLS</div>
@@ -325,27 +329,27 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                 </Form.Item>
               </div>
             </section>
-          </>}
-          secondary={<>
+          </div>
+
+          <aside className="agent-config-aside">
             <div className="agent-config-note-card liquid-glass agent-config-floating">
-              <SectionNav items={configSections} title="运行配置章节" />
-            </div>
-            <div className="agent-config-note-card liquid-glass agent-config-floating">
-              <div className="agent-config-note-title">当前状态</div>
-              <div className="editor-rail-status">
-                <div className="editor-rail-status-line"><span>总开关</span><strong>{(watchedEnabled ?? data.enabled) ? "已启用" : "已关闭"}</strong></div>
-                <div className="editor-rail-status-line"><span>主动参与</span><strong>{proactiveEnabled ? "允许" : "关闭"}</strong></div>
-                <div className="editor-rail-status-line"><span>草稿</span><strong>{dirty ? "未保存" : "已同步"}</strong></div>
-              </div>
+              <div className="agent-config-note-title">配置说明</div>
+              <p>总开关只控制运行状态，不会清空这里的参数、已有记忆或人设。</p>
+              <p>因此你可以先关闭 Agent，再安全调整各项策略，最后重新开启。</p>
             </div>
             <div className="agent-config-note-card agent-config-note-soft liquid-glass agent-config-floating">
-              <div className="agent-config-note-title">调整建议</div>
-              <p>优先确认聊天参与和记忆边界；只有确有需要时再开放特权工具。高级概率默认保持收起。</p>
+              <div className="agent-config-note-title">推荐顺序</div>
+              <ol>
+                <li>先选择需要的聊天参与能力</li>
+                <li>需要时再调整主动参与频率</li>
+                <li>确认记忆边界</li>
+                <li>最后开放管理工具</li>
+              </ol>
             </div>
-          </>}
-        />
+          </aside>
+        </div>
 
-        <StickyActions className={`agent-config-savebar liquid-glass agent-config-floating ${dirty ? "is-dirty" : "is-clean"}`}>
+        <div className="agent-config-savebar liquid-glass agent-config-floating">
           <div>
             <strong>{dirty ? "有未保存的修改" : "配置已同步"}</strong>
             <span>{dirty ? "保存后立即按新策略运行" : "修改任意选项后可统一保存"}</span>
@@ -353,7 +357,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
           <Button type="primary" htmlType="submit" size="large" loading={saving} disabled={!dirty}>
             保存配置
           </Button>
-        </StickyActions>
+        </div>
       </div>
     </Form>
   );
