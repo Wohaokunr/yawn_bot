@@ -97,6 +97,7 @@ def test_group_scoped_notify_calls_are_explicit() -> None:
         "user_feature",
     }
     webui_root = PROJECT_ROOT / "src" / "plugins" / "yawn_core" / "webui"
+    assert webui_root.is_dir(), "WebUI backend source root is missing"
     violations: list[str] = []
 
     for path in sorted(webui_root.glob("*.py")):
