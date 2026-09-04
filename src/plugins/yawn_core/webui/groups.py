@@ -38,6 +38,7 @@ from .service import (
 
 router = APIRouter(prefix=API_PATH)
 
+
 @router.get("/groups")
 async def get_groups(
     _session: AdminReadSession,
@@ -77,10 +78,7 @@ async def get_group_detail(group_id: int, _session: GroupViewSession) -> dict[st
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "群不存在")
     if _session.role == "guest":
-        result = {
-            key: result[key]
-            for key in ("groupId", "groupName", "memberCount")
-        }
+        result = {key: result[key] for key in ("groupId", "groupName", "memberCount")}
     return ok(result)
 
 
@@ -158,5 +156,7 @@ async def patch_member_feature(
         await set_user_feature(db, user_id, feature, body.override, group_id=group_id)
         await db.commit()
         rows = await user_feature_rows(db, user_id, group_id)
-    await hub.notify_change("user_feature", f"{group_id}:{user_id}:{feature}", group_id=group_id)
+    await hub.notify_change(
+        "user_feature", f"{group_id}:{user_id}:{feature}", group_id=group_id
+    )
     return ok(next(row for row in rows if row["key"] == feature))

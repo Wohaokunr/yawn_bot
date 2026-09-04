@@ -1,7 +1,6 @@
 # ruff: noqa: F401, FAST002, PLR0913, PLR0917, TC001, TID252
 """Split Agent WebUI route module."""
 
-
 from __future__ import annotations
 
 import asyncio
@@ -113,6 +112,7 @@ router = APIRouter(prefix=API_PATH)
 _compact_inflight: set[int] = set()
 _bg_tasks: set[asyncio.Task[Any]] = set()
 
+
 @router.get("/agent/groups/{group_id}/memories")
 async def get_memories(
     group_id: int,
@@ -127,10 +127,7 @@ async def get_memories(
     clauses = [
         AgentMemory.group_id == group_id,
         AgentMemory.visibility.in_(("group", "public")),
-        (
-            AgentMemory.expires_at.is_(None)
-            | (AgentMemory.expires_at >= now_beijing())
-        ),
+        (AgentMemory.expires_at.is_(None) | (AgentMemory.expires_at >= now_beijing())),
     ]
     if search:
         pattern = f"%{search}%"
@@ -184,7 +181,9 @@ async def get_memories(
     )
     return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
 
+
 _SUBJECT_MEMORY_TYPES = ("profile", "core", "manual")
+
 
 @router.get("/agent/groups/{group_id}/memories/subjects")
 async def get_memory_subjects(
@@ -254,8 +253,7 @@ async def get_memory_subjects(
                     .order_by(UserGroup.user_id)
                     .limit(RELATION_GRAPH_LIMIT)
                 )
-            )
-            .all()
+            ).all()
         )
         member_names: dict[int, tuple[str, str | None]] = {
             int(user.user_id): (user.nickname, membership.group_nickname)
@@ -268,6 +266,7 @@ async def get_memory_subjects(
                 {**entry, "nickname": nickname, "groupNickname": group_nickname}
             )
     return ok(result)
+
 
 @router.get("/agent/groups/{group_id}/memories/export")
 async def export_memories(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
@@ -334,6 +333,7 @@ async def export_memories(group_id: int, _session: AdminReadSession) -> dict[str
         }
     )
 
+
 @router.get("/agent/groups/{group_id}/memories/status")
 async def get_memory_status(
     group_id: int, _session: AdminReadSession
@@ -341,6 +341,7 @@ async def get_memory_status(
     async with get_session() as db:
         await require_group(db, group_id)
         return ok(await agent_memory_status(db, group_id))
+
 
 async def _run_manual_compact(group_id: int) -> None:
     try:
@@ -358,6 +359,7 @@ async def _run_manual_compact(group_id: int) -> None:
     finally:
         _compact_inflight.discard(group_id)
         await hub.notify_change("agent_memory", str(group_id), group_id=group_id)
+
 
 async def _run_manual_rebuild(group_id: int) -> None:
     try:
@@ -378,6 +380,7 @@ async def _run_manual_rebuild(group_id: int) -> None:
         _compact_inflight.discard(group_id)
         await hub.notify_change("agent_memory", str(group_id), group_id=group_id)
 
+
 @router.post("/agent/groups/{group_id}/memories/compact")
 async def trigger_memory_compact(
     group_id: int, _session: AdminWriteSession
@@ -392,6 +395,7 @@ async def trigger_memory_compact(
     task.add_done_callback(_bg_tasks.discard)
     return ok({"started": True})
 
+
 @router.post("/agent/groups/{group_id}/memories/rebuild")
 async def trigger_memory_rebuild(
     group_id: int, _session: AdminWriteSession
@@ -405,6 +409,7 @@ async def trigger_memory_rebuild(
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
     return ok({"started": True, "rebuild": True})
+
 
 @router.post("/agent/groups/{group_id}/memories")
 async def create_memory(
@@ -451,6 +456,7 @@ async def create_memory(
     await hub.notify_change("agent_memory", str(row.id), group_id=group_id)
     return ok(result)
 
+
 @router.put("/agent/groups/{group_id}/memories/{memory_id}")
 async def update_memory(
     group_id: int, memory_id: int, body: MemoryPatchBody, _session: AdminWriteSession
@@ -487,6 +493,7 @@ async def update_memory(
     await hub.notify_change("agent_memory", str(memory_id), group_id=group_id)
     return ok(result)
 
+
 @router.delete("/agent/groups/{group_id}/memories/{memory_id}")
 async def delete_memory(
     group_id: int, memory_id: int, _session: AdminWriteSession
@@ -500,6 +507,7 @@ async def delete_memory(
     await hub.notify_change("agent_memory", str(memory_id), group_id=group_id)
     return ok({"deleted": count})
 
+
 @router.delete("/agent/groups/{group_id}/members/{user_id}/data")
 async def delete_member_agent_data(
     group_id: int, user_id: int, _session: AdminWriteSession
@@ -507,8 +515,11 @@ async def delete_member_agent_data(
     async with get_session() as db:
         await require_group(db, group_id)
         count = await delete_member_memories(db, group_id, user_id)
-    await hub.notify_change("agent_member_data", f"{group_id}:{user_id}", group_id=group_id)
+    await hub.notify_change(
+        "agent_member_data", f"{group_id}:{user_id}", group_id=group_id
+    )
     return ok({"deleted": count})
+
 
 @router.delete("/agent/groups/{group_id}/data")
 async def delete_group_agent_data(

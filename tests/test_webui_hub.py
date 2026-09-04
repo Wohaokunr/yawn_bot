@@ -110,6 +110,6 @@ def test_group_scoped_notify_calls_are_explicit() -> None:
             if "group_id=" not in line:
                 violations.append(f"{path.name}:{line_number}: {line.strip()}")
 
-    assert not violations, "group-scoped entity changes need explicit group_id:\n" + "\n".join(
-        violations
+    assert not violations, (
+        "group-scoped entity changes need explicit group_id:\n" + "\n".join(violations)
     )
