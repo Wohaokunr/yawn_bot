@@ -12,33 +12,26 @@ from typing import Any
 from fastapi import WebSocket
 from nonebot import logger
 
-_GROUP_ID_ENTITY_RESOURCES = frozenset(
+_GROUP_SCOPED_RESOURCES = frozenset(
     {
         "agent_config",
         "agent_persona",
         "agent_memory",
         "agent_group_data",
-    }
-)
-_GROUP_PREFIX_ENTITY_RESOURCES = frozenset(
-    {
         "agent_member_data",
         "agent_privacy",
+        "agent_relation",
         "group_feature",
+        "user_feature",
     }
 )
 
 
-def _legacy_group_scope(resource: str, entity_id: str | None) -> str | None:
-    """兼容尚未迁移的调用点；对外协议始终使用独立 scope/entityId。"""
-
-    if not entity_id:
-        return None
-    if resource in _GROUP_ID_ENTITY_RESOURCES:
-        return entity_id
-    if resource in _GROUP_PREFIX_ENTITY_RESOURCES:
-        return entity_id.split(":", 1)[0]
-    return None
+class GroupScopeRequiredError(ValueError):
+    def __init__(self, resource: str) -> None:
+        super().__init__(
+            f"group-scoped entity change requires explicit group_id: {resource}"
+        )
 
 
 class WebUIHub:
@@ -85,16 +78,9 @@ class WebUIHub:
         resourceId 后让前端无法判断一次变化是否属于当前页面。
         """
 
-        resolved_group_id = (
-            str(group_id)
-            if group_id is not None
-            else _legacy_group_scope(resource, entity_id)
-        )
-        scope = (
-            {"groupId": resolved_group_id}
-            if resolved_group_id is not None
-            else None
-        )
+        if resource in _GROUP_SCOPED_RESOURCES and group_id is None:
+            raise GroupScopeRequiredError(resource)
+        scope = {"groupId": str(group_id)} if group_id is not None else None
         await self.broadcast(
             {
                 "type": "entity.changed",

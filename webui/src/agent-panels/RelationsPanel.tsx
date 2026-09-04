@@ -159,7 +159,7 @@ export function RelationsPanel({
     note: string;
     confidence: number;
   }) => {
-    if (readOnly) return;
+    if (readOnly || query.stale) return;
     setSaving(true);
     try {
       await api<AgentRelationItem>(`/agent/groups/${groupId}/relations`, {

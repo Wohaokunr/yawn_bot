@@ -357,7 +357,7 @@ async def _run_manual_compact(group_id: int) -> None:
             logger.exception("WebUI 手动记忆失败状态写入失败: %s", group_id)
     finally:
         _compact_inflight.discard(group_id)
-        await hub.notify_change("agent_memory", str(group_id))
+        await hub.notify_change("agent_memory", str(group_id), group_id=group_id)
 
 async def _run_manual_rebuild(group_id: int) -> None:
     try:
@@ -376,7 +376,7 @@ async def _run_manual_rebuild(group_id: int) -> None:
             logger.exception("WebUI 手动重建失败状态写入失败: %s", group_id)
     finally:
         _compact_inflight.discard(group_id)
-        await hub.notify_change("agent_memory", str(group_id))
+        await hub.notify_change("agent_memory", str(group_id), group_id=group_id)
 
 @router.post("/agent/groups/{group_id}/memories/compact")
 async def trigger_memory_compact(
@@ -448,7 +448,7 @@ async def create_memory(
             ) from None
         await db.refresh(row)
         result = serialize_memory(row)
-    await hub.notify_change("agent_memory", str(row.id))
+    await hub.notify_change("agent_memory", str(row.id), group_id=group_id)
     return ok(result)
 
 @router.put("/agent/groups/{group_id}/memories/{memory_id}")
@@ -484,7 +484,7 @@ async def update_memory(
         await db.commit()
         await db.refresh(row)
         result = serialize_memory(row)
-    await hub.notify_change("agent_memory", str(memory_id))
+    await hub.notify_change("agent_memory", str(memory_id), group_id=group_id)
     return ok(result)
 
 @router.delete("/agent/groups/{group_id}/memories/{memory_id}")
@@ -497,7 +497,7 @@ async def delete_memory(
         if not count:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "记忆不存在")
         await db.commit()
-    await hub.notify_change("agent_memory", str(memory_id))
+    await hub.notify_change("agent_memory", str(memory_id), group_id=group_id)
     return ok({"deleted": count})
 
 @router.delete("/agent/groups/{group_id}/members/{user_id}/data")
@@ -507,7 +507,7 @@ async def delete_member_agent_data(
     async with get_session() as db:
         await require_group(db, group_id)
         count = await delete_member_memories(db, group_id, user_id)
-    await hub.notify_change("agent_member_data", f"{group_id}:{user_id}")
+    await hub.notify_change("agent_member_data", f"{group_id}:{user_id}", group_id=group_id)
     return ok({"deleted": count})
 
 @router.delete("/agent/groups/{group_id}/data")
@@ -517,5 +517,5 @@ async def delete_group_agent_data(
     async with get_session() as db:
         await require_group(db, group_id)
         count = await delete_group_memories(db, group_id)
-    await hub.notify_change("agent_group_data", str(group_id))
+    await hub.notify_change("agent_group_data", str(group_id), group_id=group_id)
     return ok({"deleted": count})

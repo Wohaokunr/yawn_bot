@@ -177,5 +177,5 @@ async def patch_privacy(
             "optedOut": privacy.opted_out,
             "updatedAt": iso(privacy.updated_at),
         }
-    await hub.notify_change("agent_privacy", f"{group_id}:{user_id}")
+    await hub.notify_change("agent_privacy", f"{group_id}:{user_id}", group_id=group_id)
     return ok(result)

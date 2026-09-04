@@ -123,9 +123,9 @@ async def patch_group_feature(
         rows = await group_feature_rows(db, group_id)
     if feature == "group_agent" and body.override is False:
         close_group_conversations(group_id, reason="WebUI 群功能关闭 Agent 总开关")
-    await hub.notify_change("group_feature", f"{group_id}:{feature}")
+    await hub.notify_change("group_feature", f"{group_id}:{feature}", group_id=group_id)
     if feature == "group_agent":
-        await hub.notify_change("agent_config", str(group_id))
+        await hub.notify_change("agent_config", str(group_id), group_id=group_id)
     return ok(next(row for row in rows if row["key"] == feature))
 
 
@@ -158,5 +158,5 @@ async def patch_member_feature(
         await set_user_feature(db, user_id, feature, body.override, group_id=group_id)
         await db.commit()
         rows = await user_feature_rows(db, user_id, group_id)
-    await hub.notify_change("user_feature", f"{group_id}:{user_id}:{feature}")
+    await hub.notify_change("user_feature", f"{group_id}:{user_id}:{feature}", group_id=group_id)
     return ok(next(row for row in rows if row["key"] == feature))

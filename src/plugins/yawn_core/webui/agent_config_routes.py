@@ -192,7 +192,7 @@ async def patch_agent_config(
             close_group_conversations(group_id, reason="WebUI 关闭 Agent 总开关")
         elif updates.get("short_conversation_enabled") is False:
             close_group_conversations(group_id, reason="WebUI 关闭短会话续聊")
-    await hub.notify_change("agent_config", str(group_id))
+    await hub.notify_change("agent_config", str(group_id), group_id=group_id)
     if "enabled" in updates:
-        await hub.notify_change("group_feature", f"{group_id}:group_agent")
+        await hub.notify_change("group_feature", f"{group_id}:group_agent", group_id=group_id)
     return ok(result)
