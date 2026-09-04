@@ -17,7 +17,7 @@ import {
 } from "@ant-design/icons";
 import { Breadcrumb, Button, Drawer, Layout, Menu, Space, Spin, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
@@ -121,11 +121,16 @@ export function Shell({
   );
   const [mobileOpen, setMobileOpen] = useState(false);
   const [dirtyCount, setDirtyCount] = useState(0);
+  const scrollPositions = useRef(new Map<string, number>());
   const selected = `/${location.pathname.split("/")[1] || (isGuest ? "guest" : "overview")}`;
   const crumbs = useMemo(
     () => breadcrumbItems(location.pathname, session.role),
     [location.pathname, session.role],
   );
+  const scrollKey = useMemo(() => {
+    const tab = new URLSearchParams(location.search).get("tab") ?? "";
+    return `${location.pathname}?tab=${tab}`;
+  }, [location.pathname, location.search]);
   const navItems = isGuest ? GUEST_NAV_ITEMS : ADMIN_NAV_ITEMS;
 
   useEffect(() => {
@@ -154,6 +159,18 @@ export function Shell({
     window.addEventListener("yawnbot-dirty-state", listener);
     return () => window.removeEventListener("yawnbot-dirty-state", listener);
   }, [isGuest]);
+
+  useEffect(() => {
+    const region = document.querySelector<HTMLElement>(".app-content-scroll");
+    if (!region) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      region.scrollTop = scrollPositions.current.get(scrollKey) ?? 0;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scrollPositions.current.set(scrollKey, region.scrollTop);
+    };
+  }, [scrollKey]);
 
   const canLeave = () => isGuest || confirmDiscardChanges();
 
