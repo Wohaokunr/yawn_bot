@@ -284,9 +284,177 @@
   box-shadow: 0 16px 44px rgba(242, 96, 141, 0.18);
 }
 
+/* Debugger: desktop behaves like an IDE workspace, not two natural-height cards. */
+.agent-debug-page {
+  min-width: 0;
+}
+
+.agent-debug-workbench {
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  height: clamp(520px, calc(100dvh - 250px), 820px);
+  min-height: 0;
+}
+
+.agent-debug-navigator-pane,
+.agent-debug-inspector-pane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.agent-debug-inspector-scroll {
+  height: 100%;
+  padding-right: 4px;
+}
+
+.agent-trace-sidebar {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-trace-sidebar > .ant-card-head {
+  flex: 0 0 auto;
+}
+
+.agent-trace-sidebar > .ant-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-trace-sidebar-layout {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-trace-sidebar-controls {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-trace-buffer-note {
+  display: block;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-trace-list-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
+}
+
+.agent-debug-simulation-dock {
+  min-width: 0;
+}
+
+/* Relations: lightweight summary, sticky controls and bounded table scrolling. */
+.relations-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.relations-summary-row {
+  margin-top: 0 !important;
+}
+
+.relations-card > .ant-card-body {
+  padding-top: 12px;
+}
+
+.relations-toolbar {
+  position: sticky;
+  top: 58px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px -2px 14px;
+  padding: 8px 2px 10px;
+  border-bottom: 1px solid rgba(255, 233, 240, 0.9);
+  background: rgba(255, 252, 254, 0.92);
+  backdrop-filter: blur(16px) saturate(160%);
+}
+
+.relations-toolbar-primary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.relations-toolbar .table-search {
+  width: min(260px, 100%);
+}
+
+.relations-content-region {
+  min-width: 0;
+}
+
+.relations-table .ant-table-body {
+  max-height: min(54vh, 500px) !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.relations-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 14px;
+}
+
 @media (max-width: 1100px) {
   .split-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .agent-debug-workbench {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    max-height: none;
+  }
+
+  .agent-debug-navigator-pane,
+  .agent-debug-inspector-pane {
+    height: auto;
+    overflow: visible;
+  }
+
+  .agent-debug-inspector-scroll,
+  .agent-trace-list-scroll {
+    height: auto;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .agent-trace-sidebar {
+    height: auto;
+    overflow: visible;
+  }
+
+  .agent-trace-sidebar > .ant-card-body {
+    overflow: visible;
   }
 }
 
@@ -310,5 +478,40 @@
 
   .sticky-actions {
     bottom: 8px;
+  }
+
+  .relations-toolbar {
+    position: static;
+    align-items: stretch;
+    flex-direction: column;
+    background: transparent;
+    backdrop-filter: none;
+  }
+
+  .relations-toolbar-primary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .relations-toolbar-primary .ant-select,
+  .relations-toolbar .table-search,
+  .relations-toolbar > .ant-btn {
+    width: 100% !important;
+  }
+
+  .relations-table .ant-table-body {
+    max-height: 460px !important;
+  }
+
+  .relations-pagination {
+    justify-content: center;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 600px) {
+  .relations-editor-drawer .ant-drawer-content-wrapper {
+    width: calc(100vw - 12px) !important;
+    max-width: 520px;
   }
 }
