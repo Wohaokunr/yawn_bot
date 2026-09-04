@@ -21,6 +21,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Retry v0.1.6-rc.8 after the WebUI release-gate test fixes merged to main.
           version="${GITHUB_REF_NAME#release-trigger/}"
           if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Invalid release trigger branch: $GITHUB_REF_NAME"
