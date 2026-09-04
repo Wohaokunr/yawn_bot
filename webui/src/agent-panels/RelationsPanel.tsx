@@ -28,6 +28,13 @@ type RelationSummary = {
   lastSeenAt: string | null;
 };
 
+function focusDrawerField(selector: string): void {
+  window.requestAnimationFrame(() => {
+    const target = document.querySelector<HTMLElement>(`${selector} input, ${selector} textarea`);
+    target?.focus();
+  });
+}
+
 export function RelationsPanel({ groupId, readOnly = false }: { groupId: string; readOnly?: boolean }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -203,7 +210,14 @@ export function RelationsPanel({ groupId, readOnly = false }: { groupId: string;
     </Card>
 
     {!readOnly && <>
-      <Drawer className="relations-editor-drawer" open={creating} width={520} title="新增关系边" onClose={() => setCreating(false)}>
+      <Drawer
+        className="relations-editor-drawer relations-create-drawer"
+        open={creating}
+        width={520}
+        title="新增关系边"
+        onClose={() => setCreating(false)}
+        afterOpenChange={(open) => { if (open) focusDrawerField(".relations-create-drawer"); }}
+      >
         <Form form={createForm} layout="vertical" onFinish={saveCreate} initialValues={{ confidence: 0.9 }}>
           <Row gutter={16}>
             <Col xs={24} sm={12}><Form.Item name="subjectUserId" label="主体 QQ" rules={[{ required: true, message: "请输入主体 QQ" }]}><InputNumber min={1} precision={0} style={{ width: "100%" }} /></Form.Item></Col>
@@ -215,7 +229,14 @@ export function RelationsPanel({ groupId, readOnly = false }: { groupId: string;
           <Space><Button type="primary" htmlType="submit" loading={saving}>新增</Button><Button onClick={() => setCreating(false)}>取消</Button></Space>
         </Form>
       </Drawer>
-      <Drawer className="relations-editor-drawer" open={!!editing} width={520} title={`编辑关系边 · ${editing?.type ?? ""}`} onClose={() => setEditing(null)}>
+      <Drawer
+        className="relations-editor-drawer relations-edit-drawer"
+        open={!!editing}
+        width={520}
+        title={`编辑关系边 · ${editing?.type ?? ""}`}
+        onClose={() => setEditing(null)}
+        afterOpenChange={(open) => { if (open) focusDrawerField(".relations-edit-drawer"); }}
+      >
         <Form form={editForm} layout="vertical" onFinish={saveEdit}>
           <Alert type="info" showIcon className="section-alert" message="类型与两端成员属于边的唯一身份，如需调整请删除后重新新增。" />
           <Form.Item name="note" label="备注"><Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} maxLength={200} showCount /></Form.Item>
