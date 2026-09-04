@@ -1,0 +1,522 @@
+/* P5-P7: final visual/interaction contract loaded after legacy page styles. */
+:root {
+  --surface-1-bg: rgba(255, 255, 255, 0.52);
+  --surface-2-bg: rgba(255, 255, 255, 0.64);
+  --surface-elevated-bg: rgba(255, 255, 255, 0.82);
+  --surface-interactive-bg: rgba(255, 255, 255, 0.60);
+  --surface-border: rgba(255, 255, 255, 0.68);
+  --surface-border-soft: rgba(255, 233, 240, 0.88);
+  --surface-radius: 18px;
+  --surface-radius-small: 14px;
+  --surface-shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 7px 22px rgba(103, 71, 88, 0.07);
+  --surface-shadow-2: inset 0 1px 0 rgba(255, 255, 255, 0.90), 0 12px 34px rgba(103, 71, 88, 0.11);
+  --surface-shadow-interactive: 0 12px 28px rgba(242, 96, 141, 0.13);
+  --space-page-wide: 28px;
+  --space-page-desktop: 22px;
+  --space-page-tablet: 18px;
+  --space-page-mobile: 12px;
+  --space-panel: 16px;
+  --space-section: 18px;
+  --space-card: 20px;
+  --space-card-small: 16px;
+  --agent-nav-height: 56px;
+  --z-sticky-toolbar: 14;
+  --z-sticky-actions: 18;
+  --z-sticky-nav: 24;
+}
+
+/* Four material levels. Utility classes can be reused by new pages. */
+.surface-1,
+.app-content .ant-card {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--surface-radius);
+  background-color: var(--surface-1-bg);
+  box-shadow: var(--surface-shadow-1);
+}
+
+.surface-2,
+.app-content .ant-card .ant-card,
+.agent-config-note-card,
+.persona-note-card,
+.agent-config-toggle-card,
+.persona-field-card,
+.persona-trait-card {
+  border: 1px solid var(--surface-border-soft);
+  border-radius: var(--surface-radius-small);
+  background-color: var(--surface-2-bg);
+  box-shadow: none;
+}
+
+.surface-elevated,
+.agent-studio-nav-shell,
+.agent-config-savebar,
+.persona-config-savebar {
+  border-color: var(--surface-border);
+  background-color: var(--surface-elevated-bg);
+  box-shadow: var(--surface-shadow-2);
+}
+
+.surface-interactive,
+.persona-preset-card,
+.agent-studio-nav-button,
+.agent-trace-list-item {
+  background-color: var(--surface-interactive-bg);
+  transition:
+    transform var(--dur-fast) var(--ease-soft),
+    border-color var(--dur-fast) var(--ease-soft),
+    box-shadow var(--dur-fast) var(--ease-soft),
+    background-color var(--dur-fast) var(--ease-soft);
+}
+
+.surface-interactive:hover,
+.persona-preset-card:hover,
+.agent-studio-nav-button:hover,
+.agent-trace-list-item:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--surface-shadow-interactive);
+}
+
+/* Plain information cards keep light/glass response but never imply clickability by moving. */
+.app-content .ant-card,
+.agent-studio-page .agent-config-floating,
+.agent-studio-page .agent-config-toggle-card,
+.agent-studio-page .persona-field-card {
+  transform: none !important;
+}
+
+.app-content .ant-card:hover,
+.agent-studio-page .agent-config-floating:hover,
+.agent-studio-page .agent-config-toggle-card:hover,
+.agent-studio-page .persona-field-card:hover {
+  transform: none !important;
+  box-shadow: var(--surface-shadow-1);
+}
+
+/* Cards, titles, tags and section spacing use one density system. */
+.app-content .ant-card:not(.ant-card-small) > .ant-card-body {
+  padding: var(--space-card);
+}
+
+.app-content .ant-card.ant-card-small > .ant-card-body {
+  padding: var(--space-card-small);
+}
+
+.app-content .ant-card > .ant-card-head {
+  min-height: 52px;
+  padding-inline: var(--space-card);
+  border-bottom-color: rgba(255, 233, 240, 0.72);
+}
+
+.app-content .ant-card .ant-card-head-title {
+  padding-block: 14px;
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.ant-tag {
+  min-height: 22px;
+  margin-inline-end: 6px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  box-shadow: none;
+}
+
+.panel-stack,
+.agent-config-page,
+.persona-config-page,
+.relations-panel {
+  gap: var(--space-panel);
+}
+
+.agent-config-main,
+.persona-config-main {
+  gap: var(--space-section);
+}
+
+.agent-config-section,
+.persona-config-section {
+  padding: var(--space-card);
+  border-radius: var(--surface-radius);
+}
+
+.agent-config-section-head,
+.persona-config-section-head {
+  margin-bottom: var(--space-section);
+}
+
+.agent-config-section-head h3,
+.persona-config-section-head h3 {
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+/* Hero and sticky controls are intentionally elevated; ordinary sections are not. */
+.agent-config-hero,
+.persona-config-hero {
+  border-radius: 20px;
+  box-shadow: var(--surface-shadow-2);
+}
+
+.agent-config-savebar,
+.persona-config-savebar {
+  z-index: var(--z-sticky-actions);
+}
+
+.agent-studio-nav-shell {
+  z-index: var(--z-sticky-nav);
+}
+
+.relations-toolbar {
+  top: calc(var(--agent-nav-height) + 6px);
+  z-index: var(--z-sticky-toolbar);
+}
+
+/* Default rows start at their own natural height. Equal-height is explicit opt-in only. */
+.app-content .ant-row {
+  align-items: flex-start;
+}
+
+.equal-height-row {
+  align-items: stretch !important;
+}
+
+.equal-height-row > .ant-col {
+  display: flex;
+}
+
+.equal-height-row > .ant-col > .ant-card {
+  width: 100%;
+  height: 100%;
+}
+
+.guest-access-grid .ant-card,
+.relations-summary-row .ant-card,
+.stat-card {
+  height: auto;
+}
+
+/* Long content may wrap or scroll, but never expand the page width. */
+.app-content :where(
+  .ant-card-body,
+  .ant-card-head-title,
+  .ant-typography,
+  .ant-descriptions-item-content,
+  .ant-list-item,
+  td,
+  th,
+  label
+) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.app-content pre,
+.app-content code,
+.agent-debug-details,
+.agent-debug-detail-card {
+  max-width: 100%;
+}
+
+.app-content pre {
+  overflow: auto;
+}
+
+.ant-empty {
+  min-width: 0;
+  min-height: 128px;
+  display: grid;
+  place-content: center;
+}
+
+/* Top-level panel loading keeps a stable footprint so tab switches do not jump. */
+.agent-studio-panel > .ant-spin,
+.route-loading,
+.rg-loading-wrap {
+  width: 100%;
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+}
+
+/* Restore desktop defaults after older local media queries in styles.css. */
+.desktop-sider {
+  display: flex;
+}
+
+.mobile-nav-trigger {
+  display: none;
+}
+
+.split-workspace {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  align-items: start;
+}
+
+.agent-config-aside,
+.persona-config-aside {
+  position: sticky;
+  top: calc(var(--agent-nav-height) + 18px);
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-config-hero,
+.persona-config-hero {
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.75fr);
+}
+
+.agent-config-grid-2,
+.persona-field-grid,
+.persona-trait-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.agent-config-grid-3,
+.persona-preset-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.agent-config-savebar,
+.persona-config-savebar {
+  align-items: center;
+  flex-direction: row;
+}
+
+/* Wide desktop: >= 1440. */
+@media (min-width: 1440px) {
+  .app-content {
+    padding: var(--space-page-wide);
+  }
+}
+
+/* Desktop: 1025-1439. Includes the common 1366x768 admin viewport. */
+@media (min-width: 1025px) and (max-width: 1439px) {
+  .app-content {
+    padding: 20px var(--space-page-desktop) 24px;
+  }
+
+  .panel-stack,
+  .agent-config-page,
+  .persona-config-page,
+  .relations-panel {
+    gap: 14px;
+  }
+
+  .app-content .ant-card:not(.ant-card-small) > .ant-card-body,
+  .agent-config-section,
+  .persona-config-section {
+    padding: 18px;
+  }
+
+  .agent-config-hero,
+  .persona-config-hero {
+    gap: 14px;
+    padding: 20px;
+  }
+
+  .agent-debug-workbench {
+    grid-template-columns: minmax(270px, 320px) minmax(0, 1fr);
+    height: clamp(480px, calc(100dvh - 224px), 720px);
+  }
+
+  .agent-config-metrics,
+  .persona-config-metrics {
+    margin-top: 18px;
+  }
+}
+
+/* Tablet: 768-1024. One-column page structure; no forced debugger inner scrolling. */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .desktop-sider {
+    display: none;
+  }
+
+  .mobile-nav-trigger {
+    display: inline-flex;
+  }
+
+  .app-header {
+    padding-inline: 16px;
+  }
+
+  .app-content {
+    padding: var(--space-page-tablet);
+  }
+
+  .split-workspace,
+  .agent-config-hero,
+  .persona-config-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-config-aside,
+  .persona-config-aside {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .agent-config-grid-3,
+  .persona-preset-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .persona-field-grid,
+  .persona-trait-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-debug-workbench {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    max-height: none;
+  }
+
+  .agent-debug-navigator-pane,
+  .agent-debug-inspector-pane,
+  .agent-debug-inspector-scroll,
+  .agent-trace-sidebar,
+  .agent-trace-list-scroll {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .relations-toolbar {
+    top: calc(var(--agent-nav-height) + 4px);
+  }
+}
+
+/* Mobile: <= 767. Every primary panel becomes one column and sticky layers are simplified. */
+@media (max-width: 767px) {
+  .desktop-sider {
+    display: none;
+  }
+
+  .mobile-nav-trigger {
+    display: inline-flex;
+  }
+
+  .app-header {
+    padding-inline: 12px;
+  }
+
+  .app-header > .ant-space {
+    min-width: 0;
+  }
+
+  .app-content {
+    padding: var(--space-page-mobile);
+  }
+
+  .app-content .ant-card:not(.ant-card-small) > .ant-card-body,
+  .agent-config-section,
+  .persona-config-section {
+    padding: 16px;
+  }
+
+  .agent-studio-nav-scroll {
+    display: none;
+  }
+
+  .agent-studio-nav-select {
+    display: block;
+  }
+
+  .split-workspace,
+  .agent-config-hero,
+  .persona-config-hero,
+  .agent-config-grid-2,
+  .agent-config-grid-3,
+  .agent-config-aside,
+  .persona-config-aside,
+  .persona-field-grid,
+  .persona-preset-grid,
+  .persona-trait-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-config-aside,
+  .persona-config-aside {
+    position: static;
+    display: grid;
+  }
+
+  .agent-config-title-row,
+  .persona-config-title-row,
+  .persona-trial-run-row,
+  .agent-config-savebar,
+  .persona-config-savebar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agent-config-savebar .ant-btn,
+  .persona-config-savebar .ant-btn {
+    width: 100%;
+  }
+
+  .editor-page-with-sticky-actions {
+    padding-bottom: 118px;
+  }
+
+  .relations-toolbar {
+    position: static;
+    align-items: stretch;
+    flex-direction: column;
+    background: transparent;
+    backdrop-filter: none;
+  }
+
+  .relations-toolbar-primary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .relations-toolbar-primary .ant-select,
+  .relations-toolbar .table-search,
+  .relations-toolbar > .ant-btn {
+    width: 100% !important;
+  }
+
+  .relations-editor-drawer .ant-drawer-content-wrapper {
+    width: calc(100vw - 8px) !important;
+    max-width: none;
+  }
+
+  .agent-debug-workbench {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    max-height: none;
+  }
+
+  .agent-debug-navigator-pane,
+  .agent-debug-inspector-pane,
+  .agent-debug-inspector-scroll,
+  .agent-trace-sidebar,
+  .agent-trace-list-scroll {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-content > *,
+  .ant-row .ant-col > .ant-card,
+  .ant-drawer-body > *,
+  .persona-preset-card,
+  .agent-studio-nav-button,
+  .agent-trace-list-item {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}
