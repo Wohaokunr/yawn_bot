@@ -1,0 +1,35 @@
+name: Release dispatch bridge
+
+on:
+  push:
+    branches:
+      - "release-trigger/**"
+    paths:
+      - ".github/workflows/release-dispatch-bridge.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch existing release workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#release-trigger/}"
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release trigger branch: $GITHUB_REF_NAME"
+            exit 1
+          fi
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f version="$version" \
+            -f deploy_production=true \
+            -f skip_quality_gates=false
+          echo "Dispatched Release for $version with production deployment enabled."
