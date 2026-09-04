@@ -82,3 +82,34 @@ async def test_entity_id_never_infers_group_scope(
         "scope": None,
         "entityId": "12345:entity",
     }
+
+
+def test_group_scoped_notify_calls_are_explicit() -> None:
+    scoped_resources = {
+        "agent_config",
+        "agent_persona",
+        "agent_memory",
+        "agent_group_data",
+        "agent_member_data",
+        "agent_privacy",
+        "agent_relation",
+        "group_feature",
+        "user_feature",
+    }
+    webui_root = PROJECT_ROOT / "src" / "plugins" / "yawn_core" / "webui"
+    violations: list[str] = []
+
+    for path in sorted(webui_root.glob("*.py")):
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if "hub.notify_change(" not in line:
+                continue
+            if not any(f'"{resource}"' in line for resource in scoped_resources):
+                continue
+            if "group_id=" not in line:
+                violations.append(f"{path.name}:{line_number}: {line.strip()}")
+
+    assert not violations, "group-scoped entity changes need explicit group_id:\n" + "\n".join(
+        violations
+    )
