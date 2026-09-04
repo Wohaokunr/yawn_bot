@@ -74,6 +74,21 @@ replacements = {
         ('hub.notify_change("agent_config", str(group_id))', 'hub.notify_change("agent_config", str(group_id), group_id=group_id)'),
         ('hub.notify_change("user_feature", f"{group_id}:{user_id}:{feature}")', 'hub.notify_change("user_feature", f"{group_id}:{user_id}:{feature}", group_id=group_id)'),
     ],
+    "webui/src/agent-panels/AgentMessagesPanel.tsx": [
+        ('disabled={query.transitioning}', 'disabled={query.stale}'),
+    ],
+    "webui/src/agent-panels/MemberProfilesPanel.tsx": [
+        ('memberQuery.transitioning', 'memberQuery.stale'),
+    ],
+    "webui/src/agent-panels/MemoriesPanel.tsx": [
+        ('const compact = async () => {\n    if (readOnly) return;', 'const compact = async () => {\n    if (readOnly || query.stale) return;'),
+        ('const rebuild = async () => {\n    if (readOnly) return;', 'const rebuild = async () => {\n    if (readOnly || query.stale) return;'),
+        ('<Button loading={status?.inFlight}>立即整理</Button>', '<Button loading={status?.inFlight} disabled={query.stale}>立即整理</Button>'),
+        ('<Button>重建派生记忆</Button>', '<Button disabled={query.stale}>重建派生记忆</Button>'),
+    ],
+    "webui/src/agent-panels/RelationsPanel.tsx": [
+        ('    if (readOnly) return;\n    setSaving(true);', '    if (readOnly || query.stale) return;\n    setSaving(true);'),
+    ],
 }
 for path, pairs in replacements.items():
     for old_text, new_text in pairs:
@@ -82,11 +97,26 @@ for path, pairs in replacements.items():
 test = Path("tests/test_webui_hub.py")
 test.write_text('''from __future__ import annotations
 
+import importlib
+import sys
+from pathlib import Path
 from typing import Any
 
+import nonebot
 import pytest
 
-from src.plugins.yawn_core.webui.hub import WebUIHub
+try:
+    nonebot.get_driver()
+except ValueError:
+    nonebot.init()
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if nonebot.get_plugin("yawn_core") is None:
+    nonebot.load_from_toml("pyproject.toml")
+
+WebUIHub = importlib.import_module("src.plugins.yawn_core.webui.hub").WebUIHub
 
 
 @pytest.mark.asyncio
