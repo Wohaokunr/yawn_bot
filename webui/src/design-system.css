@@ -59,7 +59,9 @@
 .surface-interactive,
 .persona-preset-card,
 .agent-studio-nav-button,
-.agent-trace-list-item {
+.agent-trace-list-item,
+.app-content .ant-card.ant-card-hoverable,
+.app-content .ant-card[role="button"] {
   background-color: var(--surface-interactive-bg);
   transition:
     transform var(--dur-fast) var(--ease-soft),
@@ -90,6 +92,12 @@
 .agent-studio-page .persona-field-card:hover {
   transform: none !important;
   box-shadow: var(--surface-shadow-1);
+}
+
+.app-content .ant-card.ant-card-hoverable:hover,
+.app-content .ant-card[role="button"]:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: var(--surface-shadow-interactive);
 }
 
 /* Cards, titles, tags and section spacing use one density system. */
@@ -256,6 +264,12 @@
 .split-workspace {
   grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
   align-items: start;
+}
+
+/* Debug is a semantic exception: navigator is the narrow left rail. */
+.agent-debug-workbench {
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  align-items: stretch;
 }
 
 .agent-config-aside,
