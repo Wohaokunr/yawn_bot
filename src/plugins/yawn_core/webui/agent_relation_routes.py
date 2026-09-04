@@ -111,6 +111,66 @@ from .service import (
 
 router = APIRouter(prefix=API_PATH)
 
+
+async def _relation_clauses(db: Any, group_id: int) -> list[Any]:
+    """Return the relation visibility clauses shared by list/summary/types.
+
+    opted-out members are excluded for both admin and guest relation views so the
+    lightweight summary and type filters always describe the same visible rows as
+    the paginated table.
+    """
+
+    opted_out = set(
+        (
+            await db.execute(
+                select(AgentPrivacy.user_id).where(
+                    AgentPrivacy.group_id == group_id,
+                    AgentPrivacy.opted_out.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    clauses: list[Any] = [AgentRelation.group_id == group_id]
+    if opted_out:
+        clauses.extend(
+            (
+                AgentRelation.subject_user_id.not_in(opted_out),
+                AgentRelation.object_user_id.not_in(opted_out),
+            )
+        )
+    return clauses
+
+
+async def _relation_page_names(
+    db: Any, group_id: int, rows: list[AgentRelation]
+) -> dict[int, str]:
+    """Resolve display names only for relation endpoints on the current page."""
+
+    user_ids = {
+        int(user_id)
+        for row in rows
+        for user_id in (row.subject_user_id, row.object_user_id)
+    }
+    if not user_ids:
+        return {}
+    members = (
+        await db.execute(
+            select(UserGroup, BotUser)
+            .join(BotUser, BotUser.user_id == UserGroup.user_id)
+            .where(
+                UserGroup.group_id == group_id,
+                UserGroup.user_id.in_(user_ids),
+            )
+        )
+    ).all()
+    return {
+        int(user.user_id): (membership.group_nickname or user.nickname or str(user.user_id))
+        for membership, user in members
+    }
+
+
 @router.get("/agent/groups/{group_id}/relations")
 async def get_relations(
     group_id: int,
@@ -121,36 +181,17 @@ async def get_relations(
     relation_type: str = Query(default="", alias="type", max_length=32),
 ) -> dict[str, Any]:
     page, page_size = page_params(page, page_size)
-    clauses = [AgentRelation.group_id == group_id]
-    if relation_type:
-        clauses.append(AgentRelation.relation_type == relation_type)
-    if search.strip().isdigit():
-        target = int(search.strip())
-        clauses.append(
-            or_(
-                AgentRelation.subject_user_id == target,
-                AgentRelation.object_user_id == target,
-            )
-        )
     async with get_session() as db:
         await require_group(db, group_id)
-        opted_out = set(
-            (
-                await db.execute(
-                    select(AgentPrivacy.user_id).where(
-                        AgentPrivacy.group_id == group_id,
-                        AgentPrivacy.opted_out.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if opted_out:
-            clauses.extend(
-                (
-                    AgentRelation.subject_user_id.not_in(opted_out),
-                    AgentRelation.object_user_id.not_in(opted_out),
+        clauses = await _relation_clauses(db, group_id)
+        if relation_type:
+            clauses.append(AgentRelation.relation_type == relation_type)
+        if search.strip().isdigit():
+            target = int(search.strip())
+            clauses.append(
+                or_(
+                    AgentRelation.subject_user_id == target,
+                    AgentRelation.object_user_id == target,
                 )
             )
         total = int(
@@ -172,10 +213,70 @@ async def get_relations(
             .scalars()
             .all()
         )
+        names = await _relation_page_names(db, group_id, rows)
     serializer = (
         serialize_guest_relation if _is_guest_view(_session) else serialize_relation
     )
-    return ok([serializer(row) for row in rows], page_meta(page, page_size, total))
+    data: list[dict[str, Any]] = []
+    for row in rows:
+        item = serializer(row)
+        subject_id = int(row.subject_user_id)
+        object_id = int(row.object_user_id)
+        item["subjectName"] = names.get(subject_id, str(subject_id))
+        item["objectName"] = names.get(object_id, str(object_id))
+        data.append(item)
+    return ok(data, page_meta(page, page_size, total))
+
+
+@router.get("/agent/groups/{group_id}/relations/summary")
+async def get_relation_summary(
+    group_id: int, _session: GroupViewSession
+) -> dict[str, Any]:
+    """Small aggregate used by the table view without loading the full graph."""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+        clauses = await _relation_clauses(db, group_id)
+        edge_count, last_seen_at = (
+            await db.execute(
+                select(
+                    func.count(AgentRelation.id),
+                    func.max(AgentRelation.last_seen_at),
+                ).where(*clauses)
+            )
+        ).one()
+        endpoint_ids = (
+            select(AgentRelation.subject_user_id.label("user_id"))
+            .where(*clauses)
+            .union_all(
+                select(AgentRelation.object_user_id.label("user_id")).where(*clauses)
+            )
+            .subquery()
+        )
+        linked_member_count = int(
+            await db.scalar(select(func.count(func.distinct(endpoint_ids.c.user_id))))
+            or 0
+        )
+        type_rows = (
+            await db.execute(
+                select(AgentRelation.relation_type, func.count(AgentRelation.id))
+                .where(*clauses)
+                .group_by(AgentRelation.relation_type)
+                .order_by(func.count(AgentRelation.id).desc(), AgentRelation.relation_type)
+            )
+        ).all()
+    return ok(
+        {
+            "edgeCount": int(edge_count or 0),
+            "linkedMemberCount": linked_member_count,
+            "typeCounts": [
+                {"type": str(relation_type), "count": int(count)}
+                for relation_type, count in type_rows
+            ],
+            "lastSeenAt": iso(last_seen_at),
+        }
+    )
+
 
 @router.get("/agent/groups/{group_id}/relations/graph")
 async def get_relation_graph(
@@ -187,33 +288,14 @@ async def get_relation_graph(
             await load_relation_graph(db, group_id, guest=_is_guest_view(_session))
         )
 
+
 @router.get("/agent/groups/{group_id}/relations/types")
 async def get_relation_types(
     group_id: int, _session: GroupViewSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
-        clauses = [AgentRelation.group_id == group_id]
-        if _is_guest_view(_session):
-            opted_out = set(
-                (
-                    await db.execute(
-                        select(AgentPrivacy.user_id).where(
-                            AgentPrivacy.group_id == group_id,
-                            AgentPrivacy.opted_out.is_(True),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if opted_out:
-                clauses.extend(
-                    (
-                        AgentRelation.subject_user_id.not_in(opted_out),
-                        AgentRelation.object_user_id.not_in(opted_out),
-                    )
-                )
+        clauses = await _relation_clauses(db, group_id)
         rows = (
             (
                 await db.execute(
@@ -227,6 +309,7 @@ async def get_relation_types(
             .all()
         )
     return ok([str(row) for row in rows])
+
 
 @router.post("/agent/groups/{group_id}/relations")
 async def create_relation(
@@ -282,6 +365,7 @@ async def create_relation(
     await hub.notify_change("agent_relation", str(row.id))
     return ok(result)
 
+
 @router.put("/agent/groups/{group_id}/relations/{relation_id}")
 async def update_relation(
     group_id: int,
@@ -311,6 +395,7 @@ async def update_relation(
         result = serialize_relation(row)
     await hub.notify_change("agent_relation", str(relation_id))
     return ok(result)
+
 
 @router.delete("/agent/groups/{group_id}/relations/{relation_id}")
 async def delete_relation(
