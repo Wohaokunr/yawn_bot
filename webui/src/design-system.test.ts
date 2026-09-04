@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import designCss from "./design-system.css?raw";
+import designCss from "./design-system.css?inline";
 
 const VIEWPORTS = [
   { width: 1920, height: 1080, mode: "wide", desktopSider: true, debuggerInternalScroll: true, mobileTabSelect: false },
