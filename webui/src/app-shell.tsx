@@ -21,6 +21,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
+import { ScrollRegion } from "./layout";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 
 const { Header, Sider, Content } = Layout;
@@ -198,7 +199,7 @@ export function Shell({
       >
         {menu}
       </Drawer>
-      <Layout>
+      <Layout className="app-main-layout">
         <Header className="app-header">
           <Space>
             <Button
@@ -222,11 +223,15 @@ export function Shell({
           </Space>
           <Button icon={<LogoutOutlined />} onClick={() => void logout()}>{isGuest ? "退出访客" : "退出"}</Button>
         </Header>
-        <Content className="app-content">
-          <Breadcrumb className="app-breadcrumb" items={crumbs} />
-          <Suspense fallback={<div className="route-loading"><Spin size="large" /></div>}>
-            <Outlet />
-          </Suspense>
+        <Content className="app-content-shell">
+          <ScrollRegion className="app-content-scroll">
+            <main className="app-content">
+              <Breadcrumb className="app-breadcrumb" items={crumbs} />
+              <Suspense fallback={<div className="route-loading"><Spin size="large" /></div>}>
+                <Outlet />
+              </Suspense>
+            </main>
+          </ScrollRegion>
         </Content>
       </Layout>
     </Layout>
