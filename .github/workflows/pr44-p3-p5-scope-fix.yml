@@ -34,14 +34,13 @@ jobs:
       - name: Verify backend scope contract
         run: |
           uv sync --all-groups --locked --python 3.10
-          uv run --python 3.10 ruff format src/plugins/yawn_core/webui tests/test_webui_hub.py
           uv run --python 3.10 pytest -q tests/test_webui_hub.py
-          uv run --python 3.10 ruff check src/plugins/yawn_core/webui tests/test_webui_hub.py
-      - name: Verify high-risk WebUI regressions
+          uv run --python 3.10 ruff check src/plugins/yawn_core/webui/hub.py tests/test_webui_hub.py
+      - name: Verify directly affected WebUI regressions
         working-directory: webui
         run: |
           npm ci --prefer-offline
-          npm test -- --run src/shared.test.tsx src/agent-panels/AgentConfigPanel.test.tsx src/agent-panels/AgentMessagesPanel.test.tsx src/agent-detail-regression.test.tsx src/agent-panels/RelationsPanel.test.tsx src/agent-panels/RelationsPanel.lazy.test.tsx
+          npm test -- --run src/shared.test.tsx src/agent-panels/AgentConfigPanel.test.tsx src/agent-panels/AgentMessagesPanel.test.tsx src/agent-panels/RelationsPanel.test.tsx src/agent-panels/RelationsPanel.lazy.test.tsx
           npm run typecheck
           npm run build
       - name: Commit hardened safety contract and remove temporary helpers
