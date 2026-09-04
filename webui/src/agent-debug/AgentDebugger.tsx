@@ -1,5 +1,6 @@
-import { Alert, Col, Row, Space } from "antd";
+import { Alert } from "antd";
 import { useState } from "react";
+import { PanelStack, ScrollRegion, SplitWorkspace } from "../layout";
 import type { AgentDebugResponse } from "../types";
 import { SimulationWorkbench } from "./SimulationWorkbench";
 import { TraceSidebar } from "./TraceSidebar";
@@ -11,27 +12,36 @@ export function AgentDebugger({ groupId }: { groupId: string }): React.JSX.Eleme
   const [result, setResult] = useState<AgentDebugResponse | null>(null);
   const [baseline, setBaseline] = useState<AgentDebugResponse | null>(null);
 
-  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
+  return <PanelStack className="agent-debug-page">
     <Alert
       type="info"
       showIcon
-      className="section-alert"
+      className="section-alert agent-debug-intro"
       message="Agent 调试工作台"
-      description="左侧查看最近真实执行，右侧按需加载完整 Trace；下方模拟运行可固定一次结果，再与下一次运行比较 Context、Prompt、Tools、Speech、Token 和 Model。"
+      description="桌面端左侧 Trace Navigator 与右侧 Inspector 独立滚动；切到平板或手机后自动恢复普通纵向页面。下方模拟运行仍是 dry-run，可固定一次结果进行 Context、Prompt、Tools、Speech、Token 和 Model 对比。"
     />
-    <Row gutter={[16, 16]} align="top">
-      <Col xs={24} xl={8}><TraceSidebar traces={traces} /></Col>
-      <Col xs={24} xl={16}><TraceWorkspace
-        runtimeTrace={traces.selectedTrace}
-        runtimeLoading={traces.detailLoading}
-        runtimeError={traces.detailError}
-        onReloadRuntime={traces.reloadSelected}
-        result={result}
-        baseline={baseline}
-        onPinBaseline={() => { if (result) setBaseline(result); }}
-        onClearBaseline={() => setBaseline(null)}
-      /></Col>
-    </Row>
-    <SimulationWorkbench groupId={groupId} onResult={setResult} />
-  </Space>;
+    <SplitWorkspace
+      className="agent-debug-workbench"
+      primaryClassName="agent-debug-navigator-pane"
+      secondaryClassName="agent-debug-inspector-pane"
+      primary={<TraceSidebar traces={traces} />}
+      secondary={
+        <ScrollRegion className="agent-debug-inspector-scroll">
+          <TraceWorkspace
+            runtimeTrace={traces.selectedTrace}
+            runtimeLoading={traces.detailLoading}
+            runtimeError={traces.detailError}
+            onReloadRuntime={traces.reloadSelected}
+            result={result}
+            baseline={baseline}
+            onPinBaseline={() => { if (result) setBaseline(result); }}
+            onClearBaseline={() => setBaseline(null)}
+          />
+        </ScrollRegion>
+      }
+    />
+    <div className="agent-debug-simulation-dock">
+      <SimulationWorkbench groupId={groupId} onResult={setResult} />
+    </div>
+  </PanelStack>;
 }
