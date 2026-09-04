@@ -28,6 +28,11 @@ strict = '''_GROUP_SCOPED_RESOURCES = frozenset(
         "user_feature",
     }
 )
+
+
+class GroupScopeRequiredError(ValueError):
+    def __init__(self, resource: str) -> None:
+        super().__init__(f"group-scoped entity change requires explicit group_id: {resource}")
 '''
 text = text[:start] + strict + text[end:]
 old = '''        resolved_group_id = (
@@ -42,9 +47,7 @@ old = '''        resolved_group_id = (
         )
 '''
 new = '''        if resource in _GROUP_SCOPED_RESOURCES and group_id is None:
-            raise ValueError(
-                f"group-scoped entity change requires explicit group_id: {resource}"
-            )
+            raise GroupScopeRequiredError(resource)
         scope = {"groupId": str(group_id)} if group_id is not None else None
 '''
 if old not in text:
