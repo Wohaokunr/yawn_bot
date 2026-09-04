@@ -1,5 +1,14 @@
+// Vitest executes this contract test in Node; the browser tsconfig intentionally omits Node globals.
+// @ts-ignore -- node:fs is available at test runtime without widening production browser types.
+import { readFileSync } from "node:fs";
+// @ts-ignore -- node:url is available at test runtime without widening production browser types.
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import designCss from "./design-system.css?inline";
+
+const designCss = readFileSync(
+  fileURLToPath(new URL("./design-system.css", import.meta.url)),
+  "utf8",
+);
 
 const VIEWPORTS = [
   { width: 1920, height: 1080, mode: "wide", desktopSider: true, debuggerInternalScroll: true, mobileTabSelect: false },
