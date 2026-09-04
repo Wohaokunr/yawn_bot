@@ -16,38 +16,49 @@ const STATUS_OPTIONS = [
 export function TraceSidebar({ traces }: { traces: ExecutionTracesState }): React.JSX.Element {
   return <Card
     className="agent-trace-sidebar"
-    title="最近真实执行"
+    title="Trace Navigator"
     extra={<Button onClick={traces.reloadSelected} loading={traces.listRefreshing || traces.detailLoading}>刷新</Button>}
   >
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap>
-        <Select value={traces.status} onChange={traces.setStatus} options={STATUS_OPTIONS} style={{ width: 128 }} />
-        <Space size={6}><Switch size="small" checked={traces.autoRefresh} onChange={traces.setAutoRefresh} /><Text type="secondary">自动刷新（3 秒）</Text></Space>
-      </Space>
-      <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空；列表只加载摘要，选中后才请求事件详情。" description="完整 URL、本机路径、file 值与原始 OneBot payload 不会保留。" />
-      {traces.selectedTraceUnavailable && <Alert
-        type="info"
-        showIcon
-        message="当前选中的 Trace 已离开当前缓冲 / 不在当前筛选结果"
-        description="仍保留已加载的详情，不会自动跳回最新 Trace。你可以调整筛选条件，或手动选择列表中的另一条 Trace。"
-      />}
-      {traces.listError && traces.summaries.length === 0
-        ? <QueryErrorAlert error={traces.listError} onRetry={traces.reload} />
-        : traces.summaries.length === 0
-          ? <AdminEmpty description="暂无真实执行 Trace；让 Agent 实际处理一条触发消息后刷新这里" />
-          : <List
-            className="agent-debug-list"
-            loading={traces.listLoading}
-            dataSource={traces.summaries}
-            renderItem={(trace) => <TraceListItem
-              key={trace.traceId}
-              trace={trace}
-              selected={trace.traceId === traces.selectedTraceId}
-              onSelect={() => traces.setSelectedTraceId(trace.traceId)}
+    <div className="agent-trace-sidebar-layout">
+      <div className="agent-trace-sidebar-controls">
+        <Space wrap>
+          <Select value={traces.status} onChange={traces.setStatus} options={STATUS_OPTIONS} style={{ width: 128 }} />
+          <Space size={6}>
+            <Switch size="small" checked={traces.autoRefresh} onChange={traces.setAutoRefresh} />
+            <Text type="secondary">自动刷新（3 秒）</Text>
+          </Space>
+        </Space>
+        <Text type="secondary" className="agent-trace-buffer-note">
+          Trace 仅保存在当前 Bot 进程；列表加载摘要，选中后才请求完整事件。
+        </Text>
+      </div>
+
+      <div className="agent-trace-list-scroll">
+        {traces.selectedTraceUnavailable && <Alert
+          type="info"
+          showIcon
+          className="section-alert"
+          message="当前 Trace 已离开缓冲 / 当前筛选"
+          description="已加载详情会继续保留，不会自动跳回最新 Trace。"
+        />}
+        {traces.listError && traces.summaries.length === 0
+          ? <QueryErrorAlert error={traces.listError} onRetry={traces.reload} />
+          : traces.summaries.length === 0
+            ? <AdminEmpty description="暂无真实执行 Trace；让 Agent 实际处理一条触发消息后刷新这里" />
+            : <List
+              className="agent-debug-list"
+              loading={traces.listLoading}
+              dataSource={traces.summaries}
+              renderItem={(trace) => <TraceListItem
+                key={trace.traceId}
+                trace={trace}
+                selected={trace.traceId === traces.selectedTraceId}
+                onSelect={() => traces.setSelectedTraceId(trace.traceId)}
+              />}
             />}
-          />}
-      {traces.listError && traces.summaries.length > 0 && <Text type="danger">刷新列表失败：{traces.listError}</Text>}
-    </Space>
+        {traces.listError && traces.summaries.length > 0 && <Text type="danger">刷新列表失败：{traces.listError}</Text>}
+      </div>
+    </div>
   </Card>;
 }
 

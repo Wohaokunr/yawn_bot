@@ -7,6 +7,8 @@ import "@fontsource/zcool-kuaile/400.css";
 import App from "./App";
 import { installGlassGlow } from "./glass";
 import "./styles.css";
+import "./layout.css";
+import "./design-system.css";
 
 installGlassGlow();
 

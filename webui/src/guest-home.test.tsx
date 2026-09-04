@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -90,15 +90,21 @@ describe("guest group route", () => {
     expect(paths.some((path) => path.includes("/debug"))).toBe(false);
   });
 
-  it("keeps the shared relations panel read-only for guests", async () => {
+  it("keeps relations read-only and only loads graph after switching views", async () => {
     state.api.mockImplementation((path: string) => {
       if (path === "/groups/100") {
         return Promise.resolve({ data: { groupId: "100", groupName: "测试群", memberCount: 42 }, meta: {} });
       }
       if (path.startsWith("/agent/groups/100/relations?")) {
         return Promise.resolve({
-          data: [{ id: "r1", subjectUserId: "1", objectUserId: "2", type: "好友", note: "常聊天", confidence: 0.9, lastSeenAt: null }],
+          data: [{ id: "r1", subjectUserId: "1", subjectName: "甲", objectUserId: "2", objectName: "乙", type: "好友", note: "常聊天", confidence: 0.9, lastSeenAt: null }],
           meta: { total: 1 },
+        });
+      }
+      if (path === "/agent/groups/100/relations/summary") {
+        return Promise.resolve({
+          data: { edgeCount: 1, linkedMemberCount: 2, typeCounts: [{ type: "好友", count: 1 }], lastSeenAt: null },
+          meta: {},
         });
       }
       if (path === "/agent/groups/100/relations/graph") {
@@ -129,11 +135,22 @@ describe("guest group route", () => {
     );
 
     expect(await screen.findByText("常聊天")).toBeInTheDocument();
+    expect(screen.getByText("甲")).toBeInTheDocument();
+    expect(screen.getByText("乙")).toBeInTheDocument();
     expect(screen.queryByText("新增关系边")).not.toBeInTheDocument();
     expect(screen.queryByText("来源")).not.toBeInTheDocument();
     expect(screen.queryByText("证据数")).not.toBeInTheDocument();
     expect(screen.queryByText("编辑")).not.toBeInTheDocument();
     expect(screen.queryByText("删除")).not.toBeInTheDocument();
+
+    let paths = state.api.mock.calls.map(([path]) => String(path));
+    expect(paths).toContain("/agent/groups/100/relations/summary");
+    expect(paths).not.toContain("/agent/groups/100/relations/graph");
+
+    fireEvent.click(screen.getByText("图谱视图"));
+    expect(await screen.findByText("relation graph")).toBeInTheDocument();
+    paths = state.api.mock.calls.map(([path]) => String(path));
+    expect(paths).toContain("/agent/groups/100/relations/graph");
   });
 
   it("only recognizes the three guest tabs", () => {
