@@ -163,11 +163,16 @@ export function Shell({
   useEffect(() => {
     const region = document.querySelector<HTMLElement>(".app-content-scroll");
     if (!region) return undefined;
-    const frame = window.requestAnimationFrame(() => {
+    const restore = () => {
       region.scrollTop = scrollPositions.current.get(scrollKey) ?? 0;
-    });
+    };
+    const useAnimationFrame = typeof window.requestAnimationFrame === "function";
+    const ticket = useAnimationFrame
+      ? window.requestAnimationFrame(restore)
+      : window.setTimeout(restore, 0);
     return () => {
-      window.cancelAnimationFrame(frame);
+      if (useAnimationFrame) window.cancelAnimationFrame(ticket);
+      else window.clearTimeout(ticket);
       scrollPositions.current.set(scrollKey, region.scrollTop);
     };
   }, [scrollKey]);
