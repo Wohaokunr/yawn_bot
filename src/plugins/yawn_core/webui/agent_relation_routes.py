@@ -112,15 +112,14 @@ from .service import (
 router = APIRouter(prefix=API_PATH)
 
 
-async def _visible_relation_clauses(
-    db: Any,
-    group_id: int,
-    *,
-    guest: bool,
-) -> list[Any]:
-    clauses: list[Any] = [AgentRelation.group_id == group_id]
-    if not guest:
-        return clauses
+async def _relation_clauses(db: Any, group_id: int) -> list[Any]:
+    """Return the relation visibility clauses shared by list/summary/types.
+
+    opted-out members are excluded for both admin and guest relation views so the
+    lightweight summary and type filters always describe the same visible rows as
+    the paginated table.
+    """
+
     opted_out = set(
         (
             await db.execute(
@@ -133,6 +132,7 @@ async def _visible_relation_clauses(
         .scalars()
         .all()
     )
+    clauses: list[Any] = [AgentRelation.group_id == group_id]
     if opted_out:
         clauses.extend(
             (
@@ -143,12 +143,10 @@ async def _visible_relation_clauses(
     return clauses
 
 
-async def _relation_member_labels(
-    db: Any,
-    group_id: int,
-    rows: list[AgentRelation],
+async def _relation_page_names(
+    db: Any, group_id: int, rows: list[AgentRelation]
 ) -> dict[int, str]:
-    """Load labels only for members referenced by the current relation page."""
+    """Resolve display names only for relation endpoints on the current page."""
 
     user_ids = {
         int(user_id)
@@ -157,10 +155,10 @@ async def _relation_member_labels(
     }
     if not user_ids:
         return {}
-    memberships = (
+    members = (
         await db.execute(
-            select(UserGroup.user_id, UserGroup.group_nickname, BotUser.nickname)
-            .outerjoin(BotUser, BotUser.user_id == UserGroup.user_id)
+            select(UserGroup, BotUser)
+            .join(BotUser, BotUser.user_id == UserGroup.user_id)
             .where(
                 UserGroup.group_id == group_id,
                 UserGroup.user_id.in_(user_ids),
@@ -168,10 +166,10 @@ async def _relation_member_labels(
         )
     ).all()
     return {
-        int(user_id): (
-            str(group_nickname or nickname or "").strip() or str(user_id)
+        int(user.user_id): (
+            membership.group_nickname or user.nickname or str(user.user_id)
         )
-        for user_id, group_nickname, nickname in memberships
+        for membership, user in members
     }
 
 
@@ -187,11 +185,7 @@ async def get_relations(
     page, page_size = page_params(page, page_size)
     async with get_session() as db:
         await require_group(db, group_id)
-        clauses = await _visible_relation_clauses(
-            db,
-            group_id,
-            guest=_is_guest_view(_session),
-        )
+        clauses = await _relation_clauses(db, group_id)
         if relation_type:
             clauses.append(AgentRelation.relation_type == relation_type)
         if search.strip().isdigit():
@@ -221,70 +215,70 @@ async def get_relations(
             .scalars()
             .all()
         )
-        member_labels = await _relation_member_labels(db, group_id, rows)
+        names = await _relation_page_names(db, group_id, rows)
     serializer = (
         serialize_guest_relation if _is_guest_view(_session) else serialize_relation
     )
-    result: list[dict[str, Any]] = []
+    data: list[dict[str, Any]] = []
     for row in rows:
         item = serializer(row)
         subject_id = int(row.subject_user_id)
         object_id = int(row.object_user_id)
-        item["subjectDisplayName"] = member_labels.get(subject_id, str(subject_id))
-        item["objectDisplayName"] = member_labels.get(object_id, str(object_id))
-        result.append(item)
-    return ok(result, page_meta(page, page_size, total))
+        item["subjectName"] = names.get(subject_id, str(subject_id))
+        item["objectName"] = names.get(object_id, str(object_id))
+        data.append(item)
+    return ok(data, page_meta(page, page_size, total))
 
 
 @router.get("/agent/groups/{group_id}/relations/summary")
 async def get_relation_summary(
-    group_id: int,
-    _session: GroupViewSession,
+    group_id: int, _session: GroupViewSession
 ) -> dict[str, Any]:
+    """Small aggregate used by the table view without loading the full graph."""
+
     async with get_session() as db:
         await require_group(db, group_id)
-        clauses = await _visible_relation_clauses(
-            db,
-            group_id,
-            guest=_is_guest_view(_session),
-        )
-        relation_count = int(
-            await db.scalar(
-                select(func.count()).select_from(AgentRelation).where(*clauses)
+        clauses = await _relation_clauses(db, group_id)
+        edge_count, last_seen_at = (
+            await db.execute(
+                select(
+                    func.count(AgentRelation.id),
+                    func.max(AgentRelation.last_seen_at),
+                ).where(*clauses)
             )
-            or 0
-        )
-        member_ids = (
+        ).one()
+        endpoint_ids = (
             select(AgentRelation.subject_user_id.label("user_id"))
             .where(*clauses)
-            .union(
+            .union_all(
                 select(AgentRelation.object_user_id.label("user_id")).where(*clauses)
             )
             .subquery()
         )
-        member_count = int(
-            await db.scalar(select(func.count()).select_from(member_ids)) or 0
+        linked_member_count = int(
+            await db.scalar(select(func.count(func.distinct(endpoint_ids.c.user_id))))
+            or 0
         )
         type_rows = (
             await db.execute(
-                select(AgentRelation.relation_type, func.count())
+                select(AgentRelation.relation_type, func.count(AgentRelation.id))
                 .where(*clauses)
                 .group_by(AgentRelation.relation_type)
-                .order_by(func.count().desc(), AgentRelation.relation_type)
+                .order_by(
+                    func.count(AgentRelation.id).desc(),
+                    AgentRelation.relation_type,
+                )
             )
         ).all()
-        last_seen = await db.scalar(
-            select(func.max(AgentRelation.last_seen_at)).where(*clauses)
-        )
     return ok(
         {
-            "relationCount": relation_count,
-            "memberCount": member_count,
+            "edgeCount": int(edge_count or 0),
+            "linkedMemberCount": linked_member_count,
             "typeCounts": [
                 {"type": str(relation_type), "count": int(count)}
                 for relation_type, count in type_rows
             ],
-            "lastSeenAt": iso(last_seen),
+            "lastSeenAt": iso(last_seen_at),
         }
     )
 
@@ -306,11 +300,7 @@ async def get_relation_types(
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
-        clauses = await _visible_relation_clauses(
-            db,
-            group_id,
-            guest=_is_guest_view(_session),
-        )
+        clauses = await _relation_clauses(db, group_id)
         rows = (
             (
                 await db.execute(

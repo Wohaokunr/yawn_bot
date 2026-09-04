@@ -1,5 +1,5 @@
 import {
-  App as AntApp, AutoComplete, Button, Card, Col, Drawer, Empty, Form, Input,
+  Alert, App as AntApp, AutoComplete, Button, Card, Col, Drawer, Empty, Form, Input,
   InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Spin, Statistic,
   Table, Tag, Typography,
 } from "antd";
@@ -17,16 +17,23 @@ const LazyRelationGraphView = lazy(() =>
 );
 
 interface RelationSummary {
-  relationCount: number;
-  memberCount: number;
+  edgeCount: number;
+  linkedMemberCount: number;
   typeCounts: Array<{ type: string; count: number }>;
   lastSeenAt: string | null;
 }
 
 type RelationListItem = AgentRelationItem & {
-  subjectDisplayName?: string;
-  objectDisplayName?: string;
+  subjectName?: string;
+  objectName?: string;
 };
+
+function focusDrawerField(selector: string): void {
+  window.requestAnimationFrame(() => {
+    const target = document.querySelector<HTMLElement>(`${selector} input, ${selector} textarea`);
+    target?.focus();
+  });
+}
 
 function RelationGraphPane({
   groupId,
@@ -203,10 +210,10 @@ export function RelationsPanel({
   return <>
     <Row gutter={[12, 12]} className="section-row">
       <Col xs={12} md={6}>
-        <Card size="small"><Statistic title="关系边" value={summary?.relationCount ?? "—"} suffix="条" /></Card>
+        <Card size="small"><Statistic title="关系边" value={summary?.edgeCount ?? "—"} suffix="条" /></Card>
       </Col>
       <Col xs={12} md={6}>
-        <Card size="small"><Statistic title="关系成员" value={summary?.memberCount ?? "—"} suffix="人" /></Card>
+        <Card size="small"><Statistic title="关系成员" value={summary?.linkedMemberCount ?? "—"} suffix="人" /></Card>
       </Col>
       <Col xs={24} md={12}>
         <Card size="small"><div className="ag-stat-line">
@@ -277,15 +284,15 @@ export function RelationsPanel({
               }}
               locale={{ emptyText: <Empty description="暂无关系记忆" /> }}
               columns={readOnly ? [
-                { title: "主体", dataIndex: "subjectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.subjectDisplayName, value) },
-                { title: "客体", dataIndex: "objectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.objectDisplayName, value) },
+                { title: "主体", dataIndex: "subjectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.subjectName, value) },
+                { title: "客体", dataIndex: "objectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.objectName, value) },
                 { title: "类型", dataIndex: "type", render: (value: string) => <Tag color={relationTypeColor(value)}>{value}</Tag> },
                 { title: "备注", dataIndex: "note", ellipsis: true, render: (value: string) => value || <Text type="secondary">—</Text> },
                 { title: "置信度", render: (_, row: RelationListItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
                 { title: "最后见到", dataIndex: "lastSeenAt", render: formatTime, width: 170 },
               ] : [
-                { title: "主体", dataIndex: "subjectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.subjectDisplayName, value) },
-                { title: "客体", dataIndex: "objectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.objectDisplayName, value) },
+                { title: "主体", dataIndex: "subjectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.subjectName, value) },
+                { title: "客体", dataIndex: "objectUserId", render: (value: string, row: RelationListItem) => renderMemberCell(row.objectName, value) },
                 { title: "类型", dataIndex: "type", render: (value: string) => <Tag color={relationTypeColor(value)}>{value}</Tag> },
                 { title: "备注", dataIndex: "note", ellipsis: true, render: (value: string) => value || <Text type="secondary">—</Text> },
                 { title: "来源", dataIndex: "sourceKind", width: 90, render: (value: string) => <Tag color={RELATION_SOURCE_META[value]?.color}>{RELATION_SOURCE_META[value]?.label ?? value}</Tag> },
@@ -306,7 +313,14 @@ export function RelationsPanel({
             />}
     </Card>
     {!readOnly && <>
-      <Drawer open={creating} width={520} title="新增关系边" onClose={() => setCreating(false)}>
+      <Drawer
+      className="relations-editor-drawer relations-create-drawer"
+      open={creating}
+      width={520}
+      title="新增关系边"
+      onClose={() => setCreating(false)}
+      afterOpenChange={(open) => { if (open) focusDrawerField(".relations-create-drawer"); }}
+    >
         <Form form={createForm} layout="vertical" onFinish={saveCreate} initialValues={{ confidence: 0.9 }}>
           <Row gutter={16}>
             <Col span={12}><Form.Item name="subjectUserId" label="主体 QQ" rules={[{ required: true, message: "请输入主体 QQ" }]}><InputNumber min={1} precision={0} style={{ width: "100%" }} /></Form.Item></Col>
@@ -324,8 +338,16 @@ export function RelationsPanel({
           <Space><Button type="primary" htmlType="submit" loading={saving}>新增</Button><Button onClick={() => setCreating(false)}>取消</Button></Space>
         </Form>
       </Drawer>
-      <Drawer open={!!editing} width={520} title={`编辑关系边 · ${editing?.type ?? ""}`} onClose={() => setEditing(null)}>
+      <Drawer
+      className="relations-editor-drawer relations-edit-drawer"
+      open={!!editing}
+      width={520}
+      title={`编辑关系边 · ${editing?.type ?? ""}`}
+      onClose={() => setEditing(null)}
+      afterOpenChange={(open) => { if (open) focusDrawerField(".relations-edit-drawer"); }}
+    >
         <Form form={editForm} layout="vertical" onFinish={saveEdit}>
+          <Alert type="info" showIcon className="section-alert" message="类型与两端成员属于边的唯一身份，如需调整请删除后重新新增。" />
           <Form.Item name="note" label="备注"><Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} maxLength={200} showCount /></Form.Item>
           <Form.Item name="confidence" label="置信度" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} /></Form.Item>
           <Space><Button type="primary" htmlType="submit" loading={saving}>保存</Button><Button onClick={() => setEditing(null)}>取消</Button></Space>

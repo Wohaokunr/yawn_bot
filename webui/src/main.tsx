@@ -8,6 +8,8 @@ import App from "./App";
 import { installGlassGlow } from "./glass";
 import "./styles.css";
 import "./interaction.css";
+import "./layout.css";
+import "./design-system.css";
 
 installGlassGlow();
 

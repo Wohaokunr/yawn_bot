@@ -17,10 +17,11 @@ import {
 } from "@ant-design/icons";
 import { Breadcrumb, Button, Drawer, Layout, Menu, Space, Spin, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
+import { ScrollRegion } from "./layout";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 
 const { Header, Sider, Content } = Layout;
@@ -120,11 +121,16 @@ export function Shell({
   );
   const [mobileOpen, setMobileOpen] = useState(false);
   const [dirtyCount, setDirtyCount] = useState(0);
+  const scrollPositions = useRef(new Map<string, number>());
   const selected = `/${location.pathname.split("/")[1] || (isGuest ? "guest" : "overview")}`;
   const crumbs = useMemo(
     () => breadcrumbItems(location.pathname, session.role),
     [location.pathname, session.role],
   );
+  const scrollKey = useMemo(() => {
+    const tab = new URLSearchParams(location.search).get("tab") ?? "";
+    return `${location.pathname}?tab=${tab}`;
+  }, [location.pathname, location.search]);
   const navItems = isGuest ? GUEST_NAV_ITEMS : ADMIN_NAV_ITEMS;
 
   useEffect(() => {
@@ -153,6 +159,23 @@ export function Shell({
     window.addEventListener("yawnbot-dirty-state", listener);
     return () => window.removeEventListener("yawnbot-dirty-state", listener);
   }, [isGuest]);
+
+  useEffect(() => {
+    const region = document.querySelector<HTMLElement>(".app-content-scroll");
+    if (!region) return undefined;
+    const restore = () => {
+      region.scrollTop = scrollPositions.current.get(scrollKey) ?? 0;
+    };
+    const useAnimationFrame = typeof window.requestAnimationFrame === "function";
+    const ticket = useAnimationFrame
+      ? window.requestAnimationFrame(restore)
+      : window.setTimeout(restore, 0);
+    return () => {
+      if (useAnimationFrame) window.cancelAnimationFrame(ticket);
+      else window.clearTimeout(ticket);
+      scrollPositions.current.set(scrollKey, region.scrollTop);
+    };
+  }, [scrollKey]);
 
   const canLeave = () => isGuest || confirmDiscardChanges();
 
@@ -198,7 +221,7 @@ export function Shell({
       >
         {menu}
       </Drawer>
-      <Layout>
+      <Layout className="app-main-layout">
         <Header className="app-header">
           <Space>
             <Button
@@ -222,11 +245,15 @@ export function Shell({
           </Space>
           <Button icon={<LogoutOutlined />} onClick={() => void logout()}>{isGuest ? "退出访客" : "退出"}</Button>
         </Header>
-        <Content className="app-content">
-          <Breadcrumb className="app-breadcrumb" items={crumbs} />
-          <Suspense fallback={<div className="route-loading"><Spin size="large" /></div>}>
-            <Outlet />
-          </Suspense>
+        <Content className="app-content-shell">
+          <ScrollRegion className="app-content-scroll">
+            <main className="app-content">
+              <Breadcrumb className="app-breadcrumb" items={crumbs} />
+              <Suspense fallback={<div className="route-loading"><Spin size="large" /></div>}>
+                <Outlet />
+              </Suspense>
+            </main>
+          </ScrollRegion>
         </Content>
       </Layout>
     </Layout>
