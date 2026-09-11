@@ -1,4 +1,6 @@
+import type { PropsWithChildren } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { AgentExecutionTrace, AgentExecutionTraceSummary } from "../types";
@@ -7,6 +9,10 @@ import { useExecutionTraces } from "./useExecutionTraces";
 vi.mock("../api", () => ({ api: vi.fn() }));
 
 const apiMock = vi.mocked(api);
+
+function wrapper({ children }: PropsWithChildren): React.JSX.Element {
+  return <MemoryRouter initialEntries={["/agent/1?tab=debug"]}>{children}</MemoryRouter>;
+}
 
 function summary(traceId: string, status = "completed"): AgentExecutionTraceSummary {
   return {
@@ -22,6 +28,11 @@ function summary(traceId: string, status = "completed"): AgentExecutionTraceSumm
     outcome: "success",
     durationMs: 120,
     eventCount: 3,
+    hasFailure: status === "failed",
+    hasDegradation: false,
+    hasTool: false,
+    hasMedia: false,
+    hasOutboundProblem: false,
   };
 }
 
@@ -52,7 +63,7 @@ describe("useExecutionTraces selection stability", () => {
   });
 
   it("旧 Trace 被 12 条缓冲淘汰后保持用户选择和已加载详情", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));
 
     act(() => result.current.setSelectedTraceId("old"));
@@ -76,7 +87,7 @@ describe("useExecutionTraces selection stability", () => {
         data: path.includes("?status=failed") ? [summary("failed", "failed")] : summaries,
       } as never;
     });
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));
 
     act(() => result.current.setSelectedTraceId("old"));
@@ -84,13 +95,14 @@ describe("useExecutionTraces selection stability", () => {
     act(() => result.current.setStatus("failed"));
 
     await waitFor(() => expect(result.current.summaries[0]?.traceId).toBe("failed"));
+    expect(result.current.status).toBe("failed");
     expect(result.current.selectedTraceId).toBe("old");
     expect(result.current.selectedTrace?.traceId).toBe("old");
     expect(result.current.selectedTraceUnavailable).toBe(true);
   });
 
   it("3 秒自动轮询刷新摘要时不会把用户从旧 Trace 跳回最新", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));
     act(() => result.current.setAutoRefresh(false));
     act(() => result.current.setSelectedTraceId("old"));
@@ -118,7 +130,7 @@ describe("useExecutionTraces selection stability", () => {
     expect(result.current.selectedTraceUnavailable).toBe(true);
   });
   it("摘要变化刷新选中详情，但相同摘要不重复获取", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
     const count = () => apiMock.mock.calls.filter(([path]) => path.endsWith("/new")).length;
     const initial = count();
@@ -131,7 +143,7 @@ describe("useExecutionTraces selection stability", () => {
   });
 
   it("刷新失败保留已加载快照，并可恢复跟随最新", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
     act(() => result.current.setSelectedTraceId("old"));
     await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("old"));
@@ -149,7 +161,7 @@ describe("useExecutionTraces selection stability", () => {
   it("隐藏页签停止轮询", async () => {
     const interval = vi.spyOn(window, "setInterval");
     const clear = vi.spyOn(window, "clearInterval");
-    const { rerender } = renderHook(({ active }) => useExecutionTraces("1", active), { initialProps: { active: false } });
+    const { rerender } = renderHook(({ active }) => useExecutionTraces("1", active), { wrapper, initialProps: { active: false } });
     expect(interval).not.toHaveBeenCalled();
     rerender({ active: true });
     expect(interval).toHaveBeenCalledWith(expect.any(Function), 3000);
@@ -158,7 +170,7 @@ describe("useExecutionTraces selection stability", () => {
   });
 
   it("合并同一详情重复刷新，旧请求不覆盖新选择", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
     let resolveOld!: (value: unknown) => void;
     apiMock.mockImplementation((path: string) => {

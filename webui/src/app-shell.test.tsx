@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useSearchParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthSessionData } from "./auth-session";
 
@@ -33,6 +33,16 @@ function session(role: "admin" | "guest", realtimeAdminStream: boolean): AuthSes
   };
 }
 
+function TabHarness(): React.JSX.Element {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get("tab") ?? "overview";
+  return <div>
+    <div data-testid="tab">{tab}</div>
+    <button type="button" onClick={() => setSearchParams({ tab: "config" })}>config</button>
+    <button type="button" onClick={() => setSearchParams({ tab: "persona" })}>persona</button>
+  </div>;
+}
+
 describe("Shell realtime stream isolation", () => {
   beforeEach(() => {
     state.api.mockReset();
@@ -63,5 +73,31 @@ describe("Shell realtime stream isolation", () => {
 
     await waitFor(() => expect(state.openStatusStream).toHaveBeenCalledTimes(1));
     expect(screen.getByText("正在重连")).toBeInTheDocument();
+  });
+
+  it("restores an independent scroll position for each tab", async () => {
+    render(
+      <MemoryRouter initialEntries={["/agent/100?tab=config"]}>
+        <Routes>
+          <Route element={<Shell session={session("guest", false)} onLogout={vi.fn()} />}>
+            <Route path="agent/:groupId" element={<TabHarness />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const region = document.querySelector<HTMLElement>(".app-content-scroll");
+    expect(region).not.toBeNull();
+    await waitFor(() => expect(screen.getByTestId("tab")).toHaveTextContent("config"));
+
+    region!.scrollTop = 320;
+    fireEvent.click(screen.getByRole("button", { name: "persona" }));
+    await waitFor(() => expect(screen.getByTestId("tab")).toHaveTextContent("persona"));
+    await waitFor(() => expect(region!.scrollTop).toBe(0));
+
+    region!.scrollTop = 77;
+    fireEvent.click(screen.getByRole("button", { name: "config" }));
+    await waitFor(() => expect(screen.getByTestId("tab")).toHaveTextContent("config"));
+    await waitFor(() => expect(region!.scrollTop).toBe(320));
   });
 });

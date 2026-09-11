@@ -59,7 +59,7 @@ describe("Agent debugger workflow", () => {
   });
 
   it("历史消息链接直接打开模拟调试", () => {
-    render(<MemoryRouter initialEntries={["/?messageId=20"]}><AgentDebugger groupId="1" /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/?debug.messageId=20"]}><AgentDebugger groupId="1" /></MemoryRouter>);
     expect(screen.getByRole("tab", { name: "模拟调试" })).toHaveAttribute("aria-selected", "true");
   });
 

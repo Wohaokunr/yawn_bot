@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { debugMessageLabel } from "./agent-debug/debug-utils";
 import {
   MEMORY_TYPE_META,
-  debugMessageLabel,
   mergePersonaPreset,
   memberDisplayName,
   personaBehaviorPreview,
@@ -10,7 +10,7 @@ import {
   personaDraftSummary,
   PROFILE_KEY_META,
   profileKeyLabel,
-} from "./agent";
+} from "./agent-meta";
 import type { PersonaPreset, PersonaProfile } from "./types";
 
 describe("MEMORY_TYPE_META", () => {

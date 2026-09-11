@@ -143,7 +143,7 @@ async def put_agent_persona(
             await db.refresh(row)
         result = serialize_persona(row, group_id)
     if changed:
-        await hub.notify_change("agent_persona", str(group_id))
+        await hub.notify_change("agent_persona", str(group_id), group_id=group_id)
     return ok(result)
 
 @router.delete("/agent/groups/{group_id}/persona")
@@ -169,5 +169,5 @@ async def reset_agent_persona(
             await db.refresh(row)
         result = serialize_persona(row, group_id)
     if changed:
-        await hub.notify_change("agent_persona", str(group_id))
+        await hub.notify_change("agent_persona", str(group_id), group_id=group_id)
     return ok(result)

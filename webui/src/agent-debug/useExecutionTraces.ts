@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useApiQuery } from "../shared";
 import type { AgentExecutionTrace, AgentExecutionTraceSummary } from "../types";
@@ -26,46 +27,61 @@ export interface ExecutionTracesState {
 }
 
 export function useExecutionTraces(groupId: string, active = true): ExecutionTracesState {
-  const [status, setStatus] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = searchParams.get("debug.status") ?? "";
+  const selectedTraceId = searchParams.get("debug.trace") ?? "";
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [selectedTraceId, setSelectedTraceId] = useState("");
+  const userSelectedTrace = useRef(Boolean(selectedTraceId));
   const [selectedTrace, setSelectedTrace] = useState<AgentExecutionTrace | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const detailGeneration = useRef(0);
-  const userSelectedTrace = useRef(false);
   const pending = useRef<{ key: string; rerun: boolean } | null>(null);
 
-  const loadSummaries = useCallback(
-    () => {
+  const updateParam = useCallback((key: string, value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value); else next.delete(key);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  const setStatus = useCallback((value: string) => {
+    updateParam("debug.status", value);
+  }, [updateParam]);
+
+  const setSelectedTraceId = useCallback((traceId: string) => {
+    userSelectedTrace.current = true;
+    updateParam("debug.trace", traceId);
+  }, [updateParam]);
+
+  const listQuery = useApiQuery({
+    queryKey: ["agent-execution-traces", groupId, status],
+    fetcher: (signal) => {
       const query = status ? `?status=${encodeURIComponent(status)}` : "";
       return api<AgentExecutionTraceSummary[]>(
         `/agent/groups/${groupId}/execution-traces${query}`,
+        { signal },
       ).then((response) => response.data);
     },
-    [groupId, status],
-  );
-  const listQuery = useApiQuery(loadSummaries);
+  });
   const summaries = listQuery.data ?? [];
 
   useEffect(() => {
     const firstId = summaries[0]?.traceId ?? "";
     if (firstId && (!selectedTraceId || !userSelectedTrace.current)) {
-      if (selectedTraceId !== firstId) setSelectedTraceId(firstId);
+      if (selectedTraceId !== firstId) updateParam("debug.trace", firstId);
     }
-  }, [selectedTraceId, summaries]);
+  }, [selectedTraceId, summaries, updateParam]);
 
+  const previousGroupId = useRef(groupId);
   useEffect(() => {
+    if (previousGroupId.current === groupId) return;
+    previousGroupId.current = groupId;
     userSelectedTrace.current = false;
-    setSelectedTraceId("");
-    setSelectedTrace(null);
-    setDetailError("");
-  }, [groupId]);
-
-  const selectTrace = useCallback((traceId: string) => {
-    userSelectedTrace.current = true;
-    setSelectedTraceId(traceId);
-  }, []);
+    const next = new URLSearchParams(searchParams);
+    next.delete("debug.trace");
+    next.delete("debug.messageId");
+    setSearchParams(next, { replace: true });
+  }, [groupId, searchParams, setSearchParams]);
 
   const loadDetail = useCallback(
     async (traceId: string) => {
@@ -137,7 +153,7 @@ export function useExecutionTraces(groupId: string, active = true): ExecutionTra
   const reloadSelected = useCallback(() => {
     listQuery.reload();
     if (selectedTraceId) void loadDetail(selectedTraceId);
-  }, [listQuery.reload, loadDetail, selectedTraceId]);
+  }, [loadDetail, listQuery.reload, selectedTraceId]);
 
   const selectedTraceUnavailable = Boolean(
     userSelectedTrace.current
@@ -147,9 +163,9 @@ export function useExecutionTraces(groupId: string, active = true): ExecutionTra
 
   const selectLatest = useCallback(() => {
     userSelectedTrace.current = false;
-    setSelectedTraceId(summaries[0]?.traceId ?? "");
+    updateParam("debug.trace", summaries[0]?.traceId ?? "");
     listQuery.reload();
-  }, [summaries, listQuery.reload]);
+  }, [summaries, listQuery.reload, updateParam]);
 
   return {
     selectLatest,
@@ -159,7 +175,7 @@ export function useExecutionTraces(groupId: string, active = true): ExecutionTra
     autoRefresh,
     setAutoRefresh,
     selectedTraceId,
-    setSelectedTraceId: selectTrace,
+    setSelectedTraceId,
     selectedTrace,
     selectedTraceUnavailable,
     listLoading: listQuery.loading,

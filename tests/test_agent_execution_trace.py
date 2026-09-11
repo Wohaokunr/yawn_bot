@@ -135,3 +135,51 @@ def test_execution_trace_collection_is_lightweight_and_detail_is_selective() -> 
     assert detail["events"][0]["phase"] == "prompt"
     assert execution_trace_by_id(group_id, "missing") is None
     clear_execution_traces(group_id)
+
+def test_execution_trace_summaries_preserve_diagnostic_filter_signals() -> None:
+    group_id = 987656
+    clear_execution_traces(group_id)
+
+    trace = begin_execution_trace(
+        group_id,
+        mode="dialogue",
+        source="runtime",
+        trigger_source="mention",
+        actor_user_id=321,
+        message_id=654,
+    )
+    trace_event("tool", "discover_tools", status="success", trace=trace)
+    trace_event("media", "media projection", status="degraded", trace=trace)
+    trace_event(
+        "outbound",
+        "OneBot send",
+        status="unknown",
+        output={"delivery_state": "unknown"},
+        trace=trace,
+    )
+    finish_execution_trace(trace, outcome="delivery_unknown")
+
+    summary = recent_execution_trace_summaries(group_id)[0]
+    assert summary["actorUserId"] == "321"
+    assert summary["messageId"] == "654"
+    assert summary["eventCount"] == 3  # noqa: PLR2004
+    assert summary["hasFailure"] is False
+    assert summary["hasDegradation"] is True
+    assert summary["hasTool"] is True
+    assert summary["hasMedia"] is True
+    assert summary["hasOutboundProblem"] is True
+    assert "events" not in summary
+    assert recent_execution_trace_summaries(group_id, status="failed") == []
+    assert recent_execution_trace_summaries(group_id, status="degraded")[0][
+        "traceId"
+    ] == trace.trace_id
+    assert recent_execution_trace_summaries(group_id, status="tool")[0][
+        "traceId"
+    ] == trace.trace_id
+    assert recent_execution_trace_summaries(group_id, status="media")[0][
+        "traceId"
+    ] == trace.trace_id
+    assert recent_execution_trace_summaries(group_id, status="outbound")[0][
+        "traceId"
+    ] == trace.trace_id
+    clear_execution_traces(group_id)

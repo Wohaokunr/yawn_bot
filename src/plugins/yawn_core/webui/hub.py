@@ -12,6 +12,27 @@ from typing import Any
 from fastapi import WebSocket
 from nonebot import logger
 
+_GROUP_SCOPED_RESOURCES = frozenset(
+    {
+        "agent_config",
+        "agent_persona",
+        "agent_memory",
+        "agent_group_data",
+        "agent_member_data",
+        "agent_privacy",
+        "agent_relation",
+        "group_feature",
+        "user_feature",
+    }
+)
+
+
+class GroupScopeRequiredError(ValueError):
+    def __init__(self, resource: str) -> None:
+        super().__init__(
+            f"group-scoped entity change requires explicit group_id: {resource}"
+        )
+
 
 class WebUIHub:
     def __init__(self) -> None:
@@ -44,11 +65,30 @@ class WebUIHub:
         for websocket in stale:
             self.disconnect(websocket)
 
-    async def notify_change(self, resource: str, resource_id: str | None) -> None:
+    async def notify_change(
+        self,
+        resource: str,
+        entity_id: str | None = None,
+        *,
+        group_id: int | str | None = None,
+    ) -> None:
+        """广播资源变化；scope 描述查询所属范围，entityId 描述具体实体。
+
+        group_id 与 entity_id 分开，避免过去把群号、关系 ID、用户 ID 都塞进
+        resourceId 后让前端无法判断一次变化是否属于当前页面。
+        """
+
+        if resource in _GROUP_SCOPED_RESOURCES and group_id is None:
+            raise GroupScopeRequiredError(resource)
+        scope = {"groupId": str(group_id)} if group_id is not None else None
         await self.broadcast(
             {
                 "type": "entity.changed",
-                "data": {"resource": resource, "resourceId": resource_id},
+                "data": {
+                    "resource": resource,
+                    "scope": scope,
+                    "entityId": entity_id,
+                },
             }
         )
 

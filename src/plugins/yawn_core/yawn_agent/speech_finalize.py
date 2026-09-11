@@ -164,6 +164,10 @@ async def finalize_reply(  # noqa: PLR0913
         config.last_response_input_fingerprint = input_fingerprint
         config.last_response_at = now
         config.last_agent_at = now
+        # AsyncSession.commit() may expire ORM attributes. Snapshot values needed
+        # by post-commit diagnostics before committing to avoid implicit IO /
+        # MissingGreenlet when Trace serialization reads them synchronously.
+        committed_context_epoch = config.context_epoch
         await session.commit()
     except Exception as exc:  # noqa: BLE001
         trace_event(
@@ -188,7 +192,7 @@ async def finalize_reply(  # noqa: PLR0913
             "回复后状态提交",
             output={
                 "recent_fingerprints": len(recent[-8:]),
-                "context_epoch": config.context_epoch,
+                "context_epoch": committed_context_epoch,
                 "delivery_state": sent.delivery_state,
                 "topic": next_active_topic,
                 "topic_action": speech_plan.topic_action if speech_plan else "compat",

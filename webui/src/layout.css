@@ -1,0 +1,517 @@
+/* Layout primitives: scrolling ownership, sizing and sticky behavior. */
+.page-frame,
+.panel-stack,
+.panel-grid,
+.split-workspace,
+.split-workspace-primary,
+.split-workspace-secondary,
+.scroll-region,
+.sticky-actions {
+  min-width: 0;
+}
+
+.page-frame {
+  width: 100%;
+}
+
+.panel-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.split-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 18px;
+  align-items: start;
+}
+
+.split-workspace-primary,
+.split-workspace-secondary {
+  min-height: 0;
+}
+
+.scroll-region {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.sticky-actions {
+  position: sticky;
+  bottom: 12px;
+  z-index: 8;
+}
+
+/* Shell owns viewport height; navigation and page content scroll independently. */
+.app-layout {
+  height: 100dvh;
+  min-height: 0 !important;
+  overflow: hidden;
+}
+
+.app-sider.desktop-sider {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.desktop-sider .brand {
+  flex: 0 0 auto;
+}
+
+.desktop-sider .admin-menu {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 18px;
+}
+
+.app-main-layout {
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-header {
+  flex: 0 0 64px;
+  position: relative !important;
+  top: auto !important;
+}
+
+.app-content-shell {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-content-scroll {
+  width: 100%;
+  height: 100%;
+}
+
+.app-content {
+  min-width: 0;
+  min-height: 100%;
+}
+
+.app-content > *,
+.ant-row > .ant-col,
+.ant-card,
+.ant-card-body,
+.ant-tabs,
+.ant-tabs-content-holder,
+.ant-tabs-content,
+.ant-tabs-tabpane {
+  min-width: 0;
+}
+
+/* Agent detail shell. */
+.agent-detail-page {
+  --agent-detail-nav-top: 0px;
+}
+
+.agent-detail-heading {
+  margin-bottom: 14px;
+}
+
+.agent-studio-nav-shell {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  margin: 0 -4px 18px;
+  padding: 8px 4px;
+  background: linear-gradient(180deg, rgba(255, 249, 251, 0.96), rgba(255, 249, 251, 0.84) 72%, transparent);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+
+.agent-studio-nav-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+.agent-studio-nav-button {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--ink-secondary);
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.agent-studio-nav-button:hover {
+  color: var(--sakura-700);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.agent-studio-nav-button.is-active {
+  color: var(--sakura-700);
+  background: var(--sakura-100);
+  box-shadow: inset 0 0 0 1px rgba(242, 96, 141, 0.14), 0 5px 16px rgba(242, 96, 141, 0.10);
+}
+
+.agent-studio-nav-select {
+  display: none;
+  width: 100%;
+}
+
+.agent-studio-panel {
+  min-width: 0;
+}
+
+/* Long editor pages: safe anchors, compact rail, bottom action reserve. */
+.editor-page-with-sticky-actions {
+  padding-bottom: 92px;
+}
+
+.editor-section-anchor {
+  scroll-margin-top: 88px;
+  outline: none;
+}
+
+.section-nav-title {
+  margin-bottom: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.section-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.section-nav-item {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  padding: 9px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.section-nav-item:hover,
+.section-nav-item:focus-visible {
+  background: rgba(255, 255, 255, 0.60);
+  outline: none;
+}
+
+.section-nav-index {
+  flex: 0 0 auto;
+  color: var(--sakura-500);
+  font: 700 10px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.section-nav-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.section-nav-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.section-nav-copy small {
+  color: var(--ink-secondary);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.editor-rail-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.editor-rail-status-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.editor-rail-status-line strong {
+  color: var(--ink);
+  text-align: right;
+}
+
+.agent-config-savebar,
+.persona-config-savebar {
+  transition: opacity var(--dur-fast) ease, transform var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+}
+
+.agent-config-savebar.is-clean,
+.persona-config-savebar.is-clean {
+  opacity: 0.72;
+  box-shadow: 0 8px 24px rgba(103, 71, 88, 0.08);
+}
+
+.agent-config-savebar.is-dirty,
+.persona-config-savebar.is-dirty {
+  opacity: 1;
+  transform: translateY(-2px);
+  box-shadow: 0 16px 44px rgba(242, 96, 141, 0.18);
+}
+
+/* Debugger: desktop behaves like an IDE workspace, not two natural-height cards. */
+.agent-debug-page {
+  min-width: 0;
+}
+
+.agent-debug-workbench {
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  height: clamp(520px, calc(100dvh - 250px), 820px);
+  min-height: 0;
+}
+
+.agent-debug-navigator-pane,
+.agent-debug-inspector-pane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.agent-debug-inspector-scroll {
+  height: 100%;
+  padding-right: 4px;
+}
+
+.agent-trace-sidebar {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-trace-sidebar > .ant-card-head {
+  flex: 0 0 auto;
+}
+
+.agent-trace-sidebar > .ant-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-trace-sidebar-layout {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-trace-sidebar-controls {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-trace-buffer-note {
+  display: block;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-trace-list-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
+}
+
+.agent-debug-simulation-dock {
+  min-width: 0;
+}
+
+/* Relations: lightweight summary, sticky controls and bounded table scrolling. */
+.relations-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.relations-summary-row {
+  margin-top: 0 !important;
+}
+
+.relations-card > .ant-card-body {
+  padding-top: 12px;
+}
+
+.relations-toolbar {
+  position: sticky;
+  top: 58px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px -2px 14px;
+  padding: 8px 2px 10px;
+  border-bottom: 1px solid rgba(255, 233, 240, 0.9);
+  background: rgba(255, 252, 254, 0.92);
+  backdrop-filter: blur(16px) saturate(160%);
+}
+
+.relations-toolbar-primary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.relations-toolbar .table-search {
+  width: min(260px, 100%);
+}
+
+.relations-content-region {
+  min-width: 0;
+}
+
+.relations-table .ant-table-body {
+  max-height: min(54vh, 500px) !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.relations-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 14px;
+}
+
+@media (max-width: 1100px) {
+  .split-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-debug-workbench {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    max-height: none;
+  }
+
+  .agent-debug-navigator-pane,
+  .agent-debug-inspector-pane {
+    height: auto;
+    overflow: visible;
+  }
+
+  .agent-debug-inspector-scroll,
+  .agent-trace-list-scroll {
+    height: auto;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .agent-trace-sidebar {
+    height: auto;
+    overflow: visible;
+  }
+
+  .agent-trace-sidebar > .ant-card-body {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-layout,
+  .app-main-layout {
+    height: 100dvh;
+  }
+
+  .agent-studio-nav-scroll {
+    display: none;
+  }
+
+  .agent-studio-nav-select {
+    display: block;
+  }
+
+  .editor-page-with-sticky-actions {
+    padding-bottom: 118px;
+  }
+
+  .sticky-actions {
+    bottom: 8px;
+  }
+
+  .relations-toolbar {
+    position: static;
+    align-items: stretch;
+    flex-direction: column;
+    background: transparent;
+    backdrop-filter: none;
+  }
+
+  .relations-toolbar-primary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .relations-toolbar-primary .ant-select,
+  .relations-toolbar .table-search,
+  .relations-toolbar > .ant-btn {
+    width: 100% !important;
+  }
+
+  .relations-table .ant-table-body {
+    max-height: 460px !important;
+  }
+
+  .relations-pagination {
+    justify-content: center;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 600px) {
+  .relations-editor-drawer .ant-drawer-content-wrapper {
+    width: calc(100vw - 12px) !important;
+    max-width: 520px;
+  }
+}

@@ -394,6 +394,11 @@ export interface AgentExecutionTraceSummary {
   outcome: string | null;
   durationMs: number | null;
   eventCount: number;
+  hasFailure: boolean;
+  hasDegradation: boolean;
+  hasTool: boolean;
+  hasMedia: boolean;
+  hasOutboundProblem: boolean;
 }
 
 export interface AgentExecutionTrace {
@@ -520,6 +525,7 @@ export interface AgentAudit {
   id: string;
   groupId: string;
   actorUserId?: string | null;
+  traceId?: string | null;
   toolName: string;
   arguments: Record<string, unknown>;
   result: string;
