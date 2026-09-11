@@ -3,7 +3,7 @@ import { Alert, Card, Col, Descriptions, Drawer, Empty, Row, Space, Spin, Statis
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import { PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { PageHeader, QueryErrorAlert, RefreshErrorAlert, useApiQuery } from "./shared";
 import type { RpgModuleDetail, RpgModuleLintIssue, RpgModuleSummary } from "./types";
 
 const { Text } = Typography;
@@ -143,7 +143,7 @@ export function ModulesPage(): React.JSX.Element {
       <Col xs={12} lg={6}><Card size="small"><Statistic title="声明结局" value={endings} /></Card></Col>
     </Row>
     <Card>
-      {query.error && !query.data
+      <RefreshErrorAlert query={query} />{query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : query.data && query.data.length > 0
           ? <Table rowKey="id" loading={query.loading} dataSource={query.data} columns={columns} pagination={{ pageSize: 20, showSizeChanger: false }} />

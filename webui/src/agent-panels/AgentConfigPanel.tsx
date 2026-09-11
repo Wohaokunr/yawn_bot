@@ -10,7 +10,7 @@ import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
 import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
+  DangerActionButton, formatTime, QueryErrorAlert, RefreshErrorAlert, confirmReloadConflict, SaveStatus, TablePagination,
   useApiQuery, useUnsavedChanges,
 } from "../shared";
 import type {
@@ -54,7 +54,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
   const watchedWarmupProbability = Form.useWatch("proactiveProbability", form) as number | undefined;
   const watchedInterjectProbability = Form.useWatch("proactiveActiveProbability", form) as number | undefined;
   useUnsavedChanges(dirty);
-  useEffect(() => { if (query.data) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data]);
+  useEffect(() => { if (query.data && !dirty) { form.setFieldsValue(query.data); setDirty(false); } }, [form, query.data, dirty]);
   const save = async (values: Record<string, unknown>) => {
     setSaving(true);
     try {
@@ -64,7 +64,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
       message.success("Agent 配置已保存");
       query.reload();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); } else message.error((error as Error).message);
+      if (error instanceof ApiError && error.status === 409) { if (confirmReloadConflict()) { setDirty(false); query.reload(); } } else message.error((error as Error).message);
     } finally { setSaving(false); }
   };
   const data = query.data;
@@ -90,6 +90,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
       onValuesChange={() => setDirty(true)}
       className="agent-config-form"
     >
+      <RefreshErrorAlert query={query} />
       <div className="agent-config-page agent-studio-page agent-studio-runtime">
         <section className="agent-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="agent-config-hero-copy">

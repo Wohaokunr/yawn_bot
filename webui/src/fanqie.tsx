@@ -35,7 +35,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "./api";
-import { formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { formatTime, PageHeader, QueryErrorAlert, RefreshErrorAlert, useApiQuery } from "./shared";
 import type {
   FanqieBookSummary,
   FanqieChapterRef,
@@ -349,7 +349,7 @@ function RankPanel({ onResults }: { onResults: (books: FanqieBookSummary[]) => v
     }
   };
   return <Card className="section-row">
-    {categoriesQuery.error && !categoriesQuery.data
+    <RefreshErrorAlert query={categoriesQuery} />{categoriesQuery.error && !categoriesQuery.data
       ? <QueryErrorAlert error={categoriesQuery.error} onRetry={categoriesQuery.reload} />
       : <>
         <Flex gap={12} wrap>
@@ -497,7 +497,7 @@ function BookDrawer({ book, maxChapters, onClose, onSubmitted }: {
             </div>}
           </div>
         </div>
-        {chaptersQuery.error && !chaptersQuery.data
+        <RefreshErrorAlert query={chaptersQuery} />{chaptersQuery.error && !chaptersQuery.data
           ? <QueryErrorAlert error={chaptersQuery.error} onRetry={chaptersQuery.reload} />
           : <>
             <Card className="section-row" size="small" title="目录">
@@ -632,7 +632,7 @@ function JobsTab(): React.JSX.Element {
     <Select value={status} onChange={(value) => { setStatus(value); setPage(1); }} options={FANQIE_JOB_STATUS_OPTIONS} style={{ width: 120 }} />
     <Button icon={<ReloadOutlined />} loading={query.refreshing} onClick={reload}>刷新</Button>
   </Space>}>
-    {query.error && !query.data
+    <RefreshErrorAlert query={query} />{query.error && !query.data
       ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
       : <Table
           rowKey="id"

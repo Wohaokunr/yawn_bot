@@ -10,7 +10,7 @@ import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
 import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
+  DangerActionButton, formatTime, QueryErrorAlert, confirmReloadConflict, RefreshErrorAlert, SaveStatus, TablePagination,
   useApiQuery, useUnsavedChanges,
 } from "../shared";
 import type {
@@ -117,7 +117,7 @@ export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; 
       setEditing(null);
       query.reload();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { message.warning(error.message); query.reload(); setEditing(null); } else message.error((error as Error).message);
+      if (error instanceof ApiError && error.status === 409) { if (confirmReloadConflict()) { query.reload(); setEditing(null); } } else message.error((error as Error).message);
     } finally { setSaving(false); }
   };
   const saveCreate = async (values: MemoryFormValues & { type: string; key: string; subjectUserId?: number }) => {
@@ -160,7 +160,7 @@ export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; 
       {status?.lastError && <Alert type="error" showIcon closable message={`最近整理失败（连续 ${status.consecutiveFailures} 次）`} description={status.lastError} className="section-alert" />}
       {status?.rebuildRequired && <Alert type="warning" showIcon message="派生记忆正在重建" description="系统会按连续批次处理保留期内原始消息；手工记忆不会被覆盖。" className="section-alert" />}
     </>}
-    <Card title="公开/群级记忆" extra={readOnly ? undefined : <Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
+    <Card title="公开/群级记忆" extra={readOnly ? undefined : <Space><Button type="primary" onClick={() => { setCreating(true); createForm.resetFields(); }}>新增记忆</Button><Popconfirm title="立即整理本群记忆？" description="含 LLM 摘要，将在后台运行数十秒。" onConfirm={compact}><Button loading={status?.inFlight}>立即整理</Button></Popconfirm><Popconfirm title="重建全部自动派生记忆？" description="保留手工记忆，清除自动摘要/画像/关系后从短期消息重新生成。" onConfirm={rebuild}><Button>重建派生记忆</Button></Popconfirm><Button onClick={exportData}>导出 JSON</Button><Popconfirm title="清理整个群的消息、记忆、关系和媒体缓存？" description="此操作还会重置上下文游标，且不可撤销。" onConfirm={removeGroup}><DangerActionButton>清理全群 Agent 数据</DangerActionButton></Popconfirm></Space>}><Input.Search className="table-search" placeholder="搜索 key 或内容" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} /><RefreshErrorAlert query={query} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : <Table

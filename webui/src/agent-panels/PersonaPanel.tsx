@@ -10,7 +10,7 @@ import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
 import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
+  DangerActionButton, formatTime, QueryErrorAlert, RefreshErrorAlert, confirmReloadConflict, SaveStatus, TablePagination,
   useApiQuery, useUnsavedChanges,
 } from "../shared";
 import type {
@@ -53,7 +53,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   useUnsavedChanges(dirty);
 
   useEffect(() => {
-    if (query.data) {
+    if (query.data && !dirty) {
       form.setFieldsValue({
         mode: query.data.enabled ? "custom" : "inherit",
         profile: query.data.profile,
@@ -62,7 +62,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       setTrialResult(null);
       setTrialError(null);
     }
-  }, [form, query.data]);
+  }, [form, query.data, dirty]);
 
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
@@ -99,8 +99,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       query.reload();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        message.warning(error.message);
-        query.reload();
+        if (confirmReloadConflict()) { setDirty(false); query.reload(); }
       } else message.error((error as Error).message);
     } finally {
       setSaving(false);
@@ -189,6 +188,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       onValuesChange={() => { setDirty(true); setTrialResult(null); }}
       className="persona-config-form"
     >
+      <RefreshErrorAlert query={query} />
       <div className="persona-config-page agent-studio-page agent-studio-persona">
         <section className="persona-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="persona-config-hero-copy">

@@ -8,6 +8,7 @@ import {
 } from "@ant-design/icons";
 import {
   Alert,
+  Button,
   Card,
   Col,
   Descriptions,
@@ -23,7 +24,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AgentAuditTable } from "./agent-audit-table";
 import { api } from "./api";
-import { AdminEmpty, formatTime, PageHeader } from "./shared";
+import { AdminEmpty, formatTime, PageHeader, QueryErrorAlert } from "./shared";
 import type { Overview } from "./types";
 
 const { Text } = Typography;
@@ -206,12 +207,12 @@ export function OverviewPage(): React.JSX.Element {
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
-    const update = (event: Event) => setData((event as CustomEvent<Overview>).detail);
+    const update = (event: Event) => { setData((event as CustomEvent<Overview>).detail); setError(""); };
     window.addEventListener("yawnbot-overview", update);
     return () => window.removeEventListener("yawnbot-overview", update);
   }, []);
 
-  if (!data) return error ? <Alert type="error" message={error} /> : <Spin />;
+  if (!data) return error ? <QueryErrorAlert error={error} onRetry={() => void load()} /> : <Spin />;
 
   const { stats } = data;
   const liveAvailable = stats.games.live.rpg.available || stats.games.live.werewolf.available;
@@ -229,6 +230,7 @@ export function OverviewPage(): React.JSX.Element {
       refreshing={refreshing}
       status={issues.length > 0 ? <Tag color="red">{issues.length} 项需处理</Tag> : <Tag color="green">运行正常</Tag>}
     />
+    {error && <Alert type="warning" showIcon title="更新失败，当前为上次成功数据" description={`${error} · 上次成功更新：${formatTime(data.generatedAt)}`} action={<Button onClick={() => void load()} loading={refreshing}>重试</Button>} />}
     <Card title="需要处理的问题" className="ops-issues-card">
       {issues.length === 0
         ? <AdminEmpty description="当前没有需要处理的问题" />

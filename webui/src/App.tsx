@@ -1,8 +1,8 @@
-import { App as AntApp, Spin } from "antd";
-import { lazy, useEffect, useState } from "react";
+import { Alert, Button, App as AntApp, Spin } from "antd";
+import { lazy, useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./app-shell";
-import { api, setCsrfToken } from "./api";
+import { api, ApiError, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
 import { Login } from "./login";
 import { OverviewPage } from "./overview";
@@ -50,14 +50,22 @@ const GuestGroupPage = lazy(() =>
 function App(): React.JSX.Element {
   const [session, setSession] = useState<AuthSessionData | null | undefined>(undefined);
 
-  useEffect(() => {
+  const [sessionError, setSessionError] = useState("");
+  const checkSession = useCallback(() => {
+    setSessionError("");
     api<AuthSessionData>("/auth/session")
       .then(({ data }) => {
         setCsrfToken(data.csrfToken);
         setSession(data);
       })
-      .catch(() => setSession(null));
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 401) setSession(null);
+        else setSessionError(error instanceof Error ? error.message : "连接失败");
+      });
+  }, []);
 
+  useEffect(() => { checkSession(); }, [checkSession]);
+  useEffect(() => {
     const lost = () => {
       setCsrfToken("");
       setSession(null);
@@ -66,6 +74,10 @@ function App(): React.JSX.Element {
     return () => window.removeEventListener("yawnbot-auth-lost", lost);
   }, []);
 
+  if (session === undefined && sessionError) {
+    return <div className="center-screen"><Alert type="error" showIcon title="会话检查失败" description={sessionError}
+      action={<Button onClick={checkSession}>重试</Button>} /></div>;
+  }
   if (session === undefined) {
     return <div className="center-screen"><Spin size="large" /></div>;
   }

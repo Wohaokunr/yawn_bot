@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock("./api", () => ({
   api: state.api,
+  ApiError: class extends Error { status = 401; },
   setCsrfToken: vi.fn(),
 }));
 
@@ -172,4 +173,14 @@ describe("route lazy loading", () => {
     expect(state.lazyLoads).not.toContain("agent");
     expect(state.lazyLoads).not.toContain("environment");
   });
+
+ it("keeps network errors out of login and retries the session", async () => {
+   state.api.mockRejectedValueOnce(new Error("network unavailable"));
+   render(<MemoryRouter><App /></MemoryRouter>);
+   expect(await screen.findByText("会话检查失败")).toBeInTheDocument();
+   expect(screen.queryByText("login page")).not.toBeInTheDocument();
+   fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
+   expect(await screen.findByText("overview page")).toBeInTheDocument();
+ });
+
 });

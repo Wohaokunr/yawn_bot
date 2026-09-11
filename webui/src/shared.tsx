@@ -1,5 +1,5 @@
-import { Alert, Button, Empty, Flex, Space, Table, Tag, Typography } from "antd";
-import type { TablePaginationConfig } from "antd/es/table";
+import { Alert, Button, Empty, Flex, Space, Pagination, Tag, Typography } from "antd";
+import { useSearchParams } from "react-router-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const { Title, Text } = Typography;
@@ -93,6 +93,37 @@ export function useApiQuery<T>(load: () => Promise<T>, options: ApiQueryOptions 
   useEffect(() => { void run(); }, [run]);
   useEntityRefresh(run, options.resources ?? []);
   return { data, loading, refreshing, error, updatedAt, reload: run };
+}
+
+export function useListLocation() {
+  const [params, setParams] = useSearchParams();
+  const rawPage = Number(params.get("page") ?? 1);
+  const page = Number.isSafeInteger(rawPage) && rawPage > 0 ? rawPage : 1;
+  const search = params.get("search") ?? "";
+  const update = (nextPage: number, nextSearch: string) => {
+    const next = new URLSearchParams(params);
+    if (nextPage > 1) next.set("page", String(nextPage)); else next.delete("page");
+    if (nextSearch) next.set("search", nextSearch); else next.delete("search");
+    setParams(next);
+  };
+  const listQuery = new URLSearchParams();
+  if (page > 1) listQuery.set("page", String(page));
+  if (search) listQuery.set("search", search);
+  return { page, search, setPage: (value: number) => update(value, search),
+    setSearch: (value: string) => update(1, value),
+    listSuffix: listQuery.size ? `?${listQuery}` : "" };
+}
+
+export function RefreshErrorAlert({ query }: { query: ApiQuery<unknown> }): React.JSX.Element | null {
+  if (!query.data || !query.error) return null;
+  return <Alert className="section-alert" type="warning" showIcon
+    title="更新失败，当前为上次成功数据"
+    description={`${query.error} · 上次成功更新：${query.updatedAt ? formatTime(new Date(query.updatedAt).toISOString()) : "未知"}`}
+    action={<Button size="small" loading={query.refreshing} onClick={query.reload}>重试</Button>} />;
+}
+
+export function confirmReloadConflict(): boolean {
+  return window.confirm("数据已被其他操作修改。重新加载会丢弃当前未保存修改，是否重新加载？取消可保留当前输入。");
 }
 
 export function QueryErrorAlert({ error, onRetry }: { error: string; onRetry: () => void }): React.JSX.Element {
@@ -221,6 +252,5 @@ export function useUnsavedChanges(dirty: boolean): void {
 // 少于等于一页时完全隐藏分页；否则只渲染分页条（配合服务端分页表格）。
 export function TablePagination({ current, total, onChange }: { current: number; total: number; onChange: (page: number) => void }): React.JSX.Element {
   if (total <= 20) return <></>;
-  const pagination: TablePaginationConfig = { current, total, pageSize: 20, showSizeChanger: false, onChange };
-  return <Table rowKey="placeholder" columns={[]} dataSource={[]} showHeader={false} pagination={pagination} className="pagination-only" />;
+  return <Pagination current={current} total={total} pageSize={20} showSizeChanger={false} onChange={onChange} align="end" />;
 }

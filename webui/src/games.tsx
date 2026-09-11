@@ -39,7 +39,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "./api";
-import { formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { formatTime, PageHeader, QueryErrorAlert, RefreshErrorAlert, useApiQuery } from "./shared";
 import type {
   LiveGames,
   RpgHistoryGame,
@@ -276,7 +276,7 @@ function WerewolfTab({ live, onChanged }: { live: LiveGames["werewolf"]; onChang
       <Input.Search placeholder="搜索群号或房主" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />
       <Select value={status} onChange={(v) => { setStatus(v); setPage(1); }} options={STATUS_OPTIONS} />
     </Space>}>
-      {historyQuery.error && !historyQuery.data
+      <RefreshErrorAlert query={historyQuery} />{historyQuery.error && !historyQuery.data
         ? <QueryErrorAlert error={historyQuery.error} onRetry={historyQuery.reload} />
         : <Table rowKey="id" size="small" columns={columns} loading={historyQuery.loading} dataSource={historyQuery.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: historyQuery.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <WerewolfHistoryPlayers row={row} /> }} />}
     </Card>
@@ -568,7 +568,7 @@ function RpgTab({ live, onChanged }: { live: LiveGames["rpg"]; onChanged: () => 
       <Input.Search placeholder="搜索群号或房主" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />
       <Select value={status} onChange={(v) => { setStatus(v); setPage(1); }} options={STATUS_OPTIONS} />
     </Space>}>
-      {historyQuery.error && !historyQuery.data
+      <RefreshErrorAlert query={historyQuery} />{historyQuery.error && !historyQuery.data
         ? <QueryErrorAlert error={historyQuery.error} onRetry={historyQuery.reload} />
         : <Table rowKey="id" size="small" columns={columns} loading={historyQuery.loading} dataSource={historyQuery.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: historyQuery.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <RpgHistoryPlayers row={row} /> }} />}
     </Card>

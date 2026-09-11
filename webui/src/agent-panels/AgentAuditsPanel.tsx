@@ -10,7 +10,7 @@ import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
 import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
+  DangerActionButton, formatTime, QueryErrorAlert, RefreshErrorAlert, SaveStatus, TablePagination,
   useApiQuery, useUnsavedChanges,
 } from "../shared";
 import type {
@@ -41,7 +41,7 @@ export function AgentAuditsPanel({ groupId }: { groupId: string }): React.JSX.El
   const [page, setPage] = useState(1); const [result, setResult] = useState("");
   const load = useCallback(() => api<AgentAudit[]>(`/agent/audits?groupId=${groupId}&page=${page}&pageSize=20&result=${result}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, result]);
   const query = useApiQuery(load);
-  return <Card extra={<Select value={result} onChange={(value) => { setResult(value); setPage(1); }} options={RESULT_OPTIONS} style={{ width: 120 }} />}>{
+  return <Card extra={<Select value={result} onChange={(value) => { setResult(value); setPage(1); }} options={RESULT_OPTIONS} style={{ width: 120 }} />}><RefreshErrorAlert query={query} />{
     query.error && !query.data
       ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
       : <>

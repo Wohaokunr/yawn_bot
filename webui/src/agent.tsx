@@ -40,10 +40,10 @@ import {
   DangerActionButton,
   formatTime,
   PageHeader,
-  QueryErrorAlert,
+  QueryErrorAlert, RefreshErrorAlert,
   SaveStatus,
   TablePagination,
-  useApiQuery,
+  useApiQuery, useListLocation,
   useUnsavedChanges,
 } from "./shared";
 import type {
@@ -89,17 +89,18 @@ export { RelationsPanel } from "./agent-panels/RelationsPanel";
 export { debugMessageLabel } from "./agent-debug/debug-utils";
 
 export function AgentGroupsPage(): React.JSX.Element {
-  const [page, setPage] = useState(1); const [search, setSearch] = useState("");
+  const { page, search, setPage, setSearch, listSuffix } = useListLocation();
   const load = useCallback(() => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [page, search]);
   const query = useApiQuery(load, { resources: ["agent_config"] });
-  return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" onRefresh={query.reload} refreshing={query.refreshing} extra={<Input.Search placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />} /><Card>{
+  return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" onRefresh={query.reload} refreshing={query.refreshing} extra={<Input.Search key={search} defaultValue={search} placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); }} />} /><Card><RefreshErrorAlert query={query} />{
     query.error && !query.data
       ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <Table rowKey="groupId" loading={query.loading} dataSource={query.data?.rows ?? []} locale={{ emptyText: <AdminEmpty description="暂无可管理群组" /> }} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} columns={[{ title: "群组", render: (_, row: GroupSummary) => <>{row.groupName || "未命名群"}<br /><Text type="secondary">{row.groupId}</Text></> }, { title: "成员", dataIndex: "memberCount" }, { title: "状态", render: (_, row: GroupSummary) => <Tag color={row.agentEnabled ? "green" : "default"}>{row.agentEnabled ? "开启" : "关闭"}</Tag> }, { title: "操作", render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link> }]} />
+      : <Table rowKey="groupId" loading={query.loading} dataSource={query.data?.rows ?? []} locale={{ emptyText: <AdminEmpty description={search ? "没有匹配的群组，请调整搜索条件" : "暂无可管理群组"} /> }} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} columns={[{ title: "群组", render: (_, row: GroupSummary) => <>{row.groupName || "未命名群"}<br /><Text type="secondary">{row.groupId}</Text></> }, { title: "成员", dataIndex: "memberCount" }, { title: "状态", render: (_, row: GroupSummary) => <Tag color={row.agentEnabled ? "green" : "default"}>{row.agentEnabled ? "开启" : "关闭"}</Tag> }, { title: "操作", render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}${listSuffix}`}>进入管理</Link> }]} />
   }</Card></>;
 }
 
 export function AgentDetailPage(): React.JSX.Element {
+  const { listSuffix } = useListLocation();
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = searchParams.get("tab") ?? "overview";
@@ -107,7 +108,7 @@ export function AgentDetailPage(): React.JSX.Element {
     if (!confirmDiscardChanges()) return;
     setSearchParams(key === "overview" ? {} : { tab: key }, { replace: true });
   };
-  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to="/agent">返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={changeTab} items={[
+  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to={`/agent${listSuffix}`}>返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={changeTab} items={[
     { key: "overview", label: "运行诊断", children: <AgentOverviewPanel groupId={groupId} /> },
     { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
     { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
@@ -156,6 +157,7 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
     }
   };
   return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
+    <RefreshErrorAlert query={query} />
     <Card
       title="实际生效配置"
       extra={<Button onClick={query.reload} loading={query.refreshing}>刷新诊断</Button>}

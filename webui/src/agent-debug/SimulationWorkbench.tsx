@@ -2,7 +2,7 @@ import { App as AntApp, Button, Card, Col, Input, Row, Segmented, Select, Space,
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { AdminEmpty, formatTime, QueryErrorAlert, useApiQuery } from "../shared";
+import { AdminEmpty, formatTime, QueryErrorAlert, RefreshErrorAlert, useApiQuery } from "../shared";
 import type { AgentDebugMode, AgentDebugResponse, AgentMessageItem } from "../types";
 import { AGENT_DEBUG_MODES, debugMessageLabel } from "./debug-utils";
 
@@ -136,7 +136,7 @@ export function SimulationWorkbench({
         <Button type="primary" onClick={run} loading={running}>{runModel ? "开始真实试跑" : "生成调试快照"}</Button>
       </div>
       {error && <QueryErrorAlert error={error} onRetry={run} />}
-      {messagesQuery.error && !messagesQuery.data && <QueryErrorAlert error={messagesQuery.error} onRetry={messagesQuery.reload} />}
+      <RefreshErrorAlert query={messagesQuery} />{messagesQuery.error && !messagesQuery.data && <QueryErrorAlert error={messagesQuery.error} onRetry={messagesQuery.reload} />}
       {messagesQuery.data && messagesQuery.data.length === 0 && source === "history" && <AdminEmpty description="当前没有可回放的成员消息" />}
     </Space>
   </Card>;

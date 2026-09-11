@@ -10,7 +10,7 @@ import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
 import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
+  DangerActionButton, formatTime, QueryErrorAlert, RefreshErrorAlert, SaveStatus, TablePagination,
   useApiQuery, useUnsavedChanges,
 } from "../shared";
 import type {
@@ -38,7 +38,7 @@ export function AgentMessagesPanel({ groupId }: { groupId: string }): React.JSX.
   const query = useApiQuery(load);
   return <Card title="短期消息库" extra={<Select value={role} onChange={(value) => { setRole(value); setPage(1); }} options={MEMORY_ROLE_OPTIONS} style={{ width: 120 }} />}>
     <Alert type="info" showIcon className="section-alert" message="仅保留 rawRetentionDays 内的原始消息；隐私退出成员的消息不在此展示，到期由整理任务清除。" />
-    <Input.Search className="table-search" placeholder="搜索消息内容或昵称" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
+    <Input.Search className="table-search" placeholder="搜索消息内容或昵称" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} /><RefreshErrorAlert query={query} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.text}</Paragraph> }} columns={[{ title: "时间", dataIndex: "receivedAt", render: formatTime, width: 170 }, { title: "成员", render: (_, row: AgentMessageItem) => <>{row.senderName || "—"}<br /><Text type="secondary" copyable>{row.userId}</Text></> }, { title: "角色", dataIndex: "role", width: 90, render: (value: string) => <Tag color={value === "bot" ? "blue" : value === "owner" ? "gold" : value === "admin" ? "cyan" : "default"}>{value}</Tag> }, { title: "内容", dataIndex: "text", ellipsis: true }, { title: "操作", width: 80, render: (_, row: AgentMessageItem) => row.role === "bot" ? null : <Button type="link" size="small" onClick={() => setSearchParams({ tab: "debug", messageId: row.messageId }, { replace: true })}>调试</Button> }]} />

@@ -15,14 +15,13 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "./api";
-import { AdminEmpty, formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { AdminEmpty, formatTime, PageHeader, QueryErrorAlert, RefreshErrorAlert, useApiQuery, useListLocation } from "./shared";
 import type { FeatureState, GroupSummary, Member, UserSummary } from "./types";
 
 const { Text } = Typography;
 
 export function GroupsPage(): React.JSX.Element {
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
+  const { page, search, setPage, setSearch, listSuffix } = useListLocation();
   const load = useCallback(
     () => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`)
       .then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })),
@@ -33,7 +32,7 @@ export function GroupsPage(): React.JSX.Element {
     {
       title: "群",
       render: (_, row) => <>
-        <Link to={`/groups/${row.groupId}`}>{row.groupName || "未命名群"}</Link>
+        <Link to={`/groups/${row.groupId}${listSuffix}`}>{row.groupName || "未命名群"}</Link>
         <br />
         <Text type="secondary" copyable>{row.groupId}</Text>
       </>,
@@ -48,7 +47,7 @@ export function GroupsPage(): React.JSX.Element {
       ),
     },
     { title: "最近活跃", dataIndex: "lastActiveAt", render: formatTime },
-    { title: "操作", width: 100, render: (_, row) => <Link to={`/agent/${row.groupId}`}>Agent</Link> },
+    { title: "操作", width: 100, render: (_, row) => <Link to={`/agent/${row.groupId}${listSuffix}`}>Agent</Link> },
   ];
 
   return <>
@@ -59,17 +58,16 @@ export function GroupsPage(): React.JSX.Element {
       refreshing={query.refreshing}
       extra={(
         <Input.Search
-          placeholder="搜索群名或群号"
+          key={search} defaultValue={search} placeholder="搜索群名或群号"
           allowClear
           onSearch={(value) => {
             setSearch(value);
-            setPage(1);
           }}
         />
       )}
     />
     <Card>
-      {query.error && !query.data
+      <RefreshErrorAlert query={query} />{query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : (
           <Table
@@ -77,7 +75,7 @@ export function GroupsPage(): React.JSX.Element {
             loading={query.loading}
             columns={columns}
             dataSource={query.data?.rows ?? []}
-            locale={{ emptyText: <AdminEmpty description="暂无群组" /> }}
+            locale={{ emptyText: <AdminEmpty description={search ? "没有匹配的群组，请调整搜索条件" : "暂无群组"} /> }}
             pagination={{
               current: page,
               pageSize: 20,
@@ -167,6 +165,7 @@ interface GroupDetailData {
 }
 
 export function GroupDetailPage(): React.JSX.Element {
+  const { listSuffix } = useListLocation();
   const { groupId = "" } = useParams();
   const { message } = AntApp.useApp();
   const groupLoad = useCallback(
@@ -209,7 +208,7 @@ export function GroupDetailPage(): React.JSX.Element {
     <PageHeader
       title={group.groupName || "未命名群"}
       subtitle={`群号 ${group.groupId} · ${group.memberCount} 名成员`}
-      extra={<Link to="/groups">返回列表</Link>}
+      extra={<Link to={`/groups${listSuffix}`}>返回列表</Link>}
     />
     <Tabs items={[
       {
@@ -245,7 +244,7 @@ export function GroupDetailPage(): React.JSX.Element {
                 setMemberPage(1);
               }}
             />
-            {membersQuery.error && !membersQuery.data
+            <RefreshErrorAlert query={membersQuery} />{membersQuery.error && !membersQuery.data
               ? <QueryErrorAlert error={membersQuery.error} onRetry={membersQuery.reload} />
               : (
                 <Table
@@ -312,8 +311,7 @@ export function GroupDetailPage(): React.JSX.Element {
 
 export function UsersPage(): React.JSX.Element {
   const { message } = AntApp.useApp();
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
+  const { page, search, setPage, setSearch } = useListLocation();
   const load = useCallback(
     () => api<UserSummary[]>(`/users?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`)
       .then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })),
@@ -344,17 +342,16 @@ export function UsersPage(): React.JSX.Element {
       refreshing={query.refreshing}
       extra={(
         <Input.Search
-          placeholder="搜索昵称或 QQ"
+          key={search} defaultValue={search} placeholder="搜索昵称或 QQ"
           allowClear
           onSearch={(value) => {
             setSearch(value);
-            setPage(1);
           }}
         />
       )}
     />
     <Card>
-      {query.error && !query.data
+      <RefreshErrorAlert query={query} />{query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : (
           <Table

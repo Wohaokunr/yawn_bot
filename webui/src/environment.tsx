@@ -49,7 +49,7 @@ import {
   TASK_PANEL_KEYS,
 } from "./environment-config";
 export { filterEnvironmentEntries, groupEnvironmentEntries } from "./environment-config";
-import { PageHeader, QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "./shared";
+import { PageHeader, QueryErrorAlert, confirmReloadConflict, SaveStatus, useApiQuery, useUnsavedChanges } from "./shared";
 import type {
   EnvironmentEntry,
   EnvironmentPatchResult,
@@ -241,10 +241,12 @@ export function EnvironmentPage(): React.JSX.Element {
       }
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 409) {
-        setChanges({});
-        setProviderChanges(null);
-        query.reload();
-        message.error("配置文件已变化，页面已刷新，请重新修改");
+        if (confirmReloadConflict()) {
+          setChanges({});
+          setProviderChanges(null);
+          setPreviewOpen(false);
+          query.reload();
+        }
       } else {
         message.error(reason instanceof Error ? reason.message : "保存失败");
       }

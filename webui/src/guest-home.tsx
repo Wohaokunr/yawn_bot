@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { MemoriesPanel, MemberProfilesPanel, RelationsPanel } from "./agent";
 import { api, ApiError } from "./api";
-import { PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { PageHeader, QueryErrorAlert, RefreshErrorAlert, useApiQuery } from "./shared";
 
 const { Text } = Typography;
 
@@ -66,7 +66,7 @@ export function GuestGroupsPage(): React.JSX.Element {
       description="进入群聊后仅提供记忆、成员画像和关系边三个只读页面，不提供 Agent 配置、人设、消息记录、调试、隐私治理或工具审计。"
     />
     <Card className="guest-groups-card">
-      {query.error && !query.data ? (
+      <RefreshErrorAlert query={query} />{query.error && !query.data ? (
         <QueryErrorAlert error={query.error} onRetry={query.reload} />
       ) : (
         <Table
@@ -151,7 +151,7 @@ export function GuestGroupPage(): React.JSX.Element {
       status={<Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>}
       extra={<Link to="/guest">返回群聊列表</Link>}
     />
-    {groupQuery.error && !groupQuery.data && <QueryErrorAlert error={groupQuery.error} onRetry={groupQuery.reload} />}
+    <RefreshErrorAlert query={groupQuery} />{groupQuery.error && !groupQuery.data && <QueryErrorAlert error={groupQuery.error} onRetry={groupQuery.reload} />}
     <Tabs
       destroyOnHidden
       activeKey={tab}

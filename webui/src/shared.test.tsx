@@ -1,6 +1,7 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { useApiQuery } from "./shared";
+import { MemoryRouter, Route, Routes, Link, useLocation } from "react-router-dom";
+import { act, render, screen, fireEvent, renderHook, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { useApiQuery, RefreshErrorAlert, useListLocation } from "./shared";
 
 describe("useApiQuery", () => {
   it("resolves data and clears loading", async () => {
@@ -75,4 +76,35 @@ describe("useApiQuery", () => {
     });
     await waitFor(() => expect(result.current.data).toBe(3));
   });
+});
+
+it("retains last successful data and exposes an actionable refresh error", async () => {
+  const load = vi.fn().mockResolvedValueOnce(["saved row"]).mockRejectedValueOnce(new Error("offline")).mockResolvedValue(["new row"]);
+  function Page() {
+    const query = useApiQuery<string[]>(load);
+    return <><RefreshErrorAlert query={query} /><div>{query.data?.join()}</div><button onClick={query.reload}>refresh</button></>;
+  }
+  render(<Page />);
+  await screen.findByText("saved row");
+  fireEvent.click(screen.getByText("refresh"));
+  await screen.findByText("更新失败，当前为上次成功数据");
+  expect(screen.getByText("saved row")).toBeInTheDocument();
+  expect(screen.getByText(/上次成功更新/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
+  await screen.findByText("new row");
+  expect(screen.queryByText("更新失败，当前为上次成功数据")).not.toBeInTheDocument();
+});
+it("preserves submitted list filters through a detail return and resets page on search", () => {
+  function Page() {
+    const { page, search, listSuffix, setSearch } = useListLocation();
+    const location = useLocation();
+    return <><div>{page}:{search}</div><Link to={`${location.pathname === "/list" ? "/detail" : "/list"}${listSuffix}`}>switch</Link><button onClick={() => setSearch("new")}>search</button></>;
+  }
+  render(<MemoryRouter initialEntries={["/list?page=3&search=hello"]}><Routes><Route path="*" element={<Page />} /></Routes></MemoryRouter>);
+  expect(screen.getByText("3:hello")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("switch"));
+  fireEvent.click(screen.getByText("switch"));
+  expect(screen.getByText("3:hello")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("search"));
+  expect(screen.getByText("1:new")).toBeInTheDocument();
 });

@@ -305,3 +305,18 @@ it("模型档位连接测试使用当前草稿路由且不回填已有密钥", a
   expect(await screen.findByText(/最近测试成功/)).toBeInTheDocument();
   expect(screen.getAllByText(/default \/ default-model/).length).toBeGreaterThan(0);
 });
+
+it("版本冲突取消重载时保留输入", async () => {
+  stubBrowserApis();
+  const fetchMock = stubEnvironmentFetch([entry({ key: "AI_MODEL", value: "old-model" })]);
+  render(<AntApp><EnvironmentPage /></AntApp>);
+  fireEvent.change(await screen.findByDisplayValue("old-model"), { target: { value: "draft-model" } });
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const conflict = () => fetchMock.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: { message: "conflict" } }) } as never);
+  conflict();
+  fireEvent.click(screen.getByRole("button", { name: /预览保存/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认保存" }));
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(screen.getByDisplayValue("draft-model")).toBeInTheDocument();
+  confirm.mockRestore();
+});

@@ -10,7 +10,7 @@ import { TraceCompareView } from "../agent-debug/TraceWorkspace";
 import { api, ApiError } from "../api";
 import { nodeDisplayName, relationTypeColor } from "../relation-meta";
 import {
-  DangerActionButton, formatTime, QueryErrorAlert, SaveStatus, TablePagination,
+  DangerActionButton, formatTime, QueryErrorAlert, RefreshErrorAlert, SaveStatus, TablePagination,
   useApiQuery, useUnsavedChanges,
 } from "../shared";
 import type {
@@ -86,6 +86,9 @@ export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: st
     } finally { setSaving(false); }
   };
   return <>
+    <RefreshErrorAlert query={subjectsQuery} />
+    <RefreshErrorAlert query={memberQuery} />
+
     <Card title="成员画像" extra={<Space wrap>
       <AutoComplete
         value={draft}

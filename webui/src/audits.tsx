@@ -1,7 +1,7 @@
 import { Card, Select, Table, Tag, Typography } from "antd";
 import { useCallback, useState } from "react";
 import { api } from "./api";
-import { formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
+import { formatTime, PageHeader, QueryErrorAlert, RefreshErrorAlert, useApiQuery } from "./shared";
 import type { WebAudit } from "./types";
 
 const { Text } = Typography;
@@ -39,7 +39,7 @@ export function WebAuditsPage(): React.JSX.Element {
       )}
     />
     <Card>
-      {query.error && !query.data
+      <RefreshErrorAlert query={query} />{query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
         : (
           <Table
