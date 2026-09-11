@@ -280,6 +280,15 @@ h1, h2, h3, h4, h5,
 
 .page-heading { margin-bottom: 22px; }
 .page-heading h2 { margin: 0 0 4px !important; color: var(--ink); }
+.agent-detail-layout { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 24px; align-items: start; }
+.agent-detail-nav { position: sticky; top: 88px; }
+.agent-detail-select { display: none; }
+.agent-detail-content { min-width: 0; }
+@media (max-width: 1100px) {
+  .agent-detail-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .agent-detail-nav { display: none; }
+  .agent-detail-select { display: block; width: 100%; }
+}
 .section-row { margin-top: 16px; }
 
 /* ── 液态玻璃 · Liquid Glass ────────────────────────

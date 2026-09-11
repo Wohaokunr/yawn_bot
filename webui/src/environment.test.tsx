@@ -146,7 +146,8 @@ it("页面隐藏敏感值并且只提交发生变化的配置项", async () => {
   render(<AntApp><EnvironmentPage /></AntApp>);
   expect(await screen.findByText("LLM 模型档位")).toBeInTheDocument();
   expect(screen.getByText("子插件任务路由")).toBeInTheDocument();
-  expect(screen.getByText("普通对话 / 工具")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /子插件任务路由/ }));
+  expect(await screen.findByText("普通对话 / 工具")).toBeInTheDocument();
   fireEvent.change(screen.getByDisplayValue("old-model"), { target: { value: "new-model" } });
   expect(screen.queryByDisplayValue("secret-value")).not.toBeInTheDocument();
   // 敏感项位于默认收起的分组面板内,先全部展开再断言
@@ -319,4 +320,17 @@ it("版本冲突取消重载时保留输入", async () => {
   await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
   expect(screen.getByDisplayValue("draft-model")).toBeInTheDocument();
   confirm.mockRestore();
+});
+
+it("LLM 搜索展开任务路由且不搜索密钥值", async () => {
+  stubBrowserApis();
+  stubEnvironmentFetch([entry({ key: "AGENT_DIALOGUE_LLM_PROFILE", description: "普通对话", kind: "enum", options: ["default"], value: "default" }), entry({ key: "AI_API_KEY", secret: true, value: "hidden-secret" })]);
+  render(<AntApp><EnvironmentPage /></AntApp>);
+  await screen.findByText("子插件任务路由");
+  expect(screen.queryByText("普通对话 / 工具")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText("搜索配置名、分组或说明"), { target: { value: "AGENT_DIALOGUE_LLM_PROFILE" } });
+  expect(await screen.findByText("普通对话 / 工具")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /子插件任务路由/ })).toHaveAttribute("aria-expanded", "true");
+  fireEvent.change(screen.getByPlaceholderText("搜索配置名、分组或说明"), { target: { value: "hidden-secret" } });
+  expect(await screen.findByText("没有匹配的配置项")).toBeInTheDocument();
 });

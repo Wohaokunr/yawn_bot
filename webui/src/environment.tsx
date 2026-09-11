@@ -76,7 +76,6 @@ export function EnvironmentPage(): React.JSX.Element {
   const [expanded, setExpanded] = useState<string[]>([
     PROVIDER_PANEL_KEY,
     LLM_PANEL_KEY,
-    TASK_PANEL_KEY,
   ]);
 
   const nonLlmEntries = useMemo(
@@ -232,7 +231,7 @@ export function EnvironmentPage(): React.JSX.Element {
       setProviderChanges(null);
       setPreviewOpen(false);
       query.reload();
-      if (data.restartRequired) message.success("环境配置已保存，重启 YawnBot 后生效");
+      if (data.restartRequired) message.success("环境配置已写入根 .env，重启 YawnBot 后生效");
       if (data.updatedKeys.includes("WEBUI_ADMIN_TOKEN")) {
         message.warning("重启后当前管理会话将失效，请使用新 Token 登录");
       }
@@ -255,18 +254,37 @@ export function EnvironmentPage(): React.JSX.Element {
     }
   };
 
-  /* 搜索命中哪个分组就自动展开哪个,避免命中内容被折叠藏住 */
+  const configPanel = (key: string, section: string): string =>
+    TASK_PANEL_KEYS.some((item) => item === key) ? TASK_PANEL_KEY : MODEL_PANEL_KEYS.some((item) => item === key) ? LLM_PANEL_KEY
+      : LLM_CONFIG_KEYS.has(key) ? PROVIDER_PANEL_KEY : section;
+  const searchTargets = [
+    ...(query.data?.entries ?? []).map((item) => ({
+      key: item.key, label: `${item.key} · ${item.description}`, section: item.section,
+      panel: configPanel(item.key, item.section),
+    })),
+    ...providerDrafts.map((provider) => ({ key: `provider-${provider.draftKey}`,
+      label: `LLM 提供商 ${provider.id} · Base URL 与密钥`, section: "LLM 提供商", panel: PROVIDER_PANEL_KEY })),
+  ];
+  const needle = search.trim().toLocaleLowerCase();
+  const panelTitles: Record<string, string> = {
+    [PROVIDER_PANEL_KEY]: "LLM 提供商 Base URL 密钥",
+    [LLM_PANEL_KEY]: "LLM 模型档位",
+    [TASK_PANEL_KEY]: "子插件任务路由",
+  };
+  const matchesFor = (value: string) => searchTargets.filter((item) =>
+    `${item.label} ${item.section} ${panelTitles[item.panel] ?? ""}`.toLocaleLowerCase().includes(value.trim().toLocaleLowerCase()));
+  const searchMatches = needle ? matchesFor(search) : [];
+  const matchedPanels = new Set(searchMatches.map((item) => item.panel));
   const handleSearchChange = (value: string) => {
     setSearch(value);
-    if (!value.trim()) return;
-    const matched = new Set(
-      filterEnvironmentEntries(nonLlmEntries, value).map((item) => item.section),
-    );
-    if (matched.size === 0) return;
-    setExpanded((current) => {
-      const next = new Set(current);
-      for (const section of matched) next.add(section);
-      return next.size === current.length ? current : [...next];
+    if (value.trim()) setExpanded((current) => [...new Set([...current, ...matchesFor(value).map((item) => item.panel)])]);
+  };
+  const locateMatch = (key: string, panel: string) => {
+    setExpanded((current) => [...new Set([...current, panel])]);
+    requestAnimationFrame(() => {
+      const target = document.getElementById(`env-${key}`) ?? document.getElementById(`env-panel-${panel}`);
+      target?.scrollIntoView({ block: "center" });
+      target?.focus({ preventScroll: true });
     });
   };
 
@@ -332,7 +350,7 @@ export function EnvironmentPage(): React.JSX.Element {
       width: 260,
       render: (key: string, item) => (
         <Space orientation="vertical" size={2}>
-          <Text code copyable>{key}</Text>
+          <Text id={`env-${key}`} tabIndex={-1} code copyable>{key}</Text>
           {item.description && <Text type="secondary">{item.description}</Text>}
         </Space>
       ),
@@ -377,7 +395,7 @@ export function EnvironmentPage(): React.JSX.Element {
     const item = entryByKey.get(key);
     if (!item) return null;
     return (
-      <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Space id={`env-${key}`} tabIndex={-1} orientation="vertical" size={4} style={{ width: "100%" }}>
         <Space size={4} wrap>
           <Text strong>{label}</Text>
           <Text code>{key}</Text>
@@ -392,7 +410,7 @@ export function EnvironmentPage(): React.JSX.Element {
     const item = entryByKey.get(key);
     if (!item) return null;
     return (
-      <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+      <Space id={`env-${key}`} tabIndex={-1} orientation="vertical" size={4} style={{ width: "100%" }}>
         <Space size={4} wrap>
           <Text strong>提供商</Text>
           <Text code>{key}</Text>
@@ -458,7 +476,7 @@ export function EnvironmentPage(): React.JSX.Element {
           testedAt: new Date().toLocaleString(),
         },
       }));
-      message.success(`连接成功，耗时 ${data.latencyMs.toFixed(1)} ms`);
+      message.success(`连接测试成功，耗时 ${data.latencyMs.toFixed(1)} ms；测试不会保存配置或使配置生效`);
     } catch (reason) {
       const errorMessage = reason instanceof Error ? reason.message : "连接测试失败";
       setTestResults((current) => ({
@@ -477,7 +495,7 @@ export function EnvironmentPage(): React.JSX.Element {
 
   const providerCards = (
     <Row gutter={[16, 16]}>
-      {providerDrafts.map((provider) => <Col xs={24} lg={12} xl={8} key={provider.draftKey}>
+      {providerDrafts.map((provider) => <Col id={`env-provider-${provider.draftKey}`} tabIndex={-1} xs={24} lg={12} xl={8} key={provider.draftKey}>
         <ProviderEditor
           provider={provider}
           usage={providerUsage(provider.id)}
@@ -632,13 +650,6 @@ export function EnvironmentPage(): React.JSX.Element {
         title="敏感配置只允许替换，不会从服务端回显"
         description={`当前环境：${query.data?.environment ?? "—"}。进程环境变量或 ${query.data?.environmentFile ?? ".env.<ENVIRONMENT>"} 的值优先于根 .env。`}
       />
-      <Collapse
-        ghost
-        className="env-collapse"
-        activeKey={expanded}
-        onChange={setExpanded}
-        items={llmItems}
-      />
       <Space size={12} wrap>
         <Input.Search
           className="env-search"
@@ -650,8 +661,18 @@ export function EnvironmentPage(): React.JSX.Element {
         <Button size="small" onClick={() => setExpanded(allPanelKeys)}>全部展开</Button>
         <Button size="small" onClick={() => setExpanded([])}>全部收起</Button>
       </Space>
+      {needle && searchMatches.length > 0 && <Space wrap aria-label="配置搜索结果">
+        {searchMatches.map((item) => <Button key={item.key} size="small" onClick={() => locateMatch(item.key, item.panel)}>{item.label}</Button>)}
+      </Space>}
+      <Collapse
+        ghost
+        className="env-collapse"
+        activeKey={expanded}
+        onChange={setExpanded}
+        items={llmItems.filter((item) => !needle || matchedPanels.has(String(item.key))).map((item) => ({ ...item, children: <div id={`env-panel-${item.key}`} tabIndex={-1}>{item.children}</div> }))}
+      />
       {query.error && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
-      {!query.loading && groups.length === 0 && <Empty description="没有匹配的配置项" />}
+      {!query.loading && needle && searchMatches.length === 0 && <Empty description="没有匹配的配置项" />}
       {groups.length > 0 && (
         <Collapse
           ghost

@@ -12,6 +12,7 @@ import {
   Input,
   InputNumber,
   List,
+  Menu,
   Popconfirm,
   Progress,
   Row,
@@ -99,27 +100,51 @@ export function AgentGroupsPage(): React.JSX.Element {
   }</Card></>;
 }
 
+const AGENT_SECTIONS = [
+  { label: "运行", items: [["overview", "运行诊断"], ["messages", "消息记录"], ["debug", "对话调试"], ["audit", "工具审计"]] },
+  { label: "配置", items: [["config", "运行配置"], ["persona", "人设"]] },
+  { label: "数据与隐私", items: [["memories", "记忆"], ["profiles", "成员画像"], ["relations", "关系"], ["privacy", "隐私退出"]] },
+];
+
 export function AgentDetailPage(): React.JSX.Element {
   const { listSuffix } = useListLocation();
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = searchParams.get("tab") ?? "overview";
-  const changeTab = (key: string) => {
-    if (!confirmDiscardChanges()) return;
-    setSearchParams(key === "overview" ? {} : { tab: key }, { replace: true });
+  const requestedTab = searchParams.get("tab") ?? "overview";
+  const panels: Record<string, React.ReactNode> = {
+    overview: <AgentOverviewPanel groupId={groupId} />,
+    config: <AgentConfigPanel groupId={groupId} />,
+    persona: <PersonaPanel groupId={groupId} />,
+    memories: <MemoriesPanel groupId={groupId} />,
+    profiles: <MemberProfilesPanel groupId={groupId} />,
+    relations: <RelationsPanel groupId={groupId} />,
+    messages: <AgentMessagesPanel groupId={groupId} />,
+    debug: <AgentDebugger groupId={groupId} />,
+    privacy: <PrivacyPanel groupId={groupId} />,
+    audit: <AgentAuditsPanel groupId={groupId} />,
   };
-  return <><PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理" extra={<Link to={`/agent${listSuffix}`}>返回 Agent 列表</Link>} /><Tabs destroyOnHidden activeKey={tab} onChange={changeTab} items={[
-    { key: "overview", label: "运行诊断", children: <AgentOverviewPanel groupId={groupId} /> },
-    { key: "config", label: "运行配置", children: <AgentConfigPanel groupId={groupId} /> },
-    { key: "persona", label: "人设", children: <PersonaPanel groupId={groupId} /> },
-    { key: "memories", label: "记忆", children: <MemoriesPanel groupId={groupId} /> },
-    { key: "profiles", label: "成员画像", children: <MemberProfilesPanel groupId={groupId} /> },
-    { key: "relations", label: "关系边", children: <RelationsPanel groupId={groupId} /> },
-    { key: "messages", label: "消息记录", children: <AgentMessagesPanel groupId={groupId} /> },
-    { key: "debug", label: "对话调试", children: <AgentDebugger groupId={groupId} /> },
-    { key: "privacy", label: "隐私退出", children: <PrivacyPanel groupId={groupId} /> },
-    { key: "audit", label: "工具审计", children: <AgentAuditsPanel groupId={groupId} /> },
-  ]} /></>;
+  const tab = Object.hasOwn(panels, requestedTab) ? requestedTab : "overview";
+  const changeTab = (key: string) => {
+    if (key === tab || !confirmDiscardChanges()) return;
+    const next = new URLSearchParams(searchParams);
+    if (key === "overview") next.delete("tab"); else next.set("tab", key);
+    setSearchParams(next, { replace: true });
+  };
+  return <>
+    <PageHeader title={`Agent · ${groupId}`} subtitle="群级运行状态、配置、人设、记忆与数据治理"
+      extra={<Link to={`/agent${listSuffix}`}>返回 Agent 列表</Link>} />
+    <div className="agent-detail-layout">
+      <nav className="agent-detail-nav" aria-label="Agent 管理分组">
+        <Menu mode="inline" selectedKeys={[tab]} onClick={({ key }) => changeTab(key)}
+          items={AGENT_SECTIONS.map((section) => ({ type: "group", label: section.label,
+            children: section.items.map(([key, label]) => ({ key, label })) }))} />
+      </nav>
+      <Select className="agent-detail-select" aria-label="选择 Agent 管理页面" value={tab} onChange={changeTab}
+        options={AGENT_SECTIONS.map((section) => ({ label: section.label,
+          options: section.items.map(([value, label]) => ({ value, label })) }))} />
+      <div className="agent-detail-content" key={`${groupId}:${tab}`}>{panels[tab]}</div>
+    </div>
+  </>;
 }
 
 const LLM_TASK_LABELS: Record<string, string> = {
