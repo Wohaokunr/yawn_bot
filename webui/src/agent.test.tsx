@@ -10,8 +10,10 @@ import {
   personaDraftSummary,
   PROFILE_KEY_META,
   profileKeyLabel,
+  traceMatchesFilter,
+  traceProblems,
 } from "./agent";
-import type { PersonaPreset, PersonaProfile } from "./types";
+import type { AgentExecutionTrace, PersonaPreset, PersonaProfile } from "./types";
 
 describe("MEMORY_TYPE_META", () => {
   it("覆盖后端 memory_type 的全部已知取值，防止口径漂移", () => {
@@ -97,6 +99,128 @@ describe("debugMessageLabel", () => {
       receivedAt: null,
       expiresAt: null,
     })).toBe("小明 · 到底有没有一起玩");
+  });
+});
+
+describe("traceMatchesFilter", () => {
+  const baseTrace: AgentExecutionTrace = {
+    traceId: "trace-abc-123",
+    groupId: "10",
+    mode: "dialogue",
+    source: "runtime",
+    triggerSource: "mention",
+    actorUserId: "10001",
+    messageId: "9988",
+    startedAt: "2026-09-03T10:00:00+08:00",
+    status: "completed",
+    outcome: "success",
+    durationMs: 128.4,
+    events: [
+      {
+        id: "e1",
+        phase: "llm",
+        label: "模型调用",
+        status: "success",
+        offsetMs: 20,
+        durationMs: 80,
+        input: {},
+        output: {},
+        detail: null,
+        round: null,
+      },
+      {
+        id: "e2",
+        phase: "tool",
+        label: "工具 get_message",
+        status: "success",
+        offsetMs: 100,
+        durationMs: 10,
+        input: {},
+        output: { ok: true },
+        detail: null,
+        round: 1,
+      },
+      {
+        id: "e3",
+        phase: "media",
+        label: "媒体投影",
+        status: "degraded",
+        offsetMs: 110,
+        durationMs: 8,
+        input: {},
+        output: {},
+        detail: "降级为 URL",
+        round: null,
+      },
+    ],
+  };
+
+  it("支持 Trace ID、message ID 与 actor 搜索", () => {
+    expect(traceMatchesFilter(baseTrace, "all", "abc-123")).toBe(true);
+    expect(traceMatchesFilter(baseTrace, "all", "9988")).toBe(true);
+    expect(traceMatchesFilter(baseTrace, "all", "10001")).toBe(true);
+    expect(traceMatchesFilter(baseTrace, "all", "not-found")).toBe(false);
+  });
+
+  it("按工具、媒体与降级状态筛选", () => {
+    expect(traceMatchesFilter(baseTrace, "tool")).toBe(true);
+    expect(traceMatchesFilter(baseTrace, "media")).toBe(true);
+    expect(traceMatchesFilter(baseTrace, "degraded")).toBe(true);
+    expect(traceMatchesFilter(baseTrace, "failed")).toBe(false);
+    expect(traceMatchesFilter(baseTrace, "outbound")).toBe(false);
+  });
+
+  it("发送失败会进入失败与发送异常筛选", () => {
+    const failedTrace: AgentExecutionTrace = {
+      ...baseTrace,
+      traceId: "trace-failed",
+      outcome: "delivery_unknown",
+      events: [
+        ...baseTrace.events,
+        {
+          id: "e4",
+          phase: "outbound",
+          label: "OneBot 发送",
+          status: "failed",
+          offsetMs: 120,
+          durationMs: 6,
+          input: {},
+          output: { delivery_state: "confirmed_failure" },
+          detail: "OneBot 返回失败",
+          round: null,
+        },
+      ],
+    };
+    expect(traceMatchesFilter(failedTrace, "failed")).toBe(true);
+    expect(traceMatchesFilter(failedTrace, "outbound")).toBe(true);
+  });
+});
+
+describe("traceProblems", () => {
+  it("识别降级、未知投递和连续 discover_tools，并定位到事件", () => {
+    const trace: AgentExecutionTrace = {
+      traceId: "problem-trace",
+      groupId: "10",
+      mode: "dialogue",
+      source: "runtime",
+      triggerSource: "mention",
+      actorUserId: "10001",
+      messageId: "88",
+      startedAt: "2026-09-03T10:00:00+08:00",
+      status: "completed",
+      outcome: "delivery_unknown",
+      durationMs: 100,
+      events: [
+        { id: "e1", phase: "media", label: "媒体处理", status: "degraded", offsetMs: 1, durationMs: 1, input: {}, output: {}, detail: "降级为 URL", round: null },
+        { id: "e2", phase: "tool", label: "工具 discover_tools", status: "success", offsetMs: 2, durationMs: 1, input: {}, output: {}, detail: null, round: 1 },
+        { id: "e3", phase: "tool", label: "工具 discover_tools", status: "success", offsetMs: 3, durationMs: 1, input: {}, output: {}, detail: null, round: 2 },
+        { id: "e4", phase: "outbound", label: "发送", status: "unknown", offsetMs: 4, durationMs: 1, input: {}, output: { delivery_state: "unknown" }, detail: null, round: null },
+      ],
+    };
+    const problems = traceProblems(trace);
+    expect(problems.some((item) => item.label === "媒体处理降级" && item.eventId === "e1")).toBe(true);
+    expect(problems.some((item) => item.label === "discover_tools 连续调用" && item.eventId === "e3")).toBe(true);
+    expect(problems.some((item) => item.label === "消息投递结果未知" && item.eventId === "e4")).toBe(true);
   });
 });
 

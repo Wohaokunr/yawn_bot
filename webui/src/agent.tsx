@@ -24,7 +24,6 @@ import {
   Table,
   Tabs,
   Tag,
-  Timeline,
   Typography,
 } from "antd";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
@@ -52,11 +51,13 @@ import type {
   AgentDebugResponse,
   AgentDiagnostics,
   AgentExecutionTrace,
+  AgentExecutionTraceSummary,
   AgentMemoryStatus,
   AgentMessageItem,
   AgentRelationGraph,
   AgentRelationItem,
   GroupSummary,
+  Member,
   MemoryItem,
   MemorySubjectItem,
   Persona,
@@ -2341,50 +2342,414 @@ const TRACE_STATUS_META: Record<string, { label: string; color: string }> = {
   skipped: { label: "跳过", color: "default" },
 };
 
-function ExecutionTraceView({ trace, compact = false }: { trace: AgentExecutionTrace; compact?: boolean }): React.JSX.Element {
-  const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
-  const visibleEvents = compact ? trace.events.slice(-12) : trace.events;
-  return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
-      { key: "source", label: "执行来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
-      { key: "trigger", label: "触发原因", children: trace.triggerSource ? <Tag color="blue">{triggerSourceLabel(trace.triggerSource)}</Tag> : "—" },
-      { key: "status", label: "状态", children: <Tag color={status.color}>{status.label}</Tag> },
-      { key: "outcome", label: "结果", children: traceOutcomeLabel(trace.outcome) },
-      { key: "duration", label: "总耗时", children: trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(1)} ms` },
-      { key: "actor", label: "发言人", children: trace.actorUserId ? <Text code>{trace.actorUserId}</Text> : "—" },
-      { key: "message", label: "触发消息", children: trace.messageId ? <Text code>{trace.messageId}</Text> : "—" },
-      { key: "trace", label: "Trace", children: <Text code>{trace.traceId.slice(0, 12)}</Text> },
-    ]} />
-    {compact && trace.events.length > visibleEvents.length && <Alert type="info" showIcon message={`仅显示最后 ${visibleEvents.length} / ${trace.events.length} 个事件`} />}
-    <Timeline
-      items={visibleEvents.map((event) => {
-        const eventMeta = TRACE_STATUS_META[event.status] ?? { label: event.status, color: "default" };
-        const hasInput = Object.keys(event.input ?? {}).length > 0;
-        const hasOutput = Object.keys(event.output ?? {}).length > 0;
-        return {
-          color: event.status === "failed" ? "red" : event.status === "degraded" || event.status === "unknown" ? "orange" : event.status === "success" ? "green" : "blue",
-          children: <div className="agent-debug-list-item">
-            <Space wrap>
-              <Tag>{TRACE_PHASE_LABELS[event.phase] ?? event.phase}</Tag>
-              <Text strong>{event.label}</Text>
-              <Tag color={eventMeta.color}>{eventMeta.label}</Tag>
-              {event.round != null && <Tag>第 {event.round} 轮</Tag>}
-              <Text type="secondary">+{event.offsetMs.toFixed(1)} ms</Text>
-              {event.durationMs != null && <Text type="secondary">耗时 {event.durationMs.toFixed(1)} ms</Text>}
-            </Space>
-            <TraceHumanSummary event={event} />
-            {event.detail && <Text type={event.status === "failed" ? "danger" : "secondary"}>{event.detail}</Text>}
-            <TraceDiagnosticFields input={event.input ?? {}} output={event.output ?? {}} />
-            {(hasInput || hasOutput) && <details className="agent-debug-details">
-              <summary>查看原始诊断字段（JSON，备用）</summary>
-              {hasInput && <><Text type="secondary">输入</Text><DebugRawBlock value={event.input} /></>}
-              {hasOutput && <><Text type="secondary">输出</Text><DebugRawBlock value={event.output} /></>}
-            </details>}
-          </div>,
-        };
+type AgentTraceFilter = "all" | "failed" | "degraded" | "tool" | "media" | "outbound";
+
+interface AgentTraceProblem {
+  key: string;
+  eventId: string;
+  label: string;
+  detail: string;
+  severity: "error" | "warning";
+}
+
+const TRACE_FILTER_OPTIONS: Array<{ value: AgentTraceFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "failed", label: "失败" },
+  { value: "degraded", label: "降级" },
+  { value: "tool", label: "工具" },
+  { value: "media", label: "媒体" },
+  { value: "outbound", label: "发送异常" },
+];
+
+const TRACE_PIPELINE_STAGES: Array<{ key: string; label: string; phases: string[] }> = [
+  { key: "input", label: "输入", phases: ["parse", "intake"] },
+  { key: "context", label: "上下文", phases: ["context"] },
+  { key: "capability", label: "能力", phases: ["capability"] },
+  { key: "media", label: "媒体", phases: ["media"] },
+  { key: "prompt", label: "Prompt", phases: ["prompt"] },
+  { key: "llm", label: "模型", phases: ["llm"] },
+  { key: "tool", label: "工具", phases: ["tool"] },
+  { key: "speech", label: "Speech", phases: ["speech"] },
+  { key: "outbound", label: "发送", phases: ["outbound"] },
+  { key: "state", label: "状态", phases: ["state", "turn"] },
+];
+
+function traceEventIsProblem(event: AgentExecutionTrace["events"][number]): boolean {
+  return ["failed", "degraded", "unknown"].includes(event.status);
+}
+
+export function traceProblems(trace: AgentExecutionTrace): AgentTraceProblem[] {
+  const problems: AgentTraceProblem[] = [];
+  const add = (problem: AgentTraceProblem): void => {
+    if (!problems.some((item) => item.key === problem.key)) problems.push(problem);
+  };
+  trace.events.forEach((event) => {
+    if (!traceEventIsProblem(event)) return;
+    const output = debugRecord(event.output);
+    const input = debugRecord(event.input);
+    const errorText = String(output.error_message ?? input.error_message ?? event.detail ?? traceCompactEventSummary(event));
+    let label = `${TRACE_PHASE_LABELS[event.phase] ?? event.phase}异常`;
+    if (event.phase === "media" && event.status !== "failed") label = "媒体处理降级";
+    if (event.phase === "outbound") label = event.status === "failed" ? "消息发送失败" : "消息投递异常";
+    if (event.phase === "state") label = "状态写入失败";
+    add({
+      key: `event:${event.id}`,
+      eventId: event.id,
+      label,
+      detail: errorText,
+      severity: event.status === "failed" ? "error" : "warning",
+    });
+  });
+  trace.events.forEach((event) => {
+    if (event.phase !== "outbound") return;
+    const deliveryState = String(debugRecord(event.output).delivery_state ?? "");
+    if (deliveryState === "unknown") {
+      add({ key: `delivery:${event.id}`, eventId: event.id, label: "消息投递结果未知", detail: "OneBot 没有返回可确认的成功或失败状态。", severity: "warning" });
+    }
+  });
+  let previousDiscover: AgentExecutionTrace["events"][number] | null = null;
+  trace.events.forEach((event) => {
+    if (event.phase !== "tool") {
+      previousDiscover = null;
+      return;
+    }
+    const name = event.label.replace(/^工具\s+/, "").replace(/^工具意图\s+/, "");
+    if (name !== "discover_tools") {
+      previousDiscover = null;
+      return;
+    }
+    if (previousDiscover) {
+      add({ key: `discover-loop:${event.id}`, eventId: event.id, label: "discover_tools 连续调用", detail: `连续两个工具事件都是 discover_tools（${previousDiscover.id} → ${event.id}）。`, severity: "warning" });
+    }
+    previousDiscover = event;
+  });
+  return problems;
+}
+
+function traceHasFailure(trace: AgentExecutionTrace): boolean {
+  return trace.status === "failed"
+    || ["error", "timeout"].includes(String(trace.outcome ?? ""))
+    || trace.events.some((event) => event.status === "failed");
+}
+
+function traceHasDegradation(trace: AgentExecutionTrace): boolean {
+  return String(trace.outcome ?? "") === "delivery_unknown"
+    || trace.events.some((event) => ["degraded", "unknown"].includes(event.status));
+}
+
+function traceHasOutboundProblem(trace: AgentExecutionTrace): boolean {
+  return trace.events.some((event) => {
+    if (event.phase !== "outbound") return false;
+    const deliveryState = String(debugRecord(event.output).delivery_state ?? "");
+    return traceEventIsProblem(event) || ["confirmed_failure", "unknown"].includes(deliveryState);
+  });
+}
+
+export function traceMatchesFilter(trace: AgentExecutionTrace | AgentExecutionTraceSummary, filter: AgentTraceFilter, search = ""): boolean {
+  const query = search.trim().toLowerCase();
+  if (query) {
+    const haystack = [
+      trace.traceId,
+      trace.messageId,
+      trace.actorUserId,
+      trace.mode,
+      trace.triggerSource,
+      trace.outcome,
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (!haystack.includes(query)) return false;
+  }
+  if (filter === "failed") return trace.status === "failed" || trace.outcome === "error";
+  if (filter === "degraded") return trace.status === "degraded" || trace.outcome === "degraded";
+  if ("events" in trace) {
+    if (filter === "tool") return trace.events.some((event) => event.phase === "tool");
+    if (filter === "media") return trace.events.some((event) => event.phase === "media");
+    if (filter === "outbound") return traceHasOutboundProblem(trace);
+  }
+  return true;
+}
+
+function traceVisualStatus(trace: AgentExecutionTrace | AgentExecutionTraceSummary): { label: string; color: string; kind: string } {
+  if (trace.status === "failed" || trace.outcome === "error") return { label: "失败", color: "red", kind: "failed" };
+  if (trace.status === "degraded" || trace.outcome === "degraded") return { label: "降级", color: "orange", kind: "degraded" };
+  if ("events" in trace && traceHasFailure(trace)) return { label: "失败", color: "red", kind: "failed" };
+  if ("events" in trace && traceHasDegradation(trace)) return { label: "降级", color: "orange", kind: "degraded" };
+  if (trace.status === "running") return { label: "执行中", color: "processing", kind: "running" };
+  return { label: "成功", color: "green", kind: "success" };
+}
+
+function traceTrigger(trace: AgentExecutionTrace): string {
+  if (trace.triggerSource) return triggerSourceLabel(trace.triggerSource);
+  for (const event of trace.events) {
+    if (!["parse", "intake"].includes(event.phase)) continue;
+    const output = debugRecord(event.output);
+    const candidate = output.trigger_source ?? output.trigger;
+    if (candidate) return triggerSourceLabel(candidate);
+  }
+  return "—";
+}
+
+function traceUsage(trace: AgentExecutionTrace): { prompt: number | null; completion: number | null; cached: number | null } {
+  const llmEvents = trace.events.filter((event) => event.phase === "llm").reverse();
+  for (const event of llmEvents) {
+    const usage = debugRecord(debugRecord(event.output).usage);
+    const turn = debugRecord(usage.turn);
+    const request = debugRecord(usage.request);
+    const source = Object.keys(turn).length > 0 ? turn : Object.keys(request).length > 0 ? request : usage;
+    const prompt = source.prompt_tokens ?? source.promptTokens;
+    const completion = source.completion_tokens ?? source.completionTokens;
+    const cached = source.cached_tokens ?? source.cachedTokens;
+    if ([prompt, completion, cached].some((value) => typeof value === "number")) {
+      return {
+        prompt: typeof prompt === "number" ? prompt : null,
+        completion: typeof completion === "number" ? completion : null,
+        cached: typeof cached === "number" ? cached : null,
+      };
+    }
+  }
+  return { prompt: null, completion: null, cached: null };
+}
+
+function outboundEventLabel(event: AgentExecutionTrace["events"][number]): string {
+  const output = debugRecord(event.output);
+  const state = String(output.delivery_state ?? "");
+  if (state) return DELIVERY_STATE_LABELS[state] ?? state;
+  if (event.status === "skipped") return "未发送";
+  if (event.status === "failed") return "发送失败";
+  if (event.status === "degraded") return "降级发送";
+  return "发送阶段完成";
+}
+
+function traceOutboundLabel(trace: AgentExecutionTrace): string {
+  const event = [...trace.events].reverse().find((item) => item.phase === "outbound");
+  return event ? outboundEventLabel(event) : "未进入发送";
+}
+
+function traceCompactEventSummary(event: AgentExecutionTrace["events"][number]): string {
+  const input = debugRecord(event.input);
+  const output = debugRecord(event.output);
+  if (event.phase === "parse" || event.phase === "intake") {
+    const trigger = output.trigger_source ?? output.trigger;
+    if (trigger) return `触发：${triggerSourceLabel(trigger)}`;
+    const media = traceMetric(output.media_refs ?? output.media_refs_total);
+    return media > 0 ? `发现 ${media} 个媒体引用` : "输入已归一化";
+  }
+  if (event.phase === "context") return `${traceMetric(output.messages)} 条消息 · ${traceMetric(output.memories)} 条记忆 · ${traceMetric(output.relations)} 条关系`;
+  if (event.phase === "capability") return `开放 ${traceMetric(output.tool_count)} 个工具${traceMetric(output.round_limit) > 0 ? ` · 最多 ${traceMetric(output.round_limit)} 轮` : ""}`;
+  if (event.phase === "media") return `${traceMetric(output.delivered_media, traceMetric(output.vision_blocks))} 个媒体进入模型 · 缓存命中 ${traceMetric(output.cached_captions)}`;
+  if (event.phase === "prompt") return `${traceMetric(output.message_count)} 条 Prompt 消息${output.prompt_cache ? ` · 缓存 ${String(output.prompt_cache)}` : ""}`;
+  if (event.phase === "llm") {
+    const tools = stringArray(output.tool_calls);
+    return `${output.model ? String(output.model) : "模型调用"}${typeof output.content_chars === "number" ? ` · ${output.content_chars} 字符` : ""}${tools.length ? ` · ${tools.length} 个工具意图` : ""}`;
+  }
+  if (event.phase === "tool") {
+    const toolName = event.label.replace(/^工具\s+/, "").replace(/^工具意图\s+/, "");
+    return `${toolDisplayName(toolName)} · ${output.executed === false ? "仅计划，未执行" : output.ok === false ? "执行失败" : "执行完成"}`;
+  }
+  if (event.phase === "speech") return `${String(output.action ?? "speak")} · ${String(output.scene ?? "conversation")} · ${String(output.act ?? "continue")}`;
+  if (event.phase === "outbound") return outboundEventLabel(event);
+  if (event.phase === "state") return event.status === "skipped" ? "调试执行不写入状态" : "状态写入完成";
+  if (event.phase === "turn") return `结果：${traceOutcomeLabel(output.outcome)}`;
+  if (event.detail) return event.detail;
+  const error = output.error_message ?? input.error_message;
+  return error ? String(error) : "阶段完成";
+}
+
+function traceStageStatus(events: AgentExecutionTrace["events"]): { label: string; kind: string } {
+  if (events.some((event) => event.status === "failed")) return { label: "失败", kind: "failed" };
+  if (events.some((event) => ["degraded", "unknown"].includes(event.status))) return { label: "降级", kind: "degraded" };
+  if (events.some((event) => ["success", "completed"].includes(event.status))) return { label: "完成", kind: "success" };
+  if (events.length > 0 && events.every((event) => event.status === "skipped")) return { label: "跳过", kind: "skipped" };
+  if (events.length > 0) return { label: "经过", kind: "planned" };
+  return { label: "未经过", kind: "empty" };
+}
+
+function TracePipelineView({ trace, selectedEventId, onSelectEvent, debugResult }: {
+  trace: AgentExecutionTrace;
+  selectedEventId: string | null;
+  onSelectEvent: (event: AgentExecutionTrace["events"][number]) => void;
+  debugResult?: AgentDebugResponse | null;
+}): React.JSX.Element {
+  const visual = traceVisualStatus(trace);
+  const usage = traceUsage(trace);
+  const toolEvents = trace.events.filter((event) => event.phase === "tool");
+  const llmInvoked = trace.events.some((event) => event.phase === "llm" && event.status !== "skipped");
+  const problems = traceProblems(trace);
+  const cacheRate = usage.prompt && usage.cached != null ? Math.round((usage.cached / usage.prompt) * 100) : null;
+  const finalAction = debugResult
+    ? debugResult.result?.toolCalls.length
+      ? `工具调用 · ${debugResult.result.toolCalls.length}`
+      : debugResult.speechSimulation.should_speak === true
+        ? "发言"
+        : debugResult.speechSimulation.should_speak === false
+          ? "保持沉默"
+          : "仅策略预览"
+    : traceOutcomeLabel(trace.outcome ?? trace.status);
+  return <div className="agent-trace-workspace">
+    <div className="agent-trace-summary-head">
+      <div>
+        <Space wrap size={[6, 6]}>
+          <Tag color={visual.color}>{visual.label}</Tag>
+          <Tag>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag>
+          <Tag color="blue">{agentDebugModeLabel(trace.mode)}</Tag>
+          <Text type="secondary">{traceTrigger(trace)}</Text>
+        </Space>
+        <div className="agent-trace-summary-title">{finalAction}</div>
+        <Space wrap size={8}>
+          <Text type="secondary">Trace <Text code>{trace.traceId.slice(0, 12)}</Text>{trace.messageId ? <> · 消息 <Text code>{trace.messageId}</Text></> : null}</Text>
+          {trace.messageId ? <Link to={`/agent/${trace.groupId}?tab=messages&messageId=${encodeURIComponent(trace.messageId)}`}>原消息</Link> : null}
+          <Link to={`/agent/${trace.groupId}?tab=config`}>运行配置</Link>
+          <Link to={`/agent/${trace.groupId}?tab=persona`}>人设配置</Link>
+        </Space>
+      </div>
+      <div className="agent-trace-summary-duration">{trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(1)} ms`}</div>
+    </div>
+    <div className="agent-trace-metrics">
+      <div><span>模型</span><strong>{llmInvoked ? "已调用" : "未调用"}</strong></div>
+      <div><span>工具</span><strong>{toolEvents.length ? `${toolEvents.length} 次` : "无"}</strong></div>
+      <div><span>发送</span><strong>{traceOutboundLabel(trace)}</strong></div>
+      <div><span>异常</span><strong className={problems.length ? "is-problem" : ""}>{problems.length ? `${problems.length} 项` : "无"}</strong></div>
+      <div><span>Token</span><strong>{usage.prompt == null ? "—" : `${usage.prompt} → ${usage.completion ?? "—"}`}</strong></div>
+      <div><span>缓存</span><strong>{cacheRate == null ? "—" : `${cacheRate}%`}</strong></div>
+    </div>
+    {problems.length > 0 && <div className="agent-trace-problem-nav">
+      <div className="agent-trace-problem-head"><Text strong>发现 {problems.length} 个问题</Text><Text type="secondary">优先检查这些事件</Text></div>
+      <div className="agent-trace-problem-list">
+        {problems.map((problem) => {
+          const event = trace.events.find((item) => item.id === problem.eventId);
+          if (!event) return null;
+          return <button key={problem.key} type="button" className={`agent-trace-problem-item is-${problem.severity}`} onClick={() => onSelectEvent(event)}>
+            <span>{problem.label}</span><small>{problem.detail}</small>
+          </button>;
+        })}
+      </div>
+    </div>}
+    <div className="agent-trace-pipeline" aria-label="执行阶段">
+      {TRACE_PIPELINE_STAGES.map((stage) => {
+        const events = trace.events.filter((event) => stage.phases.includes(event.phase));
+        const status = traceStageStatus(events);
+        return <div key={stage.key} className={`agent-trace-stage is-${status.kind}`}>
+          <span className="agent-trace-stage-dot" />
+          <span>{stage.label}</span>
+          <small>{status.label}</small>
+        </div>;
       })}
-    />
-  </Space>;
+    </div>
+    <div className="agent-trace-event-list">
+      {trace.events.map((event) => {
+        const meta = TRACE_STATUS_META[event.status] ?? { label: event.status, color: "default" };
+        const problem = traceEventIsProblem(event);
+        const errorMessage = debugRecord(event.output).error_message ?? debugRecord(event.input).error_message;
+        return <button
+          type="button"
+          key={event.id}
+          id={`trace-event-${event.id}`}
+          className={`agent-trace-event-row${selectedEventId === event.id ? " is-selected" : ""}${problem ? " is-problem" : ""}`}
+          onClick={() => onSelectEvent(event)}
+        >
+          <span className={`agent-trace-event-status is-${problem ? event.status : "normal"}`} />
+          <span className="agent-trace-event-main">
+            <span className="agent-trace-event-title">
+              <Tag>{TRACE_PHASE_LABELS[event.phase] ?? event.phase}</Tag>
+              <strong>{event.label}</strong>
+              <Tag color={meta.color}>{meta.label}</Tag>
+              {event.round != null ? <Tag>第 {event.round} 轮</Tag> : null}
+            </span>
+            <span className="agent-trace-event-summary">{traceCompactEventSummary(event)}</span>
+            {problem && <span className="agent-trace-event-problem-detail">{event.detail || (errorMessage ? String(errorMessage) : "该阶段出现异常或降级，点击查看完整诊断。")}</span>}
+          </span>
+          <span className="agent-trace-event-time">
+            {event.durationMs != null ? `${event.durationMs.toFixed(1)} ms` : `+${event.offsetMs.toFixed(1)} ms`}
+          </span>
+        </button>;
+      })}
+    </div>
+  </div>;
+}
+
+function TraceEventInspector({ trace, event }: { trace: AgentExecutionTrace; event: AgentExecutionTrace["events"][number] | null }): React.JSX.Element {
+  const { message } = AntApp.useApp();
+  if (!event) return <div className="agent-trace-inspector-empty"><AdminEmpty description="选择一个执行事件查看诊断详情" /></div>;
+  const input = event.input ?? {};
+  const output = event.output ?? {};
+  const errorText = String(debugRecord(output).error_message ?? debugRecord(input).error_message ?? event.detail ?? "").trim();
+  const copy = async (label: string, value: string): Promise<void> => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(value);
+      message.success(`${label}已复制`);
+    } catch {
+      message.error("浏览器不允许读取剪贴板，请手动复制");
+    }
+  };
+  return <div className="agent-trace-inspector-content">
+    <div className="agent-trace-inspector-head">
+      <div>
+        <Space wrap size={[6, 6]}>
+          <Tag>{TRACE_PHASE_LABELS[event.phase] ?? event.phase}</Tag>
+          <Tag color={(TRACE_STATUS_META[event.status] ?? { color: "default" }).color}>{(TRACE_STATUS_META[event.status] ?? { label: event.status }).label}</Tag>
+        </Space>
+        <div className="agent-trace-inspector-title">{event.label}</div>
+        <Text type="secondary">事件 {event.id} · +{event.offsetMs.toFixed(1)} ms{event.durationMs != null ? ` · 耗时 ${event.durationMs.toFixed(1)} ms` : ""}</Text>
+      </div>
+    </div>
+    <div className="agent-trace-copy-actions">
+      <Button size="small" onClick={() => void copy("事件 JSON", debugJson(event))}>复制事件 JSON</Button>
+      <Button size="small" onClick={() => void copy("Trace ID", trace.traceId)}>复制 Trace ID</Button>
+      <Button size="small" disabled={!errorText} onClick={() => void copy("错误信息", errorText)}>复制错误信息</Button>
+    </div>
+    <section className="agent-trace-inspector-section">
+      <Text strong>结论</Text>
+      <div className="agent-trace-inspector-summary"><TraceHumanSummary event={event} />{event.detail ? <Text type={event.status === "failed" ? "danger" : "warning"}>{event.detail}</Text> : null}</div>
+    </section>
+    <section className="agent-trace-inspector-section">
+      <Text strong>关键字段</Text>
+      <TraceDiagnosticFields input={input} output={output} />
+    </section>
+    <section className="agent-trace-inspector-section">
+      <Text strong>Input</Text>
+      <details className="agent-debug-details"><summary>展开输入 JSON</summary><DebugRawBlock value={input} /></details>
+    </section>
+    <section className="agent-trace-inspector-section">
+      <Text strong>Output</Text>
+      <details className="agent-debug-details"><summary>展开输出 JSON</summary><DebugRawBlock value={output} /></details>
+    </section>
+    <section className="agent-trace-inspector-section">
+      <Text strong>Raw</Text>
+      <details className="agent-debug-details"><summary>展开完整事件</summary><DebugRawBlock value={{ traceId: trace.traceId, event }} /></details>
+    </section>
+  </div>;
+}
+
+type DebugInspectorPane = "event" | "context" | "prompt" | "model" | "tools" | "speech";
+
+function DebugSessionInspector({ trace, event, debugResult, pane, onPaneChange }: {
+  trace: AgentExecutionTrace;
+  event: AgentExecutionTrace["events"][number] | null;
+  debugResult?: AgentDebugResponse | null;
+  pane: DebugInspectorPane;
+  onPaneChange: (pane: DebugInspectorPane) => void;
+}): React.JSX.Element {
+  const options: Array<{ value: DebugInspectorPane; label: string }> = [
+    { value: "event", label: "事件" },
+    ...(debugResult ? [
+      { value: "context" as const, label: "Context" },
+      { value: "prompt" as const, label: "Prompt" },
+      { value: "model" as const, label: "Model" },
+      { value: "tools" as const, label: "Tool" },
+      { value: "speech" as const, label: "Speech" },
+    ] : []),
+  ];
+  return <div className="agent-debug-session-inspector">
+    <Segmented block size="small" value={pane} onChange={(value) => onPaneChange(value as DebugInspectorPane)} options={options} />
+    <div className="agent-debug-session-inspector-body">
+      {pane === "event" && <TraceEventInspector trace={trace} event={event} />}
+      {pane === "context" && debugResult ? <DebugContextView context={debugResult.context} selection={debugResult.contextSelection} /> : null}
+      {pane === "prompt" && debugResult ? <DebugPromptView messages={debugResult.promptMessages} /> : null}
+      {pane === "model" && debugResult ? <DebugModelView result={debugResult.result} /> : null}
+      {pane === "tools" && debugResult ? <DebugToolsView tools={debugResult.tools} permissions={debugResult.toolPermissions} /> : null}
+      {pane === "speech" && debugResult ? <DebugSpeechSimulation value={debugResult.speechSimulation} /> : null}
+    </div>
+  </div>;
 }
 
 function DebugSpeechSimulation({ value }: { value: AgentDebugResponse["speechSimulation"] }): React.JSX.Element {
@@ -2459,46 +2824,186 @@ function DebugModelView({ result }: { result: AgentDebugResponse["result"] }): R
 
 function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const linkedMessageId = searchParams.get("messageId") ?? "";
-  const [mode, setMode] = useState<AgentDebugMode>("dialogue");
-  const [source, setSource] = useState<"history" | "simulation">(linkedMessageId ? "history" : "simulation");
+  const requestedView = searchParams.get("view");
+  const requestedMode = searchParams.get("mode");
+  const requestedSource = searchParams.get("source");
+  const [view, setView] = useState<"runtime" | "simulation">(linkedMessageId || requestedView === "simulate" || requestedView === "simulation" ? "simulation" : "runtime");
+  const [mode, setMode] = useState<AgentDebugMode>(AGENT_DEBUG_MODES.some((item) => item.value === requestedMode) ? requestedMode as AgentDebugMode : "dialogue");
+  const [source, setSource] = useState<"history" | "simulation">(linkedMessageId || requestedSource === "history" ? "history" : "simulation");
   const [messageId, setMessageId] = useState(linkedMessageId);
-  const [actorUserId, setActorUserId] = useState("");
+  const [actorUserId, setActorUserId] = useState(searchParams.get("actor") ?? "");
+  const [actorDisplayName, setActorDisplayName] = useState("");
   const [text, setText] = useState("");
   const [runModel, setRunModel] = useState(false);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<AgentDebugResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [messagePickerOpen, setMessagePickerOpen] = useState(false);
+  const [messagePickerSearch, setMessagePickerSearch] = useState("");
+  const [memberPickerOpen, setMemberPickerOpen] = useState(false);
+  const [memberSearch, setMemberSearch] = useState("");
+  const [advancedActorInput, setAdvancedActorInput] = useState(false);
+  const [inspectorPane, setInspectorPane] = useState<DebugInspectorPane>("event");
+  const patchDebugUrl = useCallback((patch: Record<string, string | null | undefined>): void => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "debug");
+    Object.entries(patch).forEach(([key, value]) => {
+      if (value == null || value === "") next.delete(key);
+      else next.set(key, value);
+    });
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   const loadMessages = useCallback(
     () => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=1&pageSize=100`).then((r) => r.data),
     [groupId],
   );
   const messagesQuery = useApiQuery(loadMessages, { resources: ["agent_group_data", "agent_privacy"] });
-  const [runtimeTraceId, setRuntimeTraceId] = useState("");
+  const loadMembers = useCallback(
+    () => api<Member[]>(`/groups/${groupId}/members?page=1&pageSize=50&search=${encodeURIComponent(memberSearch)}`).then((r) => r.data),
+    [groupId, memberSearch],
+  );
+  const membersQuery = useApiQuery(loadMembers);
+  const [runtimeTraceId, setRuntimeTraceId] = useState(searchParams.get("trace") ?? "");
+  const [traceFilter, setTraceFilter] = useState<AgentTraceFilter>("all");
+  const [traceSearch, setTraceSearch] = useState("");
+  const [traceAutoRefresh, setTraceAutoRefresh] = useState(true);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(searchParams.get("event"));
+  const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
   const loadRuntimeTraces = useCallback(
-    () => api<AgentExecutionTrace[]>(`/agent/groups/${groupId}/execution-traces`).then((r) => r.data),
+    () => api<AgentExecutionTraceSummary[]>(`/agent/groups/${groupId}/execution-traces`).then((r) => r.data),
     [groupId],
   );
   const runtimeTraceQuery = useApiQuery(loadRuntimeTraces);
-  const runtimeTrace = useMemo(
-    () => (runtimeTraceQuery.data ?? []).find((item) => item.traceId === runtimeTraceId) ?? runtimeTraceQuery.data?.[0] ?? null,
-    [runtimeTraceId, runtimeTraceQuery.data],
+  const traceDetailQuery = useApiQuery(
+    useCallback(
+      () => runtimeTraceId
+        ? api<AgentExecutionTrace>(`/agent/groups/${groupId}/execution-traces/${runtimeTraceId}`).then((r) => r.data)
+        : Promise.reject(new Error("未选择 Trace")),
+      [groupId, runtimeTraceId],
+    ),
+    { enabled: Boolean(runtimeTraceId) },
   );
   useEffect(() => {
-    if (linkedMessageId) {
-      setSource("history");
-      setMessageId(linkedMessageId);
-    }
-  }, [linkedMessageId]);
-  const messageOptions = useMemo(
-    () => (messagesQuery.data ?? []).filter((row) => row.role !== "bot").map((row) => ({ value: row.messageId, label: debugMessageLabel(row) })),
-    [messagesQuery.data],
+    if (!traceAutoRefresh) return;
+    const timer = window.setInterval(() => runtimeTraceQuery.reload(), 3000);
+    return () => window.clearInterval(timer);
+  }, [runtimeTraceQuery.reload, traceAutoRefresh]);
+  const filteredRuntimeTraces = useMemo(
+    () => (runtimeTraceQuery.data ?? []).filter((trace) => traceMatchesFilter(trace, traceFilter, traceSearch)),
+    [runtimeTraceQuery.data, traceFilter, traceSearch],
   );
+  const runtimeTrace = useMemo(
+    () => traceDetailQuery.data ?? null,
+    [traceDetailQuery.data],
+  );
+  useEffect(() => {
+    const urlView = linkedMessageId || requestedView === "simulate" || requestedView === "simulation" ? "simulation" : "runtime";
+    const urlMode = AGENT_DEBUG_MODES.some((item) => item.value === requestedMode) ? requestedMode as AgentDebugMode : "dialogue";
+    const urlSource = linkedMessageId || requestedSource === "history" ? "history" : "simulation";
+    setView(urlView);
+    setMode(urlMode);
+    setSource(urlSource);
+    if (linkedMessageId) setMessageId(linkedMessageId);
+    setRuntimeTraceId(searchParams.get("trace") ?? "");
+    setSelectedEventId(searchParams.get("event"));
+    if (searchParams.get("actor")) setActorUserId(searchParams.get("actor") ?? "");
+  }, [linkedMessageId, requestedMode, requestedSource, requestedView, searchParams]);
+  const filteredMessages = useMemo(() => {
+    const query = messagePickerSearch.trim().toLowerCase();
+    return (messagesQuery.data ?? []).filter((row) => row.role !== "bot" && (!query || [row.messageId, row.userId, row.senderName, row.text].filter(Boolean).join(" ").toLowerCase().includes(query)));
+  }, [messagePickerSearch, messagesQuery.data]);
   const selectedMessage = useMemo(
     () => (messagesQuery.data ?? []).find((row) => row.messageId === messageId) ?? null,
     [messageId, messagesQuery.data],
   );
+  const messageContext = useMemo(() => {
+    const rows = messagesQuery.data ?? [];
+    const index = rows.findIndex((row) => row.messageId === messageId);
+    if (index < 0) return [];
+    return rows.slice(Math.max(0, index - 2), Math.min(rows.length, index + 3)).reverse();
+  }, [messageId, messagesQuery.data]);
+  const activeTrace = view === "runtime" ? runtimeTrace : result?.executionTrace ?? null;
+  const selectedEvent = useMemo(
+    () => activeTrace?.events.find((event) => event.id === selectedEventId) ?? null,
+    [activeTrace, selectedEventId],
+  );
+  useEffect(() => {
+    if (!activeTrace) {
+      setSelectedEventId(null);
+      return;
+    }
+    const requestedEvent = activeTrace.events.find((event) => event.id === selectedEventId);
+    if (!requestedEvent) {
+      const firstProblem = traceProblems(activeTrace)[0];
+      const defaultEvent = (firstProblem ? activeTrace.events.find((event) => event.id === firstProblem.eventId) : null) ?? activeTrace.events[0] ?? null;
+      setSelectedEventId(defaultEvent?.id ?? null);
+      patchDebugUrl({ event: defaultEvent?.id ?? null });
+    }
+    setInspectorDrawerOpen(false);
+  }, [activeTrace?.traceId]);
+
+  useEffect(() => {
+    if (view === "runtime" && runtimeTrace && runtimeTrace.traceId !== runtimeTraceId) {
+      setRuntimeTraceId(runtimeTrace.traceId);
+      patchDebugUrl({ view: "runtime", trace: runtimeTrace.traceId, event: selectedEventId });
+    }
+  }, [runtimeTrace?.traceId, view]);
+
+  const selectEvent = (event: AgentExecutionTrace["events"][number]): void => {
+    setSelectedEventId(event.id);
+    setInspectorPane("event");
+    patchDebugUrl({ event: event.id });
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => document.getElementById(`trace-event-${event.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    }
+    if (typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 1180px)").matches) {
+      setInspectorDrawerOpen(true);
+    }
+  };
+
+  const changeView = (nextView: "runtime" | "simulation"): void => {
+    setView(nextView);
+    patchDebugUrl({
+      view: nextView === "simulation" ? "simulate" : "runtime",
+      trace: nextView === "runtime" ? runtimeTrace?.traceId ?? null : null,
+      event: nextView === "runtime" ? selectedEventId : null,
+      mode: nextView === "simulation" ? mode : null,
+      source: nextView === "simulation" ? source : null,
+      messageId: nextView === "simulation" && source === "history" ? messageId : null,
+      actor: nextView === "simulation" && source === "simulation" ? actorUserId : null,
+    });
+  };
+
+  const changeMode = (nextMode: AgentDebugMode): void => {
+    setMode(nextMode);
+    patchDebugUrl({ view: "simulate", mode: nextMode });
+  };
+
+  const changeSource = (nextSource: "history" | "simulation"): void => {
+    setSource(nextSource);
+    patchDebugUrl({
+      view: "simulate",
+      source: nextSource,
+      messageId: nextSource === "history" ? messageId : null,
+      actor: nextSource === "simulation" ? actorUserId : null,
+    });
+  };
+
+  const chooseMessage = (row: AgentMessageItem): void => {
+    setMessageId(row.messageId);
+    patchDebugUrl({ view: "simulate", source: "history", mode, messageId: row.messageId, actor: null });
+  };
+
+  const chooseMember = (row: Member): void => {
+    const name = memberDisplayName(row.groupNickname, row.nickname, row.userId);
+    setActorUserId(row.userId);
+    setActorDisplayName(name);
+    setMemberPickerOpen(false);
+    patchDebugUrl({ view: "simulate", source: "simulation", mode, actor: row.userId, messageId: null });
+  };
+
   const run = async () => {
     if (source === "history" && !messageId) {
       message.warning("请先选择一条历史消息"); return;
@@ -2521,156 +3026,221 @@ function AgentDebugPanel({ groupId }: { groupId: string }): React.JSX.Element {
     }
   };
 
-  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
-    <Alert
-      type="info"
-      showIcon
-      className="section-alert"
-      message="执行追踪器 + 发言模拟器"
-      description="这里同时提供无副作用发言模拟、调试 Trace 和当前进程最近的真实 Agent Trace。真实试跑只请求模型，不执行工具、不发送消息、不修改状态；真实运行时间线则会记录实际工具、发送降级与 delivery_state。"
-    />
-
-    <Card
-      title="最近真实执行"
-      extra={<Button onClick={() => runtimeTraceQuery.reload()} loading={runtimeTraceQuery.loading}>刷新 Trace</Button>}
-    >
-      <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空。完整 URL、本机路径、file 值与原始 OneBot payload 不会保留；调试页会保留 host、文件类型/大小、Payload 字段结构等安全元数据用于排障。" />
-      {runtimeTraceQuery.error && !runtimeTraceQuery.data
-        ? <QueryErrorAlert error={runtimeTraceQuery.error} onRetry={runtimeTraceQuery.reload} />
-        : (runtimeTraceQuery.data?.length ?? 0) === 0
-          ? <AdminEmpty description="暂无真实执行 Trace；让 Agent 实际处理一条触发消息后刷新这里" />
-          : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-              <Select
-                value={runtimeTrace?.traceId}
-                onChange={setRuntimeTraceId}
-                style={{ width: "100%" }}
-                options={(runtimeTraceQuery.data ?? []).map((trace) => ({
-                  value: trace.traceId,
-                  label: `${formatTime(trace.startedAt)} · ${agentDebugModeLabel(trace.mode)} · ${traceOutcomeLabel(trace.outcome ?? trace.status)} · ${trace.events.length} 个事件`,
-                }))}
-              />
-              {runtimeTrace && <ExecutionTraceView trace={runtimeTrace} />}
-            </Space>}
-    </Card>
-
-    <Card
-      title="调试场景"
-      extra={<Space wrap><Link to={`?tab=config`}>运行配置</Link><Link to={`?tab=persona`}>人设配置</Link><Link to="/environment">LLM Provider</Link></Space>}
-    >
-      <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-        <div className="agent-debug-control-row">
-          <Text strong>调试场景</Text>
-          <Segmented block value={mode} onChange={(value) => setMode(value as AgentDebugMode)} options={AGENT_DEBUG_MODES} />
-        </div>
-        <div className="agent-debug-control-row">
-          <Text strong>消息来源</Text>
-          <Segmented value={source} onChange={(value) => setSource(value as "history" | "simulation")} options={[{ value: "history", label: "历史消息回放" }, { value: "simulation", label: "模拟消息" }]} />
-        </div>
-
-        {source === "history" ? <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-          <Select
-            showSearch
-            loading={messagesQuery.loading}
-            value={messageId || undefined}
-            onChange={setMessageId}
-            options={messageOptions}
-            optionFilterProp="label"
-            placeholder="选择保留期内的一条成员消息"
-            style={{ width: "100%" }}
-            notFoundContent={messagesQuery.error ? "消息记录加载失败" : undefined}
-          />
-          {selectedMessage && <Card size="small" className="agent-debug-source-preview">
-            <Space orientation="vertical" size={4} style={{ width: "100%" }}>
-              <Space wrap size={8}>
-                <Text strong>{selectedMessage.senderName || selectedMessage.userId}</Text>
-                <Tag>{selectedMessage.role}</Tag>
-                <Text type="secondary">{formatTime(selectedMessage.receivedAt)}</Text>
-              </Space>
-              <Paragraph style={{ marginBottom: 0 }}>{selectedMessage.text || "[媒体消息]"}</Paragraph>
-            </Space>
-          </Card>}
-        </Space> : <Row gutter={[16, 16]}>
-          <Col xs={24} md={8}>
-            <Space orientation="vertical" size={6} style={{ width: "100%" }}>
-              <Text strong>模拟发言人</Text>
-              <Input value={actorUserId} onChange={(event) => setActorUserId(event.target.value)} placeholder="成员 QQ 号" />
-            </Space>
-          </Col>
-          <Col xs={24} md={16}>
-            <Space orientation="vertical" size={6} style={{ width: "100%" }}>
-              <Text strong>消息正文</Text>
-              <Input.TextArea value={text} onChange={(event) => setText(event.target.value)} autoSize={{ minRows: 3, maxRows: 7 }} maxLength={4000} showCount placeholder="输入要模拟的当前群消息" />
-            </Space>
-          </Col>
-        </Row>}
-
-        <div className="agent-debug-run-row">
-          <Space wrap>
-            <Switch checked={runModel} onChange={setRunModel} />
-            <div>
-              <Text strong>{runModel ? "调用真实模型" : "仅构建提示词"}</Text><br />
-              <Text type="secondary">{runModel ? "30 秒超时，并发上限 2；仍不会执行任何副作用" : "用于检查上下文、Prompt 和可见工具，不产生模型调用"}</Text>
-            </div>
-          </Space>
-          <Button type="primary" onClick={run} loading={running}>{runModel ? "开始真实试跑" : "生成调试快照"}</Button>
-        </div>
+  return <div className="agent-debug-page">
+    <div className="agent-debug-modebar">
+      <div>
+        <Segmented
+          value={view}
+          onChange={(value) => changeView(value as "runtime" | "simulation")}
+          options={[{ value: "runtime", label: "实时执行" }, { value: "simulation", label: "场景模拟" }]}
+        />
+        <Text type="secondary" className="agent-debug-mode-note">
+          {view === "runtime" ? "查看当前 Bot 进程最近的真实 Agent 执行" : "无副作用回放消息、检查 Prompt，并可选调用真实模型"}
+        </Text>
+      </div>
+      <Space wrap size={8}>
+        {view === "runtime" ? <>
+          <Tag>临时 Trace · 最多 12 条 · 重启后清空</Tag>
+          <Button size="small" onClick={() => runtimeTraceQuery.reload()} loading={runtimeTraceQuery.loading}>刷新</Button>
+        </> : <>
+          <Link to={`?tab=config`}>运行配置</Link>
+          <Link to={`?tab=persona`}>人设配置</Link>
+          <Link to="/environment">LLM Provider</Link>
+        </>}
       </Space>
-    </Card>
+    </div>
 
-    {error && <QueryErrorAlert error={error} onRetry={run} />}
+    {view === "runtime" ? <div className="agent-debug-workbench">
+      <aside className="agent-debug-sidebar">
+        <div className="agent-debug-pane-head">
+          <div><Text strong>执行记录</Text><Text type="secondary">{runtimeTraceQuery.data?.length ?? 0} 条</Text></div>
+        </div>
+        <div className="agent-trace-sidebar-controls">
+          <Input.Search allowClear value={traceSearch} onChange={(event) => setTraceSearch(event.target.value)} placeholder="Trace / 消息 ID / QQ" />
+          <div className="agent-trace-filter-list">
+            {TRACE_FILTER_OPTIONS.map((item) => <Button
+              key={item.value}
+              size="small"
+              type={traceFilter === item.value ? "primary" : "default"}
+              onClick={() => setTraceFilter(item.value)}
+            >{item.label}</Button>)}
+          </div>
+        </div>
+        <div className="agent-trace-sidebar-list">
+          {runtimeTraceQuery.error && !runtimeTraceQuery.data ? <QueryErrorAlert error={runtimeTraceQuery.error} onRetry={runtimeTraceQuery.reload} />
+            : runtimeTraceQuery.loading && !runtimeTraceQuery.data ? <Spin />
+              : filteredRuntimeTraces.length === 0 ? <AdminEmpty description={(runtimeTraceQuery.data?.length ?? 0) === 0 ? "暂无真实执行 Trace" : "没有符合筛选条件的 Trace"} />
+                : filteredRuntimeTraces.map((trace) => {
+                  const visual = traceVisualStatus(trace);
+                  return <button
+                    key={trace.traceId}
+                    type="button"
+                    className={`agent-trace-list-item is-${visual.kind}${runtimeTrace?.traceId === trace.traceId ? " is-selected" : ""}`}
+                    onClick={() => {
+                      setRuntimeTraceId(trace.traceId);
+                      setSelectedEventId(null);
+                      patchDebugUrl({ view: "runtime", trace: trace.traceId, event: null });
+                    }}
+                  >
+                    <span className="agent-trace-list-top">
+                      <Tag color={visual.color}>{visual.label}</Tag>
+                      <strong>{formatTime(trace.startedAt)}</strong>
+                      <span>{trace.durationMs == null ? "—" : `${trace.durationMs.toFixed(0)} ms`}</span>
+                    </span>
+                    <span className="agent-trace-list-meta">
+                      <Tag>{agentDebugModeLabel(trace.mode)}</Tag>
+                      <span>{traceTrigger(trace)}</span>
+                    </span>
+                    <span className="agent-trace-list-foot">
+                      <span>{trace.events.length} 事件</span>
+                      <span>actor {trace.actorUserId ?? "—"}</span>
+                      <code>{trace.traceId.slice(0, 8)}</code>
+                    </span>
+                  </button>;
+                })}
+        </div>
+      </aside>
+      <main className="agent-debug-workspace-pane">
+        {runtimeTrace ? <TracePipelineView trace={runtimeTrace} selectedEventId={selectedEventId} onSelectEvent={selectEvent} />
+          : <AdminEmpty description="选择一条 Trace 查看执行过程" />}
+      </main>
+      <aside className="agent-debug-inspector-pane">
+        {runtimeTrace ? <DebugSessionInspector trace={runtimeTrace} event={selectedEvent} pane={inspectorPane} onPaneChange={setInspectorPane} /> : <AdminEmpty description="暂无事件" />}
+      </aside>
+    </div> : <div className="agent-debug-simulation-shell">
+      <div className="agent-debug-runbar">
+        <div className="agent-debug-runbar-group is-mode">
+          <Text type="secondary">模式</Text>
+          <Segmented value={mode} onChange={(value) => changeMode(value as AgentDebugMode)} options={AGENT_DEBUG_MODES} />
+        </div>
+        <div className="agent-debug-runbar-group is-source">
+          <Text type="secondary">消息来源</Text>
+          <Segmented value={source} onChange={(value) => changeSource(value as "history" | "simulation")} options={[{ value: "history", label: "历史消息" }, { value: "simulation", label: "模拟消息" }]} />
+          {source === "history" ? <Button size="small" onClick={() => setMessagePickerOpen(true)}>{selectedMessage ? `消息 ${selectedMessage.messageId}` : "选择消息"}</Button> : null}
+        </div>
+        <div className="agent-debug-runbar-group is-actor">
+          <Text type="secondary">发言人</Text>
+          {source === "history" ? <div className="agent-debug-runbar-actor">
+            <strong>{selectedMessage?.senderName || selectedMessage?.userId || "随历史消息确定"}</strong>
+            {selectedMessage?.userId ? <code>{selectedMessage.userId}</code> : null}
+          </div> : <Button size="small" onClick={() => setMemberPickerOpen(true)}>{actorDisplayName || actorUserId || "选择群成员"}</Button>}
+        </div>
+        <div className="agent-debug-runbar-group is-model">
+          <Text type="secondary">调用模型</Text>
+          <Switch checked={runModel} onChange={setRunModel} />
+          <Text type="secondary">{runModel ? "真实模型" : "仅快照"}</Text>
+        </div>
+        <Button className="agent-debug-run-button" type="primary" onClick={run} loading={running}>{runModel ? "Run Model" : "Run"}</Button>
+      </div>
 
-    {result && <>
-      {result.warnings.map((warning) => <Alert key={warning} type="warning" showIcon message={warning} />)}
-      <Card title="本次调试摘要" extra={<Tag color={result.route.configured ? "green" : "red"}>{result.route.configured ? "路由可用" : "路由未配置"}</Tag>}>
-        <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
-          { key: "mode", label: "调试场景", children: AGENT_DEBUG_MODES.find((item) => item.value === result.mode)?.label ?? result.mode },
-          { key: "prompt", label: "Prompt 版本", children: result.promptVersion },
-          { key: "provider", label: "Provider", children: result.route.provider || "—" },
-          { key: "model", label: "模型", children: result.route.model || "—" },
-          { key: "profile", label: "路由配置", children: result.route.profile || "—" },
-          { key: "thinking", label: "Thinking", children: result.route.thinking || "—" },
-          { key: "multimodal", label: "多模态", children: result.route.multimodal || "—" },
-          { key: "result", label: "模型结果", children: result.result ? <Tag color={result.result.outcome === "success" ? "green" : "orange"}>{result.result.outcome}</Tag> : <Tag>未调用</Tag> },
-        ]} />
-      </Card>
+      {error ? <QueryErrorAlert error={error} onRetry={run} /> : null}
 
-      <Card title="发言模拟器" extra={<Tag color="blue">Dry-run · 不发送</Tag>}>
-        <DebugSpeechSimulation value={result.speechSimulation} />
-      </Card>
+      {source === "simulation" ? <div className="agent-debug-composer">
+        <div className="agent-debug-composer-head"><Text strong>模拟消息正文</Text><Text type="secondary">不会发送到群聊</Text></div>
+        <Input.TextArea value={text} onChange={(event) => setText(event.target.value)} autoSize={{ minRows: 3, maxRows: 8 }} maxLength={4000} showCount placeholder="输入要模拟的当前群消息" />
+      </div> : selectedMessage ? <div className="agent-debug-history-strip">
+        <div className="agent-debug-history-strip-head">
+          <Space wrap size={6}><Tag color="blue">历史回放</Tag><Text strong>{selectedMessage.senderName || selectedMessage.userId}</Text><Text type="secondary">{formatTime(selectedMessage.receivedAt)}</Text><Text code>{selectedMessage.messageId}</Text></Space>
+          <Button size="small" onClick={() => setMessagePickerOpen(true)}>更换消息</Button>
+        </div>
+        <Paragraph style={{ margin: 0 }}>{selectedMessage.text || "[媒体消息]"}</Paragraph>
+      </div> : <Alert type="info" showIcon message="先选择一条历史消息" action={<Button size="small" onClick={() => setMessagePickerOpen(true)}>打开消息抽屉</Button>} />}
 
-      <Card title="调试详情" className="agent-debug-detail-card">
-        <Tabs items={[
-          { key: "trace", label: `执行轨迹 ${result.executionTrace.events.length}`, children: <ExecutionTraceView trace={result.executionTrace} /> },
-          {
-            key: "overview",
-            label: "概览",
-            children: <Row gutter={[16, 16]}>
-              <Col xs={24} xl={14}><DebugCurrentTurn value={result.currentTurn} /></Col>
-              <Col xs={24} xl={10}><DebugContextBudget stats={result.stats} /></Col>
-            </Row>,
-          },
-          { key: "context", label: "上下文", children: <DebugContextView context={result.context} selection={result.contextSelection} /> },
-          { key: "prompt", label: `Prompt ${result.promptMessages.length}`, children: <DebugPromptView messages={result.promptMessages} /> },
-          { key: "tools", label: `工具 ${result.tools.length}`, children: <DebugToolsView tools={result.tools} permissions={result.toolPermissions} /> },
-          { key: "model", label: "模型结果", children: <DebugModelView result={result.result} /> },
-          { key: "raw", label: "原始数据", children: <DebugRawBlock value={result} /> },
-        ]} />
-      </Card>
-    </>}
-  </Space>;
+      <div className="agent-debug-session-grid">
+        <main className="agent-debug-workspace-pane">
+          {!result ? <div className="agent-debug-simulation-empty"><AdminEmpty description="运行后，这里原地显示 Debug Session" /></div> : <>
+            <div className="agent-debug-session-head">
+              <Space wrap size={[6, 6]}>
+                <Tag color="blue">Dry-run</Tag>
+                <Tag color={result.route.configured ? "green" : "red"}>{result.route.configured ? "路由可用" : "路由未配置"}</Tag>
+                <Text type="secondary">{result.route.provider || "—"} / {result.route.model || "—"}</Text>
+                <Text type="secondary">Prompt {result.promptVersion}</Text>
+              </Space>
+              {result.warnings.map((warning) => <Alert key={warning} type="warning" showIcon message={warning} />)}
+            </div>
+            <TracePipelineView trace={result.executionTrace} selectedEventId={selectedEventId} onSelectEvent={selectEvent} debugResult={result} />
+          </>}
+        </main>
+        <aside className="agent-debug-inspector-pane">
+          {result ? <DebugSessionInspector trace={result.executionTrace} event={selectedEvent} debugResult={result} pane={inspectorPane} onPaneChange={setInspectorPane} /> : <AdminEmpty description="运行后可检查 Event / Context / Prompt / Model / Tool" />}
+        </aside>
+      </div>
+    </div>}
+
+    <Drawer
+      title="选择历史消息"
+      open={messagePickerOpen}
+      onClose={() => setMessagePickerOpen(false)}
+      width="min(760px, 96vw)"
+      extra={<Button type="primary" disabled={!selectedMessage} onClick={() => setMessagePickerOpen(false)}>使用所选消息</Button>}
+    >
+      <div className="agent-debug-picker">
+        <Input.Search allowClear value={messagePickerSearch} onChange={(event) => setMessagePickerSearch(event.target.value)} placeholder="搜索昵称、QQ、消息 ID 或正文" />
+        <div className="agent-debug-message-picker-grid">
+          <div className="agent-debug-picker-list">
+            {messagesQuery.loading && !messagesQuery.data ? <Spin /> : filteredMessages.length === 0 ? <AdminEmpty description="没有匹配的成员消息" /> : filteredMessages.map((row) => <button key={`${row.id}-${row.messageId}`} type="button" className={`agent-debug-picker-row${row.messageId === messageId ? " is-selected" : ""}`} onClick={() => chooseMessage(row)}>
+              <span><strong>{row.senderName || row.userId}</strong><Text type="secondary">{formatTime(row.receivedAt)}</Text></span>
+              <small>{row.text || "[媒体消息]"}</small>
+              <code>{row.messageId}</code>
+            </button>)}
+          </div>
+          <div className="agent-debug-context-preview">
+            <Text strong>前后上下文</Text>
+            {selectedMessage ? messageContext.map((row) => <div key={`${row.id}-context`} className={`agent-debug-context-row${row.messageId === messageId ? " is-current" : ""}`}>
+              <Space wrap size={5}><Text strong>{row.senderName || row.userId}</Text>{row.messageId === messageId ? <Tag color="blue">当前</Tag> : null}<Text type="secondary">{formatTime(row.receivedAt)}</Text></Space>
+              <Paragraph style={{ margin: "4px 0 0" }}>{row.text || "[媒体消息]"}</Paragraph>
+            </div>) : <AdminEmpty description="选择消息后显示前后几条上下文" />}
+          </div>
+        </div>
+      </div>
+    </Drawer>
+
+    <Drawer
+      title="选择模拟发言人"
+      open={memberPickerOpen}
+      onClose={() => setMemberPickerOpen(false)}
+      width="min(560px, 94vw)"
+    >
+      <div className="agent-debug-picker">
+        <Input.Search allowClear value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} placeholder="搜索群名片、昵称或 QQ" />
+        <div className="agent-debug-member-list">
+          {membersQuery.loading && !membersQuery.data ? <Spin /> : (membersQuery.data ?? []).map((row) => {
+            const name = memberDisplayName(row.groupNickname, row.nickname, row.userId);
+            return <button key={row.userId} type="button" className={`agent-debug-picker-row${row.userId === actorUserId ? " is-selected" : ""}`} onClick={() => chooseMember(row)}>
+              <span><strong>{name}</strong><Tag>{row.role}</Tag></span><code>{row.userId}</code>
+            </button>;
+          })}
+        </div>
+        <div className="agent-debug-advanced-actor">
+          <Button type="link" size="small" onClick={() => setAdvancedActorInput((value) => !value)}>{advancedActorInput ? "收起高级输入" : "高级：直接输入 QQ ID"}</Button>
+          {advancedActorInput ? <Space.Compact block><Input value={actorUserId} onChange={(event) => setActorUserId(event.target.value.replace(/\D/g, ""))} placeholder="QQ ID" /><Button type="primary" disabled={!actorUserId.trim()} onClick={() => { setActorDisplayName(""); setMemberPickerOpen(false); patchDebugUrl({ view: "simulate", source: "simulation", mode, actor: actorUserId, messageId: null }); }}>使用 ID</Button></Space.Compact> : null}
+        </div>
+      </div>
+    </Drawer>
+
+    {activeTrace ? <Drawer
+      className="agent-debug-inspector-drawer"
+      title={selectedEvent ? `${TRACE_PHASE_LABELS[selectedEvent.phase] ?? selectedEvent.phase} · ${selectedEvent.label}` : "事件详情"}
+      open={inspectorDrawerOpen}
+      onClose={() => setInspectorDrawerOpen(false)}
+      width="min(620px, 94vw)"
+    ><DebugSessionInspector trace={activeTrace} event={selectedEvent} debugResult={view === "simulation" ? result : null} pane={inspectorPane} onPaneChange={setInspectorPane} /></Drawer> : null}
+  </div>;
 }
 
 function AgentMessagesPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const [, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const locatedMessageId = searchParams.get("messageId") ?? "";
   const [page, setPage] = useState(1); const [search, setSearch] = useState(""); const [role, setRole] = useState("");
-  const load = useCallback(() => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=${page}&pageSize=20&search=${encodeURIComponent(search)}&role=${role}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, page, search, role]);
+  const load = useCallback(() => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=${locatedMessageId ? 1 : page}&pageSize=20&search=${encodeURIComponent(locatedMessageId ? "" : search)}&role=${locatedMessageId ? "" : role}&messageId=${encodeURIComponent(locatedMessageId)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [groupId, locatedMessageId, page, search, role]);
   const query = useApiQuery(load);
   return <Card title="短期消息库" extra={<Select value={role} onChange={(value) => { setRole(value); setPage(1); }} options={MEMORY_ROLE_OPTIONS} style={{ width: 120 }} />}>
     <Alert type="info" showIcon className="section-alert" message="仅保留 rawRetentionDays 内的原始消息；隐私退出成员的消息不在此展示，到期由整理任务清除。" />
+    {locatedMessageId ? <Alert type="success" showIcon className="section-alert" message={`已定位消息 ${locatedMessageId}`} action={<Button size="small" onClick={() => setSearchParams({ tab: "messages" }, { replace: true })}>返回消息列表</Button>} /> : null}
     <Input.Search className="table-search" placeholder="搜索消息内容或昵称" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />{
       query.error && !query.data
         ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.text}</Paragraph> }} columns={[{ title: "时间", dataIndex: "receivedAt", render: formatTime, width: 170 }, { title: "成员", render: (_, row: AgentMessageItem) => <>{row.senderName || "—"}<br /><Text type="secondary" copyable>{row.userId}</Text></> }, { title: "角色", dataIndex: "role", width: 90, render: (value: string) => <Tag color={value === "bot" ? "blue" : value === "owner" ? "gold" : value === "admin" ? "cyan" : "default"}>{value}</Tag> }, { title: "内容", dataIndex: "text", ellipsis: true }, { title: "操作", width: 80, render: (_, row: AgentMessageItem) => row.role === "bot" ? null : <Button type="link" size="small" onClick={() => setSearchParams({ tab: "debug", messageId: row.messageId }, { replace: true })}>调试</Button> }]} />
+        : <Table rowKey="id" loading={query.loading} dataSource={query.data?.rows ?? []} pagination={locatedMessageId ? false : { current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} expandable={{ expandedRowRender: (row) => <Paragraph copyable>{row.text}</Paragraph> }} columns={[{ title: "时间", dataIndex: "receivedAt", render: formatTime, width: 170 }, { title: "成员", render: (_, row: AgentMessageItem) => <>{row.senderName || "—"}<br /><Text type="secondary" copyable>{row.userId}</Text></> }, { title: "角色", dataIndex: "role", width: 90, render: (value: string) => <Tag color={value === "bot" ? "blue" : value === "owner" ? "gold" : value === "admin" ? "cyan" : "default"}>{value}</Tag> }, { title: "内容", dataIndex: "text", ellipsis: true }, { title: "操作", width: 80, render: (_, row: AgentMessageItem) => row.role === "bot" ? null : <Button type="link" size="small" onClick={() => setSearchParams({ tab: "debug", view: "simulate", mode: "dialogue", source: "history", messageId: row.messageId }, { replace: true })}>调试</Button> }]} />
     }</Card>;
 }
 

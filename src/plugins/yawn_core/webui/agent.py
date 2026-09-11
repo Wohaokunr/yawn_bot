@@ -42,6 +42,8 @@ from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
+    execution_trace_by_id,
+    execution_trace_summaries,
     finish_execution_trace,
     recent_execution_traces,
     trace_event,
@@ -198,7 +200,9 @@ async def get_agent_capabilities(
 
 @router.get("/agent/groups/{group_id}/execution-traces")
 async def get_agent_execution_traces(
-    group_id: int, _session: AdminReadSession
+    group_id: int,
+    _session: AdminReadSession,
+    status: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """返回当前进程内最近的真实 Agent 执行时间线。
 
@@ -208,7 +212,22 @@ async def get_agent_execution_traces(
 
     async with get_session() as db:
         await require_group(db, group_id)
-    return ok(recent_execution_traces(group_id))
+    rows = execution_trace_summaries(group_id)
+    if status:
+        rows = [row for row in rows if row.get("status") == status or row.get("outcome") == status]
+    return ok(rows)
+
+
+@router.get("/agent/groups/{group_id}/execution-traces/{trace_id}")
+async def get_agent_execution_trace(
+    group_id: int, trace_id: str, _session: AdminReadSession
+) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+    trace = execution_trace_by_id(group_id, trace_id)
+    if trace is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Trace 不存在或已过期")
+    return ok(trace)
 
 
 @router.post("/agent/groups/{group_id}/capabilities/refresh")
@@ -1058,6 +1077,7 @@ async def get_agent_messages(
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
     role: str = Query(default="", max_length=24),
+    message_id: int | None = Query(default=None, alias="messageId"),
 ) -> dict[str, Any]:
     page, page_size = page_params(page, page_size)
     now = now_beijing()
@@ -1068,6 +1088,8 @@ async def get_agent_messages(
     ]
     if role:
         clauses.append(GroupAgentMessage.role == role)
+    if message_id is not None:
+        clauses.append(GroupAgentMessage.message_id == message_id)
     if search:
         pattern = f"%{search}%"
         clauses.append(

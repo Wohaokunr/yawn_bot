@@ -164,6 +164,10 @@ async def finalize_reply(  # noqa: PLR0913
         config.last_response_input_fingerprint = input_fingerprint
         config.last_response_at = now
         config.last_agent_at = now
+        # AsyncSession.commit() 默认会 expire ORM 对象。commit 成功后再同步读取
+        # config.context_epoch 会触发隐式刷新，并在 AsyncSession 场景抛 MissingGreenlet。
+        # 因此所有提交后 Trace 需要的 ORM 值都必须在 commit 前快照下来。
+        committed_context_epoch = config.context_epoch
         await session.commit()
     except Exception as exc:  # noqa: BLE001
         trace_event(
@@ -188,7 +192,7 @@ async def finalize_reply(  # noqa: PLR0913
             "回复后状态提交",
             output={
                 "recent_fingerprints": len(recent[-8:]),
-                "context_epoch": config.context_epoch,
+                "context_epoch": committed_context_epoch,
                 "delivery_state": sent.delivery_state,
                 "topic": next_active_topic,
                 "topic_action": speech_plan.topic_action if speech_plan else "compat",

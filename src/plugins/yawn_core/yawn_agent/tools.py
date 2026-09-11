@@ -33,6 +33,7 @@ from .capabilities import (
     user_can_manage_group,
 )
 from .context import now_beijing
+from .execution_trace import current_execution_trace
 from .log import dbg
 from .memory import effective_relation_confidence, normalize_relation_type, rank_memories
 from .outbound import (
@@ -602,14 +603,18 @@ async def _audit(
     if session is None:
         return
     try:
+        trace = current_execution_trace()
+        safe_arguments = {
+            k: _jsonable(v) for k, v in args.items() if k not in {"file", "url"}
+        }
+        if trace is not None:
+            safe_arguments["_trace_id"] = trace.trace_id
         session.add(
             AgentAudit(
                 group_id=group_id,
                 actor_user_id=actor_user_id,
                 tool_name=name,
-                arguments={
-                    k: _jsonable(v) for k, v in args.items() if k not in {"file", "url"}
-                },
+                arguments=safe_arguments,
                 result=result,
                 detail=detail[:2000],
             )

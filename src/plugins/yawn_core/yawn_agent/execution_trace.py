@@ -331,6 +331,37 @@ def recent_execution_traces(group_id: int) -> list[dict[str, Any]]:
     return [trace.as_dict() for trace in reversed(_recent_traces.get(int(group_id), ()))]
 
 
+def execution_trace_by_id(group_id: int, trace_id: str) -> dict[str, Any] | None:
+    """Return one full trace from the bounded in-memory debug buffer."""
+
+    for trace in _recent_traces.get(int(group_id), ()):
+        if trace.trace_id == trace_id:
+            return trace.as_dict()
+    return None
+
+
+def execution_trace_summaries(group_id: int) -> list[dict[str, Any]]:
+    """Return lightweight rows for the trace list UI without events."""
+
+    return [
+        {
+            "traceId": trace.trace_id,
+            "groupId": str(trace.group_id),
+            "mode": trace.mode,
+            "source": trace.source,
+            "triggerSource": trace.trigger_source,
+            "actorUserId": trace.actor_user_id,
+            "messageId": trace.message_id,
+            "startedAt": trace.started_at,
+            "status": trace.status,
+            "outcome": trace.outcome,
+            "durationMs": trace.duration_ms,
+            "eventCount": len(trace.events),
+        }
+        for trace in reversed(_recent_traces.get(int(group_id), ()))
+    ]
+
+
 def clear_execution_traces(group_id: int) -> None:
     _recent_traces.pop(int(group_id), None)
 
@@ -342,6 +373,8 @@ __all__ = [
     "clear_execution_traces",
     "current_execution_trace",
     "finish_execution_trace",
+    "execution_trace_by_id",
+    "execution_trace_summaries",
     "recent_execution_traces",
     "reset_execution_trace",
     "safe_summary",

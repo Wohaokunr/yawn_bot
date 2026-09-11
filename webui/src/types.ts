@@ -396,6 +396,21 @@ export interface AgentExecutionTrace {
   events: AgentExecutionTraceEvent[];
 }
 
+export interface AgentExecutionTraceSummary {
+  traceId: string;
+  groupId: string;
+  mode: string;
+  source: string;
+  triggerSource: string | null;
+  actorUserId: string | null;
+  messageId: string | null;
+  startedAt: string;
+  status: string;
+  outcome: string | null;
+  durationMs: number | null;
+  eventCount: number;
+}
+
 export interface AgentSpeechSimulation {
   status: "policy_only" | "final" | string;
   should_speak: boolean | null;
@@ -505,6 +520,7 @@ export interface AgentAudit {
   id: string;
   groupId: string;
   actorUserId?: string | null;
+  traceId?: string | null;
   toolName: string;
   arguments: Record<string, unknown>;
   result: string;
