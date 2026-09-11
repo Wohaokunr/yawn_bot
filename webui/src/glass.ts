@@ -6,8 +6,12 @@ const GLASS_SELECTOR = ".liquid-glass, .app-content .ant-card, .env-collapse > .
 
 export function installGlassGlow(): void {
   if (typeof document === "undefined" || typeof requestAnimationFrame === "undefined") return;
-  // 粗指针(触屏)没有悬停概念,不启用跟随光斑
-  if (typeof matchMedia === "function" && !matchMedia("(pointer: fine)").matches) return;
+  if (typeof matchMedia === "function") {
+    // 减少动态效果时不安装跟手光斑，避免持续 pointermove + rAF 造成视觉运动。
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    // 粗指针(触屏)没有悬停概念,不启用跟随光斑。
+    if (!matchMedia("(pointer: fine)").matches) return;
+  }
 
   let frame = 0;
   let target: HTMLElement | null = null;

@@ -1,4 +1,6 @@
+import type { PropsWithChildren } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { AgentExecutionTrace, AgentExecutionTraceSummary } from "../types";
@@ -7,6 +9,10 @@ import { useExecutionTraces } from "./useExecutionTraces";
 vi.mock("../api", () => ({ api: vi.fn() }));
 
 const apiMock = vi.mocked(api);
+
+function wrapper({ children }: PropsWithChildren): React.JSX.Element {
+  return <MemoryRouter initialEntries={["/agent/1?tab=debug"]}>{children}</MemoryRouter>;
+}
 
 function summary(traceId: string, status = "completed"): AgentExecutionTraceSummary {
   return {
@@ -52,7 +58,7 @@ describe("useExecutionTraces selection stability", () => {
   });
 
   it("旧 Trace 被 12 条缓冲淘汰后保持用户选择和已加载详情", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));
 
     act(() => result.current.setSelectedTraceId("old"));
@@ -76,7 +82,7 @@ describe("useExecutionTraces selection stability", () => {
         data: path.includes("?status=failed") ? [summary("failed", "failed")] : summaries,
       } as never;
     });
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));
 
     act(() => result.current.setSelectedTraceId("old"));
@@ -84,13 +90,14 @@ describe("useExecutionTraces selection stability", () => {
     act(() => result.current.setStatus("failed"));
 
     await waitFor(() => expect(result.current.summaries[0]?.traceId).toBe("failed"));
+    expect(result.current.status).toBe("failed");
     expect(result.current.selectedTraceId).toBe("old");
     expect(result.current.selectedTrace?.traceId).toBe("old");
     expect(result.current.selectedTraceUnavailable).toBe(true);
   });
 
   it("3 秒自动轮询刷新摘要时不会把用户从旧 Trace 跳回最新", async () => {
-    const { result } = renderHook(() => useExecutionTraces("1"));
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));
     act(() => result.current.setAutoRefresh(false));
     act(() => result.current.setSelectedTraceId("old"));

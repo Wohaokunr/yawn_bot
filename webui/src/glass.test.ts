@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { installGlassGlow } from "./glass";
 
-function stubPointer(fine: boolean): void {
-  vi.stubGlobal("matchMedia", vi.fn(() => ({
-    matches: fine,
+function stubMedia({ fine = true, reduced = false }: { fine?: boolean; reduced?: boolean }): void {
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: query.includes("prefers-reduced-motion") ? reduced : fine,
+    media: query,
+    onchange: null,
     addListener: vi.fn(),
     removeListener: vi.fn(),
     addEventListener: vi.fn(),
@@ -43,7 +45,18 @@ afterEach(() => {
 
 describe("installGlassGlow", () => {
   it("粗指针(触屏)不安装监听", async () => {
-    stubPointer(false);
+    stubMedia({ fine: false });
+    installGlassGlow();
+    const host = glassHost();
+    host.dispatchEvent(
+      new MouseEvent("pointermove", { bubbles: true, clientX: 220, clientY: 110 }),
+    );
+    await flushFrames();
+    expect(host.style.getPropertyValue("--glass-mx")).toBe("");
+  });
+
+  it("prefers-reduced-motion 下不安装跟手光斑", async () => {
+    stubMedia({ fine: true, reduced: true });
     installGlassGlow();
     const host = glassHost();
     host.dispatchEvent(
@@ -54,7 +67,7 @@ describe("installGlassGlow", () => {
   });
 
   it("指针划过玻璃内任意子元素时写入相对光斑坐标", async () => {
-    stubPointer(true);
+    stubMedia({ fine: true, reduced: false });
     installGlassGlow();
     const host = glassHost();
     const inner = host.querySelector("span") as HTMLElement;

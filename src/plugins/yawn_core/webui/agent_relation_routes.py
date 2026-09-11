@@ -367,7 +367,7 @@ async def create_relation(
             ) from None
         await db.refresh(row)
         result = serialize_relation(row)
-    await hub.notify_change("agent_relation", str(row.id))
+    await hub.notify_change("agent_relation", str(row.id), group_id=group_id)
     return ok(result)
 
 
@@ -398,7 +398,7 @@ async def update_relation(
         await db.commit()
         await db.refresh(row)
         result = serialize_relation(row)
-    await hub.notify_change("agent_relation", str(relation_id))
+    await hub.notify_change("agent_relation", str(relation_id), group_id=group_id)
     return ok(result)
 
 
@@ -418,5 +418,5 @@ async def delete_relation(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "关系不存在")
         await db.delete(row)
         await db.commit()
-    await hub.notify_change("agent_relation", str(relation_id))
+    await hub.notify_change("agent_relation", str(relation_id), group_id=group_id)
     return ok({"deleted": 1})

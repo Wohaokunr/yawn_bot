@@ -1,5 +1,5 @@
 import { App as AntApp, Button, Card, Col, Input, Row, Segmented, Select, Space, Switch, Tag, Typography } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { AdminEmpty, formatTime, QueryErrorAlert, useApiQuery } from "../shared";
@@ -16,8 +16,8 @@ export function SimulationWorkbench({
   onResult: (result: AgentDebugResponse) => void;
 }): React.JSX.Element {
   const { message } = AntApp.useApp();
-  const [searchParams] = useSearchParams();
-  const linkedMessageId = searchParams.get("messageId") ?? "";
+  const [searchParams, setSearchParams] = useSearchParams();
+  const linkedMessageId = searchParams.get("debug.messageId") ?? "";
   const [mode, setMode] = useState<AgentDebugMode>("dialogue");
   const [source, setSource] = useState<"history" | "simulation">(linkedMessageId ? "history" : "simulation");
   const [messageId, setMessageId] = useState(linkedMessageId);
@@ -27,11 +27,14 @@ export function SimulationWorkbench({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadMessages = useCallback(
-    () => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=1&pageSize=100`).then((response) => response.data),
-    [groupId],
-  );
-  const messagesQuery = useApiQuery(loadMessages, { resources: ["agent_group_data", "agent_privacy"] });
+  const messagesQuery = useApiQuery({
+    queryKey: ["agent-debug-messages", groupId],
+    fetcher: (signal) => api<AgentMessageItem[]>(`/agent/groups/${groupId}/messages?page=1&pageSize=100`, { signal }).then((response) => response.data),
+    invalidation: {
+      resources: ["agent_group_data", "agent_privacy"],
+      scope: { groupId },
+    },
+  });
 
   useEffect(() => {
     if (linkedMessageId) {
@@ -39,6 +42,13 @@ export function SimulationWorkbench({
       setMessageId(linkedMessageId);
     }
   }, [linkedMessageId]);
+
+  const selectMessage = (value: string): void => {
+    setMessageId(value);
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set("debug.messageId", value); else next.delete("debug.messageId");
+    setSearchParams(next, { replace: true });
+  };
 
   const messageOptions = useMemo(
     () => (messagesQuery.data ?? []).filter((row) => row.role !== "bot").map((row) => ({ value: row.messageId, label: debugMessageLabel(row) })),
@@ -93,7 +103,7 @@ export function SimulationWorkbench({
           showSearch
           loading={messagesQuery.loading}
           value={messageId || undefined}
-          onChange={setMessageId}
+          onChange={selectMessage}
           options={messageOptions}
           optionFilterProp="label"
           placeholder="选择保留期内的一条成员消息"

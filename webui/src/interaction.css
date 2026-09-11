@@ -1,0 +1,113 @@
+/* Agent 管理信息架构：一级只保留四个任务域，二级用于域内具体页面。 */
+.agent-ia-tabs > .ant-tabs-nav {
+  margin-bottom: 14px;
+}
+.agent-ia-tabs > .ant-tabs-nav .ant-tabs-tab {
+  padding: 9px 18px;
+  font-weight: 700;
+}
+.agent-ia-tabs > .ant-tabs-nav .ant-tabs-tab-btn {
+  letter-spacing: 0.02em;
+}
+.agent-ia-section {
+  min-width: 0;
+}
+.agent-ia-subtabs > .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+.agent-ia-subtabs > .ant-tabs-nav::before {
+  border-bottom-color: rgba(255, 227, 236, 0.9);
+}
+.agent-ia-subtabs > .ant-tabs-nav .ant-tabs-tab {
+  padding: 5px 11px 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.agent-ia-subtabs > .ant-tabs-nav .ant-tabs-ink-bar {
+  height: 2px !important;
+}
+.agent-ia-single {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.agent-ia-section-label {
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* 旧样式曾把整块运行配置卡长期提升为合成层；这里明确恢复自动策略。 */
+.agent-config-floating {
+  will-change: auto;
+}
+
+@media (max-width: 640px) {
+  .agent-ia-tabs > .ant-tabs-nav .ant-tabs-tab {
+    padding-inline: 10px;
+  }
+  .agent-ia-tabs > .ant-tabs-nav .ant-tabs-nav-wrap,
+  .agent-ia-subtabs > .ant-tabs-nav .ant-tabs-nav-wrap {
+    overflow-x: auto;
+  }
+}
+
+/* 尊重系统“减少动态效果”设置：停止持续/入场动画，并移除交互位移。 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0.01ms;
+    --dur-med: 0.01ms;
+    --dur-slow: 0.01ms;
+  }
+
+  html,
+  body,
+  * {
+    scroll-behavior: auto !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  body {
+    background-attachment: scroll;
+  }
+
+  .petals,
+  .brand-mark::after,
+  .fq-hero-deco {
+    display: none !important;
+  }
+
+  .app-content .ant-card:hover,
+  .agent-config-floating:hover,
+  .agent-studio-page .agent-config-toggle-card:hover,
+  .agent-studio-page .persona-field-card:hover,
+  .agent-studio-page .persona-field-card:focus-within,
+  .persona-preset-card:hover,
+  .ww-event:hover,
+  .fq-book-card:hover,
+  .ant-btn-primary:not(:disabled):hover,
+  .ant-btn:not(:disabled):active {
+    transform: none !important;
+  }
+
+  .fq-book-card:hover .fq-cover::after {
+    left: -70% !important;
+  }
+
+  .liquid-glass::before,
+  .app-content .ant-card::before,
+  .env-collapse > .ant-collapse-item::before {
+    opacity: 0 !important;
+  }
+}

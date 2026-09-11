@@ -1,186 +1,333 @@
 import {
   Alert,
-  App as AntApp,
-  AutoComplete,
   Button,
   Card,
   Col,
-  Descriptions,
-  Drawer,
-  Empty,
-  Form,
   Input,
-  InputNumber,
   List,
-  Popconfirm,
-  Progress,
   Row,
-  Segmented,
-  Select,
   Space,
   Spin,
   Statistic,
-  Switch,
   Table,
+  Tabs,
   Tag,
-  Timeline,
   Typography,
 } from "antd";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { AgentAuditTable } from "./agent-audit-table";
-import { AgentDebugger } from "./agent-debug/AgentDebugger";
-import { TraceCompareView } from "./agent-debug/TraceWorkspace";
-import { api, ApiError } from "./api";
-import { PageFrame, PanelStack } from "./layout";
-import { nodeDisplayName, relationTypeColor } from "./relation-meta";
+import { api } from "./api";
 import {
   AdminEmpty,
-  confirmDiscardChanges,
-  DangerActionButton,
   formatTime,
   PageHeader,
   QueryErrorAlert,
-  SaveStatus,
-  TablePagination,
   useApiQuery,
-  useUnsavedChanges,
 } from "./shared";
-import type {
-  AgentAudit,
-  AgentCapabilities,
-  AgentConfig,
-  AgentDebugResponse,
-  AgentDiagnostics,
-  AgentMemoryStatus,
-  AgentMessageItem,
-  AgentRelationGraph,
-  AgentRelationItem,
-  GroupSummary,
-  MemoryItem,
-  MemorySubjectItem,
-  Persona,
-  PersonaBehavior,
-  PersonaEmotion,
-  PersonaProfile,
-  PersonaPreset,
-  PrivacyItem,
-} from "./types";
+import type { AgentCapabilities, AgentDiagnostics, GroupSummary } from "./types";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
-import { AgentConfigPanel } from "./agent-panels/AgentConfigPanel";
-import { PersonaPanel } from "./agent-panels/PersonaPanel";
-import { MemoriesPanel } from "./agent-panels/MemoriesPanel";
-import { MemberProfilesPanel } from "./agent-panels/MemberProfilesPanel";
-import { RelationsPanel } from "./agent-panels/RelationsPanel";
-import { AgentMessagesPanel } from "./agent-panels/AgentMessagesPanel";
-import { PrivacyPanel } from "./agent-panels/PrivacyPanel";
-import { AgentAuditsPanel } from "./agent-panels/AgentAuditsPanel";
+const LazyAgentConfigPanel = lazy(() =>
+  import("./agent-panels/AgentConfigPanel").then(({ AgentConfigPanel }) => ({ default: AgentConfigPanel })),
+);
+const LazyPersonaPanel = lazy(() =>
+  import("./agent-panels/PersonaPanel").then(({ PersonaPanel }) => ({ default: PersonaPanel })),
+);
+const LazyMemoriesPanel = lazy(() =>
+  import("./agent-panels/MemoriesPanel").then(({ MemoriesPanel }) => ({ default: MemoriesPanel })),
+);
+const LazyMemberProfilesPanel = lazy(() =>
+  import("./agent-panels/MemberProfilesPanel").then(({ MemberProfilesPanel }) => ({ default: MemberProfilesPanel })),
+);
+const LazyRelationsPanel = lazy(() =>
+  import("./agent-panels/RelationsPanel").then(({ RelationsPanel }) => ({ default: RelationsPanel })),
+);
+const LazyAgentMessagesPanel = lazy(() =>
+  import("./agent-panels/AgentMessagesPanel").then(({ AgentMessagesPanel }) => ({ default: AgentMessagesPanel })),
+);
+const LazyAgentDebugger = lazy(() =>
+  import("./agent-debug/AgentDebugger").then(({ AgentDebugger }) => ({ default: AgentDebugger })),
+);
+const LazyPrivacyPanel = lazy(() =>
+  import("./agent-panels/PrivacyPanel").then(({ PrivacyPanel }) => ({ default: PrivacyPanel })),
+);
+const LazyAgentAuditsPanel = lazy(() =>
+  import("./agent-panels/AgentAuditsPanel").then(({ AgentAuditsPanel }) => ({ default: AgentAuditsPanel })),
+);
 
-export {
-  MEMORY_TYPE_META, PROFILE_KEY_META, RELATION_TYPE_PRESETS,
-  memoryTypeLabel, profileKeyLabel, memberDisplayName, mergePersonaPreset,
-  personaDraftSummary, personaBehaviorPreview, personaEmotionExpressionPreview,
-} from "./agent-meta";
-export { MemoriesPanel } from "./agent-panels/MemoriesPanel";
-export { MemberProfilesPanel } from "./agent-panels/MemberProfilesPanel";
-export { RelationsPanel } from "./agent-panels/RelationsPanel";
-export { debugMessageLabel } from "./agent-debug/debug-utils";
+const AGENT_TAB_KEYS = new Set([
+  "overview",
+  "config",
+  "persona",
+  "memories",
+  "profiles",
+  "relations",
+  "messages",
+  "debug",
+  "privacy",
+  "audit",
+]);
 
-export function AgentGroupsPage(): React.JSX.Element {
-  const [page, setPage] = useState(1); const [search, setSearch] = useState("");
-  const load = useCallback(() => api<GroupSummary[]>(`/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`).then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })), [page, search]);
-  const query = useApiQuery(load, { resources: ["agent_config"] });
-  return <><PageHeader title="Agent 管理" subtitle="选择群组配置触发、人设、记忆和工具策略" onRefresh={query.reload} refreshing={query.refreshing} extra={<Input.Search placeholder="搜索群组" allowClear onSearch={(v) => { setSearch(v); setPage(1); }} />} /><Card>{
-    query.error && !query.data
-      ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <Table rowKey="groupId" loading={query.loading} dataSource={query.data?.rows ?? []} locale={{ emptyText: <AdminEmpty description="暂无可管理群组" /> }} pagination={{ current: page, pageSize: 20, total: query.data?.total ?? 0, showSizeChanger: false, onChange: setPage }} columns={[{ title: "群组", render: (_, row: GroupSummary) => <>{row.groupName || "未命名群"}<br /><Text type="secondary">{row.groupId}</Text></> }, { title: "成员", dataIndex: "memberCount" }, { title: "状态", render: (_, row: GroupSummary) => <Tag color={row.agentEnabled ? "green" : "default"}>{row.agentEnabled ? "开启" : "关闭"}</Tag> }, { title: "操作", render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link> }]} />
-  }</Card></>;
+type AgentSectionKey = "runtime" | "knowledge" | "debug" | "governance";
+
+const AGENT_SECTION_BY_TAB: Record<string, AgentSectionKey> = {
+  overview: "runtime",
+  config: "runtime",
+  persona: "runtime",
+  memories: "knowledge",
+  profiles: "knowledge",
+  relations: "knowledge",
+  messages: "knowledge",
+  debug: "debug",
+  privacy: "governance",
+  audit: "governance",
+};
+
+const AGENT_SECTION_DEFAULT: Record<AgentSectionKey, string> = {
+  runtime: "overview",
+  knowledge: "memories",
+  debug: "debug",
+  governance: "privacy",
+};
+
+interface AgentGroupDetail {
+  groupId: string;
+  groupName?: string | null;
+  memberCount: number;
 }
 
-const AGENT_DETAIL_NAV = [
-  { key: "overview", label: "运行诊断" },
-  { key: "config", label: "运行配置" },
-  { key: "persona", label: "人设" },
-  { key: "memories", label: "记忆" },
-  { key: "profiles", label: "成员画像" },
-  { key: "relations", label: "关系边" },
-  { key: "messages", label: "消息记录" },
-  { key: "debug", label: "对话调试" },
-  { key: "privacy", label: "隐私退出" },
-  { key: "audit", label: "工具审计" },
-] as const;
+function AgentPanelFallback(): React.JSX.Element {
+  return <div style={{ display: "grid", minHeight: 180, placeItems: "center" }}><Spin /></div>;
+}
 
-type AgentDetailTab = typeof AGENT_DETAIL_NAV[number]["key"];
+function panel(content: React.ReactNode): React.JSX.Element {
+  return <Suspense fallback={<AgentPanelFallback />}>{content}</Suspense>;
+}
+
+export function AgentGroupsPage(): React.JSX.Element {
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const query = useApiQuery({
+    queryKey: ["agent-groups", page, search],
+    fetcher: (signal) => api<GroupSummary[]>(
+      `/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`,
+      { signal },
+    ).then((response) => ({ rows: response.data, total: response.meta.total ?? 0 })),
+    invalidation: { resources: ["agent_config"] },
+  });
+
+  return <>
+    <PageHeader
+      title="Agent 管理"
+      subtitle="选择群组配置触发、人设、记忆和工具策略"
+      onRefresh={query.reload}
+      refreshing={query.refreshing}
+      extra={
+        <Input.Search
+          placeholder="搜索群组"
+          allowClear
+          onSearch={(value) => {
+            setSearch(value);
+            setPage(1);
+          }}
+        />
+      }
+    />
+    <Card>
+      {query.error && !query.data
+        ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
+        : <Table
+            rowKey="groupId"
+            loading={query.loading}
+            dataSource={query.data?.rows ?? []}
+            locale={{ emptyText: <AdminEmpty description="暂无可管理群组" /> }}
+            pagination={{
+              current: page,
+              pageSize: 20,
+              total: query.data?.total ?? 0,
+              showSizeChanger: false,
+              onChange: setPage,
+            }}
+            columns={[
+              {
+                title: "群组",
+                render: (_, row: GroupSummary) => <>
+                  {row.groupName || "未命名群"}<br />
+                  <Text type="secondary">{row.groupId}</Text>
+                </>,
+              },
+              { title: "成员", dataIndex: "memberCount" },
+              {
+                title: "状态",
+                render: (_, row: GroupSummary) => (
+                  <Tag color={row.agentEnabled ? "green" : "default"}>
+                    {row.agentEnabled ? "开启" : "关闭"}
+                  </Tag>
+                ),
+              },
+              {
+                title: "操作",
+                render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link>,
+              },
+            ]}
+          />}
+    </Card>
+  </>;
+}
 
 export function AgentDetailPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab") ?? "overview";
-  const activeTab = (AGENT_DETAIL_NAV.some((item) => item.key === requestedTab) ? requestedTab : "overview") as AgentDetailTab;
-  const changeTab = (key: string) => {
-    if (key === activeTab) return;
-    if (!confirmDiscardChanges()) return;
+  const tab = AGENT_TAB_KEYS.has(requestedTab) ? requestedTab : "overview";
+  const section = AGENT_SECTION_BY_TAB[tab] ?? "runtime";
+  const [lastLeafBySection, setLastLeafBySection] = useState<Record<AgentSectionKey, string>>({
+    ...AGENT_SECTION_DEFAULT,
+  });
+  const groupQuery = useApiQuery({
+    queryKey: ["agent-group-detail", groupId],
+    fetcher: (signal) => api<AgentGroupDetail>(`/groups/${groupId}`, { signal }).then((response) => response.data),
+    invalidation: {
+      resources: ["agent_group_data", "agent_config"],
+      scope: { groupId },
+    },
+  });
+
+  useEffect(() => {
+    if (requestedTab === tab) return;
     const next = new URLSearchParams(searchParams);
-    if (key === "overview") next.delete("tab");
-    else next.set("tab", key);
+    next.delete("tab");
+    setSearchParams(next, { replace: true });
+  }, [requestedTab, searchParams, setSearchParams, tab]);
+
+  useEffect(() => {
+    setLastLeafBySection((current) => current[section] === tab
+      ? current
+      : { ...current, [section]: tab });
+  }, [section, tab]);
+
+  const changeTab = (key: string) => {
+    if (!AGENT_TAB_KEYS.has(key)) return;
+    const next = new URLSearchParams(searchParams);
+    if (key === "overview") next.delete("tab"); else next.set("tab", key);
     setSearchParams(next, { replace: true });
   };
+  const changeSection = (key: string) => {
+    if (!(key in AGENT_SECTION_DEFAULT)) return;
+    const sectionKey = key as AgentSectionKey;
+    changeTab(lastLeafBySection[sectionKey] ?? AGENT_SECTION_DEFAULT[sectionKey]);
+  };
 
-  const panel = (() => {
-    switch (activeTab) {
-      case "config": return <AgentConfigPanel groupId={groupId} />;
-      case "persona": return <PersonaPanel groupId={groupId} />;
-      case "memories": return <MemoriesPanel groupId={groupId} />;
-      case "profiles": return <MemberProfilesPanel groupId={groupId} />;
-      case "relations": return <RelationsPanel groupId={groupId} />;
-      case "messages": return <AgentMessagesPanel groupId={groupId} />;
-      case "debug": return <AgentDebugger groupId={groupId} />;
-      case "privacy": return <PrivacyPanel groupId={groupId} />;
-      case "audit": return <AgentAuditsPanel groupId={groupId} />;
-      default: return <AgentOverviewPanel groupId={groupId} />;
-    }
-  })();
+  const groupName = groupQuery.data?.groupName?.trim() || "未命名群";
+  const title = groupQuery.data ? `Agent · ${groupName}（${groupId}）` : `Agent · ${groupId}`;
 
-  return (
-    <PageFrame className="agent-detail-page">
-      <div className="agent-detail-heading">
-        <PageHeader
-          title={`Agent · ${groupId}`}
-          subtitle="群级运行状态、配置、人设、记忆与数据治理"
-          extra={<Link to="/agent">返回 Agent 列表</Link>}
-        />
-      </div>
-      <nav className="agent-studio-nav-shell" aria-label="Agent 功能导航">
-        <div className="agent-studio-nav-scroll" role="tablist" aria-label="Agent 功能">
-          {AGENT_DETAIL_NAV.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === item.key}
-              aria-controls="agent-studio-panel"
-              className={`agent-studio-nav-button${activeTab === item.key ? " is-active" : ""}`}
-              onClick={() => changeTab(item.key)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-        <Select
-          className="agent-studio-nav-select"
-          value={activeTab}
-          onChange={changeTab}
-          options={AGENT_DETAIL_NAV.map((item) => ({ value: item.key, label: item.label }))}
-          aria-label="选择 Agent 功能"
-        />
-      </nav>
-      <div id="agent-studio-panel" className="agent-studio-panel" role="tabpanel">
-        {panel}
-      </div>
-    </PageFrame>
-  );
+  return <>
+    <PageHeader
+      title={title}
+      subtitle="群级运行状态、知识、调试与数据治理"
+      extra={<Link to="/agent">返回 Agent 列表</Link>}
+    />
+    <Tabs
+      className="agent-ia-tabs"
+      activeKey={section}
+      onChange={changeSection}
+      items={[
+        {
+          key: "runtime",
+          label: "运行",
+          children: <div className="agent-ia-section">
+            <Tabs
+              className="agent-ia-subtabs"
+              activeKey={tab}
+              onChange={changeTab}
+              items={[
+                {
+                  key: "overview",
+                  label: "诊断",
+                  children: <AgentOverviewPanel groupId={groupId} onNavigate={changeTab} />,
+                },
+                {
+                  key: "config",
+                  label: "配置",
+                  children: panel(<LazyAgentConfigPanel groupId={groupId} />),
+                },
+                {
+                  key: "persona",
+                  label: "人设",
+                  children: panel(<LazyPersonaPanel groupId={groupId} />),
+                },
+              ]}
+            />
+          </div>,
+        },
+        {
+          key: "knowledge",
+          label: "知识",
+          children: <div className="agent-ia-section">
+            <Tabs
+              className="agent-ia-subtabs"
+              activeKey={tab}
+              onChange={changeTab}
+              items={[
+                {
+                  key: "memories",
+                  label: "记忆",
+                  children: panel(<LazyMemoriesPanel groupId={groupId} />),
+                },
+                {
+                  key: "profiles",
+                  label: "画像",
+                  children: panel(<LazyMemberProfilesPanel groupId={groupId} />),
+                },
+                {
+                  key: "relations",
+                  label: "关系",
+                  children: panel(<LazyRelationsPanel groupId={groupId} />),
+                },
+                {
+                  key: "messages",
+                  label: "消息",
+                  children: panel(<LazyAgentMessagesPanel groupId={groupId} />),
+                },
+              ]}
+            />
+          </div>,
+        },
+        {
+          key: "debug",
+          label: "调试",
+          children: <div className="agent-ia-section agent-ia-single">
+            <div className="agent-ia-section-label">Dialogue Debug</div>
+            {panel(<LazyAgentDebugger groupId={groupId} />)}
+          </div>,
+        },
+        {
+          key: "governance",
+          label: "治理",
+          children: <div className="agent-ia-section">
+            <Tabs
+              className="agent-ia-subtabs"
+              activeKey={tab}
+              onChange={changeTab}
+              items={[
+                {
+                  key: "privacy",
+                  label: "隐私",
+                  children: panel(<LazyPrivacyPanel groupId={groupId} />),
+                },
+                {
+                  key: "audit",
+                  label: "审计",
+                  children: panel(<LazyAgentAuditsPanel groupId={groupId} />),
+                },
+              ]}
+            />
+          </div>,
+        },
+      ]}
+    />
+  </>;
 }
 
 const LLM_TASK_LABELS: Record<string, string> = {
@@ -190,20 +337,40 @@ const LLM_TASK_LABELS: Record<string, string> = {
   agent_image: "图片理解",
 };
 
-function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const load = useCallback(
-    () => api<AgentDiagnostics>(`/agent/groups/${groupId}/diagnostics`).then((r) => r.data),
-    [groupId],
-  );
-  const loadCapabilities = useCallback(
-    () => api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities`).then((r) => r.data),
-    [groupId],
-  );
-  const query = useApiQuery(load, { resources: ["agent_config", "agent_memory", "agent_group_data"] });
-  const capabilityQuery = useApiQuery(loadCapabilities, { resources: ["agent_config"] });
+function AgentOverviewPanel({
+  groupId,
+  onNavigate,
+}: {
+  groupId: string;
+  onNavigate: (tab: string) => void;
+}): React.JSX.Element {
+  const query = useApiQuery({
+    queryKey: ["agent-diagnostics", groupId],
+    fetcher: (signal) => api<AgentDiagnostics>(
+      `/agent/groups/${groupId}/diagnostics`,
+      { signal },
+    ).then((response) => response.data),
+    invalidation: {
+      resources: ["agent_config", "agent_memory", "agent_group_data"],
+      scope: { groupId },
+    },
+  });
+  const capabilityQuery = useApiQuery({
+    queryKey: ["agent-capabilities", groupId],
+    fetcher: (signal) => api<AgentCapabilities>(
+      `/agent/groups/${groupId}/capabilities`,
+      { signal },
+    ).then((response) => response.data),
+    invalidation: { resources: ["agent_config"], scope: { groupId } },
+  });
   const [capabilityRefreshing, setCapabilityRefreshing] = useState(false);
   const data = query.data;
-  if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
+  if (!data) {
+    return query.error
+      ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
+      : <Spin />;
+  }
+
   const effective = data.effective;
   const memory = data.memory;
   const conversation = effective.shortConversation;
@@ -212,12 +379,13 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
     setCapabilityRefreshing(true);
     try {
       await api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities/refresh`, { method: "POST" });
-      await capabilityQuery.reload();
+      capabilityQuery.reload();
     } finally {
       setCapabilityRefreshing(false);
     }
   };
-  return <PanelStack>
+
+  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
     <Card
       title="实际生效配置"
       extra={<Button onClick={query.reload} loading={query.refreshing}>刷新诊断</Button>}
@@ -279,8 +447,8 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
           ))}
         </Space>}
       <Space wrap className="section-row">
-        <Link to={`?tab=config`}>调整运行配置</Link>
-        <Link to={`?tab=memories`}>检查记忆治理</Link>
+        <Button type="link" onClick={() => onNavigate("config")}>调整运行配置</Button>
+        <Button type="link" onClick={() => onNavigate("memories")}>检查记忆治理</Button>
         <Link to="/environment">检查 LLM Provider / 模型路由</Link>
       </Space>
     </Card>
@@ -326,7 +494,12 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
           </Space>}
     </Card>
 
-    <Card title="LLM 实际路由" extra={data.llm.unconfiguredProviders.length > 0 ? <Tag color="red">Provider 未配置</Tag> : <Tag color="green">路由可用</Tag>}>
+    <Card
+      title="LLM 实际路由"
+      extra={data.llm.unconfiguredProviders.length > 0
+        ? <Tag color="red">Provider 未配置</Tag>
+        : <Tag color="green">路由可用</Tag>}
+    >
       <List
         dataSource={data.llm.routes}
         locale={{ emptyText: <AdminEmpty description="暂无 LLM 路由" /> }}
@@ -341,5 +514,5 @@ function AgentOverviewPanel({ groupId }: { groupId: string }): React.JSX.Element
         )}
       />
     </Card>
-  </PanelStack>;
+  </Space>;
 }
