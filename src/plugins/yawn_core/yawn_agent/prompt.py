@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from .context import CurrentTurn
-from .context_history import EffectiveTurn, effective_turn_query
+from .context_history import EffectiveTurn, effective_turn_from_context
 from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
@@ -145,8 +145,8 @@ def reconstruct_effective_current_turn(
 ) -> CurrentTurn | dict[str, Any] | None:
     """Promote a split QQ mini-turn into the actual highest-priority user turn.
 
-    The history selector already limits reconstruction to a short contiguous block from
-    the same actor. Repeating that deterministic projection here prevents the final
+    Use the pre-budget turn snapshot when available: sparse history may have lost
+    speaker/Bot boundaries. Projecting that decision here prevents the final
     prompt from saying ``current_turn.content=''`` while the real question lives only
     in history. ``primary/support/resumed_task/media_binding`` remain separate instead
     of being concatenated into a synthetic user question. Media-caption fallback text
@@ -161,11 +161,6 @@ def reconstruct_effective_current_turn(
         actor_user_id = int(payload.get("user_id") or 0)
     except (TypeError, ValueError):
         actor_user_id = 0
-    history = [
-        dict(item)
-        for item in list(context.get("messages") or [])
-        if isinstance(item, dict)
-    ]
     if actor_user_id <= 0:
         return current_turn
 
@@ -180,11 +175,7 @@ def reconstruct_effective_current_turn(
         and stripped.startswith(_MEDIA_FALLBACK_PREFIXES)
     )
 
-    direct = effective_turn_query(
-        history,
-        focus_user_ids=[actor_user_id],
-        query_text=content,
-    )
+    direct = effective_turn_from_context(current_turn, context)
     if (
         not media_fallback_only
         and direct.primary
@@ -196,13 +187,9 @@ def reconstruct_effective_current_turn(
     ):
         return _replace_turn_effective(current_turn, direct)
 
-    if not media_fallback_only or not history:
+    if not media_fallback_only:
         return current_turn
-    historical = effective_turn_query(
-        history,
-        focus_user_ids=[actor_user_id],
-        query_text="",
-    )
+    historical = effective_turn_from_context({**payload, "content": ""}, context)
     if not (historical.used_history and historical.media_requested and historical.text):
         return current_turn
     return _replace_turn_effective(
@@ -302,7 +289,7 @@ def split_context(
     volatile: dict[str, Any] = {
         key: value
         for key, value in context.items()
-        if key not in _STABLE_CONTEXT_KEYS
+        if key not in _STABLE_CONTEXT_KEYS and key != "_effective_turn"
     }
     volatile["memories"] = [
         item

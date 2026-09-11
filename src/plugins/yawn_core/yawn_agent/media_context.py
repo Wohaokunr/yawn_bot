@@ -283,6 +283,7 @@ async def resolve_media_context(
     selected_history: Sequence[dict[str, Any]] | None = None,
     tool_results: Sequence[Any] | None = None,
     query_text: str | None = None,
+    effective_turn: EffectiveTurn | None = None,
     max_assets: int = _MAX_RESOLVED_MEDIA,
     asset_ttl_seconds: int | None = None,
     cache_enabled: bool = False,
@@ -306,7 +307,7 @@ async def resolve_media_context(
         bot_id = None
 
     reply_ids = _message_ids(reply_chain)
-    effective = _history_effective_turn(selected_history, query_text)
+    effective = effective_turn or _history_effective_turn(selected_history, query_text)
     if effective.media_requested:
         preferred_history_ids = list(effective.media_message_ids)
         history_ids = preferred_history_ids or _message_ids(selected_history)

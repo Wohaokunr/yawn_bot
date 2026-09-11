@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -193,6 +194,7 @@ async def load_context(
             )
         )
         previous_at = row.received_at
+    effective_turn = None
     message_priority_order: tuple[int, ...] | None = None
     if query_text is None and not compact_history:
         # 兼容内部/测试调用：没有当前回合查询、也没有主动会话语义时，
@@ -205,6 +207,7 @@ async def load_context(
             focus_user_ids=focus_user_ids,
             query_text=query_text,
         )
+        effective_turn = selection.effective_turn
         messages = selection.messages
         message_priority_order = selection.message_priority_order
         if selection_trace is not None:
@@ -509,7 +512,7 @@ async def load_context(
     )
     (_record_db_queries or record_agent_context_db_queries)(repo.query_count)
     dbg(f"群 {group_id} 上下文组装完成: 群名={group.group_name if group else None!r}")
-    return build_context(
+    context = build_context(
         group_id=group_id,
         group_name=group.group_name if group else None,
         messages=messages,
@@ -525,6 +528,12 @@ async def load_context(
         ),
         reference_at=context_now,
     )
+    if effective_turn is not None and focus_user_ids:
+        context["_effective_turn"] = {
+            "user_id": int(focus_user_ids[0]),
+            "turn": asdict(effective_turn),
+        }
+    return context
 
 
 __all__ = ["activity_window_counts", "load_context"]

@@ -78,6 +78,7 @@ from .context import (
 )
 from .context_history import (
     bot_message_meta as _bot_message_meta,
+    effective_turn_from_context,
     history_message_meta as _history_message_meta,
     history_message_payload as _history_message_payload,
     select_context_messages,
@@ -534,6 +535,10 @@ async def _process_group_message(
                 reply_chain=normalized.reply_chain,
                 selected_history=list(context.get("messages") or []),
                 query_text=_semantic_query_text(normalized),
+                effective_turn=effective_turn_from_context(
+                    {"user_id": actor_user_id, "content": _semantic_query_text(normalized)},
+                    context,
+                ),
                 asset_ttl_seconds=max(int(config.raw_retention_days), 1) * 86400,
                 cache_enabled=bool(config.media_cache_enabled),
                 diagnostics=media_diagnostics,

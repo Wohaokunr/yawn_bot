@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -132,6 +132,8 @@ class ContextSelection:
     media_message_ids: tuple[int, ...] = ()
     # messages 中的索引，按预算分配优先级排列；不进入 Prompt。
     message_priority_order: tuple[int, ...] = ()
+    # Resolved before sparse selection; never reconstruct boundaries from packed history.
+    effective_turn: EffectiveTurn | None = None
 
 
 def query_requests_media(query_text: str | None) -> bool:
@@ -350,6 +352,13 @@ def effective_turn_from_context(
                 if isinstance(value, dict):
                     payload = dict(value)
     actor_user_id = _optional_positive_int(payload.get("user_id"))
+    content = str(payload.get("content") or "")
+    # This internal snapshot is resolved before history loses speaker boundaries.
+    snapshot = (context or {}).get("_effective_turn")
+    if snapshot and actor_user_id == snapshot["user_id"]:
+        effective = EffectiveTurn(**snapshot["turn"])
+        if _trigger_only_query(content) or content == effective.primary:
+            return effective
     history = [
         dict(item)
         for item in list((context or {}).get("messages") or [])
@@ -358,7 +367,7 @@ def effective_turn_from_context(
     return effective_turn_query(
         history,
         focus_user_ids=[actor_user_id] if actor_user_id else None,
-        query_text=str(payload.get("content") or ""),
+        query_text=content,
     )
 
 
@@ -611,10 +620,11 @@ def select_context_messages(
         if isinstance(user_id, int) and int(user_id) > 0
     }
     trigger_query = str(query_text or "").strip()
-    effective = effective_turn_query(
-        messages,
-        focus_user_ids=focus_user_ids,
-        query_text=query_text,
+    # None denotes automatic participation, not a passive empty/@ trigger.
+    effective = (
+        effective_turn_query(messages, focus_user_ids=focus_user_ids, query_text=query_text)
+        if query_text is not None
+        else EffectiveTurn(primary="")
     )
     query = effective.primary
     query_tokens = extract_bigrams(query[:1000]) if query else set()
@@ -755,6 +765,20 @@ def select_context_messages(
     return ContextSelection(
         trimmed,
         trace,
+        effective_turn=replace(
+            effective,
+            primary=effective.primary[:CONTEXT_MESSAGE_CHAR_LIMIT],
+            support=tuple(
+                text[:CONTEXT_MESSAGE_CHAR_LIMIT] for text in effective.support
+            ),
+            resumed_task=(
+                effective.resumed_task[:CONTEXT_MESSAGE_CHAR_LIMIT]
+                if effective.resumed_task
+                else None
+            ),
+        )
+        if query_text is not None
+        else None,
         effective_query=query,
         turn_message_ids=effective.message_ids,
         media_message_ids=tuple(selected_media_ids),

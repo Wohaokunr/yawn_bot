@@ -2477,3 +2477,109 @@ async def test_decay_stale_relations_only_touches_stale_auto_edges() -> None:
         assert rows[3].confidence == pytest.approx(0.9)
         assert rows[4].confidence == pytest.approx(0.9)
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary_role", ["member", "bot", None])
+async def test_loaded_turn_preserves_boundary_through_budget_and_prompt(
+    boundary_role,
+) -> None:
+    from src.plugins.yawn_core.yawn_agent.context_history import (
+        effective_turn_from_context,
+    )
+    from src.plugins.yawn_core.yawn_agent.prompt import (
+        build_messages,
+        reconstruct_effective_current_turn,
+    )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    tables = [
+        bot_group_models.BotGroup.__table__,
+        config_models.GroupAgentConfig.__table__,
+        message_models.GroupAgentMessage.__table__,
+        models.AgentMemory.__table__,
+        models.AgentRelation.__table__,
+        models.AgentPrivacy.__table__,
+        user_group_models.UserGroup.__table__,
+    ]
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: models.AgentMemory.metadata.create_all(conn, tables=tables)
+            )
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            config = config_models.GroupAgentConfig(group_id=100)
+            session.add_all(
+                [bot_group_models.BotGroup(group_id=100, group_name="测试群"), config]
+            )
+            for index in range(1, 7):
+                session.add(
+                    message_models.GroupAgentMessage(
+                        bot_id=9,
+                        message_id=index,
+                        group_id=100,
+                        user_id=11,
+                        role="member",
+                        normalized_text="机器人如何处理用户消息和上下文？" * 40,
+                        received_at=NOW,
+                        expires_at=NOW + timedelta(days=7),
+                    )
+                )
+            if boundary_role:
+                session.add(
+                    message_models.GroupAgentMessage(
+                        bot_id=9,
+                        message_id=7,
+                        group_id=100,
+                        user_id=9 if boundary_role == "bot" else 22,
+                        role=boundary_role,
+                        normalized_text="嗯",
+                        received_at=NOW,
+                        expires_at=NOW + timedelta(days=7),
+                    )
+                )
+            await session.commit()
+            query = "[用户仅@机器人，没有附加正文]"
+            context = await dialogue._load_context(
+                session,
+                100,
+                config,
+                9,
+                focus_user_ids=[11],
+                query_text=query,
+                reference_at=NOW,
+                context_token_limit=2400,
+                completion_reserve=800,
+            )
+            assert 7 not in [item["message_id"] for item in context["messages"]]
+            turn = {
+                "user_id": 11,
+                "message_id": 8,
+                "content": query,
+                "trigger": "mention",
+            }
+            expected = "ping_ack" if boundary_role else "resume_task"
+            assert (
+                effective_turn_from_context(turn, context).interaction_kind == expected
+            )
+            reconstructed = reconstruct_effective_current_turn(turn, context)
+            assert reconstructed["interaction"]["kind"] == expected
+            assert len(reconstructed["content"]) <= 500
+            prompt, _ = build_messages(
+                persona={"name": "Yawn"},
+                tools=[],
+                context=context,
+                user_prompt=query,
+                current_turn=turn,
+            )
+            assert f'"kind":"{expected}"' in prompt[-1]["content"]
+            assert "_effective_turn" not in str(prompt)
+            assert "context_budget" not in str(prompt)
+            json.dumps(context, ensure_ascii=False)
+            explicit = {**turn, "content": "现在换个问题：如何配置日志？"}
+            assert (
+                reconstruct_effective_current_turn(explicit, context)["content"]
+                == explicit["content"]
+            )
+    finally:
+        await engine.dispose()

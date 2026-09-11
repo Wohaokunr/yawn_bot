@@ -523,3 +523,29 @@ def test_trace_shape_leaves_plain_text_message_unchanged() -> None:
     assert shape["effective_mentions"] == []
     assert shape["mention_stripped_for_prompt"] is False
     assert shape["mention_recovered_from_trigger"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply_ids", [[], [501]])
+async def test_media_uses_pre_budget_boundary_without_dropping_explicit_reply(
+    monkeypatch: pytest.MonkeyPatch, reply_ids: list[int],
+) -> None:
+    context_history, media_context = _load_modules()
+    history = [_image_message(101, 20001), _text_message(102, 20001, "这张图片怎么样")]
+    raw = [*history, _text_message(103, 30001, "嗯")]
+    query = "[用户仅@机器人，没有附加正文]"
+    effective = context_history.effective_turn_query(raw, focus_user_ids=[20001], query_text=query)
+    loaded: list[int] = []
+
+    async def load_rows(_session: Any, **kwargs: Any) -> dict[int, Any]:
+        loaded.extend(kwargs["message_ids"])
+        return {}
+
+    monkeypatch.setattr(media_context, "_load_message_rows", load_rows)
+    result = await media_context.resolve_media_context(
+        SimpleNamespace(self_id=50001), None, 60001,
+        selected_history=history, query_text=query, effective_turn=effective,
+        reply_chain=[{"message_id": value} for value in reply_ids],
+    )
+    assert loaded == reply_ids
+    assert result == []

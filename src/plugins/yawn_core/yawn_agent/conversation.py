@@ -301,6 +301,7 @@ def conversation_is_current(batch: ConversationBatch) -> bool:
     return bool(
         session
         and session.session_id == batch.session_id
+        and session.bot_turns == batch.bot_turns
         and not _expired(session, time.monotonic())
     )
 
@@ -309,11 +310,7 @@ def begin_followup_evaluation(batch: ConversationBatch) -> bool:
     """占用一次续聊评估配额；配额耗尽时关闭会话。"""
 
     session = _sessions.get(batch.key)
-    if (
-        session is None
-        or session.session_id != batch.session_id
-        or _expired(session, time.monotonic())
-    ):
+    if session is None or not conversation_is_current(batch):
         return False
     if session.evaluation_count >= CONVERSATION_MAX_EVALUATIONS:
         close_conversation(*batch.key, reason="达到续聊评估上限")

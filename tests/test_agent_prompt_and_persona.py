@@ -2415,3 +2415,88 @@ def test_fallback_cursor_is_bounded() -> None:
         assert len(dialogue._FALLBACK_CURSOR) <= dialogue._FALLBACK_CURSOR_LIMIT
     finally:
         dialogue._FALLBACK_CURSOR.clear()
+
+
+@pytest.mark.parametrize("focus", [None, [11]])
+def test_automatic_history_does_not_recover_a_passive_query(
+    focus: list[int] | None,
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_history import select_context_messages
+
+    messages = [
+        {
+            "message_id": 1,
+            "user_id": 11,
+            "text": "Python 怎么读取文件？",
+            "minutes_ago": 30,
+        },
+        {
+            "message_id": 2,
+            "user_id": 99,
+            "role": "bot",
+            "text": "Python 可以用 open 读取文件。",
+            "minutes_ago": 29,
+        },
+        {
+            "message_id": 3,
+            "user_id": 11,
+            "text": "Python 怎么读取配置？",
+            "minutes_ago": 0,
+        },
+    ]
+    automatic = select_context_messages(messages, focus_user_ids=focus)
+    assert [item["message_id"] for item in automatic.messages] == [3]
+    assert automatic.effective_query == ""
+    assert automatic.effective_turn is None
+    passive = select_context_messages(
+        messages, focus_user_ids=[11], query_text="Python 怎么读取文件？"
+    )
+    assert 1 in [item["message_id"] for item in passive.messages]
+
+
+@pytest.mark.asyncio
+async def test_followup_snapshot_expires_after_dialogue_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent import conversation, proactive
+    from src.plugins.yawn_core.yawn_agent.context import now_beijing
+
+    conversation.reset_for_tests()
+    try:
+        current = conversation.mark_bot_reply(9, 100, topic="旧话题", source="dialogue")
+        current.batch_first_at = current.batch_last_at = current.last_bot_at
+        current.batch_cutoff_at = now_beijing()
+        current.batch_user_ids.append(11)
+        current.batch_message_ids.append(101)
+        old = conversation._snapshot_batch((9, 100), current)
+        assert old is not None and current.evaluating
+        conversation.observe_member_message(
+            9, 100, user_id=11, message_id=102, explicit_trigger=True
+        )
+        conversation.mark_bot_reply(9, 100, topic="新话题", source="dialogue")
+        assert not conversation.conversation_is_current(old)
+        assert not conversation.begin_followup_evaluation(old)
+        assert current.evaluation_count == 0
+
+        def unexpected_bots() -> None:
+            pytest.fail("stale batch must stop before Bot/model/send access")
+
+        monkeypatch.setattr(proactive, "get_bots", unexpected_bots)
+        assert await proactive._process_followup_impl(old) == "close"
+        fresh = conversation.ConversationBatch(
+            key=old.key,
+            session_id=current.session_id,
+            topic=current.topic,
+            bot_turns=current.bot_turns,
+            user_ids=(11,),
+            message_ids=(103,),
+            cutoff_at=now_beijing(),
+        )
+        assert conversation.conversation_is_current(fresh)
+        assert conversation.begin_followup_evaluation(fresh)
+        conversation.finish_followup_evaluation(fresh, "wait")
+        assert current.consecutive_waits == 1
+    finally:
+        conversation.reset_for_tests()
