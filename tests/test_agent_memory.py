@@ -2059,6 +2059,59 @@ async def test_core_memory_survives_purge_and_prefetch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_loader_preserves_related_exchange_with_small_budget() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    tables = [
+        bot_group_models.BotGroup.__table__,
+        config_models.GroupAgentConfig.__table__,
+        message_models.GroupAgentMessage.__table__,
+        models.AgentMemory.__table__,
+        models.AgentRelation.__table__,
+        models.AgentPrivacy.__table__,
+        user_group_models.UserGroup.__table__,
+    ]
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: models.AgentMemory.metadata.create_all(conn, tables=tables)
+            )
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            config = config_models.GroupAgentConfig(group_id=100)
+            session.add(config)
+            for message_id in range(1, 20):
+                session.add(message_models.GroupAgentMessage(
+                    bot_id=9, group_id=100, message_id=message_id,
+                    user_id=20 if message_id == 1 else 9 if message_id == 2 else 30,
+                    role="bot" if message_id == 2 else "member",
+                    normalized_text=(
+                        "请求超时应该怎么设置？" if message_id == 1
+                        else "可以先设置重试次数。" if message_id == 2
+                        else "闲" * 700
+                    ),
+                    reply_chain=[{"user_id": 20, "message_id": 1}]
+                    if message_id == 2 else [],
+                    received_at=NOW - timedelta(minutes=5 if message_id < 3 else 1)
+                    + timedelta(seconds=message_id),
+                    expires_at=NOW + timedelta(days=7),
+                ))
+            await session.commit()
+            budget_trace = []
+            context = await dialogue._load_context(
+                session, 100, config, bot_id=9,
+                query_text="那为什么要这样设置？", focus_user_ids=[20],
+                reference_at=NOW, message_cutoff=NOW,
+                context_token_limit=1600, budget_trace=budget_trace,
+            )
+            ids = [item["message_id"] for item in context["messages"]]
+            assert ids[:2] == [1, 2]
+            assert ids == sorted(ids)
+            assert budget_trace[1]["usedTokens"] <= budget_trace[1]["budgetTokens"]
+            assert "message_priority_order" not in json.dumps(context, default=str)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_context_prioritizes_core_memory_for_speaker() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [

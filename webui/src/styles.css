@@ -2711,3 +2711,12 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
   .agent-debug-run-row .ant-btn { width: 100%; }
   .agent-debug-inspector-grid { grid-template-columns: 1fr; }
 }
+
+/* Trace controls retain a visible keyboard target and wrap long diagnostics. */
+.agent-trace-list-item:focus-visible { outline: 2px solid var(--ant-color-primary, #1677ff); outline-offset: 2px; }
+.agent-trace-list-item.is-selected { box-shadow: inset 3px 0 var(--ant-color-primary, #1677ff); }
+.agent-debug-list-item { min-width: 0; overflow-wrap: anywhere; }
+.agent-debug-details { min-width: 0; }
+.agent-debugger .ant-card-head-wrapper { flex-wrap: wrap; gap: 8px; }
+.agent-debugger .ant-card-head-title { white-space: normal; }
+.agent-debugger .ant-card-extra { max-width: 100%; }

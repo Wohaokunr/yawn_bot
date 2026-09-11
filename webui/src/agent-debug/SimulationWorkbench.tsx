@@ -130,7 +130,7 @@ export function SimulationWorkbench({
           <Switch checked={runModel} onChange={setRunModel} />
           <div>
             <Text strong>{runModel ? "调用真实模型" : "仅构建提示词"}</Text><br />
-            <Text type="secondary">{runModel ? "30 秒超时，并发上限 2；仍不会执行任何副作用" : "用于检查上下文、Prompt 和可见工具，不产生模型调用"}</Text>
+            <Text type="secondary">{runModel ? "会产生模型调用费用；30 秒超时，并发上限 2；不执行工具或发送消息" : "用于检查上下文、Prompt 和可见工具，不产生模型调用"}</Text>
           </div>
         </Space>
         <Button type="primary" onClick={run} loading={running}>{runModel ? "开始真实试跑" : "生成调试快照"}</Button>

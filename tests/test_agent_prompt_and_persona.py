@@ -782,6 +782,162 @@ def test_history_selection_trace_explains_keep_and_drop_without_polluting_prompt
     )
 
 
+@pytest.mark.parametrize(
+    "query", ["那为什么要这样设置？", "你理解错了，我问的是超时，不是重试"]
+)
+@pytest.mark.parametrize("chatter_length", [30, 700])
+def test_history_budget_preserves_related_exchange_after_chatter(
+    query: str, chatter_length: int,
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_history import select_context_messages
+
+    messages = [
+        {
+            "message_id": 1, "user_id": 20,
+            "text": "请求超时应该怎么设置？", "minutes_ago": 5,
+        },
+        {
+            "message_id": 2, "user_id": 99, "role": "bot",
+            "text": "可以先设置重试次数。",
+            "reply_to": {"user_id": 20, "message_id": 1}, "minutes_ago": 5,
+        },
+        *[
+            {
+                "message_id": i, "user_id": 30 + i % 2,
+                "text": "闲" * chatter_length, "minutes_ago": 1,
+            }
+            for i in range(3, 20)
+        ],
+    ]
+    selection = select_context_messages(messages, focus_user_ids=[20], query_text=query)
+    ids = [item["message_id"] for item in selection.messages]
+    assert ids[:2] == [1, 2]
+    assert ids == sorted(ids)
+    assert len(ids) <= 16
+    assert sum(len(item["text"]) for item in selection.messages) <= 2800
+    assert all(len(item["text"]) <= 500 for item in selection.messages)
+    assert messages[-1]["text"] == "闲" * chatter_length
+    assert selection.effective_query == query
+    trace = {item["message_id"]: item for item in selection.trace}
+    assert trace[1]["selected"] and trace[2]["selected"]
+    assert trace[3]["reason"] == "context_budget"
+    assert not trace[3]["selected"]
+    assert all("reason" not in item for item in selection.messages)
+    assert selection == select_context_messages(
+        messages, focus_user_ids=[20], query_text=query
+    )
+
+    from src.plugins.yawn_core.yawn_agent.prompt import build_messages
+
+    prompt, _ = build_messages(
+        persona={"name": "Yawn"}, tools=[],
+        context={"messages": selection.messages}, user_prompt=query,
+        current_turn={"user_id": 20, "content": query, "trigger": "mention"},
+    )
+    history = str(prompt[:-1])
+    assert "请求超时应该怎么设置？" in history
+    assert "可以先设置重试次数。" in history
+    assert f'"content":"{query}"' in str(prompt[-1]["content"])
+    assert "context_budget" not in str(prompt)
+
+    from src.plugins.yawn_core.yawn_agent.context_budget import pack_context
+
+    packed = pack_context(
+        messages=selection.messages, members=[], memories=[], relations=[],
+        target_context_limit=1600,
+        message_priority_order=selection.message_priority_order,
+    )
+    packed_ids = [item["message_id"] for item in packed.messages]
+    assert packed_ids[:2] == [1, 2]
+    assert packed_ids == sorted(packed_ids)
+    assert packed.trace[1]["usedTokens"] <= packed.budget.history_limit
+    assert sorted(selection.message_priority_order) == list(range(len(ids)))
+    packed_prompt, _ = build_messages(
+        persona={"name": "Yawn"}, tools=[],
+        context={"messages": packed.messages}, user_prompt=query,
+        current_turn={"user_id": 20, "content": query, "trigger": "mention"},
+    )
+    assert "请求超时应该怎么设置？" in str(packed_prompt[:-1])
+    assert "可以先设置重试次数。" in str(packed_prompt[:-1])
+    assert "message_priority_order" not in str(packed_prompt)
+    assert "context_budget" not in str(packed_prompt)
+
+
+@pytest.mark.parametrize("query", ["毫不相关的新问题", None])
+def test_history_budget_ties_keep_latest_in_chronological_order(
+    query: str | None,
+) -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_history import select_context_messages
+
+    messages = [
+        {"message_id": i, "user_id": 30, "text": "闲" * 700, "minutes_ago": 1}
+        for i in range(1, 20)
+    ]
+    selection = select_context_messages(messages, query_text=query)
+    assert [item["message_id"] for item in selection.messages] == list(range(14, 20))
+    assert [len(item["text"]) for item in selection.messages] == [300] + [500] * 5
+
+    from copy import deepcopy
+
+    from src.plugins.yawn_core.yawn_agent.context_budget import pack_context
+
+    original = deepcopy(selection.messages)
+    default = pack_context(
+        messages=selection.messages, members=[], memories=[], relations=[],
+        target_context_limit=1600,
+    )
+    prioritized = pack_context(
+        messages=selection.messages, members=[], memories=[], relations=[],
+        target_context_limit=1600,
+        message_priority_order=selection.message_priority_order,
+    )
+    assert prioritized == default
+    assert prioritized.messages[-1]["message_id"] == 19
+    assert selection.messages == original
+
+
+def test_empty_history_priority_packs_without_prompt_metadata() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_budget import pack_context
+    from src.plugins.yawn_core.yawn_agent.context_history import select_context_messages
+
+    selection = select_context_messages([], query_text="继续")
+    assert selection.message_priority_order == ()
+    packed = pack_context(
+        messages=selection.messages, members=[], memories=[], relations=[],
+        message_priority_order=selection.message_priority_order,
+    )
+    assert packed.messages == []
+    assert packed.trace[1]["usedTokens"] == 0
+
+
+def test_history_budget_keeps_effective_turn_above_high_overlap_history() -> None:
+    _load_agent_modules()
+    from src.plugins.yawn_core.yawn_agent.context_history import select_context_messages
+
+    task = "解释请求超时重试次数退避策略以及连接池配置"
+    messages = [
+        {
+            "message_id": i, "user_id": 30 if i < 10 else 20,
+            "text": task * 30, "minutes_ago": 1,
+        }
+        for i in range(1, 14)
+    ]
+    selection = select_context_messages(
+        messages, focus_user_ids=[20],
+        query_text="[用户仅@机器人，没有附加正文]",
+    )
+    assert selection.turn_message_ids == (10, 11, 12, 13)
+    assert selection.effective_query == task * 30
+    assert {10, 11, 12, 13} <= {
+        item["message_id"] for item in selection.messages
+    }
+    trace = {item["message_id"]: item for item in selection.trace}
+    assert all(trace[i]["reason"] == "effective_turn" for i in range(10, 14))
+
+
 def _build_messages_layered(
     context: dict, tools: list
 ) -> tuple[list[dict], str]:

@@ -1,6 +1,6 @@
 import { Alert, Button, Card, Descriptions, List, Space, Tabs, Tag, Typography } from "antd";
-import { formatTime, QueryErrorAlert } from "../shared";
-import type { AgentDebugResponse, AgentExecutionTrace } from "../types";
+import { formatTime } from "../shared";
+import type { AgentDebugResponse } from "../types";
 import { ContextBudgetInspector, ContextInspector, CurrentTurnInspector } from "./ContextInspector";
 import {
   AGENT_DEBUG_MODES,
@@ -223,10 +223,6 @@ function DebugModelInspector({ result }: { result: AgentDebugResponse["result"] 
 }
 
 export interface TraceWorkspaceProps {
-  runtimeTrace: AgentExecutionTrace | null;
-  runtimeLoading: boolean;
-  runtimeError: string;
-  onReloadRuntime: () => void;
   result: AgentDebugResponse | null;
   baseline: AgentDebugResponse | null;
   onPinBaseline: () => void;
@@ -234,23 +230,16 @@ export interface TraceWorkspaceProps {
 }
 
 export function TraceWorkspace({
-  runtimeTrace,
-  runtimeLoading,
-  runtimeError,
-  onReloadRuntime,
   result,
   baseline,
   onPinBaseline,
   onClearBaseline,
 }: TraceWorkspaceProps): React.JSX.Element {
   return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
-    <Card title="真实 Trace 详情">
-      {runtimeError ? <QueryErrorAlert error={runtimeError} onRetry={onReloadRuntime} /> : runtimeLoading ? <Text type="secondary">正在加载 Trace 详情…</Text> : runtimeTrace ? <TracePipeline trace={runtimeTrace} /> : <Text type="secondary">从左侧选择一条 Trace 查看完整事件。</Text>}
-    </Card>
     {result && <>
       <Card title="本次调试摘要" extra={<Space wrap>
         {baseline ? <Tag color="purple">已固定基准</Tag> : null}
-        <Button onClick={onPinBaseline} disabled={Boolean(baseline)}>固定当前为基准</Button>
+        <Button onClick={onPinBaseline}>{baseline ? "替换为当前基准" : "固定当前为基准"}</Button>
         {baseline && <Button onClick={onClearBaseline}>清除基准</Button>}
       </Space>}>
         <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
@@ -266,7 +255,7 @@ export function TraceWorkspace({
         {baseline && <Text type="secondary">当前结果会与固定基准按 Context、Prompt、Tools、Speech、Token、Model 六个维度比较。</Text>}
       </Card>
       <Card title="调试详情" className="agent-debug-detail-card">
-        <Tabs items={[
+        <Tabs defaultActiveKey="overview" items={[
           { key: "trace", label: `执行轨迹 ${result.executionTrace.events.length}`, children: <TracePipeline trace={result.executionTrace} /> },
           { key: "overview", label: "概览", children: <div className="agent-debug-inspector-grid"><CurrentTurnInspector value={result.currentTurn} /><ContextBudgetInspector stats={result.stats} /></div> },
           { key: "context", label: "上下文", children: <ContextInspector context={result.context} selection={result.contextSelection} /> },

@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 from ..data_models.group_agent_message import GroupAgentMessage
-from .context import topic_break_before, trim_context_messages
+from .context import topic_break_before
 from .memory import extract_bigrams
 
 CONTEXT_HISTORY_MAX_MESSAGES = 16
@@ -26,6 +26,16 @@ CONTEXT_CLUSTER_GAP_MINUTES = 6
 CONTEXT_RELEVANT_MAX_AGE_MINUTES = 60
 CONTEXT_PROACTIVE_MAX_AGE_MINUTES = 45
 CONTEXT_PROACTIVE_MAX_MESSAGES = 10
+_CONTEXT_REASON_PRIORITY = {
+    "effective_turn": 2,
+    "effective_turn_media": 2,
+    "focus_relation": 1,
+    "query_overlap": 1,
+    "media_reference": 1,
+    "relevant_neighbor": 1,
+    "recent_cluster": 0,
+    "proactive_recent_cluster": 0,
+}
 EFFECTIVE_TURN_MAX_MESSAGES = 4
 EFFECTIVE_TURN_MAX_AGE_MINUTES = 2
 TRIGGER_CONTINUATION_MAX_AGE_MINUTES = 10
@@ -120,6 +130,8 @@ class ContextSelection:
     effective_query: str = ""
     turn_message_ids: tuple[int, ...] = ()
     media_message_ids: tuple[int, ...] = ()
+    # messages 中的索引，按预算分配优先级排列；不进入 Prompt。
+    message_priority_order: tuple[int, ...] = ()
 
 
 def query_requests_media(query_text: str | None) -> bool:
@@ -615,7 +627,9 @@ def select_context_messages(
     def choose(index: int, reason: str, score: float | None = None) -> None:
         selected.add(index)
         previous = reasons.get(index)
-        if previous is None or (score or 0.0) > (previous[1] or 0.0):
+        if previous is None or (
+            _CONTEXT_REASON_PRIORITY[reason], score or 0.0
+        ) > (_CONTEXT_REASON_PRIORITY[previous[0]], previous[1] or 0.0):
             reasons[index] = (reason, score)
 
     if query:
@@ -670,7 +684,7 @@ def select_context_messages(
                 if neighbor < 0 or neighbor >= len(messages):
                     continue
                 if abs(_minutes_ago(messages[neighbor]) - _minutes_ago(messages[index])) <= 2 and not _is_low_info(messages[neighbor]):
-                    choose(neighbor, "relevant_neighbor")
+                    choose(neighbor, "relevant_neighbor", score)
     else:
         next_newer_age = _minutes_ago(messages[-1])
         for index in range(len(messages) - 1, -1, -1):
@@ -686,25 +700,34 @@ def select_context_messages(
             if len(selected) >= CONTEXT_PROACTIVE_MAX_MESSAGES:
                 break
 
-    chosen = [messages[index] for index in sorted(selected)]
-    trimmed = trim_context_messages(
-        chosen,
-        max_messages=CONTEXT_HISTORY_MAX_MESSAGES,
-        max_message_chars=CONTEXT_MESSAGE_CHAR_LIMIT,
-        char_budget=CONTEXT_HISTORY_CHAR_BUDGET,
+    # 先按用途和相关性分配预算，最后恢复时间顺序；不能让最新闲聊
+    # 挤掉已经选中的当前回合及关联问答。邻居沿用关联消息的分数。
+    ranked = sorted(
+        selected,
+        key=lambda index: (
+            _CONTEXT_REASON_PRIORITY[reasons[index][0]],
+            reasons[index][1] or 0.0,
+            index,
+        ),
+        reverse=True,
     )
-    kept_keys = [
-        (item.get("message_id"), item.get("user_id"), item.get("minutes_ago"))
-        for item in trimmed
-    ]
-    kept_key_set = set(kept_keys)
+    kept: dict[int, dict[str, Any]] = {}
+    remaining = CONTEXT_HISTORY_CHAR_BUDGET
+    for index in ranked[:CONTEXT_HISTORY_MAX_MESSAGES]:
+        if remaining <= 0:
+            break
+        item = messages[index]
+        text = str(item.get("text") or "")[:min(CONTEXT_MESSAGE_CHAR_LIMIT, remaining)]
+        kept[index] = {**item, "text": text}
+        remaining -= len(text)
+    trimmed = [kept[index] for index in sorted(kept)]
+    message_positions = {index: position for position, index in enumerate(sorted(kept))}
     trace: list[dict[str, Any]] = []
     selected_media_ids: list[int] = []
     for index, item in enumerate(messages):
-        key = (item.get("message_id"), item.get("user_id"), item.get("minutes_ago"))
         if index in selected:
             reason, score = reasons.get(index, ("selected", None))
-            if key in kept_key_set:
+            if index in kept:
                 trace.append(_trace_row(item, selected=True, reason=reason, score=score))
                 if media_query and item.get("media_types") and reason in {"effective_turn_media", "media_reference", "recent_cluster", "effective_turn"}:
                     message_id = _optional_positive_int(item.get("message_id"))
@@ -735,6 +758,7 @@ def select_context_messages(
         effective_query=query,
         turn_message_ids=effective.message_ids,
         media_message_ids=tuple(selected_media_ids),
+        message_priority_order=tuple(message_positions[index] for index in kept),
     )
 
 

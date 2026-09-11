@@ -172,9 +172,12 @@ def _pack_mappings(
     budget: int,
     prefer_latest: bool,
     text_field: str,
+    priority_order: Sequence[int] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     indexed = list(enumerate(items))
     scan = list(reversed(indexed)) if prefer_latest else indexed
+    if priority_order is not None:
+        scan = [indexed[index] for index in priority_order]
     kept: list[tuple[int, dict[str, Any]]] = []
     used = 0
     for index, item in scan:
@@ -223,6 +226,7 @@ def pack_context(
     model: str | None = None,
     completion_reserve: int = 2048,
     target_context_limit: int | None = None,
+    message_priority_order: Sequence[int] | None = None,
 ) -> ContextPack:
     budget = build_context_budget(
         model=model,
@@ -234,6 +238,7 @@ def pack_context(
         budget=budget.history_limit,
         prefer_latest=True,
         text_field="text",
+        priority_order=message_priority_order,
     )
     packed_memories, memory_used, memory_dropped = _pack_mappings(
         memories,

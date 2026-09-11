@@ -1,7 +1,7 @@
 import { Alert, Button, Card, List, Select, Space, Switch, Tag, Typography } from "antd";
 import { AdminEmpty, formatTime, QueryErrorAlert } from "../shared";
 import type { AgentExecutionTraceSummary } from "../types";
-import { agentDebugModeLabel, TRACE_STATUS_META, traceOutcomeLabel } from "./debug-utils";
+import { agentDebugModeLabel, TRACE_STATUS_META, traceOutcomeLabel, triggerSourceLabel } from "./debug-utils";
 import type { ExecutionTracesState } from "./useExecutionTraces";
 
 const { Text } = Typography;
@@ -21,10 +21,11 @@ export function TraceSidebar({ traces }: { traces: ExecutionTracesState }): Reac
   >
     <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
       <Space wrap>
-        <Select value={traces.status} onChange={traces.setStatus} options={STATUS_OPTIONS} style={{ width: 128 }} />
+        <Button onClick={traces.selectLatest}>查看最新</Button>
+        <Select aria-label="筛选执行状态" value={traces.status} onChange={traces.setStatus} options={STATUS_OPTIONS} style={{ width: 128 }} />
         <Space size={6}><Switch size="small" checked={traces.autoRefresh} onChange={traces.setAutoRefresh} /><Text type="secondary">自动刷新（3 秒）</Text></Space>
       </Space>
-      <Alert type="warning" showIcon className="section-alert" message="Trace 仅保存在当前 Bot 进程内，重启后清空；列表只加载摘要，选中后才请求事件详情。" description="完整 URL、本机路径、file 值与原始 OneBot payload 不会保留。" />
+      <details className="agent-debug-details"><summary>Trace 保留与隐私说明</summary>仅保存在当前进程，重启清空；仅按需加载详情，不保留完整 URL、本机路径与原始 OneBot payload。</details>
       {traces.selectedTraceUnavailable && <Alert
         type="info"
         showIcon
@@ -61,7 +62,9 @@ function TraceListItem({
   onSelect: () => void;
 }): React.JSX.Element {
   const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
-  return <List.Item className={selected ? "agent-trace-list-item is-selected" : "agent-trace-list-item"} onClick={onSelect}>
+  return <List.Item className={selected ? "agent-trace-list-item is-selected" : "agent-trace-list-item"} role="button" tabIndex={0} aria-pressed={selected} onClick={onSelect} onKeyDown={(event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(); }
+  }}>
     <div className="agent-debug-list-item">
       <Space wrap size={6}>
         <Text strong>{formatTime(trace.startedAt)}</Text>
@@ -71,6 +74,9 @@ function TraceListItem({
       <Space wrap size={6}>
         <Text type="secondary">{traceOutcomeLabel(trace.outcome ?? trace.status)}</Text>
         <Text type="secondary">{trace.eventCount} 个事件</Text>
+        <Text type="secondary">{trace.durationMs == null ? "耗时 —" : `${trace.durationMs.toFixed(1)} ms`}</Text>
+        <Text type="secondary">{trace.triggerSource ? triggerSourceLabel(trace.triggerSource) : "触发原因 —"}</Text>
+        <Text type="secondary">发言人 {trace.actorUserId || "—"}</Text>
       </Space>
     </div>
   </List.Item>;

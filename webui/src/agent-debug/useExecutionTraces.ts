@@ -22,9 +22,10 @@ export interface ExecutionTracesState {
   detailError: string;
   reload: () => void;
   reloadSelected: () => void;
+  selectLatest: () => void;
 }
 
-export function useExecutionTraces(groupId: string): ExecutionTracesState {
+export function useExecutionTraces(groupId: string, active = true): ExecutionTracesState {
   const [status, setStatus] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [selectedTraceId, setSelectedTraceId] = useState("");
@@ -33,6 +34,7 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
   const [detailError, setDetailError] = useState("");
   const detailGeneration = useRef(0);
   const userSelectedTrace = useRef(false);
+  const pending = useRef<{ key: string; rerun: boolean } | null>(null);
 
   const loadSummaries = useCallback(
     () => {
@@ -67,14 +69,22 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
 
   const loadDetail = useCallback(
     async (traceId: string) => {
+      const key = `${groupId}:${traceId}`;
+      if (pending.current?.key === key) {
+        pending.current.rerun = true;
+        return;
+      }
       const ticket = ++detailGeneration.current;
       if (!traceId) {
+        pending.current = null;
         setSelectedTrace(null);
         setDetailError("");
         setDetailLoading(false);
         return;
       }
-      setSelectedTrace(null);
+      const request = { key, rerun: false };
+      pending.current = request;
+      setSelectedTrace((previous) => previous?.traceId === traceId && previous.groupId === groupId ? previous : null);
       setDetailLoading(true);
       setDetailError("");
       try {
@@ -87,21 +97,42 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
           setDetailError(error instanceof Error ? error.message : "Trace 详情加载失败");
         }
       } finally {
-        if (ticket === detailGeneration.current) setDetailLoading(false);
+        if (ticket === detailGeneration.current) {
+          pending.current = null;
+          setDetailLoading(false);
+          if (request.rerun) void loadDetail(traceId);
+        }
       }
     },
     [groupId],
   );
 
+  const selectedSummary = summaries.find((item) => item.traceId === selectedTraceId);
+  // A disappearing summary is not a detail change: keep an evicted snapshot readable.
+  const revision = selectedSummary
+    ? JSON.stringify([selectedSummary.status, selectedSummary.eventCount, selectedSummary.durationMs])
+    : null;
+  const lastLoaded = useRef("");
   useEffect(() => {
+    if (!active) return;
+    const selection = `${groupId}:${selectedTraceId}`;
+    const next = `${selection}:${revision}`;
+    if (lastLoaded.current === next) return;
+    if (revision === null && lastLoaded.current.startsWith(`${selection}:`)) return;
+    lastLoaded.current = next;
     void loadDetail(selectedTraceId);
-  }, [loadDetail, selectedTraceId]);
+  }, [active, groupId, loadDetail, selectedTraceId, revision]);
+
+  useEffect(() => () => {
+    detailGeneration.current += 1;
+    pending.current = null;
+  }, [groupId]);
 
   useEffect(() => {
-    if (!autoRefresh) return undefined;
+    if (!autoRefresh || !active) return undefined;
     const timer = window.setInterval(listQuery.reload, TRACE_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, listQuery.reload]);
+  }, [active, autoRefresh, listQuery.reload]);
 
   const reloadSelected = useCallback(() => {
     listQuery.reload();
@@ -114,7 +145,14 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
       && !summaries.some((item) => item.traceId === selectedTraceId),
   );
 
+  const selectLatest = useCallback(() => {
+    userSelectedTrace.current = false;
+    setSelectedTraceId(summaries[0]?.traceId ?? "");
+    listQuery.reload();
+  }, [summaries, listQuery.reload]);
+
   return {
+    selectLatest,
     summaries,
     status,
     setStatus,

@@ -117,4 +117,62 @@ describe("useExecutionTraces selection stability", () => {
     expect(result.current.selectedTrace?.traceId).toBe("old");
     expect(result.current.selectedTraceUnavailable).toBe(true);
   });
+  it("摘要变化刷新选中详情，但相同摘要不重复获取", async () => {
+    const { result } = renderHook(() => useExecutionTraces("1"));
+    await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
+    const count = () => apiMock.mock.calls.filter(([path]) => path.endsWith("/new")).length;
+    const initial = count();
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.listRefreshing).toBe(false));
+    expect(count()).toBe(initial);
+    summaries = [{ ...summary("new"), eventCount: 4 }, summary("old")];
+    act(() => result.current.reload());
+    await waitFor(() => expect(count()).toBe(initial + 1));
+  });
+
+  it("刷新失败保留已加载快照，并可恢复跟随最新", async () => {
+    const { result } = renderHook(() => useExecutionTraces("1"));
+    await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
+    act(() => result.current.setSelectedTraceId("old"));
+    await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("old"));
+    apiMock.mockImplementation(async (path: string) => {
+      if (path.endsWith("/old")) throw new Error("详情已过期");
+      return { data: path.includes("/execution-traces/") ? detail("new") : summaries } as never;
+    });
+    act(() => result.current.reloadSelected());
+    await waitFor(() => expect(result.current.detailError).toBe("详情已过期"));
+    expect(result.current.selectedTrace?.traceId).toBe("old");
+    act(() => result.current.selectLatest());
+    await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
+  });
+
+  it("隐藏页签停止轮询", async () => {
+    const interval = vi.spyOn(window, "setInterval");
+    const clear = vi.spyOn(window, "clearInterval");
+    const { rerender } = renderHook(({ active }) => useExecutionTraces("1", active), { initialProps: { active: false } });
+    expect(interval).not.toHaveBeenCalled();
+    rerender({ active: true });
+    expect(interval).toHaveBeenCalledWith(expect.any(Function), 3000);
+    rerender({ active: false });
+    expect(clear).toHaveBeenCalled();
+  });
+
+  it("合并同一详情重复刷新，旧请求不覆盖新选择", async () => {
+    const { result } = renderHook(() => useExecutionTraces("1"));
+    await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
+    let resolveOld!: (value: unknown) => void;
+    apiMock.mockImplementation((path: string) => {
+      if (path.endsWith("/old")) return new Promise((resolve) => { resolveOld = resolve; }) as never;
+      return Promise.resolve({ data: path.includes("/execution-traces/") ? detail("new") : summaries }) as never;
+    });
+    act(() => result.current.setSelectedTraceId("old"));
+    await waitFor(() => expect(resolveOld).toBeDefined());
+    act(() => { result.current.reloadSelected(); result.current.reloadSelected(); });
+    expect(apiMock.mock.calls.filter(([path]) => path.endsWith("/old"))).toHaveLength(1);
+    act(() => result.current.setSelectedTraceId("new"));
+    await waitFor(() => expect(result.current.selectedTrace?.traceId).toBe("new"));
+    await act(async () => resolveOld({ data: detail("old") }));
+    expect(result.current.selectedTrace?.traceId).toBe("new");
+  });
+
 });

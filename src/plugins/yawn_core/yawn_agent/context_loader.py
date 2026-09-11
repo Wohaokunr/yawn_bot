@@ -193,6 +193,7 @@ async def load_context(
             )
         )
         previous_at = row.received_at
+    message_priority_order: tuple[int, ...] | None = None
     if query_text is None and not compact_history:
         # 兼容内部/测试调用：没有当前回合查询、也没有主动会话语义时，
         # 保持原来的有界历史行为。线上被动对话会显式传 query_text；
@@ -205,6 +206,7 @@ async def load_context(
             query_text=query_text,
         )
         messages = selection.messages
+        message_priority_order = selection.message_priority_order
         if selection_trace is not None:
             selection_trace.extend(selection.trace)
     dbg(
@@ -450,6 +452,7 @@ async def load_context(
         relations.append(f"{line}：{note}" if note else line)
     context_pack = pack_context(
         messages=messages,
+        message_priority_order=message_priority_order,
         members=members,
         memories=memories,
         relations=relations,

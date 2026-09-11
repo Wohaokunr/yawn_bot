@@ -1,4 +1,5 @@
-import { Alert, Descriptions, Space, Tag, Timeline, Typography } from "antd";
+import { Alert, Descriptions, Segmented, Space, Tag, Timeline, Typography } from "antd";
+import { useState } from "react";
 import type { AgentExecutionTrace } from "../types";
 import { DebugRawBlock, TRACE_PHASE_LABELS, TRACE_STATUS_META, traceOutcomeLabel, triggerSourceLabel } from "./debug-utils";
 import { TraceDiagnosticFields, TraceHumanSummary } from "./TraceEventInspector";
@@ -13,9 +14,13 @@ export function TracePipeline({
   compact?: boolean;
 }): React.JSX.Element {
   const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
-  const visibleEvents = compact ? trace.events.slice(-12) : trace.events;
+  const [filter, setFilter] = useState("all");
+  const abnormalEvents = trace.events.filter((event) => ["failed", "degraded", "unknown"].includes(event.status));
+  const filteredEvents = filter === "abnormal" ? abnormalEvents : trace.events;
+  const visibleEvents = compact ? filteredEvents.slice(-12) : filteredEvents;
   return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
     <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} items={[
+      { key: "abnormal", label: "异常事件", children: <Tag color={abnormalEvents.length ? "orange" : "default"}>{abnormalEvents.length}</Tag> },
       { key: "source", label: "执行来源", children: <Tag color={trace.source === "runtime" ? "purple" : "blue"}>{trace.source === "runtime" ? "真实执行" : "调试执行"}</Tag> },
       { key: "trigger", label: "触发原因", children: trace.triggerSource ? <Tag color="blue">{triggerSourceLabel(trace.triggerSource)}</Tag> : "—" },
       { key: "status", label: "状态", children: <Tag color={status.color}>{status.label}</Tag> },
@@ -25,13 +30,16 @@ export function TracePipeline({
       { key: "message", label: "触发消息", children: trace.messageId ? <Text code>{trace.messageId}</Text> : "—" },
       { key: "trace", label: "Trace", children: <Text code>{trace.traceId.slice(0, 12)}</Text> },
     ]} />
-    {compact && trace.events.length > visibleEvents.length && <Alert type="info" showIcon message={`仅显示最后 ${visibleEvents.length} / ${trace.events.length} 个事件`} />}
+    {compact && filteredEvents.length > visibleEvents.length && <Alert type="info" showIcon message={`仅显示最后 ${visibleEvents.length} / ${filteredEvents.length} 个事件`} />}
+    <Segmented aria-label="事件筛选" value={filter} onChange={setFilter} options={[{ value: "all", label: "全部事件" }, { value: "abnormal", label: "异常事件" }]} />
+    {visibleEvents.length === 0 && <Text type="secondary">{filter === "abnormal" ? "没有异常事件" : "暂无事件"}</Text>}
     <Timeline
       items={visibleEvents.map((event) => {
         const eventMeta = TRACE_STATUS_META[event.status] ?? { label: event.status, color: "default" };
         const hasInput = Object.keys(event.input ?? {}).length > 0;
         const hasOutput = Object.keys(event.output ?? {}).length > 0;
         return {
+          key: event.id,
           color: event.status === "failed" ? "red" : event.status === "degraded" || event.status === "unknown" ? "orange" : event.status === "success" ? "green" : "blue",
           children: <div className="agent-debug-list-item">
             <Space wrap>
@@ -44,7 +52,10 @@ export function TracePipeline({
             </Space>
             <TraceHumanSummary event={event} />
             {event.detail && <Text type={event.status === "failed" ? "danger" : "secondary"}>{event.detail}</Text>}
-            <TraceDiagnosticFields input={event.input ?? {}} output={event.output ?? {}} />
+            {(hasInput || hasOutput) && <details className="agent-debug-details">
+              <summary>查看诊断详情</summary>
+              <TraceDiagnosticFields input={event.input ?? {}} output={event.output ?? {}} />
+            </details>}
             {(hasInput || hasOutput) && <details className="agent-debug-details">
               <summary>查看原始诊断字段（JSON，备用）</summary>
               {hasInput && <><Text type="secondary">输入</Text><DebugRawBlock value={event.input} /></>}
