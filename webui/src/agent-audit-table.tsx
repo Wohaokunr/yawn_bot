@@ -1,4 +1,5 @@
 import { Table, Tag } from "antd";
+import { Link } from "react-router-dom";
 import { formatTime } from "./shared";
 import type { AgentAudit } from "./types";
 
@@ -21,6 +22,13 @@ export function AgentAuditTable({ data }: { data: AgentAudit[] }): React.JSX.Ele
           ),
         },
         { title: "详情", dataIndex: "detail", ellipsis: true },
+        {
+          title: "Trace",
+          width: 80,
+          render: (_value: unknown, row: AgentAudit) => row.traceId
+            ? <Link to={`/agent/${row.groupId}?tab=debug&debug.trace=${encodeURIComponent(row.traceId)}`}>查看</Link>
+            : <span>—</span>,
+        },
       ]}
     />
   );

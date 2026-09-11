@@ -28,6 +28,11 @@ function summary(traceId: string, status = "completed"): AgentExecutionTraceSumm
     outcome: "success",
     durationMs: 120,
     eventCount: 3,
+    hasFailure: status === "failed",
+    hasDegradation: false,
+    hasTool: false,
+    hasMedia: false,
+    hasOutboundProblem: false,
   };
 }
 

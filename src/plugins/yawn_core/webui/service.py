@@ -1371,6 +1371,8 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
 
 
 def serialize_agent_audit(row: AgentAudit) -> dict[str, Any]:
+    arguments = dict(row.arguments or {})
+    trace_id = arguments.pop("_trace_id", None)
     return {
         "id": str(row.id),
         "groupId": str(row.group_id),
@@ -1378,7 +1380,8 @@ def serialize_agent_audit(row: AgentAudit) -> dict[str, Any]:
         if row.actor_user_id is not None
         else None,
         "toolName": row.tool_name,
-        "arguments": row.arguments,
+        "arguments": arguments,
+        "traceId": str(trace_id) if trace_id else None,
         "result": row.result,
         "detail": row.detail,
         "createdAt": iso(row.created_at),

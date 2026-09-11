@@ -22,6 +22,7 @@ from .capabilities import (
     user_can_manage_group,
 )
 from .context import now_beijing
+from .execution_trace import current_execution_trace
 from .log import dbg
 from .outbound import MAX_FORWARD_NODES
 from .tool_registry import (
@@ -330,15 +331,22 @@ async def _audit(
     if session is None:
         return
 
+    trace = current_execution_trace()
+    safe_arguments = {
+        key: _jsonable(value)
+        for key, value in args.items()
+        if key not in {"file", "url"}
+    }
+    if trace is not None:
+        safe_arguments["_trace_id"] = trace.trace_id
+
     async def _write() -> None:
         session.add(
             AgentAudit(
                 group_id=group_id,
                 actor_user_id=actor_user_id,
                 tool_name=name,
-                arguments={
-                    k: _jsonable(v) for k, v in args.items() if k not in {"file", "url"}
-                },
+                arguments=safe_arguments,
                 result=result,
                 detail=detail[:2000],
             )
