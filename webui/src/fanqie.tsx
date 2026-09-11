@@ -178,7 +178,7 @@ export function FanqiePage(): React.JSX.Element {
   const status = statusQuery.data;
   if (!status) {
     return statusQuery.error
-      ? <Alert className="section-alert" type="error" showIcon message={statusQuery.error} />
+      ? <QueryErrorAlert error={statusQuery.error} onRetry={statusQuery.reload} />
       : <Spin />;
   }
   if (!status.available) {
@@ -195,6 +195,7 @@ export function FanqiePage(): React.JSX.Element {
   }
   const active = status.active;
   return <>
+    <RefreshErrorAlert query={statusQuery} />
     <div className="fq-hero">
       <div className="fq-hero-main">
         <span className="fq-hero-mark">🍅</span>

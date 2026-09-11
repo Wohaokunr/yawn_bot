@@ -203,8 +203,9 @@ export function GamesPage(): React.JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = searchParams.get("tab") === "rpg" ? "rpg" : "werewolf";
   const live = query.data;
-  if (!live) return query.error ? <Alert className="section-alert" type="error" showIcon message={query.error} /> : <Spin />;
+  if (!live) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
   return <>
+    <RefreshErrorAlert query={query} />
     <PageHeader title="对局中心" subtitle="实时对局 → 对局详情 → 事件时间线 → 历史回放；强停仍走子插件状态机" onRefresh={query.reload} refreshing={query.refreshing} />
     <Tabs activeKey={tab} onChange={(key) => setSearchParams(key === "werewolf" ? {} : { tab: key }, { replace: true })} items={[
       { key: "werewolf", label: <span><MoonOutlined /> 狼人杀</span>, children: <WerewolfTab live={live.werewolf} onChanged={reload} /> },

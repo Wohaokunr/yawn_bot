@@ -5,10 +5,8 @@ import zhCN from "antd/locale/zh_CN";
 import { BrowserRouter } from "react-router-dom";
 import "@fontsource/zcool-kuaile/400.css";
 import App from "./App";
-import { installGlassGlow } from "./glass";
 import "./styles.css";
 
-installGlassGlow();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -17,12 +15,13 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: "#f2608d",
+          colorPrimary: "#bc325f",
           colorInfo: "#5b9df6",
           colorSuccess: "#34c896",
           colorWarning: "#f6a94a",
           colorError: "#ff6b7d",
           colorTextBase: "#53414c",
+          colorTextSecondary: "#705665",
           colorBgLayout: "transparent",
           colorBorder: "#f3cdd9",
           colorBorderSecondary: "#fbe4ec",
@@ -57,7 +56,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             headerSplitColor: "transparent",
           },
           Tabs: { inkBarColor: "#f2608d" },
-          Button: { borderRadius: 999, borderRadiusLG: 999, controlHeight: 36, controlHeightLG: 44, fontWeight: 600 },
+          Button: { borderRadius: 8, borderRadiusLG: 8, controlHeight: 36, controlHeightLG: 44, fontWeight: 600 },
         },
       }}
     >

@@ -49,7 +49,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const watchedMode = Form.useWatch("mode", form) as PersonaFormValues["mode"] | undefined;
   const watchedProfile = Form.useWatch("profile", form) as PersonaProfile | undefined;
   const load = useCallback(() => api<Persona>(`/agent/groups/${groupId}/persona`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load, { resources: ["agent_persona"] });
+  const query = useApiQuery(load, { resources: dirty ? [] : ["agent_persona"] });
   useUnsavedChanges(dirty);
 
   useEffect(() => {

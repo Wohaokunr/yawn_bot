@@ -183,4 +183,12 @@ describe("route lazy loading", () => {
    expect(await screen.findByText("overview page")).toBeInTheDocument();
  });
 
+ it("returns to login only when the session is unauthorized", async () => {
+   const { ApiError } = await import("./api");
+   state.api.mockRejectedValueOnce(new ApiError(401, "expired"));
+   render(<MemoryRouter><App /></MemoryRouter>);
+   expect(await screen.findByText("login page")).toBeInTheDocument();
+   expect(screen.queryByText("会话检查失败")).not.toBeInTheDocument();
+ });
+
 });

@@ -49,7 +49,7 @@ import {
   TASK_PANEL_KEYS,
 } from "./environment-config";
 export { filterEnvironmentEntries, groupEnvironmentEntries } from "./environment-config";
-import { PageHeader, QueryErrorAlert, confirmReloadConflict, SaveStatus, useApiQuery, useUnsavedChanges } from "./shared";
+import { PageHeader, QueryErrorAlert, RefreshErrorAlert, confirmReloadConflict, SaveStatus, useApiQuery, useUnsavedChanges } from "./shared";
 import type {
   EnvironmentEntry,
   EnvironmentPatchResult,
@@ -626,7 +626,7 @@ export function EnvironmentPage(): React.JSX.Element {
     <Space
       orientation="vertical"
       size="large"
-      style={{ width: "100%", paddingBottom: totalChanges > 0 ? 96 : undefined }}
+      style={{ width: "100%", paddingBottom: totalChanges > 0 ? 144 : undefined }}
     >
       <PageHeader
         title="环境配置"
@@ -671,7 +671,7 @@ export function EnvironmentPage(): React.JSX.Element {
         onChange={setExpanded}
         items={llmItems.filter((item) => !needle || matchedPanels.has(String(item.key))).map((item) => ({ ...item, children: <div id={`env-panel-${item.key}`} tabIndex={-1}>{item.children}</div> }))}
       />
-      {query.error && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
+      <RefreshErrorAlert query={query} />{query.error && !query.data && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
       {!query.loading && needle && searchMatches.length === 0 && <Empty description="没有匹配的配置项" />}
       {groups.length > 0 && (
         <Collapse

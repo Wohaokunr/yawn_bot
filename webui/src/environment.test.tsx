@@ -334,3 +334,19 @@ it("LLM 搜索展开任务路由且不搜索密钥值", async () => {
   fireEvent.change(screen.getByPlaceholderText("搜索配置名、分组或说明"), { target: { value: "hidden-secret" } });
   expect(await screen.findByText("没有匹配的配置项")).toBeInTheDocument();
 });
+
+it("确认版本冲突重载后丢弃草稿并重新取数", async () => {
+  stubBrowserApis();
+  const fetchMock = stubEnvironmentFetch([entry({ key: "AI_MODEL", value: "old-model" })]);
+  render(<AntApp><EnvironmentPage /></AntApp>);
+  fireEvent.change(await screen.findByDisplayValue("old-model"), { target: { value: "draft-model" } });
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  fetchMock.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: { message: "conflict" } }) } as never);
+  fireEvent.click(screen.getByRole("button", { name: /预览保存/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认保存" }));
+  await waitFor(() => expect(confirm).toHaveBeenCalled());
+  await screen.findByDisplayValue("old-model");
+  expect(screen.queryByDisplayValue("draft-model")).not.toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  confirm.mockRestore();
+});

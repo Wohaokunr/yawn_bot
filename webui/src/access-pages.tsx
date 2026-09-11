@@ -205,6 +205,7 @@ export function GroupDetailPage(): React.JSX.Element {
   }
 
   return <>
+    <RefreshErrorAlert query={groupQuery} />
     <PageHeader
       title={group.groupName || "未命名群"}
       subtitle={`群号 ${group.groupId} · ${group.memberCount} 名成员`}

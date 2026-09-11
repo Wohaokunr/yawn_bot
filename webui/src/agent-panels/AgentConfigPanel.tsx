@@ -49,7 +49,7 @@ function participationIntensity(warmup: number, interject: number): Participatio
 export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
   const { message } = AntApp.useApp(); const [form] = Form.useForm(); const [saving, setSaving] = useState(false); const [dirty, setDirty] = useState(false);
   const load = useCallback(() => api<AgentConfig>(`/agent/groups/${groupId}/config`).then((r) => r.data), [groupId]);
-  const query = useApiQuery(load, { resources: ["agent_config"] });
+  const query = useApiQuery(load, { resources: dirty ? [] : ["agent_config"] });
   const watchedProactiveEnabled = Form.useWatch("proactiveEnabled", form) as boolean | undefined;
   const watchedWarmupProbability = Form.useWatch("proactiveProbability", form) as number | undefined;
   const watchedInterjectProbability = Form.useWatch("proactiveActiveProbability", form) as number | undefined;
