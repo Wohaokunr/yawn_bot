@@ -1,4 +1,5 @@
-import { Alert, Button, Card, List, Select, Space, Switch, Tag, Typography } from "antd";
+import { Alert, Button, Card, Input, List, Select, Space, Switch, Tag, Typography } from "antd";
+import { useMemo, useState } from "react";
 import { AdminEmpty, formatTime, QueryErrorAlert } from "../shared";
 import type { AgentExecutionTraceSummary } from "../types";
 import { agentDebugModeLabel, TRACE_STATUS_META, traceOutcomeLabel } from "./debug-utils";
@@ -7,13 +8,42 @@ import type { ExecutionTracesState } from "./useExecutionTraces";
 const { Text } = Typography;
 
 const STATUS_OPTIONS = [
-  { value: "", label: "全部状态" },
-  { value: "completed", label: "完成" },
+  { value: "", label: "全部" },
   { value: "failed", label: "失败" },
+  { value: "degraded", label: "降级" },
+  { value: "tool", label: "工具" },
+  { value: "media", label: "媒体" },
+  { value: "outbound", label: "发送异常" },
+  { value: "completed", label: "已完成" },
   { value: "running", label: "执行中" },
 ];
 
+function traceSearchText(trace: AgentExecutionTraceSummary): string {
+  return [
+    trace.traceId,
+    trace.messageId,
+    trace.actorUserId,
+    trace.mode,
+    trace.triggerSource,
+    trace.status,
+    trace.outcome,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function traceVisualStatus(trace: AgentExecutionTraceSummary): { label: string; color: string } {
+  if (trace.hasFailure) return { label: "失败", color: "red" };
+  if (trace.hasDegradation) return { label: "降级", color: "orange" };
+  return TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
+}
+
 export function TraceSidebar({ traces }: { traces: ExecutionTracesState }): React.JSX.Element {
+  const [search, setSearch] = useState("");
+  const visibleTraces = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return traces.summaries;
+    return traces.summaries.filter((trace) => traceSearchText(trace).includes(query));
+  }, [search, traces.summaries]);
+
   return <Card
     className="agent-trace-sidebar"
     title="Trace Navigator"
@@ -28,8 +58,14 @@ export function TraceSidebar({ traces }: { traces: ExecutionTracesState }): Reac
             <Text type="secondary">自动刷新（3 秒）</Text>
           </Space>
         </Space>
+        <Input
+          allowClear
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="搜索 Trace / 消息 ID / actor / 模式"
+        />
         <Text type="secondary" className="agent-trace-buffer-note">
-          Trace 仅保存在当前 Bot 进程；列表加载摘要，选中后才请求完整事件。
+          Trace 仅保存在当前 Bot 进程；列表只加载摘要，选中后才请求完整事件。
         </Text>
       </div>
 
@@ -43,12 +79,12 @@ export function TraceSidebar({ traces }: { traces: ExecutionTracesState }): Reac
         />}
         {traces.listError && traces.summaries.length === 0
           ? <QueryErrorAlert error={traces.listError} onRetry={traces.reload} />
-          : traces.summaries.length === 0
-            ? <AdminEmpty description="暂无真实执行 Trace；让 Agent 实际处理一条触发消息后刷新这里" />
+          : visibleTraces.length === 0
+            ? <AdminEmpty description={traces.summaries.length === 0 ? "暂无真实执行 Trace；让 Agent 实际处理一条触发消息后刷新这里" : "没有符合当前搜索条件的 Trace"} />
             : <List
               className="agent-debug-list"
               loading={traces.listLoading}
-              dataSource={traces.summaries}
+              dataSource={visibleTraces}
               renderItem={(trace) => <TraceListItem
                 key={trace.traceId}
                 trace={trace}
@@ -71,7 +107,7 @@ function TraceListItem({
   selected: boolean;
   onSelect: () => void;
 }): React.JSX.Element {
-  const status = TRACE_STATUS_META[trace.status] ?? { label: trace.status, color: "default" };
+  const status = traceVisualStatus(trace);
   return <List.Item className={selected ? "agent-trace-list-item is-selected" : "agent-trace-list-item"} onClick={onSelect}>
     <div className="agent-debug-list-item">
       <Space wrap size={6}>
@@ -82,6 +118,11 @@ function TraceListItem({
       <Space wrap size={6}>
         <Text type="secondary">{traceOutcomeLabel(trace.outcome ?? trace.status)}</Text>
         <Text type="secondary">{trace.eventCount} 个事件</Text>
+      </Space>
+      <Space wrap size={6}>
+        {trace.triggerSource && <Text type="secondary">{trace.triggerSource}</Text>}
+        {trace.actorUserId && <Text type="secondary">actor {trace.actorUserId}</Text>}
+        <Text code>{trace.traceId.slice(0, 8)}</Text>
       </Space>
     </div>
   </List.Item>;

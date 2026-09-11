@@ -150,6 +150,27 @@ class ExecutionTrace:
 
     def as_summary(self) -> dict[str, Any]:
         """Return the small representation used by the trace collection API."""
+        statuses = {event.status for event in self.events}
+        phases = {event.phase for event in self.events}
+        has_outbound_problem = any(
+            event.phase == "outbound"
+            and (
+                event.status in {"failed", "degraded", "unknown"}
+                or str(event.output.get("delivery_state") or "")
+                in {"confirmed_failure", "unknown"}
+            )
+            for event in self.events
+        )
+        has_failure = (
+            self.status == "failed"
+            or self.outcome == "error"
+            or "failed" in statuses
+        )
+        has_degradation = (
+            self.status == "degraded"
+            or self.outcome in {"degraded", "delivery_unknown"}
+            or bool(statuses & {"degraded", "unknown"})
+        )
         return {
             "traceId": self.trace_id,
             "groupId": str(self.group_id),
@@ -165,6 +186,11 @@ class ExecutionTrace:
             "outcome": self.outcome,
             "durationMs": self.duration_ms,
             "eventCount": len(self.events),
+            "hasFailure": has_failure,
+            "hasDegradation": has_degradation,
+            "hasTool": "tool" in phases,
+            "hasMedia": "media" in phases,
+            "hasOutboundProblem": has_outbound_problem,
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -362,11 +388,23 @@ def recent_execution_trace_summaries(
     or render the list.
     """
     normalized_status = status.strip() if status else None
-    return [
+    summaries = [
         trace.as_summary()
         for trace in reversed(_recent_traces.get(int(group_id), ()))
-        if normalized_status is None or trace.status == normalized_status
     ]
+    if normalized_status is None:
+        return summaries
+    flag_by_filter = {
+        "failed": "hasFailure",
+        "degraded": "hasDegradation",
+        "tool": "hasTool",
+        "media": "hasMedia",
+        "outbound": "hasOutboundProblem",
+    }
+    flag = flag_by_filter.get(normalized_status)
+    if flag is not None:
+        return [summary for summary in summaries if bool(summary.get(flag))]
+    return [summary for summary in summaries if summary.get("status") == normalized_status]
 
 
 def execution_trace_by_id(group_id: int, trace_id: str) -> dict[str, Any] | None:

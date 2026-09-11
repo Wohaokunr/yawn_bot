@@ -36,6 +36,28 @@ export function SimulationWorkbench({
     },
   });
 
+  const linkedMessageQuery = useApiQuery({
+    queryKey: ["agent-debug-linked-message", groupId, linkedMessageId],
+    fetcher: (signal) => linkedMessageId
+      ? api<AgentMessageItem[]>(
+        `/agent/groups/${groupId}/messages?page=1&pageSize=1&messageId=${encodeURIComponent(linkedMessageId)}`,
+        { signal },
+      ).then((response) => response.data)
+      : Promise.resolve([]),
+    invalidation: {
+      resources: ["agent_group_data", "agent_privacy"],
+      scope: { groupId },
+    },
+  });
+
+  const availableMessages = useMemo(() => {
+    const rows = [...(messagesQuery.data ?? [])];
+    for (const linked of linkedMessageQuery.data ?? []) {
+      if (!rows.some((row) => row.messageId === linked.messageId)) rows.unshift(linked);
+    }
+    return rows;
+  }, [linkedMessageQuery.data, messagesQuery.data]);
+
   useEffect(() => {
     if (linkedMessageId) {
       setSource("history");
@@ -51,12 +73,12 @@ export function SimulationWorkbench({
   };
 
   const messageOptions = useMemo(
-    () => (messagesQuery.data ?? []).filter((row) => row.role !== "bot").map((row) => ({ value: row.messageId, label: debugMessageLabel(row) })),
-    [messagesQuery.data],
+    () => availableMessages.filter((row) => row.role !== "bot").map((row) => ({ value: row.messageId, label: debugMessageLabel(row) })),
+    [availableMessages],
   );
   const selectedMessage = useMemo(
-    () => (messagesQuery.data ?? []).find((row) => row.messageId === messageId) ?? null,
-    [messageId, messagesQuery.data],
+    () => availableMessages.find((row) => row.messageId === messageId) ?? null,
+    [availableMessages, messageId],
   );
 
   const run = async () => {

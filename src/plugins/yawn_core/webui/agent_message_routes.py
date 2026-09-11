@@ -112,13 +112,14 @@ from .service import (
 router = APIRouter(prefix=API_PATH)
 
 @router.get("/agent/groups/{group_id}/messages")
-async def get_agent_messages(
+async def get_agent_messages(  # noqa: PLR0913,PLR0917
     group_id: int,
     _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
     role: str = Query(default="", max_length=24),
+    message_id: int | None = Query(default=None, alias="messageId"),
 ) -> dict[str, Any]:
     page, page_size = page_params(page, page_size)
     now = now_beijing()
@@ -129,6 +130,8 @@ async def get_agent_messages(
     ]
     if role:
         clauses.append(GroupAgentMessage.role == role)
+    if message_id is not None:
+        clauses.append(GroupAgentMessage.message_id == message_id)
     if search:
         pattern = f"%{search}%"
         clauses.append(
