@@ -76,6 +76,7 @@ from .context import (
 from .context_history import (
     bot_message_meta as _bot_message_meta,
     effective_turn_from_context,
+    history_message_meta as _history_message_meta,
     history_message_payload as _history_message_payload,
     select_context_messages_only as _select_context_messages,
 )
