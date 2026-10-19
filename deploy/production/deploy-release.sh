@@ -376,6 +376,14 @@ if [ "$healthy" != "true" ]; then
 fi
 echo "[deploy:health] success"
 
+if [ -r "$root/public-https.env" ]; then
+    echo "[deploy:proxy] start"
+    compose --profile public-https up -d --no-deps caddy
+    echo "[deploy:proxy] success"
+else
+    compose --profile public-https stop caddy >/dev/null 2>&1 || true
+fi
+
 echo "[deploy:record] writing deployment metadata"
 if ! DEPLOYMENT_ROOT="$root/deployments" \
     PREVIOUS_IMAGE="$previous_image" \

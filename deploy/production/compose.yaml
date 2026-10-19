@@ -40,6 +40,30 @@ services:
     networks:
       - yawnbot-internal
 
+  # 公网 WebUI 入口：只在 /opt/yawnbot/public-https.env 存在时由 deploy-release 启动。
+  # 8080 仍只绑回环地址，公网只经 Caddy 的 80/443 进入并自动签发 HTTPS 证书。
+  caddy:
+    image: "caddy:2.8.4-alpine"
+    profiles:
+      - public-https
+    restart: unless-stopped
+    env_file:
+      - public-https.env
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - exec caddy reverse-proxy --from "$$YAWNBOT_PUBLIC_DOMAIN" --to yawnbot:8080
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    networks:
+      - yawnbot-internal
+
 networks:
   yawnbot-internal:
     external: true

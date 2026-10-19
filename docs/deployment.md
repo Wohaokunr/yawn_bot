@@ -270,6 +270,25 @@ WEBUI_ADMIN_TOKEN=<至少32字符高熵随机值>
 WEBUI_COOKIE_SECURE=true
 ```
 
+### 生产内置 Caddy 反代
+
+生产 Compose 自带一个 `public-https` profile 的 Caddy，默认不启动。要公开 WebUI：
+
+1. 把域名 A 记录解析到服务器公网 IP；
+2. 在服务器写入 `/opt/yawnbot/public-https.env`（只放域名，不放密钥）：
+
+   ```dotenv
+   YAWNBOT_PUBLIC_DOMAIN=bot.example.com
+   ```
+
+3. 在 `/opt/yawnbot/.env` 配好上面的 WebUI 三项；
+4. 腾讯云安全组入站放行 TCP 80、TCP 443（以及 UDP 443 供 HTTP/3），服务器
+   firewalld 如启用也要放行；8080 不要放行；
+5. 重新部署。`deploy-release` 在健康检查通过后启动 Caddy，证书自动签发并存放在
+   `/opt/yawnbot/caddy/`。
+
+删除 `public-https.env` 再部署即可停掉公网入口。
+
 不要直接把管理 Token 写进镜像。优先用 Compose secrets、宿主机环境、受限权限的 `.env` 或其他密钥管理方式注入。
 
 ## 10. 网络与端口
