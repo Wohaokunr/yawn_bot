@@ -376,12 +376,12 @@ if [ "$healthy" != "true" ]; then
 fi
 echo "[deploy:health] success"
 
-if [ -r "$root/public-https.env" ]; then
+if [ -e "$root/public-https.disabled" ]; then
+    compose --profile public-https stop caddy >/dev/null 2>&1 || true
+else
     echo "[deploy:proxy] start"
     compose --profile public-https up -d --no-deps caddy
     echo "[deploy:proxy] success"
-else
-    compose --profile public-https stop caddy >/dev/null 2>&1 || true
 fi
 
 echo "[deploy:record] writing deployment metadata"

@@ -98,21 +98,21 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(payload["current_browser_image"], self._browser_image_ref())
 
-    def test_deploy_release_starts_public_proxy_only_when_configured(self) -> None:
+    def test_deploy_release_starts_public_proxy_unless_disabled(self) -> None:
         result, _ = self._run_fake_deploy()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("[deploy:proxy] start", result.stdout)
-
-        result, _ = self._run_fake_deploy(public_https=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[deploy:proxy] success", result.stdout)
+
+        result, _ = self._run_fake_deploy(public_https_disabled=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("[deploy:proxy] start", result.stdout)
 
     def test_public_proxy_is_profiled_and_app_stays_on_loopback(self) -> None:
         compose = PRODUCTION_COMPOSE.read_text(encoding="utf-8")
         self.assertIn('- "127.0.0.1:${YAWNBOT_PORT:-8080}:8080"', compose)
         caddy_section = compose.split("  caddy:\n", 1)[1].split("\nnetworks:", 1)[0]
         self.assertIn("public-https", caddy_section)
-        self.assertIn("public-https.env", caddy_section)
+        self.assertIn('YAWNBOT_PUBLIC_DOMAIN: "bot.yawnelle.xyz"', caddy_section)
         self.assertIn("--to yawnbot:8080", caddy_section)
 
     def test_metadata_failure_has_distinct_exit_code_after_health_success(
@@ -272,7 +272,7 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         writer_source: str | None = None,
         *,
         browser: bool = False,
-        public_https: bool = False,
+        public_https_disabled: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -282,10 +282,8 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         (root / "deployments").mkdir()
         (root / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
         (root / "image.env").write_text("", encoding="utf-8")
-        if public_https:
-            (root / "public-https.env").write_text(
-                "YAWNBOT_PUBLIC_DOMAIN=bot.example.com\n", encoding="utf-8"
-            )
+        if public_https_disabled:
+            (root / "public-https.disabled").touch()
 
         writer_target = root / "bin" / "write-deployment-record.py"
         if writer_source is None:
