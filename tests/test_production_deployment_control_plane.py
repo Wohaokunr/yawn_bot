@@ -155,7 +155,9 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertIn("playwright:", compose)
         self.assertIn("fanqie-browser", compose)
         self.assertIn('shm_size: "512m"', compose)
-        self.assertIn('FANQIE_BROWSER_WS_ENDPOINT: "${FANQIE_BROWSER_WS_ENDPOINT:-}"', compose)
+        self.assertIn(
+            'FANQIE_BROWSER_WS_ENDPOINT: "${FANQIE_BROWSER_WS_ENDPOINT:-}"', compose
+        )
         playwright_section = compose.split("  playwright:\n", 1)[1].split("\n\n", 1)[0]
         self.assertNotIn("ports:", playwright_section)
 
@@ -248,7 +250,7 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         sync = SYNC_SCRIPT.read_text(encoding="utf-8")
 
         writer_copy = (
-            'cp deploy/production/write-deployment-record.py '
+            "cp deploy/production/write-deployment-record.py "
             '"$stage/write-deployment-record.py"'
         )
         for workflow in (release, deploy_existing):
@@ -345,9 +347,7 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         return result, root
 
     @staticmethod
-    def _make_bundle(
-        output: Path, stage: Path, names: tuple[str, ...]
-    ) -> None:
+    def _make_bundle(output: Path, stage: Path, names: tuple[str, ...]) -> None:
         with tarfile.open(output, "w:gz") as archive:
             for name in names:
                 archive.add(stage / name, arcname=name)
@@ -369,15 +369,11 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
 
     @staticmethod
     def _image_ref() -> str:
-        return (
-            "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:" + "a" * 64
-        )
+        return "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:" + "a" * 64
 
     @staticmethod
     def _browser_image_ref() -> str:
-        return (
-            "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:" + "c" * 64
-        )
+        return "sgccr.ccs.tencentyun.com/yawn_bot/yawn_bot@sha256:" + "c" * 64
 
 
 if __name__ == "__main__":
