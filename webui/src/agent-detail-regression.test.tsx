@@ -145,7 +145,10 @@ describe("AgentDetailPage state retention", () => {
     await screen.findByText("有未保存的修改");
 
     fireEvent.click(screen.getByRole("tab", { name: "调试" }));
-    fireEvent.click(await screen.findByRole("button", { name: "生成测试结果" }));
+    // 调试面板首次切换时才懒加载，冷启动 CI 下可能超过 findBy 默认的 1s。
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成测试结果" }, { timeout: 5_000 }),
+    );
     expect(screen.getByLabelText("debug-result").textContent).toBe("debug-v1");
     fireEvent.click(screen.getByRole("button", { name: "固定当前为基准" }));
     expect(screen.getByLabelText("debug-baseline").textContent).toBe("debug-v1");
