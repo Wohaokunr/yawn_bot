@@ -166,6 +166,9 @@ class Game:
     board: str = DEFAULT_BOARD_KEY
     # 禁言长老当夜禁言的座位（次日发言/投票限制用；每晚进入长老阶段时清空）
     silenced_seat: Optional[int] = None
+    # 警长竞选举行的回合（默认第 1 天；竞选中被自爆打断顺延一天；
+    # 竞选完成或顺延后再被打断即置 None）。仅引擎写入
+    sheriff_campaign_round: Optional[int] = 1
     # 发牌后填充
     players: list[PlayerState] = field(default_factory=list)
     # 报名顺序（退报名移除）

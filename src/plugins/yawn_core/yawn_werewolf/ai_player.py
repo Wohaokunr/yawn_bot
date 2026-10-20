@@ -1132,16 +1132,29 @@ def _is_valid_action(  # noqa: C901,PLR0911,PLR0912
 
 
 async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
-    """AI 发言窗口：生成发言代发群消息后投入 SKIP 结束发言。"""
+    """AI 发言窗口：生成发言代发群消息后投入 SKIP 结束发言。
+
+    "仍是本窗口"按 (阶段, 当前发言者) 判断而非 phase token：骑士决斗
+    失败（尤其警长骑士触发警徽移交）会在同一发言窗口内往返切阶段、
+    推进 token，但发言权仍属本座位。若只比 token，进行中的发言会被
+    无声丢弃且不投 SKIP，引擎白等满整个发言超时。
+    """
     game = driver.game
-    token = game.phase_token
-    key = (game.round_no, game.phase, player.seat, "speech")
+    phase = game.phase
+    key = (game.round_no, phase, player.seat, "speech")
     if key in driver.handled:
         return
     driver.handled.add(key)
+
+    def in_window() -> bool:
+        return game.phase is phase and game.current_speaker == player.seat
+
     name = player.display_name or f"{player.seat}号"
     text = await _llm_speech(driver, player)
-    if token != game.phase_token or game.current_speaker != player.seat:
+    if not in_window():
+        # 窗口暂被打断（如决斗引发的警徽移交）：撤销去重键，
+        # 回到本窗口时驱动会重新处理；窗口已移交他人则不会再命中
+        driver.handled.discard(key)
         return
     sent = False
     if text:
@@ -1167,12 +1180,7 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
                 extra={"isAi": True},
             )
             await asyncio.sleep(_SPEECH_LINGER)
-    if (
-        not sent
-        and token == game.phase_token
-        and game.phase in _SPEECH_PHASES
-        and game.current_speaker == player.seat
-    ):
+    if not sent and in_window():
         # LLM 失败或投递失败：代发可见兜底，而不是让发言窗口无声关闭。
         # 仅当仍在本座位窗口内才发——窗口已移走时引擎会另播"超时未发言"
         logger.info(
@@ -1186,13 +1194,13 @@ async def _do_speech(driver: AIDriver, player: PlayerState) -> None:
                 game.group_id,
                 f"【{player.seat}号 {name}】\n（思考超时，跳过本次发言）",
             )
-    # 阶段可能已在 LLM 调用期间超时切换，仅当仍在本座位发言窗口时收尾
-    if (
-        token == game.phase_token
-        and game.phase in _SPEECH_PHASES
-        and game.current_speaker == player.seat
-    ):
-        _enqueue_action(game, Action(ActionKind.SKIP, player.user_id))
+    # 阶段可能已在 LLM 调用期间超时切换，仅当仍在本座位发言窗口时收尾；
+    # 显式携带当前 token，避免驱动帧捕获的旧 token 把 SKIP 当过期丢弃
+    if in_window():
+        _enqueue_action(
+            game,
+            Action(ActionKind.SKIP, player.user_id, phase_token=game.phase_token),
+        )
 
 
 async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:

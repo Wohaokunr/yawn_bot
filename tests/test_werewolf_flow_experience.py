@@ -84,6 +84,8 @@ async def test_sheriff_final_speech_and_revote_are_distinct_phases(
     ]
     for player in players:
         player.sheriff_candidate = True
+    # 警上玩家不参与警长投票：需要一名警下选民才会开投票窗口
+    players.append(state.PlayerState(3, 3, roles.Role.VILLAGER, roles.Faction.GOOD))
     game = state.Game(group_id=201, host_user_id=1, players=players)
     entered: list[Any] = []
     notified: list[Any] = []

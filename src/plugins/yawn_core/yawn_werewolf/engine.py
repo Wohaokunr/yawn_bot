@@ -72,6 +72,18 @@ _NIGHT_AMBIENT_LINES: tuple[str, ...] = (
     "寂静笼罩村庄，行动仍在继续……",
 )
 
+# 私聊失败的群内 @ 提示只在私聊语境本身公开的阶段发出：发牌（人人
+# 都收身份卡）与警徽移交（已群播点名）。夜间 / 猎人等阶段的私聊只发给
+# 特定角色，此时群内提示等于公开"此人有技能"，只记日志
+_DM_FAIL_NOTICE_PHASES: frozenset[Phase] = frozenset(
+    {Phase.DEALING, Phase.BADGE_TRANSFER}
+)
+
+# 角色缺席（已死亡 / 无药可用）时夜间子阶段与"死亡技能"等待的
+# 拟真时长区间（秒）：与真人 / AI 的常见决策用时相当，再被阶段超时夹取，
+# 避免阶段瞬间结束暴露角色状态
+_IDLE_PHASE_SECONDS: tuple[float, float] = (4.0, 15.0)
+
 
 def _now_bj() -> datetime:
     """返回当前北京时间（naive），与项目时间约定一致。"""
@@ -191,7 +203,7 @@ async def _announce(game: Game, text: Union[str, "Message"]) -> None:
 
 
 async def _dm(game: Game, player: PlayerState, text: str) -> bool:
-    """私聊玩家；首次失败时群内 @ 提示并标记 dm_ok=False。"""
+    """私聊玩家；首次失败时标记 dm_ok=False，公开语境阶段才群内 @ 提示。"""
     if player.is_ai:
         # AI 玩家不发真实私聊，提示词记入其座位上下文（ai_player 消费）
         ai_player.on_dm(game, player, text)
@@ -201,12 +213,18 @@ async def _dm(game: Game, player: PlayerState, text: str) -> bool:
     ok = await api.send_dm(game.bot, player.user_id, text)
     if not ok and player.dm_ok:
         player.dm_ok = False
-        await _announce(
-            game,
-            MessageSegment.at(player.user_id)
-            + " 你的私聊发送失败：请加机器人为好友。\n"
-            + "本局你的夜间行动将超时托管。",
-        )
+        if game.phase in _DM_FAIL_NOTICE_PHASES:
+            await _announce(
+                game,
+                MessageSegment.at(player.user_id)
+                + " 你的私聊发送失败：请加机器人为好友。\n"
+                + "本局你需要私聊完成的操作将超时托管。",
+            )
+        else:
+            logger.warning(
+                f"狼人杀群 {game.group_id} {player.seat}号 私聊发送失败"
+                f"（阶段 {game.phase.value}，为防泄漏角色不做群内提示）"
+            )
     return ok
 
 
@@ -393,6 +411,19 @@ def _seat_list(players: list[PlayerState]) -> str:
     return "、".join(f"{p.seat}号" for p in players)
 
 
+async def _idle_phase(game: Game, limit: float) -> None:
+    """角色缺席时的拟真等待：随机时长（不超过 limit），期间照常消费行动。
+
+    已死亡 / 无药可用的角色若让阶段瞬间结束，夜长与停顿就会泄漏角色
+    状态；这里按真人 / AI 的常见决策用时等待，滞留行动照常取出丢弃。
+    """
+    low, high = _IDLE_PHASE_SECONDS
+    duration = min(random.uniform(low, high), max(float(limit), 0.0))
+    timer = _Timer(_loop_time() + duration)
+    while timer.remaining() > 0:
+        await timer.next_action(game)
+
+
 # ── 夜晚阶段 ──────────────────────────────────────────────
 
 
@@ -521,11 +552,12 @@ async def _phase_witch(  # noqa: C901
     """女巫阶段：返回 (是否使用解药, 毒杀座位)。"""
     _enter_phase(game, Phase.NIGHT_WITCH)
     witches = game.alive_players_of_role(Role.WITCH)
-    if not witches:
+    if not witches or (witches[0].save_used and witches[0].poison_used):
+        # 女巫已死 / 双药用尽：板子里有女巫时仍拟真等待，防夜长泄漏
+        if Role.WITCH in _board(game).all_roles():
+            await _idle_phase(game, cfg.ww_night_timeout)
         return False, None
     witch = witches[0]
-    if witch.save_used and witch.poison_used:
-        return False, None
     kill_desc = f"{kill_seat}号" if kill_seat is not None else "无人"
     options = ["过（回复 过）"]
     can_save = kill_seat is not None and not witch.save_used and kill_seat != witch.seat
@@ -590,6 +622,9 @@ async def _phase_seer(game: Game, cfg: Config) -> None:
     _enter_phase(game, Phase.NIGHT_SEER)
     seers = game.alive_players_of_role(Role.SEER)
     if not seers:
+        # 预言家已死：板子里有预言家时仍拟真等待，防夜长泄漏
+        if Role.SEER in _board(game).all_roles():
+            await _idle_phase(game, cfg.ww_night_timeout)
         return
     seer = seers[0]
     others = [p for p in game.alive_players() if p.user_id != seer.user_id]
@@ -705,6 +740,9 @@ async def _phase_elder(game: Game, cfg: Config) -> None:
         return
     elders = game.alive_players_of_role(Role.SILENT_ELDER)
     if not elders:
+        # 长老已死：仍进入本阶段拟真等待，防夜长泄漏
+        _enter_phase(game, Phase.NIGHT_ELDER)
+        await _idle_phase(game, cfg.ww_night_timeout)
         return
     elder = elders[0]
     _enter_phase(game, Phase.NIGHT_ELDER)
@@ -796,13 +834,21 @@ async def _run_night(game: Game, cfg: Config) -> list[PlayerState]:
         await _phase_elder(game, cfg)
     finally:
         heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        # asyncio.wait 不抛出心跳自身的 CancelledError，而本任务被取消
+        # （/结束游戏）时照常传播——不能用 suppress(CancelledError) 一并吞掉
+        await asyncio.wait({heartbeat})
     deaths: list[PlayerState] = []
     if kill_seat is not None and not saved:
         victim = game.player_by_seat(kill_seat)
         if victim is not None and victim.alive:
-            _kill(game, victim, DeathCause.WOLF_KILL)
+            # 同一人既被刀又被毒：只死一次，死因以毒杀为准
+            # （猎人不能开枪、警长警徽失效）
+            cause = (
+                DeathCause.WITCH_POISON
+                if poison_seat == kill_seat
+                else DeathCause.WOLF_KILL
+            )
+            _kill(game, victim, cause)
             deaths.append(victim)
     if poison_seat is not None:
         victim = game.player_by_seat(poison_seat)
@@ -849,15 +895,14 @@ async def _hunter_prompt(
     cfg: Config,
     hunter: PlayerState,
 ) -> Optional[int]:
-    """询问猎人是否开枪；返回带走座位（None=不开枪）。"""
+    """询问猎人是否开枪；返回带走座位（None=不开枪）。
+
+    群内只播与 _death_skill_idle 相同的中性等待文案，猎人身份仅在
+    真正开枪时由 _resolve_hunter_shot 公开。
+    """
     _enter_phase(game, Phase.HUNTER_SHOT)
     await _unban(game, hunter.user_id)
-    await _announce(
-        game,
-        f"猎人 {hunter.seat}号 死亡，开枪决策请私聊机器人"
-        f"（回复 开枪N 或 不开枪，{cfg.ww_hunter_timeout} 秒，"
-        "超时视为不开枪）",
-    )
+    await _announce(game, _death_skill_wait_text(hunter))
     await _dm(
         game,
         hunter,
@@ -876,7 +921,8 @@ async def _hunter_prompt(
                 if target is not None and target.alive:
                     await _ban(game, hunter.user_id, _MUTE_BAN_SECONDS)
                     return target.seat
-                await _announce(game, "开枪目标无效，请重新发送 /开枪 N")
+                # 私聊反馈：群播会暴露猎人身份
+                await _dm(game, hunter, "开枪目标无效，请重新回复 开枪N")
             elif action.kind in (ActionKind.NO_SHOOT, ActionKind.SKIP):
                 # 无效目标与超时都有反馈，显式放弃也补一条确认
                 await _dm(game, hunter, "收到，你选择不开枪，猎枪已压下。")
@@ -886,6 +932,38 @@ async def _hunter_prompt(
         return None
     finally:
         await _unban_living(game)
+
+
+def _death_skill_wait_text(dead: PlayerState) -> str:
+    """死亡技能等待的中性群播文案（猎人与非猎人一致，不含角色信息）。"""
+    return f"等待 {dead.seat}号 玩家确认是否发动技能……"
+
+
+async def _death_skill_idle(
+    game: Game,
+    cfg: Config,
+    dead: PlayerState,
+) -> None:
+    """身份未公开的非猎人死者：模拟一次猎人开枪等待，防停顿缺席泄漏身份。
+
+    与 _hunter_prompt 的群内可见行为（解禁死者、中性文案、全员禁言、
+    恢复禁言）保持一致，等待时长随机且不超过猎人决策超时。
+    """
+    _enter_phase(game, Phase.HUNTER_SHOT)
+    await _unban(game, dead.user_id)
+    await _announce(game, _death_skill_wait_text(dead))
+    await _ban_living_except(game)
+    try:
+        await _idle_phase(game, cfg.ww_hunter_timeout)
+    finally:
+        await _ban(game, dead.user_id, _MUTE_BAN_SECONDS)
+        await _unban_living(game)
+
+
+# 夜间死因：死者身份不公开，猎人开枪等待必须对所有此类死者一致
+_HIDDEN_ROLE_CAUSES: frozenset[DeathCause] = frozenset(
+    {DeathCause.WOLF_KILL, DeathCause.WITCH_POISON}
+)
 
 
 async def _resolve_hunter_shot(
@@ -929,6 +1007,11 @@ async def _resolve_pending_day_effects(
                 victim = game.player_by_seat(shot)
                 if victim is not None:
                     pending.append(victim)
+        elif dead.death_cause in _HIDDEN_ROLE_CAUSES and dead.user_id not in processed:
+            # 身份未公开的死者（含被毒猎人）一律走同款等待，
+            # 否则"有无开枪等待"即可反推谁是猎人
+            processed.add(dead.user_id)
+            await _death_skill_idle(game, cfg, dead)
         if not dead.is_sheriff:
             continue
         if dead.death_cause is DeathCause.WITCH_POISON:
@@ -1377,11 +1460,16 @@ async def _elect_sheriff(game: Game, seat: int) -> None:
     )
 
 
-async def _sheriff_campaign(  # noqa: C901,PLR0912,PLR0915
+def _has_eligible_voters(game: Game, exclude_seats: tuple[int, ...]) -> bool:
+    """排除 exclude_seats 后是否仍有存活且有投票权的玩家。"""
+    return any(p.can_vote and p.seat not in exclude_seats for p in game.alive_players())
+
+
+async def _sheriff_campaign(  # noqa: C901,PLR0911,PLR0912,PLR0915
     game: Game,
     cfg: Config,
 ) -> None:
-    """警长竞选（仅第 1 天）；可被 _DetonatedError 打断。"""
+    """警长竞选（第 1 天；被自爆打断时顺延一天）；可被 _DetonatedError 打断。"""
     _enter_phase(game, Phase.SHERIFF_REGISTER)
     # 有 AI 参与时延长报名窗口：AI 的竞选决策是一次 LLM 调用，
     # 不延长则迟到的上警会落进发言阶段被丢弃，AI 连候选人都当不上
@@ -1450,16 +1538,22 @@ async def _sheriff_campaign(  # noqa: C901,PLR0912,PLR0915
         await _announce(game, "所有竞选玩家均已退水，本局没有警长")
         return
     names = "、".join(f"{p.seat}号" for p in candidates)
+    # 警上玩家（投票时仍在竞选的候选人）不参与警长投票
+    candidate_seats = tuple(p.seat for p in candidates)
+    if not _has_eligible_voters(game, candidate_seats):
+        await _announce(game, "存活玩家均在警上，无人可以投票，本局没有警长")
+        return
     await _announce(
         game,
-        f"请投票选出警长：/投票 N（候选人：{names}）或 /弃票"
-        f"（{cfg.ww_vote_timeout} 秒）",
+        f"请投票选出警长：/投票 N（候选人：{names}）或 /弃票，"
+        f"警上玩家不参与投票（{cfg.ww_vote_timeout} 秒）",
     )
     votes = await _collect_votes(
         game,
         cfg,
         [p.seat for p in candidates],
         Phase.SHERIFF_VOTE,
+        exclude_seats=candidate_seats,
     )
     winner_seat, tied = _tally_votes(game, votes)
     if winner_seat is not None:
@@ -1487,15 +1581,22 @@ async def _sheriff_campaign(  # noqa: C901,PLR0912,PLR0915
         await _announce(game, "终辩后已无候选人，本局没有警长")
         return
     names = "、".join(f"{p.seat}号" for p in tied_players)
+    # 平票重投：平票者本人不参与投票
+    tied_seats = tuple(p.seat for p in tied_players)
+    if not _has_eligible_voters(game, tied_seats):
+        await _announce(game, "无人可以参与重投，本局没有警长")
+        return
     await _announce(
         game,
-        f"请在平票候选人中重投：/投票 N（{names}）或 /弃票（{cfg.ww_vote_timeout} 秒）",
+        f"请在平票候选人中重投：/投票 N（{names}）或 /弃票，"
+        f"平票者不参与投票（{cfg.ww_vote_timeout} 秒）",
     )
     votes2 = await _collect_votes(
         game,
         cfg,
         [p.seat for p in tied_players],
         Phase.SHERIFF_REVOTE,
+        exclude_seats=tied_seats,
     )
     winner2, _ = _tally_votes(game, votes2)
     if winner2 is not None:
@@ -1637,9 +1738,10 @@ async def _run_day(  # noqa: C901
     winner = _check_winner(game)
     if winner is not None:
         return winner
-    # 第 1 天警长竞选
-    if game.round_no == 1:
+    # 警长竞选：第 1 天；被自爆打断则顺延（见 run_game 的自爆处理）
+    if game.sheriff_campaign_round == game.round_no:
         await _sheriff_campaign(game, cfg)
+        game.sheriff_campaign_round = None
     # 轮流发言
     order = await _decide_speech_order(game, cfg)
     await _speech_rotation(game, cfg, order, Phase.DAY_SPEECH)
@@ -1663,6 +1765,22 @@ async def _handle_detonation(
     )
     if player.is_sheriff:
         await _badge_transfer(game, cfg, player)
+
+
+async def _postpone_sheriff_campaign(game: Game) -> None:
+    """竞选完成前被自爆打断：首日顺延到次日，顺延后再被打断则警徽流失。"""
+    if game.sheriff_campaign_round != game.round_no:
+        return
+    for p in game.players:
+        p.sheriff_candidate = False
+    if game.round_no == 1:
+        game.sheriff_campaign_round = game.round_no + 1
+        logger.info(f"狼人杀群 {game.group_id} 警长竞选因自爆顺延至第 2 天")
+        await _announce(game, "警长竞选因自爆中断，顺延到明天白天进行")
+    else:
+        game.sheriff_campaign_round = None
+        logger.info(f"狼人杀群 {game.group_id} 顺延的警长竞选再次被自爆打断，警徽流失")
+        await _announce(game, "顺延的警长竞选再次因自爆中断，警徽流失，本局没有警长")
 
 
 # ── 持久化 ────────────────────────────────────────────────
@@ -2001,6 +2119,8 @@ async def run_game(  # noqa: C901,PLR0911,PLR0912,PLR0915
             except _DetonatedError as detonated:
                 await _handle_detonation(game, cfg, detonated.player)
                 winner = _check_winner(game)
+                if winner is None:
+                    await _postpone_sheriff_campaign(game)
             except _DuelNightError:
                 winner = _check_winner(game)
             except _ConcludedError as concluded:
