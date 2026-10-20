@@ -278,7 +278,10 @@ Actions 下发，`deploy-release` 在健康检查通过后启动它。要公开 
 
 1. 把域名 A 记录解析到服务器公网 IP（Cloudflare 先用灰云 DNS only，证书签发后若开橙云，
    SSL/TLS 模式设为 Full (strict)）；
-2. 在 `/opt/yawnbot/.env` 配好上面的 WebUI 三项（密钥只在服务器保存）；
+2. `deploy-release` 会在服务器本地补齐 `/opt/yawnbot/.env` 里缺失的 WebUI 三项：
+   `WEBUI_ENABLED=true`、`WEBUI_COOKIE_SECURE=true`，以及用 `secrets.token_hex(32)`
+   生成的 `WEBUI_ADMIN_TOKEN`。已有的键不会被覆盖，改动前备份为 `.env.bak-<时间>`，
+   token 只写入服务器文件，不打印、不经过 GitHub。登录 WebUI 时到服务器上查看该值；
 3. 腾讯云安全组入站放行 TCP 80、TCP 443（以及 UDP 443 供 HTTP/3），服务器
    firewalld 如启用也要放行；8080 不要放行；
 4. 发版部署。证书自动签发并存放在 `/opt/yawnbot/caddy/`。
