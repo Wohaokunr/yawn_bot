@@ -107,6 +107,38 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("[deploy:proxy] start", result.stdout)
 
+    def test_deploy_release_fills_missing_webui_env_without_overwriting(self) -> None:
+        result, root = self._run_fake_deploy(env_text="ENVIRONMENT=prod\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[deploy:webui] added", result.stdout)
+        env = (root / ".env").read_text(encoding="utf-8")
+        self.assertIn("ENVIRONMENT=prod", env)
+        self.assertIn("WEBUI_ENABLED=true", env)
+        self.assertIn("WEBUI_COOKIE_SECURE=true", env)
+        token = [
+            line.split("=", 1)[1]
+            for line in env.splitlines()
+            if line.startswith("WEBUI_ADMIN_TOKEN=")
+        ]
+        self.assertEqual(len(token), 1)
+        self.assertGreaterEqual(len(token[0]), 32)
+        self.assertNotIn(token[0], result.stdout + result.stderr)
+        self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+        self.assertTrue(list(root.glob(".env.bak-*")))
+
+        existing = "WEBUI_ENABLED=false\nWEBUI_COOKIE_SECURE=false\n"
+        result, root = self._run_fake_deploy(env_text=existing)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("[deploy:webui] added", result.stdout)
+        self.assertEqual((root / ".env").read_text(encoding="utf-8"), existing)
+
+    def test_deploy_release_rejects_short_webui_token(self) -> None:
+        result, _ = self._run_fake_deploy(
+            env_text="WEBUI_ENABLED=true\nWEBUI_ADMIN_TOKEN=short\n"
+        )
+        self.assertEqual(result.returncode, 8)
+        self.assertNotIn("[deploy:pull]", result.stdout)
+
     def test_public_proxy_is_profiled_and_app_stays_on_loopback(self) -> None:
         compose = PRODUCTION_COMPOSE.read_text(encoding="utf-8")
         self.assertIn('- "127.0.0.1:${YAWNBOT_PORT:-8080}:8080"', compose)
@@ -273,6 +305,7 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         *,
         browser: bool = False,
         public_https_disabled: bool = False,
+        env_text: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -282,6 +315,10 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         (root / "deployments").mkdir()
         (root / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
         (root / "image.env").write_text("", encoding="utf-8")
+        if env_text is not None:
+            env_path = root / ".env"
+            env_path.write_text(env_text, encoding="utf-8")
+            env_path.chmod(0o600)
         if public_https_disabled:
             (root / "public-https.disabled").touch()
 

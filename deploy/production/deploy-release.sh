@@ -131,6 +131,58 @@ chmod 700 "$root/deployments"
 exec 9>"$root/deploy.lock"
 flock -n 9 || { echo "another production deployment is running" >&2; exit 3; }
 
+# 公网 WebUI 依赖服务器 .env 里的 WEBUI_*。缺失时在服务器本地补齐：只添加缺失的键，
+# 不覆盖已有值；admin token 在本机生成，不经过 GitHub，也不打印。
+ensure_webui_env() {
+    env_file="$root/.env"
+    [ -e "$root/public-https.disabled" ] && return 0
+    [ -f "$env_file" ] || return 0
+    YAWNBOT_ENV_FILE="$env_file" YAWNBOT_ENV_STAMP="$(date -u +%Y%m%dT%H%M%SZ)" python3 - <<'PY'
+import os, secrets, shutil, sys
+
+path = os.environ["YAWNBOT_ENV_FILE"]
+with open(path, encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+
+values = {}
+for line in lines:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    key, value = stripped.split("=", 1)
+    values[key.strip()] = value.strip().strip("'\"")
+
+added = []
+if "WEBUI_ENABLED" not in values:
+    lines.append("WEBUI_ENABLED=true")
+    values["WEBUI_ENABLED"] = "true"
+    added.append("WEBUI_ENABLED")
+if "WEBUI_COOKIE_SECURE" not in values:
+    lines.append("WEBUI_COOKIE_SECURE=true")
+    added.append("WEBUI_COOKIE_SECURE")
+enabled = values["WEBUI_ENABLED"].lower() in {"1", "true", "yes", "on"}
+if enabled and "WEBUI_ADMIN_TOKEN" not in values:
+    lines.append(f"WEBUI_ADMIN_TOKEN={secrets.token_hex(32)}")
+    added.append("WEBUI_ADMIN_TOKEN")
+elif enabled and len(values["WEBUI_ADMIN_TOKEN"]) < 32:
+    print("[deploy:webui] WEBUI_ADMIN_TOKEN is shorter than 32 characters; fix .env", file=sys.stderr)
+    raise SystemExit(8)
+
+if not added:
+    raise SystemExit(0)
+
+shutil.copy2(path, f"{path}.bak-{os.environ['YAWNBOT_ENV_STAMP']}")
+tmp = f"{path}.tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+shutil.copymode(path, tmp)
+os.replace(tmp, path)
+print("[deploy:webui] added " + ", ".join(added))
+PY
+}
+ensure_webui_env || exit 8
+
 compose() {
     docker compose --env-file "$root/image.env" -f "$root/compose.yaml" "$@"
 }
