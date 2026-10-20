@@ -1,0 +1,47 @@
+import {
+  AuditOutlined,
+  BookOutlined,
+  CrownOutlined,
+  DashboardOutlined,
+  EyeOutlined,
+  KeyOutlined,
+  ReadOutlined,
+  SettingOutlined,
+  TeamOutlined,
+  UserOutlined,
+} from "@ant-design/icons";
+import type { ReactNode } from "react";
+
+// 侧栏与命令面板共用同一份导航表，避免两处入口不同步。
+export interface NavEntry {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  group: string;
+  description: string;
+  keywords?: string;
+}
+
+export const ADMIN_NAV: NavEntry[] = [
+  { key: "/overview", label: "运行概览", icon: <DashboardOutlined />, group: "运行监控", description: "Bot、AI 与任务的健康状况", keywords: "overview dashboard 首页 状态" },
+  { key: "/audits", label: "操作审计", icon: <AuditOutlined />, group: "运行监控", description: "管理台写操作记录", keywords: "audit 日志" },
+  { key: "/groups", label: "群组", icon: <TeamOutlined />, group: "群组与用户", description: "按群管理 Agent 与功能权限", keywords: "group agent 权限 群" },
+  { key: "/users", label: "全局用户", icon: <UserOutlined />, group: "群组与用户", description: "跨群的用户功能覆盖", keywords: "user 用户 好感" },
+  { key: "/games", label: "对局中心", icon: <CrownOutlined />, group: "游戏与内容", description: "狼人杀与跑团实时对局", keywords: "game werewolf rpg 狼人杀 跑团" },
+  { key: "/modules", label: "模组库", icon: <BookOutlined />, group: "游戏与内容", description: "跑团剧本模组", keywords: "module 模组 剧本" },
+  { key: "/fanqie", label: "番茄小说", icon: <ReadOutlined />, group: "游戏与内容", description: "小说搜索与推送任务", keywords: "fanqie novel 小说" },
+  { key: "/guest-access", label: "访客访问", icon: <KeyOutlined />, group: "系统设置", description: "访客访问码与可见群", keywords: "guest 访客" },
+  { key: "/environment", label: "环境配置", icon: <SettingOutlined />, group: "系统设置", description: "模型路由与运行参数", keywords: "env config 配置 模型" },
+];
+
+export const GUEST_NAV: NavEntry[] = [
+  { key: "/guest", label: "可查看群聊", icon: <EyeOutlined />, group: "访客视图", description: "被授权查看的群聊" },
+];
+
+// Agent 工作台属于“群组”这个入口，侧栏高亮跟随群组。
+const NAV_ALIASES: Record<string, string> = { "/agent": "/groups" };
+
+export function selectedNavKey(pathname: string, isGuest: boolean): string {
+  const root = `/${pathname.split("/")[1] || (isGuest ? "guest" : "overview")}`;
+  return NAV_ALIASES[root] ?? root;
+}

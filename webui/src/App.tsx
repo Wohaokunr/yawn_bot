@@ -16,9 +16,6 @@ const GroupDetailPage = lazy(() =>
 const UsersPage = lazy(() =>
   import("./access-pages").then(({ UsersPage: Page }) => ({ default: Page })),
 );
-const AgentGroupsPage = lazy(() =>
-  import("./agent").then(({ AgentGroupsPage: Page }) => ({ default: Page })),
-);
 const AgentDetailPage = lazy(() =>
   import("./agent").then(({ AgentDetailPage: Page }) => ({ default: Page })),
 );
@@ -106,7 +103,7 @@ function App(): React.JSX.Element {
           <Route path="games" element={<GamesPage />} />
           <Route path="modules" element={<ModulesPage />} />
           <Route path="fanqie" element={<FanqiePage />} />
-          <Route path="agent" element={<AgentGroupsPage />} />
+          <Route path="agent" element={<Navigate to="/groups" replace />} />
           <Route path="agent/:groupId" element={<AgentDetailPage />} />
           <Route path="guest-access" element={<GuestAccessPage />} />
           <Route path="environment" element={<EnvironmentPage />} />

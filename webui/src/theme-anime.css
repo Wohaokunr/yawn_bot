@@ -643,3 +643,325 @@ h1, h2, h3, h4, h5,
     padding: 24px 20px;
   }
 }
+
+/* ── 交互重设计：顶栏、命令面板、可折叠侧栏、群组工作区 ── */
+.app-header {
+  gap: 12px;
+}
+
+.app-header-left,
+.app-header-right {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-header-left {
+  flex: 1 1 auto;
+}
+
+.app-header-right {
+  flex: 0 0 auto;
+}
+
+.app-header .app-breadcrumb {
+  min-width: 0;
+  margin: 0 0 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.app-header .app-breadcrumb ol {
+  flex-wrap: nowrap;
+}
+
+.sider-toggle.ant-btn,
+.mobile-nav-trigger.ant-btn {
+  color: var(--ink-secondary);
+}
+
+.palette-trigger {
+  height: 34px;
+  min-width: 240px;
+  padding: 0 8px 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink-tertiary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-soft), background-color var(--dur-fast) var(--ease-soft);
+}
+
+.palette-trigger:hover {
+  border-color: var(--brand-200);
+  background: var(--surface);
+}
+
+.palette-trigger:focus-visible {
+  outline: 2px solid var(--brand-200);
+  outline-offset: 2px;
+}
+
+.palette-trigger-text {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.palette-kbd {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.palette-kbd + .palette-kbd {
+  margin-left: 3px;
+}
+
+/* 命令面板 */
+.command-palette.ant-modal .ant-modal-container,
+.command-palette.ant-modal .ant-modal-content {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(24, 20, 34, 0.18);
+}
+
+.command-palette .ant-modal-body > .ant-input-affix-wrapper {
+  padding: 14px 16px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--border-soft) !important;
+  border-radius: 0;
+  box-shadow: none !important;
+  outline: none !important;
+  font-size: 15px;
+}
+
+.command-palette .ant-input-prefix {
+  margin-right: 10px;
+  color: var(--ink-tertiary);
+}
+
+.palette-list {
+  max-height: min(420px, 60vh);
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.palette-section {
+  padding: 10px 10px 4px;
+  color: var(--ink-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.palette-item {
+  width: 100%;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-item.is-active {
+  background: var(--brand-50);
+}
+
+.palette-item-icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+}
+
+.palette-item.is-active .palette-item-icon {
+  border-color: var(--brand-100);
+  color: var(--brand);
+}
+
+.palette-item-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette-item-title {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-item-hint {
+  overflow: hidden;
+  color: var(--ink-tertiary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-empty {
+  padding: 28px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-tertiary);
+}
+
+.palette-footer {
+  padding: 9px 14px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-muted);
+  color: var(--ink-tertiary);
+  font-size: 12px;
+}
+
+.palette-footer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.palette-footer-hint {
+  margin-left: auto;
+}
+
+/* 折叠后的侧栏只显示图标 */
+.app-sider.desktop-sider.is-collapsed .brand {
+  padding: 0;
+  justify-content: center;
+}
+
+.app-sider.desktop-sider.is-collapsed .brand > span:not(.anticon) {
+  display: none;
+}
+
+.app-sider.desktop-sider.is-collapsed .admin-menu .ant-menu-item-group-title {
+  height: 12px;
+  padding: 0 !important;
+  overflow: hidden;
+  color: transparent;
+}
+
+/* 列表行整行可点 */
+.clickable-row {
+  cursor: pointer;
+}
+
+.clickable-row:hover > td {
+  background: var(--brand-50) !important;
+}
+
+/* 群组工作区切换 */
+.group-workspace-switch.ant-segmented {
+  padding: 3px;
+  background: #f2f1f5;
+}
+
+.group-workspace-switch .ant-segmented-item-selected {
+  color: var(--brand-active);
+}
+
+/* 可点的统计卡 */
+.stat-card-link {
+  display: block;
+  height: 100%;
+  color: inherit;
+}
+
+.stat-card-link:hover {
+  color: inherit;
+}
+
+.app-content .stat-card-link .ant-card.ant-card-hoverable:hover {
+  border-color: var(--brand-200);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px) !important;
+}
+
+.stat-card-link:focus-visible {
+  outline: 2px solid var(--brand-200);
+  outline-offset: 2px;
+  border-radius: var(--surface-radius);
+}
+
+.ops-ok-banner.ant-alert {
+  border-color: #c9ecd5;
+}
+
+@media (max-width: 1024px) {
+  .sider-toggle.ant-btn {
+    display: none;
+  }
+
+  .palette-trigger {
+    min-width: 0;
+  }
+
+  .palette-trigger-text,
+  .palette-trigger .palette-kbd {
+    display: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .app-header .app-breadcrumb,
+  .logout-text {
+    display: none;
+  }
+
+  .logout-button.ant-btn {
+    width: 34px;
+    padding: 0;
+  }
+
+  .palette-footer {
+    display: none;
+  }
+
+  /* 窄屏表格横向滚动，而不是把每列挤成一字一行 */
+  .app-content .ant-table-content > table {
+    min-width: 640px;
+  }
+
+  .app-content .ant-table :where(td, th) {
+    overflow-wrap: normal;
+    word-break: keep-all;
+  }
+}
