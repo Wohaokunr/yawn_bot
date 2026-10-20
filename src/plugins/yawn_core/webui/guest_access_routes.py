@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from ..data_models.bot_group import BotGroup
 from ..data_models.guest_access import GuestGroupAccess
+from ..data_models.timeutil import beijing_now
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, ok, page_params
 from .guest_access import (
@@ -19,7 +20,6 @@ from .guest_access import (
     generate_guest_credential,
     get_or_create_config,
     policy_snapshot,
-    utc_now,
 )
 from .hub import hub
 from .route_models import GuestAccessPatch, GuestGroupAccessPatch
@@ -123,9 +123,9 @@ async def patch_guest_access_group(
         row = await db.get(GuestGroupAccess, group_id)
         if body.allowed:
             if row is None:
-                db.add(GuestGroupAccess(group_id=group_id, updated_at=utc_now()))
+                db.add(GuestGroupAccess(group_id=group_id, updated_at=beijing_now()))
             else:
-                row.updated_at = utc_now()
+                row.updated_at = beijing_now()
         elif row is not None:
             await db.delete(row)
         await db.commit()

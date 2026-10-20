@@ -192,7 +192,7 @@ export function Shell({
     try {
       await api("/auth/logout", { method: "POST" });
     } finally {
-      setCsrfToken("");
+      setCsrfToken("", null);
       onLogout();
     }
   };

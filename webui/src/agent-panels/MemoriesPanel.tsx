@@ -53,10 +53,51 @@ export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; 
     next.set("profiles.userId", userId);
     setSearchParams(next, { replace: true });
   };
-  const remove = async (id: string) => { if (readOnly || query.stale) return; await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" }); message.success("记忆已删除"); query.reload(); };
-  const removeMember = async (userId: string) => { if (readOnly || query.stale) return; const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/members/${userId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条成员数据`); query.reload(); };
-  const removeGroup = async () => { if (readOnly || query.stale) return; const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/data`, { method: "DELETE" }); message.success(`已清理 ${result.data.deleted} 条群 Agent 数据`); query.reload(); };
-  const exportData = async () => { if (readOnly || query.stale) return; const result = await api(`/agent/groups/${groupId}/memories/export`); const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `yawnbot-agent-${groupId}.json`; anchor.click(); URL.revokeObjectURL(url); };
+  const remove = async (id: string) => {
+    if (readOnly || query.stale) return;
+    try {
+      await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" });
+      message.success("记忆已删除");
+      query.reload();
+    } catch (error) {
+      message.error((error as Error).message);
+    }
+  };
+  const removeMember = async (userId: string) => {
+    if (readOnly || query.stale) return;
+    try {
+      const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/members/${userId}/data`, { method: "DELETE" });
+      message.success(`已清理 ${result.data.deleted} 条成员数据`);
+      query.reload();
+    } catch (error) {
+      message.error((error as Error).message);
+    }
+  };
+  const removeGroup = async () => {
+    if (readOnly || query.stale) return;
+    try {
+      const result = await api<{ deleted: number }>(`/agent/groups/${groupId}/data`, { method: "DELETE" });
+      message.success(`已清理 ${result.data.deleted} 条群 Agent 数据`);
+      query.reload();
+    } catch (error) {
+      message.error((error as Error).message);
+    }
+  };
+  const exportData = async () => {
+    if (readOnly || query.stale) return;
+    try {
+      const result = await api(`/agent/groups/${groupId}/memories/export`);
+      const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `yawnbot-agent-${groupId}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      message.error((error as Error).message);
+    }
+  };
   const compact = async () => {
     if (readOnly || query.stale) return;
     try {
@@ -82,7 +123,7 @@ export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; 
     if (readOnly || !editing || query.stale) return;
     setSaving(true);
     try {
-      await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.updatedAt }) });
+      await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.version ?? null }) });
       message.success("记忆已更新");
       setEditing(null);
       query.reload();

@@ -90,7 +90,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       const result = await api<Persona>(`/agent/groups/${groupId}/persona`, {
         method: "PUT",
         body: JSON.stringify({
-          version: baseVersion.current,
+          version: baseVersion.current ?? null,
           enabled: values.mode === "custom",
           profile: values.profile,
         }),
@@ -277,6 +277,8 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">IDENTITY</div><h3>它是谁</h3><p>这里只保留真正需要文字表达的身份信息，不要求你写 Prompt。</p></div>
               </div>
+              {/* presetId 由预设卡片写入；必须注册字段，否则 onFinish 会丢弃它。 */}
+              <Form.Item name={["profile", "presetId"]} hidden><Input /></Form.Item>
               <Row gutter={[16, 0]}>
                 <Col xs={24} md={8}><Form.Item name={["profile", "name"]} label="名字" rules={[{ required: true, message: "请输入名字" }]}><Input maxLength={64} showCount /></Form.Item></Col>
                 <Col xs={24} md={16}><Form.Item name={["profile", "groupRole"]} label="群内角色"><Input maxLength={240} showCount placeholder="例如：普通群友" /></Form.Item></Col>

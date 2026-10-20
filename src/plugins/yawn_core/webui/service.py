@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,7 +21,7 @@ from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.bot_group import BotGroup
 from ..data_models.bot_user import BotUser
 from ..data_models.global_user_feature import GlobalUserFeature
-from ..data_models.group_agent_config import GroupAgentConfig
+from ..data_models.group_agent_config import GroupAgentConfig, default_tool_allowlist
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.group_feature import GroupFeature
 from ..data_models.guest_access import GuestGroupAccess
@@ -58,6 +60,58 @@ def iso(value: datetime | None) -> str | None:
 
 def version(value: datetime | None) -> str | None:
     return iso(value)
+
+
+# 乐观锁版本号：只取管理员可编辑字段的内容摘要，而不是 updated_at。
+# updated_at 只有秒级精度（同一秒内两个旧版本写入都能通过），且 Bot 运行时
+# 写用量计数器等字段也会刷新它，导致无关的 409。版本号对前端是不透明字符串。
+AGENT_CONFIG_VERSION_FIELDS = (
+    "enabled",
+    "trigger_mode",
+    "reply_trigger_enabled",
+    "explicit_wakeup_enabled",
+    "proactive_enabled",
+    "proactive_probability",
+    "proactive_active_enabled",
+    "short_conversation_enabled",
+    "proactive_active_probability",
+    "proactive_active_window_minutes",
+    "idle_threshold_minutes",
+    "cooldown_minutes",
+    "daily_limit",
+    "raw_retention_days",
+    "cross_group_visibility",
+    "media_cache_enabled",
+    "admin_tool_daily_limit",
+    "critical_tool_daily_limit",
+    "tool_allowlist",
+)
+PERSONA_VERSION_FIELDS = ("persona_enabled", "persona_version", "persona_profile")
+MEMORY_VERSION_FIELDS = ("content", "salience", "confidence", "expires_at")
+
+
+def content_version(row: Any, fields: tuple[str, ...]) -> str | None:
+    if row is None:
+        return None
+    payload = json.dumps(
+        [getattr(row, field, None) for field in fields],
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def agent_config_version(row: Any) -> str | None:
+    return content_version(row, AGENT_CONFIG_VERSION_FIELDS)
+
+
+def persona_content_version(row: Any) -> str | None:
+    return content_version(row, PERSONA_VERSION_FIELDS)
+
+
+def memory_version(row: Any) -> str | None:
+    return content_version(row, MEMORY_VERSION_FIELDS)
 
 
 def page_meta(page: int, page_size: int, total: int) -> dict[str, int]:
@@ -854,7 +908,7 @@ def serialize_agent_config(
             "mediaCacheEnabled": False,
             "adminToolDailyLimit": 30,
             "criticalToolDailyLimit": 5,
-            "toolAllowlist": ["mute_member", "create_group_announcement"],
+            "toolAllowlist": default_tool_allowlist(),
             "proactiveToday": 0,
             "adminToolsToday": 0,
             "criticalToolsToday": 0,
@@ -884,7 +938,7 @@ def serialize_agent_config(
         "proactiveToday": row.proactive_count,
         "adminToolsToday": row.admin_tool_count,
         "criticalToolsToday": row.critical_tool_count,
-        "version": version(row.updated_at),
+        "version": agent_config_version(row),
     }
 
 
@@ -903,7 +957,7 @@ def serialize_persona(row: GroupAgentConfig | None, group_id: int) -> dict[str, 
             expressiveness=editor.expressiveness,
         ),
         "resolved": resolve_persona(row),
-        "version": version(row.updated_at) if row else None,
+        "version": persona_content_version(row),
     }
 
 
@@ -937,6 +991,7 @@ def serialize_memory(row: AgentMemory) -> dict[str, Any]:
         "createdAt": iso(row.created_at),
         "updatedAt": iso(row.updated_at),
         "expiresAt": iso(row.expires_at),
+        "version": memory_version(row),
     }
 
 

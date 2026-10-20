@@ -5,7 +5,14 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ..yawn_agent.persona import PersonaEditorProfileV2  # noqa: TC001
 
@@ -69,10 +76,23 @@ class LLMConnectionTestBody(BaseModel):
 
 
 
+def _reject_explicit_null(
+    value: object, info: ValidationInfo, nullable: frozenset[str]
+) -> object:
+    """PATCH 中显式传 null 的非空字段直接 422，避免关掉开关或写库 500。
+
+    字段级校验器只对请求里出现的字段运行，未提交的字段仍保持“不修改”。
+    """
+
+    if value is None and info.field_name not in nullable:
+        raise ValueError("该字段不能为 null")
+    return value
+
+
 class AgentConfigPatch(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    version: str | None
+    version: str | None = None
     enabled: bool | None = None
     # Deprecated compatibility input; new clients use independent flags.
     trigger_mode: (
@@ -153,11 +173,16 @@ class AgentConfigPatch(BaseModel):
     def unique_tools(cls, value: list[str] | None) -> list[str] | None:
         return list(dict.fromkeys(value)) if value is not None else None
 
+    @field_validator("*")
+    @classmethod
+    def reject_explicit_null(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_explicit_null(value, info, frozenset({"version"}))
+
 
 class PersonaPatch(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    version: str | None
+    version: str | None = None
     enabled: bool
     profile: PersonaEditorProfileV2
 
@@ -219,13 +244,21 @@ class MemoryCreateBody(BaseModel):
 class MemoryPatchBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    version: str | None
+    version: str | None = None
     content: str | None = Field(default=None, min_length=1, max_length=2000)
     salience: float | None = Field(default=None, ge=0, le=1)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    # null 表示“永不过期”，是合法取值。
     expires_in_days: int | None = Field(
         default=None, ge=1, le=3650, alias="expiresInDays"
     )
+
+    @field_validator("*")
+    @classmethod
+    def reject_explicit_null(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_explicit_null(
+            value, info, frozenset({"version", "expires_in_days"})
+        )
 
 
 class PrivacyPatchBody(BaseModel):

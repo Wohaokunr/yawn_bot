@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import BigInteger, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .timeutil import beijing_now
+
 if TYPE_CHECKING:
     from .user_group import UserGroup
 
@@ -17,6 +19,7 @@ class BotUser(Model):
     nickname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     first_interaction_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
     )
     last_interaction_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)

@@ -173,11 +173,11 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     @app.websocket(f"{API_PATH}/stream")
     async def stream(websocket: WebSocket) -> None:
         session = websocket_session(websocket)
-        if session is None:
-            await websocket.close(code=4401)
-            return
-        if session.role != "admin":
-            await websocket.close(code=4403)
+        if session is None or session.role != "admin":
+            # 必须先 accept 再以应用层 close code 关闭：握手前 close 会变成
+            # HTTP 403，浏览器只能看到 1006，前端无法识别登录失效而无限重连。
+            await websocket.accept()
+            await websocket.close(code=4401 if session is None else 4403)
             return
         await hub.connect(websocket)
         try:

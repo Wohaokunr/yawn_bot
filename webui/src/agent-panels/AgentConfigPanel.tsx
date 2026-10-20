@@ -56,7 +56,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
     try {
       const result = await api<AgentConfig>(`/agent/groups/${groupId}/config`, {
         method: "PATCH",
-        body: JSON.stringify({ ...values, version: baseVersion.current }),
+        body: JSON.stringify({ ...values, version: baseVersion.current ?? null }),
       });
       serverState.acceptServerData(result.data);
       message.success("Agent 配置已保存");

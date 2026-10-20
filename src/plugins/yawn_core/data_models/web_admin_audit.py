@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import JSON, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class WebAdminAudit(Model):
     """WebUI 管理写操作的脱敏审计记录。"""
@@ -18,5 +20,5 @@ class WebAdminAudit(Model):
     result: Mapped[str] = mapped_column(String(24), default="success", index=True)
     detail: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(), index=True
+        default=beijing_now, server_default=func.current_timestamp(), index=True
     )

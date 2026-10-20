@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class ScheduledReminder(Model):
     """群聊定时提醒配置。"""
@@ -49,11 +51,13 @@ class ScheduledReminder(Model):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
     )
     last_run_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     last_success_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)

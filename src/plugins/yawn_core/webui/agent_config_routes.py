@@ -79,7 +79,7 @@ from .agent_route_helpers import memory_privacy_clauses as _memory_privacy_claus
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
 from .hub import hub
-from .route_helpers import check_version, require_group
+from .route_helpers import check_version, optimistic_write_lock, require_group
 from .route_models import (
     AgentConfigPatch,
     AgentDebugRunBody,
@@ -92,6 +92,7 @@ from .route_models import (
 )
 from .service import (
     RELATION_GRAPH_LIMIT,
+    agent_config_version,
     agent_diagnostics,
     agent_memory_status,
     delete_one_memory,
@@ -133,10 +134,10 @@ async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[st
 async def patch_agent_config(
     group_id: int, body: AgentConfigPatch, _session: AdminWriteSession
 ) -> dict[str, Any]:
-    async with get_session() as db:
+    async with optimistic_write_lock, get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, body.version)
+        check_version(row, body.version, version_of=agent_config_version)
         if row is None:
             row = GroupAgentConfig(group_id=group_id)
             db.add(row)

@@ -1,4 +1,4 @@
-# ruff: noqa: PERF203,TC002,TC003
+# ruff: noqa: TC002,TC003
 """单进程 WebSocket 状态广播。"""
 
 from __future__ import annotations
@@ -11,6 +11,9 @@ from typing import Any
 
 from fastapi import WebSocket
 from nonebot import logger
+
+# 单客户端发送上限：超过即视为卡死连接并断开。
+_SEND_TIMEOUT_SECONDS = 2.0
 
 _GROUP_SCOPED_RESOURCES = frozenset(
     {
@@ -55,15 +58,26 @@ class WebUIHub:
             await websocket.send_json(payload)
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
-        stale: list[WebSocket] = []
-        for websocket in tuple(self._clients):
+        """并发推送给所有客户端；单个卡住的连接超时后被断开，不拖住写接口。"""
+
+        clients = tuple(self._clients)
+        if not clients:
+            return
+
+        async def deliver(websocket: WebSocket) -> None:
             try:
-                await self.send(websocket, payload)
+                await asyncio.wait_for(
+                    self.send(websocket, payload), timeout=_SEND_TIMEOUT_SECONDS
+                )
             except Exception:  # noqa: BLE001
-                logger.debug("WebUI 广播失败，将断开该客户端", exc_info=True)
-                stale.append(websocket)
-        for websocket in stale:
-            self.disconnect(websocket)
+                logger.debug("WebUI 广播失败或超时，将断开该客户端", exc_info=True)
+                self.disconnect(websocket)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        websocket.close(code=1011), timeout=_SEND_TIMEOUT_SECONDS
+                    )
+
+        await asyncio.gather(*(deliver(websocket) for websocket in clients))
 
     async def notify_change(
         self,

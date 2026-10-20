@@ -15,6 +15,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
+
+def default_tool_allowlist() -> list[str]:
+    """默认开放历史低风险管理能力与精华设置；WebUI 未配置群的展示也取此值。"""
+
+    return [
+        "mute_member",
+        "create_group_announcement",
+        "set_essence_message",
+    ]
+
 
 class GroupAgentConfig(Model):
     """群聊 Agent 配置；一群一份。"""
@@ -89,13 +101,10 @@ class GroupAgentConfig(Model):
     # 默认开放历史低风险管理能力与精华设置；其余新增 privileged/critical
     # 仍必须显式启用。空列表语义为全部禁用。
     tool_allowlist: Mapped[list[str]] = mapped_column(
-        JSON,
-        default=lambda: [
-            "mute_member",
-            "create_group_announcement",
-            "set_essence_message",
-        ],
+        JSON, default=default_tool_allowlist
     )
     updated_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(), onupdate=func.current_timestamp()
+        default=beijing_now,
+        server_default=func.current_timestamp(),
+        onupdate=beijing_now,
     )

@@ -14,6 +14,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class AgentMediaCache(Model):
     """短期 Agent 媒体缓存；按群隔离，避免跨群泄露识别结果。"""
@@ -42,11 +44,15 @@ class AgentMediaCache(Model):
     status: Mapped[str] = mapped_column(String(24), default="ready")
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), index=True
+        DateTime,
+        default=beijing_now,
+        server_default=func.current_timestamp(),
+        index=True,
     )
     last_access_at: Mapped[datetime] = mapped_column(
         DateTime,
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)

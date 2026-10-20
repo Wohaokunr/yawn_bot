@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import BigInteger, Date, ForeignKeyConstraint, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .timeutil import beijing_now
+
 if TYPE_CHECKING:
     from .user_group import UserGroup
 
@@ -43,6 +45,7 @@ class CheckinRecord(Model):
 
     # 记录创建时间
     created_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
     )
 

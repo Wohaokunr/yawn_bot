@@ -15,13 +15,15 @@ async def get_or_create_config(session: Any, group_id: int) -> GroupAgentConfig 
     record = await session.get(GroupAgentConfig, group_id)
     if record is None:
         record = GroupAgentConfig(group_id=group_id)
-        session.add(record)
         try:
-            await session.flush()
+            # SAVEPOINT 只回滚这一次插入；调用方已暂存的变更（如 WebUI 同时写入的
+            # GroupFeature）不能被整体 rollback 悄悄丢弃。
+            async with session.begin_nested():
+                session.add(record)
+                await session.flush()
         except IntegrityError:
             # block=False 监听器下同一群可能并发创建；输的一方重新读取。
             dbg(f"群 {group_id} Agent 配置并发创建竞态,回滚后重新读取")
-            await session.rollback()
             record = await session.get(GroupAgentConfig, group_id)
         else:
             dbg(f"群 {group_id} 新建 Agent 配置记录")

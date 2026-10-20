@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import BigInteger, Boolean, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class GuestAccessConfig(Model):
     """WebUI 访客访问的全局策略。固定使用 id=1 的单例行。"""
@@ -16,8 +18,9 @@ class GuestAccessConfig(Model):
         Integer, default=0, server_default="0"
     )
     updated_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
     )
 
 
@@ -26,6 +29,7 @@ class GuestGroupAccess(Model):
 
     group_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     updated_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
     )

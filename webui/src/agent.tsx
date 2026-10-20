@@ -1,5 +1,6 @@
 import {
   Alert,
+  App as AntApp,
   Button,
   Card,
   Col,
@@ -272,6 +273,7 @@ function AgentOverviewPanel({
   groupId: string;
   onNavigate: (tab: string) => void;
 }): React.JSX.Element {
+  const { message } = AntApp.useApp();
   const query = useApiQuery({
     queryKey: ["agent-diagnostics", groupId],
     fetcher: (signal) => api<AgentDiagnostics>(
@@ -308,6 +310,8 @@ function AgentOverviewPanel({
     try {
       await api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities/refresh`, { method: "POST" });
       capabilityQuery.reload();
+    } catch (error) {
+      message.error((error as Error).message);
     } finally {
       setCapabilityRefreshing(false);
     }

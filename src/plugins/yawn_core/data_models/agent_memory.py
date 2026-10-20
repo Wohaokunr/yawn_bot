@@ -16,6 +16,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class AgentMemory(Model):
     """群摘要、人物画像、关系和回忆的统一存储。"""
@@ -58,10 +60,12 @@ class AgentMemory(Model):
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     visibility: Mapped[str] = mapped_column(String(24), default="group")
     created_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp()
+        default=beijing_now, server_default=func.current_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(), onupdate=func.current_timestamp()
+        default=beijing_now,
+        server_default=func.current_timestamp(),
+        onupdate=beijing_now,
     )
     expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
 
@@ -103,7 +107,7 @@ class AgentRelation(Model):
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     evidence_count: Mapped[int] = mapped_column(Integer, default=1)
     last_seen_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp()
+        default=beijing_now, server_default=func.current_timestamp()
     )
 
 
@@ -118,5 +122,7 @@ class AgentPrivacy(Model):
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     opted_out: Mapped[bool] = mapped_column(default=False)
     updated_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(), onupdate=func.current_timestamp()
+        default=beijing_now,
+        server_default=func.current_timestamp(),
+        onupdate=beijing_now,
     )
