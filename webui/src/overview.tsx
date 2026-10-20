@@ -15,7 +15,6 @@ import {
   Row,
   Space,
   Spin,
-  Statistic,
   Tag,
   Typography,
 } from "antd";
@@ -23,7 +22,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AgentAuditTable } from "./agent-audit-table";
 import { api } from "./api";
-import { AdminEmpty, formatTime, PageHeader } from "./shared";
+import { formatTime, PageHeader } from "./shared";
 import type { Overview } from "./types";
 
 const { Text } = Typography;
@@ -36,21 +35,28 @@ function StatCard({
   title,
   value,
   suffix,
+  to,
 }: {
   icon: React.ReactNode;
   tone: StatTone;
   title: string;
   value: number | string;
   suffix?: string;
+  to?: string;
 }): React.JSX.Element {
-  return (
-    <Card className="stat-card">
-      <Flex align="center" gap={16}>
+  const card = (
+    <Card className="stat-card" hoverable={Boolean(to)}>
+      <div className="stat-card-head">
+        <span className="stat-card-title">{title}</span>
         <span className={`stat-badge tone-${tone}`}>{icon}</span>
-        <Statistic title={title} value={value} suffix={suffix} />
-      </Flex>
+      </div>
+      <div className="stat-value-row">
+        <span className="stat-value">{typeof value === "number" ? value.toLocaleString("zh-CN") : value}</span>
+        {suffix && <span className="stat-suffix">{suffix}</span>}
+      </div>
     </Card>
   );
+  return to ? <Link to={to} className="stat-card-link" aria-label={`${title}，查看详情`}>{card}</Link> : card;
 }
 
 export function formatUptime(seconds: number): string {
@@ -164,7 +170,7 @@ export function buildOverviewIssues(data: Overview): OverviewIssue[] {
       severity: stats.memory.failingGroups > 0 ? "error" : "warning",
       title: `记忆治理异常 ${stats.memory.failingGroups + stats.memory.rebuildRequired} 群`,
       description: recent?.error ?? "存在连续整理失败或待重建的群记忆。",
-      to: recent ? `/agent/${recent.groupId}?tab=memories` : "/agent",
+      to: recent ? `/agent/${recent.groupId}?tab=memories` : "/groups",
     });
   }
   if (stats.jobs.reminderErrors > 0) {
@@ -229,10 +235,10 @@ export function OverviewPage(): React.JSX.Element {
       refreshing={refreshing}
       status={issues.length > 0 ? <Tag color="red">{issues.length} 项需处理</Tag> : <Tag color="green">运行正常</Tag>}
     />
-    <Card title="需要处理的问题" className="ops-issues-card">
-      {issues.length === 0
-        ? <AdminEmpty description="当前没有需要处理的问题" />
-        : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    {issues.length === 0
+      ? <Alert className="ops-ok-banner" type="success" showIcon message="一切正常，当前没有需要处理的问题" />
+      : <Card title={`需要处理的问题 · ${issues.length}`} className="ops-issues-card">
+        <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
           {issues.map((issue) => (
             <Alert
               key={issue.key}
@@ -243,15 +249,15 @@ export function OverviewPage(): React.JSX.Element {
               action={issue.to.startsWith("#") ? <a href={issue.to}>查看</a> : <Link to={issue.to}>去处理</Link>}
             />
           ))}
-        </Space>}
-    </Card>
-    <Row gutter={[16, 16]} className="section-row">
+        </Space>
+      </Card>}
+    <Row gutter={[16, 16]} className="section-row equal-height-row">
       <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sakura" icon={<RobotOutlined />} title="在线 Bot" value={data.bots.length} suffix="个" /></Col>
-      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="mint" icon={<MessageOutlined />} title="24 小时消息量" value={stats.activity.messages24h} suffix="条" /></Col>
-      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sky" icon={<TeamOutlined />} title="24 小时活跃群" value={stats.activity.activeGroups24h} suffix="个" /></Col>
-      <Col xs={24} sm={12} xl={4}><StatCard tone="lavender" icon={<ApiOutlined />} title="AI 成功率" value={formatRate(stats.ai.successRate)} suffix={stats.ai.requestsTotal > 0 ? `均 ${formatLatency(stats.ai.avgDurationMs)}` : undefined} /></Col>
-      <Col xs={24} sm={12} xl={4}><StatCard tone="sky" icon={<CrownOutlined />} title="进行中对局" value={liveGames} suffix={liveAvailable ? "局" : undefined} /></Col>
-      <Col xs={24} sm={12} xl={4}><StatCard tone={stats.memory.failingGroups > 0 || stats.memory.rebuildRequired > 0 ? "tomato" : "mint"} icon={<WarningOutlined />} title="记忆异常群" value={stats.memory.failingGroups + stats.memory.rebuildRequired} suffix="个" /></Col>
+      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="mint" icon={<MessageOutlined />} title="24 小时消息量" value={stats.activity.messages24h} suffix="条" to="/groups" /></Col>
+      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sky" icon={<TeamOutlined />} title="24 小时活跃群" value={stats.activity.activeGroups24h} suffix="个" to="/groups" /></Col>
+      <Col xs={24} sm={12} xl={4}><StatCard tone="lavender" icon={<ApiOutlined />} title="AI 成功率" value={formatRate(stats.ai.successRate)} suffix={stats.ai.requestsTotal > 0 ? `均 ${formatLatency(stats.ai.avgDurationMs)}` : undefined} to="/environment" /></Col>
+      <Col xs={24} sm={12} xl={4}><StatCard tone="sky" icon={<CrownOutlined />} title="进行中对局" value={liveGames} suffix={liveAvailable ? "局" : undefined} to="/games" /></Col>
+      <Col xs={24} sm={12} xl={4}><StatCard tone={stats.memory.failingGroups > 0 || stats.memory.rebuildRequired > 0 ? "tomato" : "mint"} icon={<WarningOutlined />} title="记忆异常群" value={stats.memory.failingGroups + stats.memory.rebuildRequired} suffix="个" to="/groups" /></Col>
     </Row>
     <Row gutter={[16, 16]} className="section-row">
       <Col xs={24} lg={12}>
@@ -279,7 +285,7 @@ export function OverviewPage(): React.JSX.Element {
         </Card>
       </Col>
       <Col xs={24} lg={12}>
-        <Card title="记忆治理" extra={<Link to="/agent">Agent 管理</Link>}>
+        <Card title="记忆治理" extra={<Link to="/groups">按群查看</Link>}>
           <Descriptions column={3} size="small" items={[
             { key: "compacting", label: "整理中", children: `${stats.memory.compactingGroups} 群` },
             { key: "rebuild", label: "待重建", children: `${stats.memory.rebuildRequired} 群` },

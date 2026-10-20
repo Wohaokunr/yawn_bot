@@ -5,6 +5,7 @@ import {
   Drawer,
   Input,
   Select,
+  Space,
   Spin,
   Table,
   Tabs,
@@ -13,8 +14,9 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "./api";
+import { GroupWorkspaceSwitch } from "./group-workspace";
 import { AdminEmpty, formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
 import type { FeatureState, GroupSummary, Member, UserSummary } from "./types";
 
@@ -29,13 +31,18 @@ export function GroupsPage(): React.JSX.Element {
     [page, search],
   );
   const query = useApiQuery(load, { resources: ["group_feature", "agent_config"] });
+  const navigate = useNavigate();
   const columns: ColumnsType<GroupSummary> = [
     {
       title: "群",
       render: (_, row) => <>
-        <Link to={`/groups/${row.groupId}`}>{row.groupName || "未命名群"}</Link>
+        <Link to={`/agent/${row.groupId}`} onClick={(event) => event.stopPropagation()}>
+          {row.groupName || "未命名群"}
+        </Link>
         <br />
-        <Text type="secondary" copyable>{row.groupId}</Text>
+        <span onClick={(event) => event.stopPropagation()}>
+          <Text type="secondary" copyable>{row.groupId}</Text>
+        </span>
       </>,
     },
     { title: "成员", dataIndex: "memberCount", width: 100 },
@@ -48,13 +55,23 @@ export function GroupsPage(): React.JSX.Element {
       ),
     },
     { title: "最近活跃", dataIndex: "lastActiveAt", render: formatTime },
-    { title: "操作", width: 100, render: (_, row) => <Link to={`/agent/${row.groupId}`}>Agent</Link> },
+    {
+      title: "操作",
+      width: 200,
+      render: (_, row) => (
+        <Space size={4} onClick={(event) => event.stopPropagation()}>
+          <Link to={`/agent/${row.groupId}`}>Agent 工作台</Link>
+          <Text type="secondary">·</Text>
+          <Link to={`/groups/${row.groupId}`}>功能权限</Link>
+        </Space>
+      ),
+    },
   ];
 
   return <>
     <PageHeader
-      title="群组与权限"
-      subtitle="管理群级及成员级功能覆盖"
+      title="群组"
+      subtitle="点开一个群，在同一处管理它的 Agent 与功能权限"
       onRefresh={query.reload}
       refreshing={query.refreshing}
       extra={(
@@ -77,6 +94,8 @@ export function GroupsPage(): React.JSX.Element {
             loading={query.loading}
             columns={columns}
             dataSource={query.data?.rows ?? []}
+            rowClassName={() => "clickable-row"}
+            onRow={(row) => ({ onClick: () => navigate(`/agent/${row.groupId}`) })}
             locale={{ emptyText: <AdminEmpty description="暂无群组" /> }}
             pagination={{
               current: page,
@@ -208,8 +227,8 @@ export function GroupDetailPage(): React.JSX.Element {
   return <>
     <PageHeader
       title={group.groupName || "未命名群"}
-      subtitle={`群号 ${group.groupId} · ${group.memberCount} 名成员`}
-      extra={<Link to="/groups">返回列表</Link>}
+      subtitle={`群号 ${group.groupId} · ${group.memberCount} 名成员 · 功能权限`}
+      extra={<GroupWorkspaceSwitch groupId={group.groupId} active="access" />}
     />
     <Tabs items={[
       {

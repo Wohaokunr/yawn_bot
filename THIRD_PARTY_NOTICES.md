@@ -18,6 +18,18 @@ font files.
 The bundled font remains under OFL-1.1; YawnBot's Apache-2.0 license does not
 replace the font's license.
 
+## Nunito
+
+The WebUI uses `@fontsource-variable/nunito`, which redistributes the Nunito
+variable font files.
+
+- Copyright: 2014 The Nunito Project Authors
+- License: SIL Open Font License 1.1
+- License copy: `third_party_licenses/Nunito-OFL-1.1.txt`
+
+The bundled font remains under OFL-1.1; YawnBot's Apache-2.0 license does not
+replace the font's license.
+
 ## nonebot-plugin-htmlkit 0.1.0rc5
 
 YawnBot redistributes `nonebot-plugin-htmlkit==0.1.0rc5` in its published Python

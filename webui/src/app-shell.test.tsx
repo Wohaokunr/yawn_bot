@@ -100,4 +100,20 @@ describe("Shell realtime stream isolation", () => {
     await waitFor(() => expect(screen.getByTestId("tab")).toHaveTextContent("config"));
     await waitFor(() => expect(region!.scrollTop).toBe(320));
   });
+
+  it("Ctrl+K 打开命令面板，侧栏可以折叠并记住状态", async () => {
+    window.localStorage.removeItem("yawnbot.sider.collapsed");
+    render(
+      <MemoryRouter initialEntries={["/overview"]}>
+        <Shell session={session("admin", false)} onLogout={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(await screen.findByRole("listbox", { name: "搜索结果" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "收起侧栏" }));
+    expect(window.localStorage.getItem("yawnbot.sider.collapsed")).toBe("1");
+    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeInTheDocument();
+  });
 });

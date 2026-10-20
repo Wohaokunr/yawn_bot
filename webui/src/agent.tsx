@@ -3,13 +3,11 @@ import {
   Button,
   Card,
   Col,
-  Input,
   List,
   Row,
   Space,
   Spin,
   Statistic,
-  Table,
   Tabs,
   Tag,
   Typography,
@@ -17,6 +15,7 @@ import {
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "./api";
+import { GroupWorkspaceSwitch } from "./group-workspace";
 import {
   AdminEmpty,
   formatTime,
@@ -24,7 +23,7 @@ import {
   QueryErrorAlert,
   useApiQuery,
 } from "./shared";
-import type { AgentCapabilities, AgentDiagnostics, GroupSummary } from "./types";
+import type { AgentCapabilities, AgentDiagnostics } from "./types";
 
 const { Text } = Typography;
 
@@ -105,77 +104,6 @@ function panel(content: React.ReactNode): React.JSX.Element {
   return <Suspense fallback={<AgentPanelFallback />}>{content}</Suspense>;
 }
 
-export function AgentGroupsPage(): React.JSX.Element {
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const query = useApiQuery({
-    queryKey: ["agent-groups", page, search],
-    fetcher: (signal) => api<GroupSummary[]>(
-      `/groups?page=${page}&pageSize=20&search=${encodeURIComponent(search)}`,
-      { signal },
-    ).then((response) => ({ rows: response.data, total: response.meta.total ?? 0 })),
-    invalidation: { resources: ["agent_config"] },
-  });
-
-  return <>
-    <PageHeader
-      title="Agent 管理"
-      subtitle="选择群组配置触发、人设、记忆和工具策略"
-      onRefresh={query.reload}
-      refreshing={query.refreshing}
-      extra={
-        <Input.Search
-          placeholder="搜索群组"
-          allowClear
-          onSearch={(value) => {
-            setSearch(value);
-            setPage(1);
-          }}
-        />
-      }
-    />
-    <Card>
-      {query.error && !query.data
-        ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-        : <Table
-            rowKey="groupId"
-            loading={query.loading}
-            dataSource={query.data?.rows ?? []}
-            locale={{ emptyText: <AdminEmpty description="暂无可管理群组" /> }}
-            pagination={{
-              current: page,
-              pageSize: 20,
-              total: query.data?.total ?? 0,
-              showSizeChanger: false,
-              onChange: setPage,
-            }}
-            columns={[
-              {
-                title: "群组",
-                render: (_, row: GroupSummary) => <>
-                  {row.groupName || "未命名群"}<br />
-                  <Text type="secondary">{row.groupId}</Text>
-                </>,
-              },
-              { title: "成员", dataIndex: "memberCount" },
-              {
-                title: "状态",
-                render: (_, row: GroupSummary) => (
-                  <Tag color={row.agentEnabled ? "green" : "default"}>
-                    {row.agentEnabled ? "开启" : "关闭"}
-                  </Tag>
-                ),
-              },
-              {
-                title: "操作",
-                render: (_, row: GroupSummary) => <Link to={`/agent/${row.groupId}`}>进入管理</Link>,
-              },
-            ]}
-          />}
-    </Card>
-  </>;
-}
-
 export function AgentDetailPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -226,7 +154,7 @@ export function AgentDetailPage(): React.JSX.Element {
     <PageHeader
       title={title}
       subtitle="群级运行状态、知识、调试与数据治理"
-      extra={<Link to="/agent">返回 Agent 列表</Link>}
+      extra={<GroupWorkspaceSwitch groupId={groupId} active="agent" />}
     />
     <Tabs
       className="agent-ia-tabs"

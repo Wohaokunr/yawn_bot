@@ -49,6 +49,7 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
       <Card className="login-card" variant="borderless">
         <div className="brand-mark">{isGuest ? <TeamOutlined /> : <RobotOutlined />}</div>
         <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 18 }}>
+          <span className="login-kicker">✦ {isGuest ? "GUEST PASS" : "CONTROL ROOM"}</span>
           <Space align="center" wrap>
             <Title level={2} style={{ margin: 0 }}>YawnBot WebUI</Title>
             {isGuest && <Tag color="blue" icon={<SafetyCertificateOutlined />}>只读</Tag>}

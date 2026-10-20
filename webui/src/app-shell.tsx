@@ -1,90 +1,66 @@
 import {
-  ApiOutlined,
-  AuditOutlined,
-  BookOutlined,
-  CrownOutlined,
-  DashboardOutlined,
   EyeOutlined,
-  KeyOutlined,
   LogoutOutlined,
+  MenuFoldOutlined,
   MenuOutlined,
-  ReadOutlined,
+  MenuUnfoldOutlined,
   RobotOutlined,
-  SafetyCertificateOutlined,
-  SettingOutlined,
-  TeamOutlined,
-  UserOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
-import { Breadcrumb, Button, Drawer, Layout, Menu, Space, Spin, Tag, Typography } from "antd";
+import { Breadcrumb, Button, Drawer, Layout, Menu, Spin, Tag, Tooltip } from "antd";
 import type { MenuProps } from "antd";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
+import { CommandPalette } from "./command-palette";
 import { ScrollRegion } from "./layout";
+import { ADMIN_NAV, GUEST_NAV, type NavEntry, selectedNavKey } from "./nav-config";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 
 const { Header, Sider, Content } = Layout;
-const { Text } = Typography;
-
 type MenuItem = Required<MenuProps>["items"][number];
 
-const ADMIN_NAV_ITEMS: MenuItem[] = [
-  {
-    type: "group",
-    label: "运行监控",
-    children: [
-      { key: "/overview", icon: <DashboardOutlined />, label: "运行概览" },
-      { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
-    ],
-  },
-  {
-    type: "group",
-    label: "用户与 Agent",
-    children: [
-      { key: "/groups", icon: <TeamOutlined />, label: "群组与权限" },
-      { key: "/users", icon: <UserOutlined />, label: "全局用户" },
-      { key: "/agent", icon: <ApiOutlined />, label: "Agent 管理" },
-    ],
-  },
-  {
-    type: "group",
-    label: "游戏与内容",
-    children: [
-      { key: "/games", icon: <CrownOutlined />, label: "对局中心" },
-      { key: "/modules", icon: <BookOutlined />, label: "模组库" },
-      { key: "/fanqie", icon: <ReadOutlined />, label: "番茄小说" },
-    ],
-  },
-  {
-    type: "group",
-    label: "系统设置",
-    children: [
-      { key: "/guest-access", icon: <KeyOutlined />, label: "访客访问" },
-      { key: "/environment", icon: <SettingOutlined />, label: "环境配置" },
-    ],
-  },
-];
+const SIDER_COLLAPSED_KEY = "yawnbot.sider.collapsed";
 
-const GUEST_NAV_ITEMS: MenuItem[] = [
-  {
-    type: "group",
-    label: "访客视图",
-    children: [
-      { key: "/guest", icon: <EyeOutlined />, label: "可查看群聊" },
-    ],
-  },
-];
+function menuItems(entries: NavEntry[]): MenuItem[] {
+  const groups = new Map<string, NavEntry[]>();
+  for (const entry of entries) groups.set(entry.group, [...(groups.get(entry.group) ?? []), entry]);
+  return [...groups.entries()].map(([label, children]) => ({
+    type: "group" as const,
+    label,
+    children: children.map((entry) => ({ key: entry.key, icon: entry.icon, label: entry.label })),
+  }));
+}
+
+const ADMIN_NAV_ITEMS = menuItems(ADMIN_NAV);
+const GUEST_NAV_ITEMS = menuItems(GUEST_NAV);
+
+function readCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDER_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeCollapsed(value: boolean): void {
+  try {
+    window.localStorage.setItem(SIDER_COLLAPSED_KEY, value ? "1" : "0");
+  } catch {
+    // 隐私模式等场景下无法持久化，忽略即可
+  }
+}
 
 const BREADCRUMB_LABELS: Record<string, string> = {
   overview: "运行概览",
   audits: "操作审计",
-  groups: "群组与权限",
+  groups: "群组",
   users: "全局用户",
   games: "对局中心",
   modules: "模组库",
   fanqie: "番茄小说",
-  agent: "Agent 管理",
+  agent: "群组",
   "guest-access": "访客访问",
   environment: "环境配置",
   guest: "可查看群聊",
@@ -98,10 +74,14 @@ function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { tit
   if (segments.length === 0) return items;
   const root = segments[0];
   const rootLabel = BREADCRUMB_LABELS[root] ?? root;
+  const rootPathForCrumb = root === "agent" ? "/groups" : `/${root}`;
   if (root !== "overview" || role === "guest") {
-    items.push({ title: segments.length > 1 ? <Link to={`/${root}`}>{rootLabel}</Link> : rootLabel });
+    items.push({ title: segments.length > 1 ? <Link to={rootPathForCrumb}>{rootLabel}</Link> : rootLabel });
   }
   if (segments.length > 1) items.push({ title: `群 ${segments[1]}` });
+  if (segments.length > 1 && (root === "agent" || root === "groups")) {
+    items.push({ title: root === "agent" ? "Agent 工作台" : "功能权限" });
+  }
   return items;
 }
 
@@ -120,9 +100,11 @@ export function Shell({
     canUseAdminStream ? "connecting" : "closed",
   );
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [dirtyCount, setDirtyCount] = useState(0);
   const scrollPositions = useRef(new Map<string, number>());
-  const selected = `/${location.pathname.split("/")[1] || (isGuest ? "guest" : "overview")}`;
+  const selected = selectedNavKey(location.pathname, isGuest);
   const crumbs = useMemo(
     () => breadcrumbItems(location.pathname, session.role),
     [location.pathname, session.role],
@@ -132,6 +114,26 @@ export function Shell({
     return `${location.pathname}?tab=${tab}`;
   }, [location.pathname, location.search]);
   const navItems = isGuest ? GUEST_NAV_ITEMS : ADMIN_NAV_ITEMS;
+  const navEntries = isGuest ? GUEST_NAV : ADMIN_NAV;
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed((current) => {
+      writeCollapsed(!current);
+      return !current;
+    });
+  }, []);
+
+  // Ctrl/⌘ + K 全局唤起命令面板
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((current) => !current);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   useEffect(() => {
     if (!canUseAdminStream) {
@@ -205,11 +207,28 @@ export function Shell({
     />
   );
 
+  const mascot = (
+    <div className="sider-mascot" aria-hidden="true">
+      <span className="sider-mascot-face">=ω=</span>
+      <span className="sider-mascot-text">
+        <strong>{isGuest ? "只读巡视中" : "今日也在值班"}</strong>
+        <span>{isGuest ? "访客视图" : stream === "open" ? "实时连接已就绪" : "等待实时连接"}</span>
+      </span>
+    </div>
+  );
+
   return (
     <Layout className="app-layout">
-      <Sider width={236} className="app-sider desktop-sider">
+      <Sider
+        width={236}
+        collapsedWidth={72}
+        collapsed={collapsed}
+        trigger={null}
+        className={`app-sider desktop-sider${collapsed ? " is-collapsed" : ""}`}
+      >
         <div className="brand"><RobotOutlined /><span>YawnBot</span></div>
         {menu}
+        {!collapsed && mascot}
       </Sider>
       <Drawer
         placement="left"
@@ -223,7 +242,7 @@ export function Shell({
       </Drawer>
       <Layout className="app-main-layout">
         <Header className="app-header">
-          <Space>
+          <div className="app-header-left">
             <Button
               className="mobile-nav-trigger"
               type="text"
@@ -231,8 +250,28 @@ export function Shell({
               aria-label="打开导航"
               onClick={() => setMobileOpen(true)}
             />
-            <SafetyCertificateOutlined />
-            <Text>{isGuest ? "开放群聊视图" : "Core / Agent"}</Text>
+            <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"}>
+              <Button
+                className="sider-toggle"
+                type="text"
+                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
+                onClick={toggleCollapsed}
+              />
+            </Tooltip>
+            <Breadcrumb className="app-breadcrumb" items={crumbs} />
+          </div>
+          <div className="app-header-right">
+            <button
+              type="button"
+              className="palette-trigger"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="搜索页面或群组"
+            >
+              <SearchOutlined />
+              <span className="palette-trigger-text">{isGuest ? "搜索页面" : "搜索页面或群组"}</span>
+              <kbd className="palette-kbd">Ctrl K</kbd>
+            </button>
             {isGuest ? (
               <Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>
             ) : (
@@ -242,13 +281,21 @@ export function Shell({
               </Tag>
             )}
             {!isGuest && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
-          </Space>
-          <Button icon={<LogoutOutlined />} onClick={() => void logout()}>{isGuest ? "退出访客" : "退出"}</Button>
+            <Tooltip title={isGuest ? "退出访客" : "退出登录"}>
+              <Button
+                className="logout-button"
+                icon={<LogoutOutlined />}
+                aria-label={isGuest ? "退出访客" : "退出"}
+                onClick={() => void logout()}
+              >
+                <span className="logout-text">{isGuest ? "退出访客" : "退出"}</span>
+              </Button>
+            </Tooltip>
+          </div>
         </Header>
         <Content className="app-content-shell">
           <ScrollRegion className="app-content-scroll">
             <main className="app-content">
-              <Breadcrumb className="app-breadcrumb" items={crumbs} />
               <Suspense fallback={<div className="route-loading"><Spin size="large" /></div>}>
                 <Outlet />
               </Suspense>
@@ -256,6 +303,13 @@ export function Shell({
           </ScrollRegion>
         </Content>
       </Layout>
+      <CommandPalette
+        open={paletteOpen}
+        entries={navEntries}
+        searchGroups={!isGuest}
+        onClose={() => setPaletteOpen(false)}
+        onNavigate={go}
+      />
     </Layout>
   );
 }

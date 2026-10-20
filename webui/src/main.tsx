@@ -4,12 +4,14 @@ import { ConfigProvider, theme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { BrowserRouter } from "react-router-dom";
 import "@fontsource/zcool-kuaile/400.css";
+import "@fontsource-variable/nunito/wght.css";
 import App from "./App";
 import { installGlassGlow } from "./glass";
 import "./styles.css";
 import "./interaction.css";
 import "./layout.css";
 import "./design-system.css";
+import "./theme-anime.css";
 
 installGlassGlow();
 
@@ -20,47 +22,49 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: "#f2608d",
-          colorInfo: "#5b9df6",
-          colorSuccess: "#34c896",
-          colorWarning: "#f6a94a",
-          colorError: "#ff6b7d",
-          colorTextBase: "#53414c",
+          colorPrimary: "#e4558a",
+          colorInfo: "#3b82f6",
+          colorSuccess: "#16a34a",
+          colorWarning: "#d97706",
+          colorError: "#dc2626",
+          colorTextBase: "#1f1d24",
+          colorLink: "#d2427a",
+          colorLinkHover: "#e4558a",
           colorBgLayout: "transparent",
-          colorBorder: "#f3cdd9",
-          colorBorderSecondary: "#fbe4ec",
-          borderRadius: 14,
+          colorBorder: "#e7e6ec",
+          colorBorderSecondary: "#f0eff3",
+          borderRadius: 8,
           fontFamily:
-            '-apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
+            '"Nunito Variable", -apple-system, "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
         },
         components: {
-          Layout: { siderBg: "#fff7fa", headerBg: "rgba(255, 252, 254, 0.62)", bodyBg: "transparent" },
+          Layout: { siderBg: "#ffffff", headerBg: "rgba(255, 255, 255, 0.88)", bodyBg: "transparent" },
           Menu: {
             itemBg: "transparent",
-            itemColor: "#8a6b78",
-            itemHoverBg: "#fff0f5",
-            itemHoverColor: "#e4587f",
-            itemSelectedBg: "#ffe3ec",
-            itemSelectedColor: "#d63f71",
-            itemBorderRadius: 12,
+            itemColor: "#6c6977",
+            itemHoverBg: "#f4f3f7",
+            itemHoverColor: "#1f1d24",
+            itemSelectedBg: "#fdf2f6",
+            itemSelectedColor: "#bb3469",
+            itemBorderRadius: 8,
             activeBarBorderWidth: 0,
             itemMarginInline: 10,
           },
           Card: {
-            borderRadius: 16,
-            borderRadiusLG: 20,
-            colorBorderSecondary: "#fbe4ec",
-            boxShadowTertiary: "0 10px 30px rgba(242, 96, 141, 0.10)",
+            borderRadius: 14,
+            borderRadiusLG: 14,
+            colorBorderSecondary: "#f0eff3",
+            boxShadowTertiary: "0 1px 2px rgba(24, 20, 34, 0.04)",
           },
           Table: {
-            headerBg: "#fff2f6",
-            headerColor: "#a37186",
-            rowHoverBg: "#fff8fb",
-            borderColor: "#fbe4ec",
+            headerBg: "#fafafb",
+            headerColor: "#6c6977",
+            rowHoverBg: "#fafafb",
+            borderColor: "#f0eff3",
             headerSplitColor: "transparent",
           },
-          Tabs: { inkBarColor: "#f2608d" },
-          Button: { borderRadius: 999, borderRadiusLG: 999, controlHeight: 36, controlHeightLG: 44, fontWeight: 600 },
+          Tabs: { inkBarColor: "#e4558a", itemSelectedColor: "#bb3469", itemHoverColor: "#e4558a" },
+          Button: { borderRadius: 8, borderRadiusLG: 10, controlHeight: 34, controlHeightLG: 42, fontWeight: 600, primaryShadow: "none", defaultShadow: "none" },
         },
       }}
     >
