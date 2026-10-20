@@ -44,7 +44,6 @@ function StatCard({
 }): React.JSX.Element {
   return (
     <Card className="stat-card">
-      <span className={`stat-glow tone-${tone}`} aria-hidden="true" />
       <div className="stat-card-head">
         <span className="stat-card-title">{title}</span>
         <span className={`stat-badge tone-${tone}`}>{icon}</span>

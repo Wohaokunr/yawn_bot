@@ -1,57 +1,94 @@
-/* ── 樱花 × 现代 · 视觉刷新层 ─────────────────────────────
-   在 design-system.css 之后加载，只调整“观感”：字体、配色层次、
-   侧栏/顶栏、卡片材质、统计卡、页头与登录页。布局与响应式梯度
-   仍以 design-system.css 为准，这里不新增断点。 */
+/* ── 樱花仪表盘 · 视觉刷新层 ─────────────────────────────
+   在 design-system.css 之后加载。思路是“干净的仪表盘底子 + 克制的二次元点缀”：
+   - 底色、卡片、表格全部回到中性灰白，去掉彩色光斑和玻璃折射；
+   - 全站只有一个强调色（樱粉），其余颜色只用于状态语义；
+   - 二次元感集中在品牌猫耳、看板娘值班卡、登录页花瓣和樱花水印上。
+   布局与响应式梯度仍以 design-system.css 为准，这里不新增断点。 */
 :root {
-  --ink: #3d2c37;
-  --ink-secondary: #8a7482;
-  --ink-tertiary: #b49fab;
-  --accent-violet: #8b6cf6;
-  --accent-gradient: linear-gradient(135deg, #ff86ad 0%, #f2608d 45%, #a07cf7 100%);
-  --accent-gradient-soft: linear-gradient(135deg, rgba(255, 134, 173, 0.16), rgba(160, 124, 247, 0.14));
+  --bg: #f6f6f8;
+  --surface: #ffffff;
+  --surface-muted: #fafafb;
+  --border: #e7e6ec;
+  --border-soft: #f0eff3;
+  --ink: #1f1d24;
+  --ink-secondary: #6c6977;
+  --ink-tertiary: #9e9ba7;
+  --brand: #e4558a;
+  --brand-hover: #d2427a;
+  --brand-active: #bb3469;
+  --brand-50: #fdf2f6;
+  --brand-100: #fbe3ec;
+  --brand-200: #f6c4d6;
+  --shadow-xs: 0 1px 2px rgba(24, 20, 34, 0.04);
+  --shadow-sm: 0 1px 2px rgba(24, 20, 34, 0.04), 0 2px 8px rgba(24, 20, 34, 0.04);
+  --shadow-md: 0 4px 16px rgba(24, 20, 34, 0.08);
   --font-sans: "Nunito Variable", -apple-system, "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-heading: var(--font-sans);
-  --glass-bg: rgba(255, 255, 255, 0.68);
-  --glass-blur: 18px;
-  --glass-shadow: 0 1px 2px rgba(122, 64, 92, 0.04), 0 8px 28px rgba(122, 64, 92, 0.07);
-  --surface-1-bg: rgba(255, 255, 255, 0.68);
-  --surface-border: rgba(255, 255, 255, 0.82);
-  --surface-shadow-1: 0 1px 2px rgba(122, 64, 92, 0.04), 0 8px 28px rgba(122, 64, 92, 0.07);
-  --surface-shadow-interactive: 0 14px 34px rgba(242, 96, 141, 0.16);
-  --surface-radius: 20px;
-  --hairline: rgba(236, 196, 214, 0.55);
+
+  /* 旧样式里的 --font-display 统一改为无衬线；快乐体只给品牌字标用 */
+  --font-brand: "ZCOOL KuaiLe", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: var(--font-sans);
+
+  /* 旧样式大量引用这些令牌：统一压平成实心白卡，不再有玻璃与粉色投影 */
+  --sakura-600: var(--brand);
+  --sakura-700: var(--brand-active);
+  --line: var(--border-soft);
+  --cream: var(--bg);
+  --glass-bg: var(--surface);
+  --glass-bg-strong: var(--surface);
+  --glass-blur: 0px;
+  --glass-saturate: 100%;
+  --glass-edge: transparent;
+  --glass-shadow: var(--shadow-sm);
+  --surface-1-bg: var(--surface);
+  --surface-2-bg: var(--surface-muted);
+  --surface-elevated-bg: var(--surface);
+  --surface-interactive-bg: var(--surface);
+  --surface-border: var(--border);
+  --surface-border-soft: var(--border-soft);
+  --surface-radius: 14px;
+  --surface-radius-small: 10px;
+  --surface-shadow-1: var(--shadow-xs);
+  --surface-shadow-2: var(--shadow-sm);
+  --surface-shadow-interactive: var(--shadow-md);
+
+  color: var(--ink);
+  background: var(--bg);
   font-family: var(--font-sans);
 }
 
 body {
-  font-family: var(--font-sans);
   color: var(--ink);
-  background:
-    radial-gradient(48% 38% at 0% 0%, rgba(255, 196, 218, 0.55) 0%, transparent 70%),
-    radial-gradient(42% 36% at 100% 0%, rgba(206, 226, 255, 0.6) 0%, transparent 70%),
-    radial-gradient(50% 44% at 100% 100%, rgba(226, 214, 255, 0.55) 0%, transparent 70%),
-    radial-gradient(40% 36% at 0% 100%, rgba(208, 244, 228, 0.5) 0%, transparent 70%),
-    #fffafc;
-  background-attachment: fixed;
+  font-family: var(--font-sans);
+  background: var(--bg);
 }
 
-/* 原圆点纹理换成更克制的网格，边缘渐隐，像漫画原稿的分镜底纹 */
 body::before {
-  background-image:
-    linear-gradient(rgba(242, 96, 141, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(242, 96, 141, 0.06) 1px, transparent 1px);
-  background-size: 32px 32px;
-  opacity: 1;
-  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 85%);
-  mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 85%);
+  content: none;
 }
 
-/* 标题改用现代圆润无衬线；可爱字体只留给品牌字标 */
+::selection {
+  background: var(--brand-100);
+  color: var(--brand-active);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #dcdae2;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #c9c6d1;
+}
+
+/* 标题用现代无衬线；可爱的快乐体只留给品牌字标 */
 h1, h2, h3, h4, h5,
 .ant-statistic-content,
-.ant-card-head-title {
-  font-family: var(--font-heading);
-  font-weight: 750;
+.ant-card-head-title,
+.agent-studio-page .agent-master-title,
+.agent-studio-page .persona-master-title,
+.agent-studio-page .agent-config-section-head h3,
+.agent-studio-page .persona-config-section-head h3 {
+  font-family: var(--font-sans);
+  font-weight: 700;
   letter-spacing: -0.01em;
 }
 
@@ -62,97 +99,27 @@ h1, h2, h3, h4, h5,
   font-variant-numeric: tabular-nums;
 }
 
+/* ── 去掉全局玻璃：光斑、折射环、模糊 ── */
+.liquid-glass,
+.app-content .ant-card,
+.env-collapse > .ant-collapse-item {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.liquid-glass::before,
+.liquid-glass::after,
+.app-content .ant-card::before,
+.app-content .ant-card::after,
+.env-collapse > .ant-collapse-item::before,
+.env-collapse > .ant-collapse-item::after {
+  content: none;
+}
+
 /* ── 侧栏 ── */
 .app-sider.desktop-sider {
-  background: rgba(255, 255, 255, 0.62) !important;
-  border-right: 1px solid var(--hairline);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-}
-
-.brand {
-  height: 72px;
-  padding: 0 20px;
-  font-family: var(--font-display);
-  font-size: 23px;
-}
-
-.brand .anticon {
-  position: relative;
-  border-radius: 13px;
-  background: var(--accent-gradient);
-  box-shadow: 0 6px 18px rgba(242, 96, 141, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.45);
-}
-
-/* 品牌图标头顶一对猫耳 */
-.brand .anticon::before,
-.brand .anticon::after {
-  content: "";
-  position: absolute;
-  top: -5px;
-  width: 12px;
-  height: 12px;
-  background: #ff86ad;
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
-  border-radius: 2px;
-}
-.brand .anticon::before { left: 3px; transform: rotate(-18deg); }
-.brand .anticon::after { right: 3px; transform: rotate(18deg); background: #c08af8; }
-
-.brand span {
-  background: var(--accent-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-}
-
-.admin-menu.ant-menu {
-  background: transparent;
-  border-inline-end: 0 !important;
-}
-
-.admin-menu .ant-menu-item-group-title {
-  padding: 16px 22px 6px !important;
-  color: var(--ink-tertiary);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-}
-
-.admin-menu .ant-menu-item {
-  position: relative;
-  height: 40px;
-  line-height: 40px;
-  margin-block: 2px;
-  color: #7d6672;
-  font-weight: 600;
-  transition: background-color var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft);
-}
-
-.admin-menu .ant-menu-item .ant-menu-item-icon {
-  font-size: 15px;
-  transition: transform var(--dur-med) var(--ease-spring);
-}
-
-.admin-menu .ant-menu-item:not(.ant-menu-item-selected):hover .ant-menu-item-icon {
-  transform: translateY(-1px) rotate(-8deg);
-}
-
-.admin-menu .ant-menu-item.ant-menu-item-selected {
-  color: #d23f72;
-  background: var(--accent-gradient-soft);
-  box-shadow: inset 0 0 0 1px rgba(242, 96, 141, 0.14);
-}
-
-/* 选中项左侧的渐变指示条 */
-.admin-menu .ant-menu-item.ant-menu-item-selected::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 10px;
-  bottom: 10px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--accent-gradient);
+  background: var(--surface) !important;
+  border-right: 1px solid var(--border);
 }
 
 .app-sider.desktop-sider > .ant-layout-sider-children {
@@ -162,31 +129,115 @@ h1, h2, h3, h4, h5,
   flex-direction: column;
 }
 
+.brand {
+  height: 68px;
+  padding: 0 20px;
+  color: var(--ink);
+  font-family: var(--font-brand);
+  font-size: 22px;
+}
+
+.brand .anticon {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  font-size: 18px;
+  background: var(--brand);
+  box-shadow: none;
+}
+
+/* 品牌图标头顶一对猫耳：全站最主要的二次元记号 */
+.brand .anticon::before,
+.brand .anticon::after {
+  content: "";
+  position: absolute;
+  top: -5px;
+  width: 11px;
+  height: 11px;
+  background: var(--brand);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.brand .anticon::before { left: 2px; transform: rotate(-16deg); }
+.brand .anticon::after { right: 2px; transform: rotate(16deg); }
+
+.brand span {
+  background: none;
+  color: var(--ink);
+  -webkit-text-fill-color: currentColor;
+}
+
+.admin-menu.ant-menu {
+  background: transparent;
+  border-inline-end: 0 !important;
+}
+
+.admin-menu .ant-menu-item-group-title {
+  padding: 18px 22px 6px !important;
+  color: var(--ink-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.admin-menu .ant-menu-item {
+  position: relative;
+  height: 38px;
+  line-height: 38px;
+  margin-block: 1px;
+  border-radius: 8px;
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.admin-menu .ant-menu-item .ant-menu-item-icon {
+  font-size: 15px;
+}
+
+.admin-menu .ant-menu-item:not(.ant-menu-item-selected):hover {
+  color: var(--ink);
+}
+
+.admin-menu .ant-menu-item.ant-menu-item-selected {
+  color: var(--brand-active);
+  background: var(--brand-50);
+}
+
+.admin-menu .ant-menu-item.ant-menu-item-selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--brand);
+}
+
+/* 看板娘值班卡 */
 .sider-mascot {
   flex: 0 0 auto;
-  margin: auto 14px 16px;
-  padding: 12px 14px;
+  margin: auto 12px 14px;
+  padding: 10px 12px;
   display: flex;
   align-items: center;
   gap: 10px;
-  border: 1px solid rgba(242, 96, 141, 0.14);
-  border-radius: 16px;
-  background: var(--accent-gradient-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted);
 }
 
 .sider-mascot-face {
   flex: none;
   width: 36px;
-  height: 36px;
+  height: 32px;
   display: grid;
   place-items: center;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.85);
-  color: #d23f72;
-  font-size: 13px;
+  border-radius: 9px;
+  background: var(--brand-50);
+  color: var(--brand-active);
+  font-size: 12px;
   font-weight: 800;
-  letter-spacing: -0.02em;
-  box-shadow: 0 4px 12px rgba(242, 96, 141, 0.14);
 }
 
 .sider-mascot-text {
@@ -199,132 +250,99 @@ h1, h2, h3, h4, h5,
 .sider-mascot-text strong {
   color: var(--ink);
   font-size: 13px;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .sider-mascot-text span {
-  color: var(--ink-secondary);
+  color: var(--ink-tertiary);
   font-size: 12px;
 }
 
 /* ── 顶栏 ── */
 .app-header {
-  background: rgba(255, 252, 254, 0.55) !important;
-  border-bottom: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.88) !important;
+  border-bottom: 1px solid var(--border);
   box-shadow: none;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .app-header-title {
   color: var(--ink-secondary);
-  font-weight: 650;
+  font-weight: 600;
 }
 
-.app-header .ant-btn:not(.mobile-nav-trigger) {
-  border-color: var(--hairline);
-  background: rgba(255, 255, 255, 0.7);
+.app-header-shield {
+  color: var(--ink-tertiary);
 }
 
-/* ── 页头：大标题 + 渐变下划线 ── */
+/* ── 页头 ── */
 .page-heading {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 }
 
 .page-heading h2.ant-typography {
-  position: relative;
-  margin: 0 0 6px !important;
-  font-size: 28px;
-  line-height: 1.25;
-  font-weight: 800;
+  margin: 0 0 4px !important;
+  color: var(--ink);
+  font-size: 24px;
+  line-height: 1.3;
+  font-weight: 750;
 }
 
-.page-heading h2.ant-typography::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: -2px;
-  width: 36px;
-  height: 4px;
-  border-radius: 4px;
-  background: var(--accent-gradient);
-}
-
-.page-heading > div > .ant-typography-secondary {
-  display: inline-block;
-  margin-top: 6px;
+.app-breadcrumb {
+  margin-bottom: 10px;
 }
 
 .app-breadcrumb .ant-breadcrumb-link,
 .app-breadcrumb a {
   font-size: 13px;
-  font-weight: 600;
 }
 
-/* ── 卡片材质：更干净的白玻璃，边缘一圈极淡的樱粉 ── */
+/* ── 卡片：实心白卡 + 细边框 ── */
 .app-content .ant-card {
+  border: 1px solid var(--border);
   border-radius: var(--surface-radius);
-  border: 1px solid var(--surface-border);
-  background-color: var(--surface-1-bg);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.app-content .ant-card:hover {
+  box-shadow: var(--shadow-xs);
+}
+
+.app-content .ant-card .ant-card {
+  background: var(--surface-muted);
+  border-color: var(--border-soft);
+  box-shadow: none;
 }
 
 .app-content .ant-card > .ant-card-head {
-  border-bottom-color: var(--hairline);
+  min-height: 50px;
+  border-bottom-color: var(--border-soft);
 }
 
 .app-content .ant-card .ant-card-head-title {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-family: var(--font-heading);
+  gap: 8px;
+  font-family: var(--font-sans);
   font-size: 15px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0;
 }
 
-/* 卡片标题前的小星芒，统一的二次元记号 */
+/* 卡片标题前一颗小小的樱花点 */
 .app-content .ant-card > .ant-card-head .ant-card-head-title::before {
   content: "";
   flex: none;
-  width: 10px;
-  height: 10px;
-  background: var(--accent-gradient);
-  clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
-}
-
-.app-content .ant-card::after {
-  background: linear-gradient(
-    165deg,
-    rgba(255, 255, 255, 0.95),
-    rgba(255, 214, 228, 0.12) 40%,
-    rgba(214, 196, 255, 0.22) 70%,
-    rgba(255, 255, 255, 0.6)
-  );
-}
-
-/* ── 统计卡：标签在上，大号数字在下，色调光晕在角落 ── */
-.stat-card {
-  isolation: isolate;
-}
-
-.stat-card .ant-card-body {
-  position: relative;
-}
-
-.stat-card .stat-glow {
-  position: absolute;
-  top: -40px;
-  right: -40px;
-  width: 120px;
-  height: 120px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  opacity: 0.22;
-  filter: blur(18px);
-  pointer-events: none;
-  z-index: 0;
+  background: var(--brand);
 }
 
+/* ── 统计卡：标签在上、大号数字在下，图标统一用强调色浅底 ── */
 .stat-card-head {
-  position: relative;
-  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -335,19 +353,26 @@ h1, h2, h3, h4, h5,
   min-width: 0;
   color: var(--ink-secondary);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .stat-card .stat-badge {
-  width: 36px;
-  height: 36px;
-  border-radius: 12px;
-  font-size: 17px;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  font-size: 16px;
+  color: var(--brand);
+  background: var(--brand-50);
+  box-shadow: none;
+}
+
+/* 只有“异常”语气保留红色，提醒要处理 */
+.stat-card .stat-badge.tone-tomato {
+  color: #d9363e;
+  background: #fff1f0;
 }
 
 .stat-value-row {
-  position: relative;
-  z-index: 3;
   margin-top: 14px;
   display: flex;
   align-items: baseline;
@@ -358,25 +383,19 @@ h1, h2, h3, h4, h5,
 
 .stat-value {
   color: var(--ink);
-  font-size: 30px;
-  font-weight: 800;
-  line-height: 1.1;
+  font-size: 28px;
+  font-weight: 750;
+  line-height: 1.15;
   letter-spacing: -0.02em;
   white-space: nowrap;
 }
 
 .stat-suffix {
-  color: var(--ink-secondary);
+  color: var(--ink-tertiary);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   white-space: nowrap;
 }
-
-.tone-sakura.stat-glow   { background: #ff7fa8; }
-.tone-mint.stat-glow     { background: #34c896; }
-.tone-sky.stat-glow      { background: #5b9df6; }
-.tone-lavender.stat-glow { background: #9a7df0; }
-.tone-tomato.stat-glow   { background: #f4694d; }
 
 /* ── 表格 ── */
 .app-content .ant-table {
@@ -384,116 +403,164 @@ h1, h2, h3, h4, h5,
 }
 
 .app-content .ant-table-thead > tr > th {
-  background: rgba(255, 240, 246, 0.7) !important;
-  color: #9a7486;
+  background: var(--surface-muted) !important;
+  color: var(--ink-secondary);
   font-size: 12px;
-  font-weight: 750;
-  letter-spacing: 0.04em;
-}
-
-.app-content .ant-table-thead > tr > th:first-child { border-start-start-radius: 12px; }
-.app-content .ant-table-thead > tr > th:last-child { border-start-end-radius: 12px; }
-
-.app-content .ant-table-tbody > tr > td {
-  border-bottom-color: var(--hairline);
-  background: transparent;
-}
-
-.app-content .ant-table-tbody > tr:last-child > td {
-  border-bottom: 0;
-}
-
-/* ── 按钮与标签 ── */
-.ant-btn-primary {
-  background: var(--accent-gradient);
-  background-size: 140% 140%;
-  background-position: 0% 50%;
-  box-shadow: 0 6px 18px rgba(242, 96, 141, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.3);
-}
-
-.ant-btn-primary:not(:disabled):hover {
-  background: var(--accent-gradient);
-  background-size: 140% 140%;
-  background-position: 100% 50%;
-  box-shadow: 0 10px 26px rgba(208, 92, 180, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.3);
-}
-
-.ant-btn-default:not(:disabled):not(.ant-btn-dangerous) {
-  border-color: var(--hairline);
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.ant-tag {
-  box-shadow: none;
   font-weight: 700;
 }
 
-.ant-segmented {
-  border-radius: 999px;
+.app-content .ant-table-tbody > tr > td {
+  border-bottom-color: var(--border-soft);
 }
 
-.ant-segmented .ant-segmented-item,
-.ant-segmented .ant-segmented-thumb {
-  border-radius: 999px;
+/* ── 按钮、标签 ── */
+.ant-btn-primary,
+.ant-btn-primary:not(:disabled):hover {
+  background: var(--brand);
+  box-shadow: none;
+  transform: none;
 }
 
-.ant-input-affix-wrapper,
-.ant-input,
-.ant-select-selector,
-.ant-input-number {
-  border-color: var(--hairline);
+.ant-btn-primary:not(:disabled):hover {
+  background: var(--brand-hover);
+}
+
+.ant-btn-primary:not(:disabled):active {
+  background: var(--brand-active);
+}
+
+.ant-btn:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+.ant-btn-default:not(:disabled):not(.ant-btn-dangerous) {
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.ant-tag {
+  border-radius: 6px;
+  padding: 0 8px;
+  font-weight: 600;
+  box-shadow: none;
 }
 
 .ant-alert {
-  border-radius: 14px;
+  border-radius: 10px;
 }
 
-/* ── 登录页 ── */
+/* ── Agent Studio：压平旧的玻璃软糖与彩色光晕 ── */
+.agent-studio-page::before,
+.agent-studio-page::after,
+.agent-studio-page .agent-config-metric::before,
+.agent-studio-page .persona-config-metric::before,
+.agent-studio-page .agent-master-card::after,
+.agent-studio-page .persona-master-card::after {
+  content: none;
+}
+
+.agent-config-hero,
+.persona-config-hero,
+.agent-studio-page .agent-studio-hero,
+.agent-studio-persona .agent-studio-hero,
+.agent-config-section,
+.persona-config-section,
+.agent-studio-page .agent-config-section,
+.agent-studio-page .persona-config-section,
+.agent-studio-runtime .agent-config-section:nth-child(2),
+.agent-studio-persona .persona-config-section:nth-child(2),
+.agent-studio-page .agent-config-floating,
+.agent-studio-page .agent-config-note-card,
+.agent-studio-page .persona-note-card {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.agent-studio-page .agent-config-floating:hover,
+.agent-config-floating:hover {
+  transform: none;
+  border-color: var(--border);
+  box-shadow: var(--shadow-xs);
+}
+
+.agent-master-card,
+.persona-master-card,
+.agent-studio-page .agent-master-card,
+.agent-studio-page .persona-master-card,
+.agent-studio-persona .persona-master-card,
+.agent-studio-page .persona-master-card.is-enabled {
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.agent-config-title-row h2,
+.persona-config-title-row h2,
+.agent-studio-page .persona-config-title-row h2,
+.agent-config-section-head h3,
+.persona-config-section-head h3,
+.agent-master-title,
+.persona-master-title,
+.agent-studio-page .agent-master-title,
+.agent-studio-page .persona-master-title {
+  font-weight: 700;
+}
+
+.agent-config-metric,
+.persona-config-metric,
+.agent-studio-page .agent-config-metric,
+.agent-studio-page .persona-config-metric {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  box-shadow: none;
+}
+
+.agent-studio-page .agent-master-card .ant-switch,
+.agent-studio-page .persona-master-card .ant-switch {
+  filter: none;
+}
+
+.agent-studio-page .agent-master-label,
+.agent-studio-page .persona-master-label {
+  background: var(--brand-50);
+  color: var(--brand-active);
+}
+
+/* ── 登录页：白卡 + 樱花水印 + 花瓣 ── */
 .login-page {
+  overflow: hidden;
   background:
-    radial-gradient(50% 45% at 10% 10%, rgba(255, 190, 214, 0.75) 0%, transparent 70%),
-    radial-gradient(44% 40% at 90% 8%, rgba(200, 222, 255, 0.75) 0%, transparent 70%),
-    radial-gradient(52% 48% at 86% 92%, rgba(224, 208, 255, 0.75) 0%, transparent 70%),
-    radial-gradient(40% 38% at 12% 90%, rgba(204, 242, 224, 0.7) 0%, transparent 70%),
-    #fffafc;
+    radial-gradient(90% 70% at 50% -20%, var(--brand-50) 0%, rgba(253, 242, 246, 0) 100%),
+    var(--bg);
 }
 
 .login-page::before {
   content: "";
   position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(242, 96, 141, 0.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(242, 96, 141, 0.07) 1px, transparent 1px);
-  background-size: 36px 36px;
-  -webkit-mask-image: radial-gradient(ellipse 60% 60% at 50% 50%, #000 20%, transparent 80%);
-  mask-image: radial-gradient(ellipse 60% 60% at 50% 50%, #000 20%, transparent 80%);
+  right: -90px;
+  bottom: -90px;
+  width: 420px;
+  height: 420px;
+  opacity: 0.7;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-50 -50 100 100'%3E%3Cg fill='%23fbe3ec'%3E%3Cpath id='p' d='M0 -6 C-14 -18 -16 -38 0 -46 C16 -38 14 -18 0 -6Z'/%3E%3Cuse href='%23p' transform='rotate(72)'/%3E%3Cuse href='%23p' transform='rotate(144)'/%3E%3Cuse href='%23p' transform='rotate(216)'/%3E%3Cuse href='%23p' transform='rotate(288)'/%3E%3C/g%3E%3Ccircle r='6' fill='%23f6c4d6'/%3E%3C/svg%3E") center / contain no-repeat;
   pointer-events: none;
 }
 
 .login-card {
-  width: min(452px, 100%);
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    0 1px 2px rgba(122, 64, 92, 0.05),
-    0 30px 80px rgba(208, 92, 150, 0.18);
-}
-
-/* 渐变描边 */
-.login-card::after {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  padding: 1px;
-  border-radius: inherit;
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.95), rgba(255, 134, 173, 0.45), rgba(160, 124, 247, 0.45));
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  pointer-events: none;
+  width: min(420px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .login-card .ant-card-body {
@@ -501,36 +568,63 @@ h1, h2, h3, h4, h5,
 }
 
 .login-card h2.ant-typography {
-  font-size: 30px;
-  font-weight: 850;
-  background: linear-gradient(120deg, var(--ink) 30%, #d23f72 75%, #8b6cf6);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--ink);
+  font-size: 26px;
+  font-weight: 750;
 }
 
 .brand-mark {
-  background: var(--accent-gradient);
-  box-shadow: 0 12px 28px rgba(242, 96, 141, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  width: 48px;
+  height: 48px;
+  margin-bottom: 20px;
+  border-radius: 14px;
+  font-size: 24px;
+  background: var(--brand);
+  box-shadow: none;
 }
 
+/* 登录页图标同样戴猫耳，替换原来的 ✨ */
+.brand-mark::before,
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  width: 15px;
+  height: 15px;
+  background: var(--brand);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  animation: none;
+  font-size: 0;
+}
+.brand-mark::before { left: 3px; transform: rotate(-16deg); }
+.brand-mark::after { right: 3px; left: auto; transform: rotate(16deg); }
+
 .login-kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  color: #d23f72;
+  display: inline-block;
+  margin-bottom: 4px;
+  color: var(--brand);
   font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.14em;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.login-mode-switch {
+  border: 0;
+  background: #f2f1f5;
+  box-shadow: none;
 }
 
 .login-mode-note {
-  background: rgba(255, 240, 246, 0.6);
-  border-color: rgba(242, 96, 141, 0.12);
+  border: 0;
+  background: var(--surface-muted);
 }
 
-/* ── 移动端：顶栏只保留必要元素，避免标签被挤成竖排 ── */
+.petals i {
+  opacity: 0.5;
+  background: var(--brand-200);
+}
+
+/* ── 移动端：顶栏只保留必要元素，避免文字被挤成竖排 ── */
 @media (max-width: 767px) {
   .app-header-title,
   .app-header-shield {
@@ -538,11 +632,11 @@ h1, h2, h3, h4, h5,
   }
 
   .page-heading h2.ant-typography {
-    font-size: 24px;
+    font-size: 22px;
   }
 
   .stat-value {
-    font-size: 26px;
+    font-size: 24px;
   }
 
   .login-card .ant-card-body {
