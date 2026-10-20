@@ -174,7 +174,7 @@ COMMAND_DEFINITIONS = (
     CommandDefinition(
         name="前往",
         aliases=("去",),
-        description="经出口切换场景",
+        description="经出口切换场景（战斗中为敏捷检定逃跑）",
         feature="rpg",
         scope="group",
         permission="player",

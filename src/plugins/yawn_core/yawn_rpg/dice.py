@@ -23,7 +23,7 @@ _INT_RE = re.compile(r"\d+")
 _MAX_DICE_COUNT = 100
 _MAX_DICE_SIDES = 1000
 
-# 大失败判定的技能分界线：技能≥50 时 96-100 为大失败，否则仅 100
+# 大失败判定的技能分界线：技能<50 时 96-100 为大失败；技能≥50 时仅 100
 _FUMBLE_SKILL_THRESHOLD = 50
 
 
@@ -35,7 +35,7 @@ class CheckTier(str, Enum):
     HARD = "hard"  # 困难成功（≤ 技能/2）
     REGULAR = "regular"  # 常规成功（≤ 技能值）
     FAILURE = "failure"  # 失败
-    FUMBLE = "fumble"  # 大失败（技能<50 时 100；否则 96-100）
+    FUMBLE = "fumble"  # 大失败（技能<50 时 96-100；否则仅 100）
 
 
 # 视为"成功"的等级集合
@@ -105,7 +105,7 @@ def classify_roll(roll: int, skill_value: int) -> CheckTier:
     """按 CoC 7版规则给 d100 点数分级。"""
     if roll == 1:
         return CheckTier.CRITICAL
-    fumble_threshold = 100 if skill_value < _FUMBLE_SKILL_THRESHOLD else 96
+    fumble_threshold = 96 if skill_value < _FUMBLE_SKILL_THRESHOLD else 100
     if roll >= fumble_threshold:
         return CheckTier.FUMBLE
     if roll <= skill_value // 5:

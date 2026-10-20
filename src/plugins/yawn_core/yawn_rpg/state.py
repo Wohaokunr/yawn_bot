@@ -267,7 +267,7 @@ class Game:
     explore_deadline: float = 0.0
     # target_user_id, skill_key, scene_id, round_number, helper_user_id
     assists: list[tuple[int, str, str, int, int]] = field(default_factory=list)
-    # 进入战斗后的稳定行动顺序；当前版本仅约束玩家行动，敌方仍由既有反击逻辑处理。
+    # 进入战斗后的稳定行动顺序（仅玩家）；回绕到序首时引擎执行怪物的敌方回合。
     combat_order: list[int] = field(default_factory=list)
     combat_index: int = 0
     combat_round: int = 0
