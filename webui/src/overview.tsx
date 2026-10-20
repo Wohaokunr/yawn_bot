@@ -15,7 +15,6 @@ import {
   Row,
   Space,
   Spin,
-  Statistic,
   Tag,
   Typography,
 } from "antd";
@@ -45,10 +44,15 @@ function StatCard({
 }): React.JSX.Element {
   return (
     <Card className="stat-card">
-      <Flex align="center" gap={16}>
+      <span className={`stat-glow tone-${tone}`} aria-hidden="true" />
+      <div className="stat-card-head">
+        <span className="stat-card-title">{title}</span>
         <span className={`stat-badge tone-${tone}`}>{icon}</span>
-        <Statistic title={title} value={value} suffix={suffix} />
-      </Flex>
+      </div>
+      <div className="stat-value-row">
+        <span className="stat-value">{typeof value === "number" ? value.toLocaleString("zh-CN") : value}</span>
+        {suffix && <span className="stat-suffix">{suffix}</span>}
+      </div>
     </Card>
   );
 }
@@ -245,7 +249,7 @@ export function OverviewPage(): React.JSX.Element {
           ))}
         </Space>}
     </Card>
-    <Row gutter={[16, 16]} className="section-row">
+    <Row gutter={[16, 16]} className="section-row equal-height-row">
       <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sakura" icon={<RobotOutlined />} title="在线 Bot" value={data.bots.length} suffix="个" /></Col>
       <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="mint" icon={<MessageOutlined />} title="24 小时消息量" value={stats.activity.messages24h} suffix="条" /></Col>
       <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sky" icon={<TeamOutlined />} title="24 小时活跃群" value={stats.activity.activeGroups24h} suffix="个" /></Col>

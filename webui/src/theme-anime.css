@@ -1,0 +1,551 @@
+/* ── 樱花 × 现代 · 视觉刷新层 ─────────────────────────────
+   在 design-system.css 之后加载，只调整“观感”：字体、配色层次、
+   侧栏/顶栏、卡片材质、统计卡、页头与登录页。布局与响应式梯度
+   仍以 design-system.css 为准，这里不新增断点。 */
+:root {
+  --ink: #3d2c37;
+  --ink-secondary: #8a7482;
+  --ink-tertiary: #b49fab;
+  --accent-violet: #8b6cf6;
+  --accent-gradient: linear-gradient(135deg, #ff86ad 0%, #f2608d 45%, #a07cf7 100%);
+  --accent-gradient-soft: linear-gradient(135deg, rgba(255, 134, 173, 0.16), rgba(160, 124, 247, 0.14));
+  --font-sans: "Nunito Variable", -apple-system, "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-heading: var(--font-sans);
+  --glass-bg: rgba(255, 255, 255, 0.68);
+  --glass-blur: 18px;
+  --glass-shadow: 0 1px 2px rgba(122, 64, 92, 0.04), 0 8px 28px rgba(122, 64, 92, 0.07);
+  --surface-1-bg: rgba(255, 255, 255, 0.68);
+  --surface-border: rgba(255, 255, 255, 0.82);
+  --surface-shadow-1: 0 1px 2px rgba(122, 64, 92, 0.04), 0 8px 28px rgba(122, 64, 92, 0.07);
+  --surface-shadow-interactive: 0 14px 34px rgba(242, 96, 141, 0.16);
+  --surface-radius: 20px;
+  --hairline: rgba(236, 196, 214, 0.55);
+  font-family: var(--font-sans);
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--ink);
+  background:
+    radial-gradient(48% 38% at 0% 0%, rgba(255, 196, 218, 0.55) 0%, transparent 70%),
+    radial-gradient(42% 36% at 100% 0%, rgba(206, 226, 255, 0.6) 0%, transparent 70%),
+    radial-gradient(50% 44% at 100% 100%, rgba(226, 214, 255, 0.55) 0%, transparent 70%),
+    radial-gradient(40% 36% at 0% 100%, rgba(208, 244, 228, 0.5) 0%, transparent 70%),
+    #fffafc;
+  background-attachment: fixed;
+}
+
+/* 原圆点纹理换成更克制的网格，边缘渐隐，像漫画原稿的分镜底纹 */
+body::before {
+  background-image:
+    linear-gradient(rgba(242, 96, 141, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(242, 96, 141, 0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 1;
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 85%);
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 85%);
+}
+
+/* 标题改用现代圆润无衬线；可爱字体只留给品牌字标 */
+h1, h2, h3, h4, h5,
+.ant-statistic-content,
+.ant-card-head-title {
+  font-family: var(--font-heading);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.ant-statistic-content,
+.stat-value,
+.ant-table td,
+.ant-descriptions-item-content {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 侧栏 ── */
+.app-sider.desktop-sider {
+  background: rgba(255, 255, 255, 0.62) !important;
+  border-right: 1px solid var(--hairline);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+}
+
+.brand {
+  height: 72px;
+  padding: 0 20px;
+  font-family: var(--font-display);
+  font-size: 23px;
+}
+
+.brand .anticon {
+  position: relative;
+  border-radius: 13px;
+  background: var(--accent-gradient);
+  box-shadow: 0 6px 18px rgba(242, 96, 141, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* 品牌图标头顶一对猫耳 */
+.brand .anticon::before,
+.brand .anticon::after {
+  content: "";
+  position: absolute;
+  top: -5px;
+  width: 12px;
+  height: 12px;
+  background: #ff86ad;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  border-radius: 2px;
+}
+.brand .anticon::before { left: 3px; transform: rotate(-18deg); }
+.brand .anticon::after { right: 3px; transform: rotate(18deg); background: #c08af8; }
+
+.brand span {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+.admin-menu.ant-menu {
+  background: transparent;
+  border-inline-end: 0 !important;
+}
+
+.admin-menu .ant-menu-item-group-title {
+  padding: 16px 22px 6px !important;
+  color: var(--ink-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.admin-menu .ant-menu-item {
+  position: relative;
+  height: 40px;
+  line-height: 40px;
+  margin-block: 2px;
+  color: #7d6672;
+  font-weight: 600;
+  transition: background-color var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft);
+}
+
+.admin-menu .ant-menu-item .ant-menu-item-icon {
+  font-size: 15px;
+  transition: transform var(--dur-med) var(--ease-spring);
+}
+
+.admin-menu .ant-menu-item:not(.ant-menu-item-selected):hover .ant-menu-item-icon {
+  transform: translateY(-1px) rotate(-8deg);
+}
+
+.admin-menu .ant-menu-item.ant-menu-item-selected {
+  color: #d23f72;
+  background: var(--accent-gradient-soft);
+  box-shadow: inset 0 0 0 1px rgba(242, 96, 141, 0.14);
+}
+
+/* 选中项左侧的渐变指示条 */
+.admin-menu .ant-menu-item.ant-menu-item-selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent-gradient);
+}
+
+.app-sider.desktop-sider > .ant-layout-sider-children {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sider-mascot {
+  flex: 0 0 auto;
+  margin: auto 14px 16px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(242, 96, 141, 0.14);
+  border-radius: 16px;
+  background: var(--accent-gradient-soft);
+}
+
+.sider-mascot-face {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.85);
+  color: #d23f72;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  box-shadow: 0 4px 12px rgba(242, 96, 141, 0.14);
+}
+
+.sider-mascot-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.sider-mascot-text strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.sider-mascot-text span {
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+/* ── 顶栏 ── */
+.app-header {
+  background: rgba(255, 252, 254, 0.55) !important;
+  border-bottom: 1px solid var(--hairline);
+  box-shadow: none;
+}
+
+.app-header-title {
+  color: var(--ink-secondary);
+  font-weight: 650;
+}
+
+.app-header .ant-btn:not(.mobile-nav-trigger) {
+  border-color: var(--hairline);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* ── 页头：大标题 + 渐变下划线 ── */
+.page-heading {
+  margin-bottom: 24px;
+}
+
+.page-heading h2.ant-typography {
+  position: relative;
+  margin: 0 0 6px !important;
+  font-size: 28px;
+  line-height: 1.25;
+  font-weight: 800;
+}
+
+.page-heading h2.ant-typography::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 36px;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--accent-gradient);
+}
+
+.page-heading > div > .ant-typography-secondary {
+  display: inline-block;
+  margin-top: 6px;
+}
+
+.app-breadcrumb .ant-breadcrumb-link,
+.app-breadcrumb a {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ── 卡片材质：更干净的白玻璃，边缘一圈极淡的樱粉 ── */
+.app-content .ant-card {
+  border-radius: var(--surface-radius);
+  border: 1px solid var(--surface-border);
+  background-color: var(--surface-1-bg);
+}
+
+.app-content .ant-card > .ant-card-head {
+  border-bottom-color: var(--hairline);
+}
+
+.app-content .ant-card .ant-card-head-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-heading);
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+
+/* 卡片标题前的小星芒，统一的二次元记号 */
+.app-content .ant-card > .ant-card-head .ant-card-head-title::before {
+  content: "";
+  flex: none;
+  width: 10px;
+  height: 10px;
+  background: var(--accent-gradient);
+  clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
+}
+
+.app-content .ant-card::after {
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 214, 228, 0.12) 40%,
+    rgba(214, 196, 255, 0.22) 70%,
+    rgba(255, 255, 255, 0.6)
+  );
+}
+
+/* ── 统计卡：标签在上，大号数字在下，色调光晕在角落 ── */
+.stat-card {
+  isolation: isolate;
+}
+
+.stat-card .ant-card-body {
+  position: relative;
+}
+
+.stat-card .stat-glow {
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  opacity: 0.22;
+  filter: blur(18px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.stat-card-head {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stat-card-title {
+  min-width: 0;
+  color: var(--ink-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.stat-card .stat-badge {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  font-size: 17px;
+}
+
+.stat-value-row {
+  position: relative;
+  z-index: 3;
+  margin-top: 14px;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  row-gap: 2px;
+}
+
+.stat-value {
+  color: var(--ink);
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.stat-suffix {
+  color: var(--ink-secondary);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.tone-sakura.stat-glow   { background: #ff7fa8; }
+.tone-mint.stat-glow     { background: #34c896; }
+.tone-sky.stat-glow      { background: #5b9df6; }
+.tone-lavender.stat-glow { background: #9a7df0; }
+.tone-tomato.stat-glow   { background: #f4694d; }
+
+/* ── 表格 ── */
+.app-content .ant-table {
+  background: transparent;
+}
+
+.app-content .ant-table-thead > tr > th {
+  background: rgba(255, 240, 246, 0.7) !important;
+  color: #9a7486;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.app-content .ant-table-thead > tr > th:first-child { border-start-start-radius: 12px; }
+.app-content .ant-table-thead > tr > th:last-child { border-start-end-radius: 12px; }
+
+.app-content .ant-table-tbody > tr > td {
+  border-bottom-color: var(--hairline);
+  background: transparent;
+}
+
+.app-content .ant-table-tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+
+/* ── 按钮与标签 ── */
+.ant-btn-primary {
+  background: var(--accent-gradient);
+  background-size: 140% 140%;
+  background-position: 0% 50%;
+  box-shadow: 0 6px 18px rgba(242, 96, 141, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.ant-btn-primary:not(:disabled):hover {
+  background: var(--accent-gradient);
+  background-size: 140% 140%;
+  background-position: 100% 50%;
+  box-shadow: 0 10px 26px rgba(208, 92, 180, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.ant-btn-default:not(:disabled):not(.ant-btn-dangerous) {
+  border-color: var(--hairline);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.ant-tag {
+  box-shadow: none;
+  font-weight: 700;
+}
+
+.ant-segmented {
+  border-radius: 999px;
+}
+
+.ant-segmented .ant-segmented-item,
+.ant-segmented .ant-segmented-thumb {
+  border-radius: 999px;
+}
+
+.ant-input-affix-wrapper,
+.ant-input,
+.ant-select-selector,
+.ant-input-number {
+  border-color: var(--hairline);
+}
+
+.ant-alert {
+  border-radius: 14px;
+}
+
+/* ── 登录页 ── */
+.login-page {
+  background:
+    radial-gradient(50% 45% at 10% 10%, rgba(255, 190, 214, 0.75) 0%, transparent 70%),
+    radial-gradient(44% 40% at 90% 8%, rgba(200, 222, 255, 0.75) 0%, transparent 70%),
+    radial-gradient(52% 48% at 86% 92%, rgba(224, 208, 255, 0.75) 0%, transparent 70%),
+    radial-gradient(40% 38% at 12% 90%, rgba(204, 242, 224, 0.7) 0%, transparent 70%),
+    #fffafc;
+}
+
+.login-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(242, 96, 141, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(242, 96, 141, 0.07) 1px, transparent 1px);
+  background-size: 36px 36px;
+  -webkit-mask-image: radial-gradient(ellipse 60% 60% at 50% 50%, #000 20%, transparent 80%);
+  mask-image: radial-gradient(ellipse 60% 60% at 50% 50%, #000 20%, transparent 80%);
+  pointer-events: none;
+}
+
+.login-card {
+  width: min(452px, 100%);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 1px 2px rgba(122, 64, 92, 0.05),
+    0 30px 80px rgba(208, 92, 150, 0.18);
+}
+
+/* 渐变描边 */
+.login-card::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.95), rgba(255, 134, 173, 0.45), rgba(160, 124, 247, 0.45));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.login-card .ant-card-body {
+  padding: 32px;
+}
+
+.login-card h2.ant-typography {
+  font-size: 30px;
+  font-weight: 850;
+  background: linear-gradient(120deg, var(--ink) 30%, #d23f72 75%, #8b6cf6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.brand-mark {
+  background: var(--accent-gradient);
+  box-shadow: 0 12px 28px rgba(242, 96, 141, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.login-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: #d23f72;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.login-mode-note {
+  background: rgba(255, 240, 246, 0.6);
+  border-color: rgba(242, 96, 141, 0.12);
+}
+
+/* ── 移动端：顶栏只保留必要元素，避免标签被挤成竖排 ── */
+@media (max-width: 767px) {
+  .app-header-title,
+  .app-header-shield {
+    display: none !important;
+  }
+
+  .page-heading h2.ant-typography {
+    font-size: 24px;
+  }
+
+  .stat-value {
+    font-size: 26px;
+  }
+
+  .login-card .ant-card-body {
+    padding: 24px 20px;
+  }
+}

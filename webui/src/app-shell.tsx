@@ -210,6 +210,13 @@ export function Shell({
       <Sider width={236} className="app-sider desktop-sider">
         <div className="brand"><RobotOutlined /><span>YawnBot</span></div>
         {menu}
+        <div className="sider-mascot" aria-hidden="true">
+          <span className="sider-mascot-face">=ω=</span>
+          <span className="sider-mascot-text">
+            <strong>{isGuest ? "只读巡视中" : "今日也在值班"}</strong>
+            <span>{isGuest ? "访客视图" : stream === "open" ? "实时连接已就绪" : "等待实时连接"}</span>
+          </span>
+        </div>
       </Sider>
       <Drawer
         placement="left"
@@ -231,8 +238,8 @@ export function Shell({
               aria-label="打开导航"
               onClick={() => setMobileOpen(true)}
             />
-            <SafetyCertificateOutlined />
-            <Text>{isGuest ? "开放群聊视图" : "Core / Agent"}</Text>
+            <SafetyCertificateOutlined className="app-header-shield" />
+            <Text className="app-header-title">{isGuest ? "开放群聊视图" : "Core / Agent"}</Text>
             {isGuest ? (
               <Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>
             ) : (

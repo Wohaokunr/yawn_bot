@@ -360,7 +360,9 @@
 
 /* Tablet: 768-1024. One-column page structure; no forced debugger inner scrolling. */
 @media (min-width: 768px) and (max-width: 1024px) {
-  .desktop-sider {
+  /* layout.css 的 .app-sider.desktop-sider 优先级更高，这里需同级选择器才能真正隐藏 */
+  .desktop-sider,
+  .app-sider.desktop-sider {
     display: none;
   }
 
@@ -423,7 +425,9 @@
 
 /* Mobile: <= 767. Every primary panel becomes one column and sticky layers are simplified. */
 @media (max-width: 767px) {
-  .desktop-sider {
+  /* layout.css 的 .app-sider.desktop-sider 优先级更高，这里需同级选择器才能真正隐藏 */
+  .desktop-sider,
+  .app-sider.desktop-sider {
     display: none;
   }
 
