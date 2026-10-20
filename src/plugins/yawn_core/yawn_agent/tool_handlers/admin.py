@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..capabilities import target_can_be_muted
+from ..capabilities import (
+    actor_can_act_on_target,
+    actor_is_group_owner,
+    target_can_be_muted,
+)
 from ..context import now_beijing
 from ..log import dbg
 from ..tool_execution import ToolExecutionContext, ToolHandlerResult
@@ -98,6 +102,11 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
         if not await target_can_be_muted(bot, group_id, user_id, capabilities.role):
             dbg(f"群 {group_id} mute_member 拒绝: 机器人无权禁言成员 {user_id}")
             raise PermissionError("机器人无权禁言该成员")
+        if not await actor_can_act_on_target(
+            bot, group_id, context.actor_user_id, user_id
+        ):
+            dbg(f"群 {group_id} mute_member 拒绝: 调用者无权处置成员 {user_id}")
+            raise PermissionError("调用者无权禁言该成员：管理员和群主只能由群主处置")
         dbg(f"群 {group_id} mute_member: 禁言成员 {user_id} {args.get('duration')}s")
         result = await bot.call_api(
             "set_group_ban",
@@ -111,6 +120,11 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             raise PermissionError("机器人不能把自己移出群聊")
         if not await target_can_be_muted(bot, group_id, user_id, capabilities.role):
             raise PermissionError("机器人无权移出该成员")
+        if not await actor_can_act_on_target(
+            bot, group_id, context.actor_user_id, user_id
+        ):
+            dbg(f"群 {group_id} kick_member 拒绝: 调用者无权处置成员 {user_id}")
+            raise PermissionError("调用者无权移出该成员：管理员和群主只能由群主处置")
         result = await bot.call_api(
             "set_group_kick",
             group_id=group_id,
@@ -126,6 +140,9 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
     elif name == "set_group_admin":
         if capabilities.role != "owner":
             raise PermissionError("设置群管理员需要机器人是群主")
+        if not await actor_is_group_owner(bot, group_id, context.actor_user_id):
+            dbg(f"群 {group_id} set_group_admin 拒绝: 调用者不是群主")
+            raise PermissionError("只有群主本人可以设置或取消群管理员")
         user_id = int(args["user_id"])
         target = await _require_group_member_api(bot, group_id, user_id)
         if str(target.get("role") or "member") == "owner":

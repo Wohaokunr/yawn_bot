@@ -648,6 +648,20 @@ async def test_critical_tool_rejects_background_and_uses_independent_quota(
     assert "管理权限" in background["error"]
     assert bot.kicked is False
 
+    no_intent = await tools.execute_tool(
+        "kick_member",
+        {"user_id": 300},
+        bot=bot,
+        group_id=1,
+        actor_user_id=ACTOR_ADMIN_ID,
+        session=Session(),
+        capabilities=current,
+        current_intent_text="帮我看看这个人",
+    )
+    assert no_intent["ok"] is False
+    assert "明确提出该操作" in no_intent["error"]
+    assert bot.kicked is False
+
     foreground = await tools.execute_tool(
         "kick_member",
         {"user_id": 300},
@@ -656,6 +670,7 @@ async def test_critical_tool_rejects_background_and_uses_independent_quota(
         actor_user_id=ACTOR_ADMIN_ID,
         session=Session(),
         capabilities=current,
+        current_intent_text="把300踢出群",
     )
     assert foreground["ok"] is True
     assert bot.kicked is True
@@ -692,7 +707,10 @@ def test_critical_tools_require_explicit_admin_intent_and_allowlist() -> None:
             "把小明踢出群", list(tools._TOOL_DEFINITIONS), limit=12
         )
     }
-    assert "kick_member" in discovered
+    # critical 工具永远不能被 discover_tools 发现，只能由当前消息显式意图装载。
+    assert "kick_member" not in discovered
+    assert tools.select_critical_tool_names("今天聊点什么") == frozenset()
+    assert "kick_member" in tools.select_critical_tool_names("把小明踢出群")
     kick = frozenset({"kick_member"})
 
     without_allowlist = _tool_names(

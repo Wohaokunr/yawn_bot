@@ -1378,7 +1378,9 @@ async def prepare_forward_message(
             if len(content) > MAX_OUTBOUND_TEXT_CHARS:
                 raise ValueError("自定义转发节点 content 超过长度限制")
             nodes.append(
-                MessageSegment.node_custom(user_id, nickname, Message(content))
+                MessageSegment.node_custom(
+                    user_id, nickname, Message(MessageSegment.text(content))
+                )
             )
             tree.append(
                 {

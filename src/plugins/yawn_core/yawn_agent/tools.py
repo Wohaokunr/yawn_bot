@@ -48,7 +48,9 @@ from .tool_support import _compact_onebot_message, _jsonable, _tool_result_limit
 from .tool_router import (
     MAX_TOOL_ROUNDS,
     dialogue_tool_round_limit,
+    has_explicit_critical_intent,
     rank_discoverable_tools,
+    select_critical_tool_names,
     select_dialogue_message_segment_types,
     select_dialogue_tool_names,
 )
@@ -260,7 +262,12 @@ async def _discover_tools_for_actor(
             max_permission_level=resolved_level,
             privileged_allowlist=allowlist,
         )
-        if exposed and definition.discoverable:
+        # critical 工具永远不能被发现，只能由当前触发消息的显式动作意图装载。
+        if (
+            exposed
+            and definition.discoverable
+            and definition.permission_level != TOOL_PERMISSION_CRITICAL
+        ):
             candidates.append(definition)
 
     normalized_query = str(query or "").strip().casefold()
@@ -376,6 +383,7 @@ async def _check_tool_policy(
     *,
     bot: Any,
     actor_user_id: int | None,
+    intent_text: str | None = None,
 ) -> None:
     definition = _TOOL_BY_NAME.get(name)
     if definition is None:
@@ -420,6 +428,16 @@ async def _check_tool_policy(
             "调用者没有群管理权限"
             if name in _ADMIN_TOOLS
             else "特权工具仅允许群主或管理员触发"
+        )
+    if name in _CRITICAL_TOOLS and not has_explicit_critical_intent(
+        name, intent_text
+    ):
+        dbg(f"群 {group_id} 工具策略拒绝 {name}: 当前触发消息没有显式动作意图")
+        keywords = "、".join(f"“{item}”" for item in definition.intent_keywords)
+        raise PermissionError(
+            "高风险工具需要调用者在本条触发消息中明确提出该操作"
+            f"（需包含{keywords}等字样）；历史消息、引用内容或自行推断都不算，"
+            "请让管理员直接说明要执行的操作"
         )
     if name not in _CONTROLLED_TOOLS:
         return
@@ -516,6 +534,7 @@ async def _run_handler_with_policy(
         runtime_context.capabilities,
         bot=runtime_context.bot,
         actor_user_id=runtime_context.actor_user_id,
+        intent_text=runtime_context.current_intent_text,
     )
 
     if name == "discover_tools":
@@ -631,6 +650,7 @@ async def execute_tool(
     capabilities: BotGroupCapabilities,
     actor_can_manage: bool | None = None,
     privileged_allowlist: set[str] | frozenset[str] | None = None,
+    current_intent_text: str | None = None,
 ) -> dict[str, Any]:
     """兼容旧调用方的单 Tool API；真实对话使用 execute_tool_with_meta。"""
 
@@ -646,6 +666,7 @@ async def execute_tool(
             if privileged_allowlist is not None
             else None
         ),
+        current_intent_text=current_intent_text,
     )
     return (await execute_tool_with_meta(name, args, context=context)).payload
 
@@ -662,6 +683,7 @@ __all__ = [
     "dialogue_tool_round_limit",
     "execute_tool",
     "execute_tool_with_meta",
+    "select_critical_tool_names",
     "select_dialogue_message_segment_types",
     "select_dialogue_tool_names",
     "tool_permission_snapshot",

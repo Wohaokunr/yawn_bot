@@ -97,6 +97,9 @@ class ToolDefinition:
     keywords: tuple[str, ...] = ()
     core: bool = False
     discoverable: bool = True
+    # critical 工具专用：当前触发消息（调用者本人正文）必须包含其中之一，
+    # 才能装载 schema 并执行；历史、引用和模型推断均不算显式意图。
+    intent_keywords: tuple[str, ...] = ()
 
 
 TOOL_DEFINITIONS = (
@@ -489,6 +492,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="moderation",
         keywords=("踢出群", "踢出去", "移出群", "踢掉", "踢人"),
+        discoverable=False,
+        intent_keywords=("踢", "移出"),
     ),
     ToolDefinition(
         "set_whole_group_mute",
@@ -500,6 +505,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="moderation",
         keywords=("全员禁言", "解除全员禁言", "关闭全员禁言"),
+        discoverable=False,
+        intent_keywords=("全员禁言",),
     ),
     ToolDefinition(
         "set_group_admin",
@@ -515,6 +522,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="moderation",
         keywords=("设为管理员", "设置管理员", "取消管理员", "撤销管理员"),
+        discoverable=False,
+        intent_keywords=("管理员",),
     ),
     ToolDefinition(
         "delete_group_file",
@@ -529,6 +538,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("删除群文件", "删群文件", "删除这个文件"),
+        discoverable=False,
+        intent_keywords=("删",),
     ),
     ToolDefinition(
         "move_group_file",
@@ -543,6 +554,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("移动群文件", "把文件移到", "移动这个文件"),
+        discoverable=False,
+        intent_keywords=("移动", "移到", "挪到"),
     ),
     ToolDefinition(
         "rename_group_file",
@@ -558,6 +571,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("重命名群文件", "群文件改名", "重命名这个文件"),
+        discoverable=False,
+        intent_keywords=("重命名", "改名"),
     ),
     ToolDefinition(
         "delete_group_folder",
@@ -569,6 +584,8 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_CRITICAL,
         family="file",
         keywords=("删除群文件夹", "删群文件夹", "删除这个文件夹"),
+        discoverable=False,
+        intent_keywords=("删",),
     ),
     ToolDefinition(
         "send_file",

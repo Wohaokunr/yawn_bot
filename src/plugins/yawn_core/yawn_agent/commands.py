@@ -5,7 +5,7 @@ import json
 import math
 
 from nonebot import logger
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, CommandArg
 from nonebot_plugin_orm import async_scoped_session
@@ -450,6 +450,12 @@ def _persona_trial_text(config: GroupAgentConfig) -> str:
     )
 
 
+def _plain_message(text: str) -> Message:
+    """把记忆/模型产出的文本包装为纯文本段，避免 CQ 码被解析成真实消息段。"""
+
+    return Message(MessageSegment.text(text))
+
+
 async def _commit(session: async_scoped_session) -> bool:
     """提交命令产生的状态变更；失败时回滚并提示稍后重试。"""
 
@@ -700,7 +706,9 @@ async def handle_agent_memory(
     if not rows:
         await agent_memory.finish("当前群还没有沉淀记忆")
     await agent_memory.finish(
-        "\n".join(f"- {row.memory_key}: {row.content[:120]}" for row in rows)
+        _plain_message(
+            "\n".join(f"- {row.memory_key}: {row.content[:120]}" for row in rows)
+        )
     )
 
 
@@ -770,7 +778,9 @@ async def handle_agent_profile(
     if not rows:
         await agent_profile.finish("暂无该成员的人物画像")
     await agent_profile.finish(
-        "\n".join(f"- {row.memory_key}: {row.content[:160]}" for row in rows)
+        _plain_message(
+            "\n".join(f"- {row.memory_key}: {row.content[:160]}" for row in rows)
+        )
     )
 
 
@@ -856,8 +866,8 @@ async def handle_agent_export(
     # 群消息有单条长度上限，超长的导出分块发送，避免静默失败。
     chunks = [text[i : i + 3000] for i in range(0, len(text), 3000)] or ["{}"]
     for chunk in chunks[:-1]:
-        await agent_export.send(Message(chunk))
-    await agent_export.finish(Message(chunks[-1]))
+        await agent_export.send(_plain_message(chunk))
+    await agent_export.finish(_plain_message(chunks[-1]))
 
 
 @agent_persona.handle()
