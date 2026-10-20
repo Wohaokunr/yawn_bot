@@ -744,9 +744,12 @@ async def _is_chat_mode_msg(
     return not text.startswith("/")
 
 
+# priority=1：排在 got/reject 产生的会话临时 matcher（priority=0、block=True）
+# 之后。多步向导（/番茄小说、/面板、/定时提醒等）等待中的回复由临时 matcher
+# 消费并阻断传播，不会再被对话模式重复投递给 LLM。
 chat_mode_listener = on_message(
     rule=Rule(_is_chat_mode_msg),
-    priority=0,
+    priority=1,
     block=True,
 )
 

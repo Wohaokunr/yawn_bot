@@ -13,6 +13,8 @@ import asyncio
 import hashlib
 import re
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -386,6 +388,24 @@ async def test_llm_connection(
 _COMPLETION_CONCURRENCY = asyncio.Semaphore(6)
 
 
+@asynccontextmanager
+async def _completion_slot(timeout: float) -> AsyncIterator[float]:
+    """获取并发名额；排队时间计入调用方总超时，产出剩余可用于请求的秒数。
+
+    排队超时抛出 ``asyncio.TimeoutError``，与请求超时走同一降级分支。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    await asyncio.wait_for(_COMPLETION_CONCURRENCY.acquire(), timeout=timeout)
+    try:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        yield remaining
+    finally:
+        _COMPLETION_CONCURRENCY.release()
+
+
 async def complete(  # noqa: PLR0911
     messages: list[ChatCompletionMessageParam],
     *,
@@ -415,8 +435,8 @@ async def complete(  # noqa: PLR0911
                 f"LLM 提供商未配置密钥（task={task}, provider={request.provider}）"
             )
             return None
-        async with _COMPLETION_CONCURRENCY:
-            try:
+        try:
+            async with _completion_slot(timeout) as remaining:
                 response = await asyncio.wait_for(
                     llm_client.chat.completions.create(
                         model=request.model,
@@ -439,24 +459,24 @@ async def complete(  # noqa: PLR0911
                         ),
                         **extra,
                     ),
-                    timeout=timeout,
+                    timeout=remaining,
                 )
                 _record_ai_usage(task, response)
-            except asyncio.TimeoutError:
-                outcome = "timeout"
-                logger.warning(
-                    f"LLM 非流式补全超时（task={task}, model={request.model}, "
-                    f"timeout={timeout}s）",
-                    exc_info=True,
-                )
-                return None
-            except OpenAIError:
-                logger.warning(
-                    f"LLM 非流式补全失败（task={task}, model={request.model}, "
-                    f"timeout={timeout}s）",
-                    exc_info=True,
-                )
-                return None
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            logger.warning(
+                f"LLM 非流式补全超时（task={task}, model={request.model}, "
+                f"timeout={timeout}s）",
+                exc_info=True,
+            )
+            return None
+        except OpenAIError:
+            logger.warning(
+                f"LLM 非流式补全失败（task={task}, model={request.model}, "
+                f"timeout={timeout}s）",
+                exc_info=True,
+            )
+            return None
         if not response.choices:
             outcome = "empty"
             logger.warning(f"LLM 未返回任何 choice（task={task}, model={request.model}）")
@@ -567,8 +587,8 @@ async def complete_with_tools_result(  # noqa: C901,PLR0911
             return _tool_completion_result(
                 message=None, outcome=outcome, started=started
             )
-        async with _COMPLETION_CONCURRENCY:
-            try:
+        try:
+            async with _completion_slot(timeout) as remaining:
                 response = await asyncio.wait_for(
                     llm_client.chat.completions.create(
                         model=request.model,
@@ -594,32 +614,32 @@ async def complete_with_tools_result(  # noqa: C901,PLR0911
                         ),
                         **extra,
                     ),
-                    timeout=timeout,
+                    timeout=remaining,
                 )
                 _record_ai_usage(task, response)
-            except asyncio.TimeoutError:
-                outcome = "timeout"
-                logger.warning(
-                    f"LLM 工具补全超时（task={task}, model={request.model}, "
-                    f"timeout={timeout}s）",
-                    exc_info=True,
-                )
-                return _tool_completion_result(
-                    message=None, outcome=outcome, started=started
-                )
-            except OpenAIError as exc:
-                if multimodal and _looks_like_multimodal_unsupported(exc):
-                    outcome = "unsupported_multimodal"
-                    if raise_on_unsupported:
-                        raise LLMMultimodalUnsupportedError(str(exc)) from exc
-                logger.warning(
-                    f"LLM 工具补全失败（task={task}, model={request.model}, "
-                    f"timeout={timeout}s）",
-                    exc_info=True,
-                )
-                return _tool_completion_result(
-                    message=None, outcome=outcome, started=started
-                )
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            logger.warning(
+                f"LLM 工具补全超时（task={task}, model={request.model}, "
+                f"timeout={timeout}s）",
+                exc_info=True,
+            )
+            return _tool_completion_result(
+                message=None, outcome=outcome, started=started
+            )
+        except OpenAIError as exc:
+            if multimodal and _looks_like_multimodal_unsupported(exc):
+                outcome = "unsupported_multimodal"
+                if raise_on_unsupported:
+                    raise LLMMultimodalUnsupportedError(str(exc)) from exc
+            logger.warning(
+                f"LLM 工具补全失败（task={task}, model={request.model}, "
+                f"timeout={timeout}s）",
+                exc_info=True,
+            )
+            return _tool_completion_result(
+                message=None, outcome=outcome, started=started
+            )
         if not response.choices:
             outcome = "empty"
             logger.warning(f"LLM 未返回任何 choice（task={task}, model={request.model}）")

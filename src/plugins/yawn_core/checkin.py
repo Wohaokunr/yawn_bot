@@ -150,6 +150,10 @@ async def handle_checkin(  # noqa: PLR0915
         checkin_user = CheckinUser(
             group_id=event.group_id,
             user_id=event.user_id,
+            # 列默认值只在 INSERT 时生效，新建对象此刻为 None，需显式置 0
+            total_days=0,
+            points=0,
+            streak_days=0,
         )
         session.add(checkin_user)
 

@@ -809,6 +809,8 @@ async def _ensure_group(
     )
     session.add(group)
     await session.commit()
+    # commit 会过期 ORM 属性，刷新后调用方才能安全读取 group_name
+    await session.refresh(group)
     return group
 
 
@@ -992,16 +994,24 @@ async def _deliver_reminder(
         if not reminder.enabled and not force:
             return "disabled"
 
-        permission_user_id = reminder.creator_user_id
-        permission_group_id: int | None = reminder.group_id
-        if reminder.target_type == "private" and reminder.target_user_id is not None:
-            permission_user_id = reminder.target_user_id
-            permission_group_id = None
+        # 所属群的功能开关对所有提醒生效（与群目标提醒相同的检查）
         if not await check_feature_permission(
-            permission_user_id,
-            permission_group_id,
+            reminder.creator_user_id,
+            reminder.group_id,
             "reminder",
             session,
+        ):
+            return "feature_disabled"
+        # 私聊目标还需目标用户自身的私聊功能开关放行
+        if (
+            reminder.target_type == "private"
+            and reminder.target_user_id is not None
+            and not await check_feature_permission(
+                reminder.target_user_id,
+                None,
+                "reminder",
+                session,
+            )
         ):
             return "feature_disabled"
 
@@ -1328,13 +1338,15 @@ async def _update_reminder(
     reminder.target_user_id = draft.target_user_id
     reminder.message_segments = payload
     reminder.enabled = new_enabled
+    # commit 会过期 ORM 属性，提前缓存 id，避免 commit 后访问触发 MissingGreenlet
+    reminder_id = reminder.id
     await session.commit()
 
     try:
         if new_enabled:
-            _schedule_reminder_job(reminder.id, schedule)
+            _schedule_reminder_job(reminder_id, schedule)
         else:
-            _remove_reminder_job(reminder.id)
+            _remove_reminder_job(reminder_id)
     except Exception as exc:
         reminder.name = old_values["name"]
         reminder.schedule_type = old_values["schedule_type"]
@@ -1345,13 +1357,14 @@ async def _update_reminder(
         reminder.message_segments = old_values["message_segments"]
         reminder.enabled = old_values["enabled"]
         await session.commit()
-        _remove_reminder_job(reminder.id)
+        _remove_reminder_job(reminder_id)
         if old_values["enabled"]:
             try:
-                _schedule_reminder_job(reminder.id, old_schedule)
+                _schedule_reminder_job(reminder_id, old_schedule)
             except Exception:  # noqa: BLE001
-                logger.exception(f"恢复旧定时提醒任务失败: reminder_id={reminder.id}")
+                logger.exception(f"恢复旧定时提醒任务失败: reminder_id={reminder_id}")
         raise ValueError("保存提醒失败，已恢复原配置") from exc
+    await session.refresh(reminder)
     return reminder
 
 
@@ -1361,24 +1374,26 @@ async def _set_enabled(
     *,
     enabled: bool,
 ) -> None:
+    # commit/rollback 会过期 ORM 属性，提前缓存，避免之后访问触发 MissingGreenlet
+    reminder_id = reminder.id
+    schedule = _schedule_from_reminder(reminder)
     if enabled:
-        schedule = _schedule_from_reminder(reminder)
         if (
             schedule.schedule_type == _SCHEDULE_ONCE
             and schedule.run_at is not None
             and schedule.run_at <= _now_bj()
         ):
             raise ValueError("一次性事件时间已过去，请编辑为未来时间")
-        _schedule_reminder_job(reminder.id, schedule)
+        _schedule_reminder_job(reminder_id, schedule)
         reminder.enabled = True
         try:
             await session.commit()
         except Exception:
             await session.rollback()
-            _remove_reminder_job(reminder.id)
+            _remove_reminder_job(reminder_id)
             raise
     else:
-        if not _remove_reminder_job(reminder.id):
+        if not _remove_reminder_job(reminder_id):
             raise ValueError("停用提醒失败，请稍后重试")
         reminder.enabled = False
         try:
@@ -1386,7 +1401,7 @@ async def _set_enabled(
         except Exception:
             await session.rollback()
             try:
-                _schedule_reminder_job(reminder.id, _schedule_from_reminder(reminder))
+                _schedule_reminder_job(reminder_id, schedule)
             except Exception:  # noqa: BLE001
                 logger.exception("停用提醒回滚调度失败")
             raise
@@ -1815,16 +1830,19 @@ async def _send_action_result(
     reminder: ScheduledReminder,
     action: str,
 ) -> None:
+    # 启停会 commit 并过期 ORM 属性，提前缓存 id/名称，避免之后访问触发 MissingGreenlet
+    reminder_id = reminder.id
+    reminder_name = reminder.name
     if action == "enable":
         await _set_enabled(session, reminder, enabled=True)
-        await _show_detail(session, matcher, reminder.id, prefix="已启用。")
+        await _show_detail(session, matcher, reminder_id, prefix="已启用。")
         return
     if action == "disable":
         await _set_enabled(session, reminder, enabled=False)
-        await _show_detail(session, matcher, reminder.id, prefix="已停用。")
+        await _show_detail(session, matcher, reminder_id, prefix="已停用。")
         return
     if action == "send":
-        status = await _deliver_reminder(reminder.id, force=True)
+        status = await _deliver_reminder(reminder_id, force=True)
         try:
             await session.refresh(reminder)
         except Exception:  # noqa: BLE001
@@ -1839,17 +1857,17 @@ async def _send_action_result(
         await _show_detail(
             session,
             matcher,
-            reminder.id,
+            reminder_id,
             prefix=messages.get(status, "发送失败。"),
         )
         return
     if action == "delete":
         matcher.state["view"] = "confirm_delete"
-        matcher.state["selected_id"] = reminder.id
-        matcher.state["delete_name"] = reminder.name
+        matcher.state["selected_id"] = reminder_id
+        matcher.state["delete_name"] = reminder_name
         await reminder_cmd.reject_arg(
             "reminder_choice",
-            f"确定删除“{reminder.name}”（ID {reminder.id}）吗？\n"
+            f"确定删除“{reminder_name}”（ID {reminder_id}）吗？\n"
             "删除后无法恢复，输入“确认删除”继续，或“返回”取消。",
         )
 
