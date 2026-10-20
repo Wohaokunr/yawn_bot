@@ -1,0 +1,388 @@
+# YawnBot WebUI 环境配置目录
+#
+# WebUI「环境配置」页面从这里读取可编辑的配置项、分组与说明，不再依赖精简后的
+# .env.example（Docker 镜像也不包含 .env.example）。格式与 .env 相同：
+# 分组标题使用「# ── 名称 ──」，每个键上方紧邻的注释即该键的说明，值为代码默认值。
+# 新增配置字段时请同步登记在这里；tests/test_webui_environment.py 会检查各插件
+# Config 字段是否都已登记。
+
+# ── NoneBot 运行时 ─────────────────────────────────────────────────────────────
+
+# 运行环境名称（prod / dev / test），决定额外加载哪个 .env.<名称> 文件
+ENVIRONMENT=prod
+# NoneBot 驱动器；正向 WebSocket 需追加 ~websockets，HTTP API 需追加 ~httpx
+DRIVER=~fastapi
+# FastAPI 监听地址；由反向代理接入时建议保持回环地址
+HOST=127.0.0.1
+# FastAPI 监听端口
+PORT=8080
+# 日志级别：TRACE / DEBUG / INFO / WARNING / ERROR / CRITICAL
+LOG_LEVEL=INFO
+# 超级用户 QQ 号，JSON 字符串数组
+SUPERUSERS=["123456789"]
+# NoneBot 多轮会话过期时间，格式 HH:MM:SS
+SESSION_EXPIRE_TIMEOUT=00:02:00
+
+# ── OneBot V11 连接 ─────────────────────────────────────────────────────────────
+
+# OneBot 访问令牌，NapCat/Lagrange 端需填写相同值；请使用独立随机值
+ONEBOT_V11_ACCESS_TOKEN=
+# 正向 WebSocket 地址，JSON 字符串数组；使用时 DRIVER 需包含 ~websockets
+ONEBOT_V11_WS_URLS=[]
+# HTTP API 根地址，JSON 对象（键为 Bot self_id）；使用时 DRIVER 需包含 ~httpx
+ONEBOT_V11_API_ROOTS={}
+
+# ── 本地数据与 SQLite/ORM ──────────────────────────────────────────────────────
+
+# 把 localstore 数据目录固定在工作目录的 ./data
+LOCALSTORE_USE_CWD=true
+# SQLAlchemy 引擎选项（JSON 对象），默认把 SQLite 忙等待设为 30 秒
+SQLALCHEMY_ENGINE_OPTIONS={"connect_args":{"timeout":30}}
+# Alembic 上下文选项（JSON 对象）；compare_server_default 用于迁移比较服务器默认值
+ALEMBIC_CONTEXT={"compare_server_default":true}
+
+# ── Sentry 可选错误上报 ─────────────────────────────────────────────────────────
+
+# Sentry DSN，留空表示关闭上报
+SENTRY_DSN=
+# Sentry 环境标签
+SENTRY_ENVIRONMENT=production
+# Sentry 发布版本标签
+SENTRY_RELEASE=yawnbot@0.1.0
+# 采样率，0.0 到 1.0
+SENTRY_SAMPLE_RATE=1.0
+# 是否开启 Sentry SDK 调试日志
+SENTRY_DEBUG=false
+
+# ── OpenAI-compatible 服务 ─────────────────────────────────────────────────────
+
+# 内置 default 提供商的 API Key；留空时 Bot 仍可启动，AI 功能走降级
+AI_API_KEY=
+# 内置 default 提供商的 API 根地址，通常包含 /v1
+AI_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
+# 命名提供商列表（JSON），推荐在上方「LLM 提供商」卡片中管理
+AI_PROVIDERS=[]
+# 命名提供商密钥（JSON），推荐在上方「LLM 提供商」卡片中管理
+AI_PROVIDER_API_KEYS={}
+# 默认模型 ID：复杂对话、KP 与狼人杀决策
+AI_MODEL=mimo-v2.5-pro
+# 轻量模型 ID；留空回退默认模型
+AI_LIGHT_MODEL=
+# 识图模型 ID；留空表示没有独立识图档位
+AI_VISION_MODEL=
+# 默认档位绑定的提供商 ID
+AI_DEFAULT_PROVIDER=default
+# 轻量档位绑定的提供商 ID
+AI_LIGHT_PROVIDER=default
+# 识图档位绑定的提供商 ID
+AI_VISION_PROVIDER=default
+# 默认档位全局推理策略
+AI_DEFAULT_THINKING=auto
+# 轻量档位全局推理策略
+AI_LIGHT_THINKING=disabled
+# 识图档位全局推理策略
+AI_VISION_THINKING=disabled
+# 默认模型图片能力
+AI_DEFAULT_MULTIMODAL=auto
+# 轻量模型图片能力
+AI_LIGHT_MULTIMODAL=auto
+# 私聊对话单次补全的最大输出 token 数
+AI_MAX_TOKENS=1024
+
+# ── Core / Agent 管理 WebUI ────────────────────────────────────────────────────
+
+# 是否启用 /webui 管理端；关闭后重启即无法再通过 WebUI 访问
+WEBUI_ENABLED=false
+# 运维管理员登录令牌，至少 32 个字符；修改后当前会话将失效
+WEBUI_ADMIN_TOKEN=
+# 登录会话有效时长（小时，1-168）
+WEBUI_SESSION_TTL_HOURS=12
+# HTTPS 访问时设为 true，会话 Cookie 只经 HTTPS 发送
+WEBUI_COOKIE_SECURE=false
+
+# ── 子插件 LLM 任务路由 ─────────────────────────────────────────────────────────
+
+# Agent 普通对话 / 工具使用的模型档位
+AGENT_DIALOGUE_LLM_PROFILE=default
+# Agent 普通对话推理覆盖
+AGENT_DIALOGUE_THINKING=inherit
+# Agent 主动发言使用的模型档位
+AGENT_PROACTIVE_LLM_PROFILE=light
+# Agent 主动发言推理覆盖
+AGENT_PROACTIVE_THINKING=inherit
+# Agent 记忆整理使用的模型档位
+AGENT_MEMORY_LLM_PROFILE=light
+# Agent 记忆整理推理覆盖
+AGENT_MEMORY_THINKING=inherit
+# Agent 图片描述使用的模型档位
+AGENT_IMAGE_LLM_PROFILE=vision
+# Agent 图片描述推理覆盖
+AGENT_IMAGE_THINKING=inherit
+# RPG KP 叙事 / 工具使用的模型档位
+RPG_KP_LLM_PROFILE=default
+# RPG KP 推理覆盖
+RPG_KP_THINKING=inherit
+# RPG NPC 路由使用的模型档位
+RPG_NPC_ROUTER_LLM_PROFILE=light
+# RPG NPC 路由推理覆盖
+RPG_NPC_ROUTER_THINKING=inherit
+# RPG NPC 短对白使用的模型档位
+RPG_NPC_LLM_PROFILE=light
+# RPG NPC 短对白推理覆盖
+RPG_NPC_THINKING=inherit
+# 狼人杀 AI 行动决策使用的模型档位
+WW_DECISION_LLM_PROFILE=default
+# 狼人杀 AI 行动决策推理覆盖
+WW_DECISION_THINKING=inherit
+# 狼人杀 AI 短发言使用的模型档位
+WW_SPEECH_LLM_PROFILE=light
+# 狼人杀 AI 短发言推理覆盖
+WW_SPEECH_THINKING=inherit
+
+# ── Agent 媒体与文件工具 ───────────────────────────────────────────────────────
+
+# 媒体缓存保留秒数
+AGENT_MEDIA_CACHE_TTL=86400
+# 媒体缓存目录，应位于持久化数据盘
+AGENT_MEDIA_CACHE_DIR=data/agent_media
+# 允许下载群图片的主机白名单（逗号分隔）；置空后群图片无法用于视觉理解
+AGENT_MEDIA_ALLOWED_HOSTS=gchat.qpic.cn,multimedia.nt.qq.com.cn
+# 支持 Files API 的提供商优先按内容哈希复用/上传远端媒体
+AGENT_REMOTE_MEDIA_ENABLED=true
+# 本地 MediaAsset 与远端文件的保留天数
+AGENT_REMOTE_MEDIA_TTL_DAYS=7
+# 单个媒体资产的大小上限（字节），默认 64 MiB
+AGENT_REMOTE_MEDIA_MAX_BYTES=67108864
+# 远端媒体提供商策略；auto 仅在当前 Provider 明确支持 Files API 时启用
+AGENT_REMOTE_MEDIA_PROVIDER=auto
+# Agent 本地文件工具根目录，不要指向源码、数据库或系统目录
+AGENT_FILE_ROOT=data/agent_files
+# Agent 文件工具允许访问的远程主机（逗号分隔）；留空不下载外部文件
+AGENT_FILE_ALLOWED_HOSTS=
+# 额外开放给 LLM 的消息段类型（share/contact/location/music，逗号分隔）
+AGENT_OPTIONAL_MESSAGE_SEGMENTS=
+# 分享卡片允许的链接域名（逗号分隔）；留空时不能发送外部链接卡片
+AGENT_SHARE_ALLOWED_HOSTS=
+# 已收到的群图片能否被 Agent 二次发送：deny / same_group
+AGENT_RECEIVED_MEDIA_REUSE=deny
+# Agent 海量调试日志，会包含完整群消息与 LLM 回复，仅供本地短时排障
+AGENT_DEBUG_LOG=false
+
+# ── Core/Agent AI 开关 ───────────────────────────────────────────────────────────
+
+# RPG 是否启用 AI 叙事/工具流程；false 为确定性模式
+RPG_AI_ENABLED=true
+# 狼人杀是否启用 AI 玩家
+WW_AI_ENABLED=true
+
+# ── Agent 全局默认人设 ──────────────────────────────────────────────────────────
+
+# 所有群组的默认 Bot 名字；详细角色风格由 Persona v2 模板与群内配置决定
+AGENT_PERSONA_NAME=Yawn
+
+# ── 番茄小说插件（可选） ───────────────────────────────────────────────────────
+
+# 单次请求超时（秒，最大 120）
+FANQIE_REQUEST_TIMEOUT=30
+# 请求失败重试次数（0-5）
+FANQIE_REQUEST_RETRIES=2
+# 相邻请求的最小间隔（秒，至少 0.2）
+FANQIE_REQUEST_DELAY=0.5
+# 下载队列长度上限
+FANQIE_QUEUE_MAX=20
+# 单个用户同时进行的任务数
+FANQIE_USER_ACTIVE_MAX=1
+# 单个群同时进行的任务数
+FANQIE_GROUP_ACTIVE_MAX=3
+# 单本书最多下载章节数
+FANQIE_MAX_CHAPTERS=500
+# 生成文件大小上限（字节），默认 32 MiB
+FANQIE_MAX_FILE_BYTES=33554432
+# 生成文件保留时长（小时）
+FANQIE_FILE_RETENTION_HOURS=24
+# 搜索结果条数（1-5）
+FANQIE_SEARCH_LIMIT=5
+# 排行榜条数（1-10）
+FANQIE_RANK_LIMIT=10
+# 浏览器搜索超时（秒）
+FANQIE_BROWSER_TIMEOUT=30
+# 浏览器是否无头运行；服务器无图形界面时保持 true
+FANQIE_BROWSER_HEADLESS=true
+# 插件专用浏览器 profile 目录；留空使用 localstore 默认目录
+FANQIE_BROWSER_PROFILE_DIR=
+# Playwright sidecar 地址，Docker 部署填 ws://playwright:3000/；留空使用本机 Chromium
+FANQIE_BROWSER_WS_ENDPOINT=
+# 是否启用官方 App 协议来源
+FANQIE_APP_PROTOCOL_ENABLED=true
+# 免费章节第三方 API 地址
+FANQIE_THIRD_PARTY_API_BASE=http://101.35.133.34:5000
+# 第三方 API 超时（秒）
+FANQIE_THIRD_PARTY_API_TIMEOUT=30
+# 第三方 API 重试次数（0-3）
+FANQIE_THIRD_PARTY_API_RETRIES=1
+# raw_full 失败后使用的公开 App 内容代理地址
+FANQIE_THIRD_PARTY_FALLBACK_BASE=https://api.fanqietc.com
+# 内容代理的前端 token，上游轮换时再覆盖
+FANQIE_THIRD_PARTY_FALLBACK_TOKEN=
+# 本机 Tomato Novel Downloader helper 的绝对路径；只填信任的本地程序
+FANQIE_MOBILE_HELPER_PATH=
+# helper 启动超时（秒）
+FANQIE_MOBILE_HELPER_STARTUP_TIMEOUT=15
+# helper 单章处理超时（秒）
+FANQIE_MOBILE_HELPER_TIMEOUT=120
+# 访问公开页面时使用的 User-Agent；一般无需修改
+FANQIE_USER_AGENT=
+
+# ── 跑团 RPG ───────────────────────────────────────────────────────────────────
+
+# 最低开局人数（与模组 min_players 取较大值）
+RPG_MIN_PLAYERS=1
+# 房间人数上限（同时受模组 max_players 约束）
+RPG_MAX_PLAYERS=6
+# 报名窗口（秒）
+RPG_SIGNUP_TIMEOUT=120
+# 报名窗口剩余多少秒时提醒一次
+RPG_SIGNUP_WARN_REMAIN=60
+# 建卡窗口（秒），超时未确认的角色卡自动确认
+RPG_CHAR_CREATE_TIMEOUT=180
+# 建卡剩余多少秒时提醒未确认的玩家
+RPG_CHAR_CREATE_WARN_REMAIN=60
+# 每人整卡重掷次数上限
+RPG_CHAR_REROLL_MAX=3
+# 可自由分配的技能点总量；留空按 CoC 惯例取 INT×2
+RPG_CHAR_SKILL_POOL=
+# 建卡期间单项技能上限
+RPG_CHAR_SKILL_CAP=75
+# PLAY 阶段无人行动的解散时长（秒）
+RPG_IDLE_TIMEOUT=600
+# 空闲剩余多少秒时提醒一次
+RPG_IDLE_WARN_REMAIN=120
+# 连续自由发言的合批窗口（秒）
+RPG_SAY_SETTLE_WINDOW=2.5
+# 单局待处理动作上限
+RPG_ACTION_QUEUE_MAX=100
+# 单用户待处理动作上限
+RPG_USER_PENDING_MAX=5
+# 单用户待处理发言上限
+RPG_USER_SAY_PENDING_MAX=10
+# 探索软轮次超时（秒）
+RPG_EXPLORE_ROUND_TIMEOUT=60.0
+# 战斗行动超时（秒）
+RPG_COMBAT_TURN_TIMEOUT=45.0
+# 单条玩家发言截断长度
+RPG_SPEECH_TRUNCATE=300
+# 每次合批最多喂给 KP 的发言条数
+RPG_KP_MAX_BATCH_LINES=6
+# 局面上下文（群聊记录）保留行数
+RPG_MAX_CONTEXT_LINES=40
+# /等待 缺省等待分钟数
+RPG_WAIT_DEFAULT=30
+# /等待 单次最大分钟数
+RPG_WAIT_MAX=120
+# 单个 KP 回合允许的工具调用轮数上限
+RPG_AI_MAX_TOOL_ROUNDS=4
+# 单个 KP 回合总时长预算（秒）
+RPG_AI_TURN_TIMEOUT=90.0
+# KP 单次 LLM 调用超时（秒），推理模型过短会全程降级
+RPG_KP_TIMEOUT=40.0
+# KP 单次生成最大 token 数（需覆盖推理开销）
+RPG_KP_MAX_TOKENS=2048
+# KP 生成温度
+RPG_KP_TEMPERATURE=0.8
+# KP 最终旁白截断长度
+RPG_KP_MAX_OUTPUT_CHARS=250
+# 两次 KP 调用之间的最小间隔（秒）
+RPG_KP_MIN_INTERVAL=3.0
+# 自然语言行动超过此时长仍未完成时，群内给一次等待提示（秒）
+RPG_AI_WAIT_NOTICE_DELAY=3.0
+# AI 工具单次伤害/治疗生效上限
+RPG_AI_MAX_DAMAGE_PER_CALL=5
+# AI 工具 san_check 单次损失上限
+RPG_AI_MAX_SAN_LOSS=10
+# NPC 单次台词生成超时（秒）
+RPG_NPC_TIMEOUT=15.0
+# NPC 单次生成最大 token 数
+RPG_NPC_MAX_TOKENS=512
+# NPC 生成温度
+RPG_NPC_TEMPERATURE=0.9
+# 每个 NPC 的公开对话上下文窗口（往返轮数）
+RPG_NPC_CONTEXT_TURNS=6
+# 旧版 NPC 群聊窗口配置，已不再读取，仅为兼容保留
+RPG_NPC_CONTEXT_LINES=8
+# 自然语言 NPC 路由器超时（秒）
+RPG_NPC_ROUTER_TIMEOUT=4.0
+# NPC 路由器最大 token 数
+RPG_NPC_ROUTER_MAX_TOKENS=128
+# NPC 路由器生成温度
+RPG_NPC_ROUTER_TEMPERATURE=0.0
+# 普通情绪微调的最低置信度
+RPG_SOCIAL_EMOTION_MIN_CONFIDENCE=0.75
+# 正向情绪微调的个人好感变化
+RPG_SOCIAL_POSITIVE_RAPPORT_DELTA=2
+# 正向情绪微调的公共态度变化
+RPG_SOCIAL_POSITIVE_ATTITUDE_DELTA=1
+# 负向情绪微调的个人好感变化
+RPG_SOCIAL_NEGATIVE_RAPPORT_DELTA=-3
+# 负向情绪微调的公共态度变化
+RPG_SOCIAL_NEGATIVE_ATTITUDE_DELTA=-2
+# 每个 NPC 每个探索轮的个人好感微调绝对上限
+RPG_SOCIAL_RAPPORT_ROUND_CAP=6
+# 每个 NPC 每个探索轮的公共态度微调绝对上限
+RPG_SOCIAL_ATTITUDE_ROUND_CAP=4
+
+# ── 狼人杀 ─────────────────────────────────────────────────────────────────────
+
+# 最小开局人数
+WW_MIN_PLAYERS=9
+# 满员自动开局人数
+WW_MAX_PLAYERS=12
+# 报名窗口（秒）
+WW_SIGNUP_TIMEOUT=180
+# 报名剩余多少秒时第一次提醒
+WW_SIGNUP_WARN_REMAIN=60
+# 报名剩余多少秒时末次提醒
+WW_SIGNUP_WARN_REMAIN_FINAL=20
+# 是否允许玩家私聊 /选身份 请求期望角色
+WW_ROLE_REQUEST=true
+# 女巫 / 预言家夜间行动时长（秒），收到有效行动即提前结束
+WW_NIGHT_TIMEOUT=60
+# 狼人阶段时长（秒），含两段式讨论与出刀
+WW_WOLF_TIMEOUT=180
+# 夜间氛围心跳播报间隔（秒）
+WW_NIGHT_WARN_REMAIN=30
+# 每人发言时长（秒），竞选与 PK 发言同样使用
+WW_SPEECH_TIMEOUT=120
+# 投票阶段时长（秒）
+WW_VOTE_TIMEOUT=90
+# 猎人开枪决策时长（秒）
+WW_HUNTER_TIMEOUT=60
+# 遗言时长（秒）
+WW_LAST_WORDS_TIMEOUT=60
+# 警长竞选报名窗口（秒）
+WW_SHERIFF_REGISTER_TIMEOUT=45
+# 移交警徽决策时长（秒），同时用于白天发言排序
+WW_BADGE_TIMEOUT=45
+# OneBot API 调用超时（秒）
+WW_API_TIMEOUT=10.0
+# 行动队列上限
+WW_ACTION_QUEUE_MAX=100
+# 单用户待处理行动上限
+WW_USER_PENDING_MAX=8
+# 人数不足时 /开始游戏 自动用 AI 补位到最低开局数
+WW_AI_AUTOFILL=true
+# 单局 AI 玩家数量上限
+WW_AI_MAX=11
+# AI 单次决策 LLM 调用超时（秒）
+WW_AI_DECISION_TIMEOUT=90.0
+# AI 发言 LLM 调用超时（秒）
+WW_AI_SPEECH_TIMEOUT=90.0
+# AI 决策单次生成最大 token 数
+WW_AI_MAX_TOKENS=4096
+# AI 发言单次生成最大 token 数
+WW_AI_SPEECH_MAX_TOKENS=2048
+# 狼队是否先讨论再统一出刀
+WW_AI_WOLF_DISCUSS=true
+# 狼队讨论阶段 LLM 调用超时（秒）
+WW_AI_DISCUSS_TIMEOUT=45.0
+# 有 AI 参与时警长竞选报名窗口的延长量（秒）
+WW_AI_REGISTER_BUFFER=15

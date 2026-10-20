@@ -18,6 +18,8 @@ from dotenv import dotenv_values
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 ENV_PATH = PROJECT_ROOT / ".env"
 EXAMPLE_PATH = PROJECT_ROOT / ".env.example"
+# 完整配置目录随代码打包；.env.example 只保留最小可运行配置，且不进 Docker 镜像
+CATALOG_PATH = Path(__file__).with_name("environment_catalog.dotenv")
 
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ASSIGNMENT_RE = re.compile(
@@ -27,10 +29,22 @@ _COMMENTED_ASSIGNMENT_RE = re.compile(
     r"^\s*#\s*(?P<key>[A-Z][A-Z0-9_]*)\s*=\s*(?P<value>.*)$"
 )
 _SECTION_RE = re.compile(r"^\s*#\s*[─━=\-]{2,}\s*(.*?)\s*[─━=\-]{2,}\s*$")
-_SECRET_RE = re.compile(
-    r"(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|COOKIE|DSN|CREDENTIAL|AUTH)",
-    re.IGNORECASE,
-)
+# 按下划线分段判断敏感键：避免 *_MAX_TOKENS、WEBUI_COOKIE_SECURE 这类普通参数被隐藏
+_SECRET_SUFFIXES = {
+    "TOKEN",
+    "KEY",
+    "KEYS",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "COOKIE",
+    "COOKIES",
+    "DSN",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "AUTH",
+}
+_SECRET_PARTS = {"SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS"}
 _INTEGER_RE = re.compile(r"^[+-]?\d+$")
 _NUMBER_RE = re.compile(r"^[+-]?(?:\d+\.\d*|\d*\.\d+)$")
 _GLOBAL_THINKING_KEYS = {
@@ -259,12 +273,29 @@ def _value_kind(key: str, sample: str | None, current: str | None) -> str:
     return "string"
 
 
+def _is_secret(key: str) -> bool:
+    parts = key.upper().split("_")
+    return (
+        parts[-1] in _SECRET_SUFFIXES
+        or bool(_SECRET_PARTS.intersection(parts))
+        or key.endswith("DATABASE_URL")
+    )
+
+
 def _catalog() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     positions: set[str] = set()
+    for path in (CATALOG_PATH, EXAMPLE_PATH):
+        _parse_catalog(_read_text(path), items, positions)
+    return items
+
+
+def _parse_catalog(
+    text: str, items: list[dict[str, Any]], positions: set[str]
+) -> None:
     section = "基础配置"
     comments: list[str] = []
-    for line in _read_text(EXAMPLE_PATH).splitlines():
+    for line in text.splitlines():
         section_match = _SECTION_RE.match(line)
         if section_match:
             section = section_match.group(1).strip() or "其他配置"
@@ -295,7 +326,6 @@ def _catalog() -> list[dict[str, Any]]:
                 comments.append(comment)
         elif not stripped:
             comments.clear()
-    return items
 
 
 def load_environment() -> dict[str, Any]:
@@ -324,7 +354,7 @@ def load_environment() -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for item in catalog:
         key = str(item["key"])
-        secret = bool(_SECRET_RE.search(key)) or key.endswith("DATABASE_URL")
+        secret = _is_secret(key)
         configured = key in root_values
         if key in os.environ:
             source = "process"

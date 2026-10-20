@@ -326,3 +326,47 @@ def test_environment_routes_require_csrf_and_report_conflicts(
         },
     )
     assert conflict.status_code == 409  # noqa: PLR2004
+
+
+def test_bundled_catalog_lists_every_plugin_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置目录不能再因精简 .env.example 而丢项；各插件 Config 字段都要登记。"""
+
+    monkeypatch.setattr(environment, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(environment, "ENV_PATH", tmp_path / ".env")
+    monkeypatch.setattr(environment, "EXAMPLE_PATH", tmp_path / ".env.example")
+    snapshot = environment.load_environment()
+    entries = {item["key"]: item for item in snapshot["entries"]}
+
+    config_modules = {
+        "src.plugins.yawn_core.llm": ("AIChatConfig",),
+        "src.plugins.yawn_core.webui.config": ("WebUIConfig",),
+        "src.plugins.yawn_core.yawn_agent.persona": ("AgentPersonaDefaults",),
+        "src.plugins.yawn_core.yawn_fanqie.config": ("Config",),
+        "src.plugins.yawn_core.yawn_rpg.config": ("Config",),
+        "src.plugins.yawn_core.yawn_werewolf.config": ("Config",),
+    }
+    expected: set[str] = set()
+    for module_name, class_names in config_modules.items():
+        module = importlib.import_module(module_name)
+        for class_name in class_names:
+            expected.update(
+                name.upper() for name in getattr(module, class_name).model_fields
+            )
+    assert expected - entries.keys() == set()
+    assert "自定义配置" not in {item["section"] for item in entries.values()}
+
+    for key in ("RPG_KP_MAX_TOKENS", "AI_MAX_TOKENS", "WEBUI_COOKIE_SECURE"):
+        assert entries[key]["secret"] is False
+    for key in (
+        "AI_API_KEY",
+        "AI_PROVIDER_API_KEYS",
+        "WEBUI_ADMIN_TOKEN",
+        "ONEBOT_V11_ACCESS_TOKEN",
+        "SENTRY_DSN",
+        "FANQIE_THIRD_PARTY_FALLBACK_TOKEN",
+    ):
+        assert entries[key]["secret"] is True
+    assert entries["RPG_KP_MAX_TOKENS"]["kind"] == "integer"
+    assert entries["WW_AI_ENABLED"]["kind"] == "boolean"

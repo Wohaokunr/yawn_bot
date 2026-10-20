@@ -77,10 +77,13 @@ export const SECTION_ICONS: Record<string, string> = {
   "Sentry 可选错误上报": "🛟",
   "OpenAI-compatible 服务": "🧠",
   "Core / Agent 管理 WebUI": "🖥️",
-  "子插件 LLM 任务路由、Agent 媒体和文件工具": "🔀",
+  "子插件 LLM 任务路由": "🔀",
+  "Agent 媒体与文件工具": "🖼️",
   "Core/Agent AI 开关": "🔆",
   "Agent 全局默认人设": "🎀",
   "番茄小说插件（可选）": "📚",
+  "跑团 RPG": "🎲",
+  "狼人杀": "🐺",
   "游戏插件常用覆盖": "🎮",
   "维护提示": "🔧",
   "自定义配置": "✨",
@@ -125,6 +128,11 @@ const ENUM_LABELS: Record<string, string> = {
   supported: "支持图片",
   unsupported: "不支持图片",
 };
+
+export function defaultPlaceholder(item: EnvironmentEntry): string {
+  if (item.defaultValue === null) return "未配置";
+  return item.defaultValue === "" ? "默认留空" : `默认：${item.defaultValue}`;
+}
 
 export function enumLabel(item: EnvironmentEntry, value: string): string {
   if (value === "auto") {

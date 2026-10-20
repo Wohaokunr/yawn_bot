@@ -32,6 +32,7 @@ import {
 } from "./environment-components";
 import type { EnvironmentDiffRow, LLMProviderDraft, ModelTestState } from "./environment-components";
 import {
+  defaultPlaceholder,
   enumLabel,
   filterEnvironmentEntries,
   groupEnvironmentEntries,
@@ -280,7 +281,7 @@ export function EnvironmentPage(): React.JSX.Element {
       return (
         <Select
           value={draft ?? undefined}
-          placeholder={item.defaultValue === null ? "未配置" : `默认：${item.defaultValue}`}
+          placeholder={defaultPlaceholder(item)}
           onChange={(value) => setValue(item.key, value)}
           style={{ width: "100%" }}
           options={item.options.map((value) => ({
@@ -294,7 +295,7 @@ export function EnvironmentPage(): React.JSX.Element {
       return (
         <Select
           value={draft ?? undefined}
-          placeholder={item.defaultValue === null ? "未配置" : `默认：${item.defaultValue}`}
+          placeholder={defaultPlaceholder(item)}
           onChange={(value) => setValue(item.key, value)}
           style={{ width: "100%" }}
           options={[
@@ -317,7 +318,7 @@ export function EnvironmentPage(): React.JSX.Element {
     return (
       <Input
         value={common.value}
-        placeholder={item.defaultValue === null ? "未配置" : `默认：${item.defaultValue}`}
+        placeholder={defaultPlaceholder(item)}
         onChange={(event) => common.onChange(event.target.value)}
       />
     );
