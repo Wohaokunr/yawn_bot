@@ -26,6 +26,8 @@ _MAX_TRACKED_GROUPS = 512
 _MAX_STRING = 600
 _MAX_LIST = 24
 _MAX_DICT = 32
+_SUMMARY_PREVIEW_CHARS = 80
+_TOOL_LABEL_PREFIXES = ("工具意图 ", "工具 ")
 _REDACT_KEYS = {
     "url",
     "path",
@@ -191,6 +193,49 @@ class ExecutionTrace:
             "hasTool": "tool" in phases,
             "hasMedia": "media" in phases,
             "hasOutboundProblem": has_outbound_problem,
+            "preview": self._preview(),
+            "toolNames": self._tool_names(),
+            "llmRounds": sum(1 for event in self.events if event.phase == "llm"),
+            "slowestPhase": self._slowest_event(),
+            "truncated": len(self.events) >= _MAX_EVENTS,
+        }
+
+    def _preview(self) -> str | None:
+        """触发消息的短预览：只取 intake 事件里已脱敏的 text_preview。"""
+        for event in self.events:
+            if event.phase != "intake":
+                continue
+            text = event.output.get("text_preview")
+            if isinstance(text, str) and text.strip():
+                text = text.strip()
+                if len(text) > _SUMMARY_PREVIEW_CHARS:
+                    return text[:_SUMMARY_PREVIEW_CHARS] + "…"
+                return text
+        return None
+
+    def _tool_names(self) -> list[str]:
+        names: list[str] = []
+        for event in self.events:
+            if event.phase != "tool":
+                continue
+            name = event.label
+            for prefix in _TOOL_LABEL_PREFIXES:
+                if name.startswith(prefix):
+                    name = name[len(prefix) :]
+                    break
+            if name and name not in names:
+                names.append(name)
+        return names[:_MAX_LIST]
+
+    def _slowest_event(self) -> dict[str, Any] | None:
+        timed = [event for event in self.events if event.duration_ms is not None]
+        if not timed:
+            return None
+        slowest = max(timed, key=lambda event: event.duration_ms or 0.0)
+        return {
+            "phase": slowest.phase,
+            "label": slowest.label,
+            "durationMs": slowest.duration_ms,
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -380,18 +425,28 @@ def recent_execution_trace_summaries(
     group_id: int,
     *,
     status: str | None = None,
+    mode: str | None = None,
+    trigger_source: str | None = None,
+    actor_user_id: int | None = None,
+    source: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent traces without their event payloads.
 
-    The status filter is intentionally applied in the in-memory buffer so the
+    The filters are intentionally applied in the in-memory buffer so the
     collection endpoint never needs to serialize event diagnostics just to filter
     or render the list.
     """
     normalized_status = status.strip() if status else None
-    summaries = [
-        trace.as_summary()
-        for trace in reversed(_recent_traces.get(int(group_id), ()))
-    ]
+    traces = list(reversed(_recent_traces.get(int(group_id), ())))
+    if mode:
+        traces = [trace for trace in traces if trace.mode == mode]
+    if trigger_source:
+        traces = [trace for trace in traces if trace.trigger_source == trigger_source]
+    if actor_user_id is not None:
+        traces = [trace for trace in traces if trace.actor_user_id == actor_user_id]
+    if source:
+        traces = [trace for trace in traces if trace.source == source]
+    summaries = [trace.as_summary() for trace in traces]
     if normalized_status is None:
         return summaries
     flag_by_filter = {
@@ -414,8 +469,103 @@ def execution_trace_by_id(group_id: int, trace_id: str) -> dict[str, Any] | None
     return None
 
 
-def clear_execution_traces(group_id: int) -> None:
-    _recent_traces.pop(int(group_id), None)
+def clear_execution_traces(group_id: int) -> int:
+    """清空一个群的 Trace 缓冲，返回被丢弃的条数。"""
+    bucket = _recent_traces.pop(int(group_id), None)
+    return len(bucket) if bucket is not None else 0
+
+
+def _percentile(values: list[float], ratio: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round(ratio * (len(ordered) - 1))))
+    return round(ordered[index], 1)
+
+
+def _count(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def execution_trace_stats(group_id: int) -> dict[str, Any]:
+    """汇总当前缓冲内 Trace 的状态分布、耗时分位与阶段耗时。
+
+    只读取内存缓冲，和列表接口一样不触碰数据库，也不返回事件原文。
+    """
+    traces = list(_recent_traces.get(int(group_id), ()))
+    summaries = [trace.as_summary() for trace in traces]
+    durations = [
+        float(trace.duration_ms) for trace in traces if trace.duration_ms is not None
+    ]
+    phase_totals: dict[str, list[float]] = {}
+    phase_failures: dict[str, int] = {}
+    tool_counts: dict[str, int] = {}
+    for trace in traces:
+        for event in trace.events:
+            if event.duration_ms is not None:
+                phase_totals.setdefault(event.phase, []).append(float(event.duration_ms))
+            if event.status == "failed":
+                phase_failures[event.phase] = phase_failures.get(event.phase, 0) + 1
+        for name in trace._tool_names():
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+    phases = [
+        {
+            "phase": phase,
+            "count": len(values),
+            "avgMs": round(sum(values) / len(values), 1),
+            "maxMs": round(max(values), 1),
+            "totalMs": round(sum(values), 1),
+            "failures": phase_failures.get(phase, 0),
+        }
+        for phase, values in phase_totals.items()
+    ]
+    for phase, failures in phase_failures.items():
+        if phase not in phase_totals:
+            phases.append(
+                {
+                    "phase": phase,
+                    "count": 0,
+                    "avgMs": None,
+                    "maxMs": None,
+                    "totalMs": 0.0,
+                    "failures": failures,
+                }
+            )
+    phases.sort(key=lambda item: -(item["totalMs"] or 0.0))
+    return {
+        "groupId": str(group_id),
+        "capacity": _MAX_GROUP_TRACES,
+        "total": len(summaries),
+        "failed": sum(1 for item in summaries if item["hasFailure"]),
+        "degraded": sum(1 for item in summaries if item["hasDegradation"]),
+        "withTools": sum(1 for item in summaries if item["hasTool"]),
+        "withMedia": sum(1 for item in summaries if item["hasMedia"]),
+        "outboundProblems": sum(1 for item in summaries if item["hasOutboundProblem"]),
+        "running": sum(1 for item in summaries if item["status"] == "running"),
+        "durationMs": {
+            "avg": round(sum(durations) / len(durations), 1) if durations else None,
+            "p50": _percentile(durations, 0.5),
+            "p95": _percentile(durations, 0.95),
+            "max": round(max(durations), 1) if durations else None,
+        },
+        "byMode": _count([str(item["mode"]) for item in summaries]),
+        "byTrigger": _count(
+            [str(item["triggerSource"]) for item in summaries if item["triggerSource"]]
+        ),
+        "byOutcome": _count(
+            [str(item["outcome"]) for item in summaries if item["outcome"]]
+        ),
+        "phases": phases,
+        "tools": [
+            {"name": name, "count": count}
+            for name, count in sorted(tool_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "oldestAt": min((item["startedAt"] for item in summaries), default=None),
+        "newestAt": max((item["startedAt"] for item in summaries), default=None),
+    }
 
 
 __all__ = [
@@ -425,6 +575,7 @@ __all__ = [
     "clear_execution_traces",
     "current_execution_trace",
     "execution_trace_by_id",
+    "execution_trace_stats",
     "finish_execution_trace",
     "recent_execution_trace_summaries",
     "recent_execution_traces",

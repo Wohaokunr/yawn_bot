@@ -1,4 +1,5 @@
-import { Card, Descriptions, List, Progress, Space, Tabs, Tag, Typography } from "antd";
+import { Card, Descriptions, List, Progress, Segmented, Space, Table, Tabs, Tag, Typography } from "antd";
+import { useState } from "react";
 import { AdminEmpty } from "../shared";
 import type { AgentDebugResponse } from "../types";
 import {
@@ -50,7 +51,7 @@ export function CurrentTurnInspector({ value }: { value: Record<string, unknown>
   const replyTo = debugRecord(value.reply_to);
   const media = Array.isArray(value.media) ? value.media.map(debugRecord) : [];
   return <Card size="small" title="当前消息">
-    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} items={[
+    <Descriptions size="small" column={{ xs: 1, sm: 2, xxl: 3 }} items={[
       { key: "actor", label: "发言人", children: debugDisplay(value.name || value.user_id) },
       { key: "message", label: "消息 ID", children: debugDisplay(value.message_id) },
       { key: "trigger", label: "触发方式", children: <Tag>{debugDisplay(value.trigger)}</Tag> },
@@ -80,12 +81,114 @@ const CONTEXT_SELECTION_REASON: Record<string, string> = {
   context_budget: "超过上下文预算",
 };
 
+const BUDGET_COMPONENT_LABELS: Record<string, string> = {
+  history: "历史消息",
+  memory: "记忆",
+  members: "成员画像",
+  relations: "关系",
+};
+
+/** 展示后端 context_budget 的 Token 装箱结果：第一行是总预算，其余是分项。 */
+export function ContextPackingInspector({ budget }: { budget: Array<Record<string, unknown>> }): React.JSX.Element {
+  if (budget.length === 0) return <AdminEmpty description="本轮没有 Token 装箱记录" />;
+  const [head, ...components] = budget;
+  const total = debugRecord(head);
+  const used = Number(total.usedTokens ?? 0);
+  const limit = Number(total.contextLimit ?? 0);
+  return <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} items={[
+      { key: "model", label: "装箱模型", children: debugDisplay(total.model) },
+      { key: "window", label: "上下文窗口", children: debugDisplay(total.contextWindow) },
+      { key: "prompt", label: "Prompt 上限", children: debugDisplay(total.promptLimit) },
+      { key: "reserve", label: "预留输出", children: debugDisplay(total.completionReserve) },
+      { key: "limit", label: "上下文预算", children: debugDisplay(total.contextLimit) },
+      { key: "used", label: "已用", children: limit > 0 ? `${used} Token（${Math.round((used / limit) * 100)}%）` : debugDisplay(total.usedTokens) },
+    ]} />
+    {limit > 0 && <Progress percent={Math.min(100, Math.round((used / limit) * 100))} status={used >= limit ? "exception" : "normal"} />}
+    <Table
+      size="small"
+      pagination={false}
+      rowKey={(row) => String(row.component)}
+      dataSource={components.map(debugRecord)}
+      scroll={{ x: 520 }}
+      columns={[
+        { title: "分项", dataIndex: "component", render: (value: string) => BUDGET_COMPONENT_LABELS[value] ?? value },
+        { title: "预算", dataIndex: "budgetTokens", width: 90 },
+        {
+          title: "已用",
+          width: 160,
+          render: (_, row: Record<string, unknown>) => {
+            const share = Number(row.budgetTokens) > 0 ? Math.min(100, Math.round((Number(row.usedTokens) / Number(row.budgetTokens)) * 100)) : 0;
+            return <div className="dbg-mini-progress"><Progress percent={share} size="small" showInfo={false} /><span>{debugDisplay(row.usedTokens, "0")}</span></div>;
+          },
+        },
+        { title: "保留", dataIndex: "kept", width: 70 },
+        { title: "丢弃", dataIndex: "dropped", width: 70, render: (value: number) => value > 0 ? <Text type="warning">{value}</Text> : value },
+      ]}
+    />
+  </Space>;
+}
+
+function SelectionList({ selection }: { selection: AgentDebugResponse["contextSelection"] }): React.JSX.Element {
+  const [filter, setFilter] = useState<"all" | "kept" | "dropped">("all");
+  if (selection.length === 0) return <AdminEmpty description="本轮没有历史筛选轨迹" />;
+  const reasons = selection.reduce<Record<string, { kept: number; dropped: number }>>((acc, item) => {
+    const row = acc[item.reason] ?? { kept: 0, dropped: 0 };
+    if (item.selected) row.kept += 1; else row.dropped += 1;
+    acc[item.reason] = row;
+    return acc;
+  }, {});
+  const rows = selection.filter((item) => filter === "all" || (filter === "kept") === item.selected);
+  const kept = selection.filter((item) => item.selected).length;
+  return <Space orientation="vertical" size="small" style={{ width: "100%" }}>
+    <div className="dbg-toolbar">
+      <Segmented size="small" value={filter} onChange={(value) => setFilter(value as typeof filter)} options={[
+        { value: "all", label: `全部 ${selection.length}` },
+        { value: "kept", label: `保留 ${kept}` },
+        { value: "dropped", label: `丢弃 ${selection.length - kept}` },
+      ]} />
+    </div>
+    <div className="dbg-reason-tags">
+      {Object.entries(reasons).map(([reason, count]) => <Tag key={reason} color={count.kept > 0 ? "green" : undefined}>
+        {CONTEXT_SELECTION_REASON[reason] ?? reason}：{count.kept > 0 ? `保留 ${count.kept}` : ""}{count.kept > 0 && count.dropped > 0 ? " / " : ""}{count.dropped > 0 ? `丢弃 ${count.dropped}` : ""}
+      </Tag>)}
+    </div>
+    <List
+      className="agent-debug-list"
+      dataSource={rows}
+      renderItem={(item, index) => <List.Item key={`${String(item.message_id ?? "none")}-${index}`}>
+        <div className="agent-debug-list-item">
+          <Space wrap size={6}>
+            <Tag color={item.selected ? "green" : undefined}>{item.selected ? "保留" : "丢弃"}</Tag>
+            <Text strong>{item.name?.trim() || String(item.user_id ?? "未知成员")}</Text>
+            <Tag>{item.role || "member"}</Tag>
+            {item.title ? <Tag>{item.title}</Tag> : null}
+            <Text type="secondary">{item.minutes_ago} 分钟前</Text>
+          </Space>
+          <Paragraph className="agent-debug-message-content" type={item.selected ? undefined : "secondary"}>
+            {item.text || "[媒体消息/空文本]"}{item.text_truncated ? " …（调试预览已截断）" : ""}
+          </Paragraph>
+          <Space wrap size={8}>
+            <Text type={item.selected ? "success" : "secondary"}>
+              筛选原因：{CONTEXT_SELECTION_REASON[item.reason] ?? item.reason}
+            </Text>
+            <Text type="secondary">消息 ID {String(item.message_id ?? "—")}</Text>
+            {typeof item.score === "number" && <Text type="secondary">相关分 {item.score.toFixed(2)}</Text>}
+          </Space>
+        </div>
+      </List.Item>}
+    />
+  </Space>;
+}
+
 export function ContextInspector({
   context,
   selection,
+  budget = [],
 }: {
   context: AgentDebugResponse["context"];
   selection: AgentDebugResponse["contextSelection"];
+  budget?: AgentDebugResponse["contextBudget"];
 }): React.JSX.Element {
   const messages = context.messages ?? [];
   const members = context.members ?? [];
@@ -116,31 +219,12 @@ export function ContextInspector({
     {
       key: "selection",
       label: `筛选轨迹 ${selection.length}`,
-      children: selection.length === 0 ? <AdminEmpty description="本轮没有历史筛选轨迹" /> : <List
-        className="agent-debug-list"
-        dataSource={selection}
-        renderItem={(item, index) => <List.Item key={`${String(item.message_id ?? "none")}-${index}`}>
-          <div className="agent-debug-list-item">
-            <Space wrap size={6}>
-              <Tag color={item.selected ? "green" : undefined}>{item.selected ? "保留" : "丢弃"}</Tag>
-              <Text strong>{item.name?.trim() || String(item.user_id ?? "未知成员")}</Text>
-              <Tag>{item.role || "member"}</Tag>
-              {item.title ? <Tag>{item.title}</Tag> : null}
-              <Text type="secondary">{item.minutes_ago} 分钟前</Text>
-            </Space>
-            <Paragraph className="agent-debug-message-content" type={item.selected ? undefined : "secondary"}>
-              {item.text || "[媒体消息/空文本]"}{item.text_truncated ? " …（调试预览已截断）" : ""}
-            </Paragraph>
-            <Space wrap size={8}>
-              <Text type={item.selected ? "success" : "secondary"}>
-                筛选原因：{CONTEXT_SELECTION_REASON[item.reason] ?? item.reason}
-              </Text>
-              <Text type="secondary">消息 ID {String(item.message_id ?? "—")}</Text>
-              {typeof item.score === "number" && <Text type="secondary">相关分 {item.score.toFixed(2)}</Text>}
-            </Space>
-          </div>
-        </List.Item>}
-      />,
+      children: <SelectionList selection={selection} />,
+    },
+    {
+      key: "packing",
+      label: "Token 装箱",
+      children: <ContextPackingInspector budget={budget} />,
     },
     {
       key: "members",

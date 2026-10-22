@@ -3,7 +3,7 @@ import {
   Progress, Row, Segmented, Select, Space, Spin, Switch, Tag, Typography,
 } from "antd";
 import { useRef, useState } from "react";
-import { TraceCompareView } from "../agent-debug/TraceWorkspace";
+import { TraceCompareView } from "../agent-debug/ResultDiff";
 import { api, ApiError } from "../api";
 import {
   DraftDiffModal,

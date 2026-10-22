@@ -1,3 +1,6 @@
+import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
+import { Button, Tooltip } from "antd";
+import { useEffect, useState } from "react";
 import type { AgentDebugMode, AgentMessageItem } from "../types";
 
 export const AGENT_DEBUG_MODES: Array<{ value: AgentDebugMode; label: string }> = [
@@ -35,8 +38,67 @@ export function debugDisplay(value: unknown, fallback = "—"): string {
   return debugJson(value);
 }
 
+/** 复制到剪贴板；非安全上下文（http 局域网访问）退回 textarea + execCommand。 */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 继续走降级路径。
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+export function CopyButton({
+  text,
+  label = "复制",
+  size = "small",
+}: {
+  text: string | (() => string);
+  label?: string;
+  size?: "small" | "middle";
+}): React.JSX.Element {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return undefined;
+    const timer = window.setTimeout(() => setCopied(false), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  return <Tooltip title={copied ? "已复制" : label}>
+    <Button
+      size={size}
+      type="text"
+      aria-label={label}
+      icon={copied ? <CheckOutlined /> : <CopyOutlined />}
+      onClick={async (event) => {
+        event.stopPropagation();
+        setCopied(await copyText(typeof text === "function" ? text() : text));
+      }}
+    />
+  </Tooltip>;
+}
+
 export function DebugRawBlock({ value }: { value: unknown }): React.JSX.Element {
-  return <pre className="agent-debug-raw">{debugJson(value)}</pre>;
+  const json = debugJson(value);
+  return <div className="dbg-raw">
+    <div className="dbg-raw-actions"><CopyButton text={json} label="复制 JSON" /></div>
+    <pre className="agent-debug-raw">{json}</pre>
+  </div>;
 }
 
 export const TOOL_PERMISSION_LABELS: Record<string, string> = {
@@ -122,7 +184,7 @@ export const TRACE_MEDIA_SOURCE_LABELS: Record<string, string> = {
   forward: "合并转发",
 };
 
-const TRACE_TRIGGER_SOURCE_LABELS: Record<string, string> = {
+export const TRACE_TRIGGER_SOURCE_LABELS: Record<string, string> = {
   mention: "@ 明确呼叫",
   reply: "回复 Agent",
   wake_word: "叫名 / 唤醒词",
