@@ -17,6 +17,16 @@ from .service import page_meta, serialize_agent_audit, serialize_web_audit
 
 router = APIRouter(prefix=API_PATH)
 
+# 工具执行异常记 error；出站消息失败记 send_failed / validation_failed /
+# unsupported_segment（见 yawn_agent.tools._audit 与 outbound._audit_outbound）。
+AGENT_AUDIT_FAILURE_RESULTS = (
+    "error",
+    "send_failed",
+    "validation_failed",
+    "unsupported_segment",
+)
+
+
 @router.get("/agent/audits")
 async def get_agent_audits(
     _session: AdminReadSession,
@@ -29,7 +39,10 @@ async def get_agent_audits(
     clauses = []
     if group_id is not None:
         clauses.append(AgentAudit.group_id == group_id)
-    if result:
+    if result == "failed":
+        # Agent 审计没有字面量 failed；“失败”筛选映射到所有失败类结果。
+        clauses.append(AgentAudit.result.in_(AGENT_AUDIT_FAILURE_RESULTS))
+    elif result:
         clauses.append(AgentAudit.result == result)
     async with get_session() as db:
         total = int(

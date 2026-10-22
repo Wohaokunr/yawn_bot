@@ -4,6 +4,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import BigInteger, Boolean, ForeignKeyConstraint, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class GroupFeature(Model):
     """群级别的功能开关。"""
@@ -23,6 +25,7 @@ class GroupFeature(Model):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     updated_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
     )

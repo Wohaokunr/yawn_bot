@@ -8,6 +8,7 @@ from nonebot import logger
 
 from .command_ux import command_failure, validation_failed
 from .data_models.chat_message import ChatMessage
+from .data_models.chat_session import ChatSession
 from .data_models.group_feature import GroupFeature
 from .data_models.user_feature import UserFeature
 from .panel_data import (
@@ -224,10 +225,14 @@ async def _route_chat_list(
                 ),
             )
         target = flow.sessions[index - 1]
+        target_id = target.id
         title = target.title or "未命名"
-        target.is_deleted = True
-        await session.commit()
-        logger.info(f"用户删除了对话 #{target.id}「{title}」")
+        # flow.sessions 由之前事件的（已关闭）会话加载，需在当前会话重新取行再修改
+        row = await session.get(ChatSession, target_id)
+        if row is not None and row.user_id == flow.user_id:
+            row.is_deleted = True
+            await session.commit()
+        logger.info(f"用户删除了对话 #{target_id}「{title}」")
         flow.sessions = await get_user_sessions(session, flow.user_id)
         await matcher.reject_arg(
             _CHOICE_ARG, f"已删除对话「{title}」\n\n{chat_list_text(flow.sessions)}"

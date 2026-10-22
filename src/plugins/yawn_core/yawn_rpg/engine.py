@@ -16,6 +16,7 @@ import contextlib
 import json
 import math
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional, Union
@@ -122,8 +123,24 @@ _DEFAULT_TIME_COSTS: dict[str, int] = {
 # ── 违规行为检测（发言关键词扫描）────────────────────────
 # 紧的多字词组降低误报（单字"杀/烧"误报率高）；命中只记 flag，
 # 是否结局由通用结局阈值决定，单次命中仅偏置 KP 反应指令。
-_ARSON_KW = ("放火", "烧了", "点火", "汽油", "烧死", "一把火")
-_THREAT_KW = ("恐吓", "威胁", "杀了", "弄死")
+# 纵火两次即触发不可逆结局，故只认明确纵火意图：裸"点火/汽油/烧了"
+# 会误中"点火柴/点火把/汽油灯/发烧了"，改为意图词组 + 否定环视。
+_ARSON_TARGETS = (
+    "房子|宅子|屋子|房间|大宅|宅邸|旧宅|老宅|别墅|仓库|建筑|大楼|楼房|"
+    "这里|这儿|那里|这地方|这个地方|整栋楼|整个房子"
+)
+_ARSON_RE = re.compile(
+    r"放火|纵火|烧死|一把火(?![柴把炬])"
+    # 把……烧了/烧掉/烧光/烧成灰（"发烧了"无"把"字，不命中）
+    r"|把[^，。！？,.!?]{0,8}?(?<![发退高低])烧(?:了|掉|光|成灰|个精光)"
+    # 烧掉/点燃/点着/引燃 + 建筑类目标
+    r"|(?:烧|点燃|点着|引燃|焚)(?:了|掉|光|毁)?(?:这|那|整)?(?:栋|座|间|个|片)?"
+    rf"(?:{_ARSON_TARGETS})(?!的)|烧(?:了|掉)它"
+    # 泼/浇/倒汽油（"汽油灯"不命中）
+    r"|(?:泼|浇|洒|倒)(?:上|点|些)?汽油|汽油(?:泼|浇|洒)"
+)
+# "他被杀了""被弄死"是陈述受害，不算威胁
+_THREAT_RE = re.compile(r"恐吓|威胁|(?<!被)杀了|(?<!被)弄死")
 _DESTROY_KW = ("砸了", "砸烂", "烧毁", "拆了")
 
 # 类别 → 面向 KP 的中文描述
@@ -137,9 +154,9 @@ _OFFENSE_LABELS = {
 def _scan_offense(text: str) -> Optional[str]:
     """扫描发言中的违规行为关键词；命中返回类别，否则 None。"""
     lowered = text.casefold()
-    if any(kw in lowered for kw in _ARSON_KW):
+    if _ARSON_RE.search(lowered):
         return "arson"
-    if any(kw in lowered for kw in _THREAT_KW):
+    if _THREAT_RE.search(lowered):
         return "threat"
     if any(kw in lowered for kw in _DESTROY_KW):
         return "destroy"
@@ -1574,21 +1591,29 @@ async def _do_move(game: Game, player: PlayerState, target_text: str) -> bool:
     """/前往 的确定性移动（与 transition_scene 工具共用出口校验）。"""
     if game.module is None or game.current_scene is None:
         return False
+    if game.module.scene(game.current_scene) is None:
+        return False
+    chosen = _match_exit(game, target_text)
+    if chosen is None:
+        await _announce(game, f"这里没有通往「{target_text.strip()}」的路。")
+        return False
+    return await _transition_exit(game, player, chosen)
+
+
+def _match_exit(game: Game, target_text: str) -> Optional["Exit"]:
+    """按目标场景名 / 关键词在当前场景出口中匹配（不校验条件）。"""
+    if game.module is None or game.current_scene is None:
+        return None
     scene = game.module.scene(game.current_scene)
     if scene is None:
-        return False
+        return None
     needle = target_text.strip()
-    chosen = None
     for ex in scene.exits:
         target = game.module.scene(ex.to_scene)
         names = [target.name if target is not None else ex.to_scene, *ex.keywords]
         if any(needle and needle in n for n in names):
-            chosen = ex
-            break
-    if chosen is None:
-        await _announce(game, f"这里没有通往「{needle}」的路。")
-        return False
-    return await _transition_exit(game, player, chosen)
+            return ex
+    return None
 
 
 async def _transition_exit(
@@ -1940,6 +1965,22 @@ _GENERIC_ENDINGS: tuple[Ending, ...] = (
         name="全军覆没",
         summary="全体调查员失去行动能力的兜底结局；模组自写 TPK 结局时轮不到它。",
     ),
+)
+
+
+# 长时间无人行动的系统收尾：不进通用结局扫描（条件不由局面驱动，
+# KP 也不可经 end_session 触发），只由 _run_play 的空闲期限走 do_ending。
+_IDLE_ENDING = Ending(
+    id="generic_idle",
+    condition="always",
+    text=(
+        "═══ 结局 · 不了了之 ═══\n"
+        "夜色渐深，调查员们迟迟没有新的动作。线索散落在原地，谜团悬而未决——\n"
+        "这段调查就此搁置，也许某一天，会有人重新推开这扇门。"
+    ),
+    outcome="neutral",
+    name="不了了之",
+    summary="长时间无人行动时系统自动收尾。",
 )
 
 
@@ -2762,7 +2803,13 @@ async def _collect_say_batch(
         if action.kind is ActionKind.SAY:
             raw.append(action)
         else:
-            game.pending = action  # 首个非 SAY 行动暂存，下轮处理
+            # 首个非 SAY 行动暂存，下轮处理。pending 已被更早的行动占用时
+            # 不得覆盖（会静默丢失如排队的 /检定）：旧 pending 先移入
+            # mid_turn_buffer 队尾，新行动占 pending——_pop_ready_action
+            # 按 缓冲 → pending 的顺序消费，仍保持到达先后
+            if game.pending is not None:
+                game.mid_turn_buffer.append(game.pending)
+            game.pending = action
             break
     await asyncio.gather(*(_classify_say(game, cfg, action) for action in raw))
     first_npc = next(
@@ -2927,12 +2974,14 @@ async def _deliver_social_rewards(
             fact_text = "\n\n".join(
                 f"〔NPC 情报〕{fact.name}\n{fact.text}" for fact in new_facts
             )
-            sent = await _dm(game, player, fact_text)
-            if not sent and game.bot is None:
+            sent = await _dm(game, player, fact_text, announce_failure=False)
+            if not sent:
+                # 无论 bot 是否存在，私聊失败都要告知本人；正文绝不改发到群内
                 await _announce(
                     game,
                     MessageSegment.at(player.user_id)
-                    + " 获得了 NPC 私人情报，但私聊发送失败，请加机器人为好友。",
+                    + " 获得了 NPC 私人情报，但私聊发送失败：请加机器人为好友后"
+                    "发送 /线索，完整手记会私聊给你。",
                 )
         for clue_id in node.private_clues:
             await discover_clue(game, clue_id, owner=player)
@@ -3138,9 +3187,15 @@ def _is_major_action(action: Action) -> bool:
 
 
 def _action_stale(game: Game, _cfg: Config, action: Action) -> bool:
-    """执行前复核逻辑局面快照，不按排队秒数淘汰动作。"""
+    """执行前复核逻辑局面快照，不按排队秒数淘汰动作。
+
+    自由发言（SAY）是对话而非指向局面的命令，只复核阶段；场景 /
+    探索轮次 / 战斗轮次变化不使其过期。
+    """
     if action.expected_phase is not None and action.expected_phase is not game.phase:
         return True
+    if action.kind is ActionKind.SAY:
+        return False
     if (
         action.expected_scene is not None
         and action.expected_scene != game.current_scene
@@ -3483,7 +3538,8 @@ async def _start_combat(game: Game, cfg: Config) -> bool:
         game,
         f"〔战斗第 1 轮〕行动顺序：{' → '.join(order)}。"
         f"轮到 {_player_name(current) if current is not None else '调查员'}；"
-        "可 /攻击 目标 或 /跳过。",
+        "可 /攻击 目标、/前往 出口（逃跑，敏捷检定）或 /跳过；"
+        "全员行动后敌方行动。",
     )
     return True
 
@@ -3513,6 +3569,17 @@ async def _advance_combat(game: Game, cfg: Config) -> None:
     else:
         game.combat_index = old_index % len(game.combat_order)
     if game.combat_index == 0:
+        # 全体调查员行动完毕 → 敌方回合：场景内存活怪物逐个确定性袭击
+        # 一名存活调查员（不依赖 KP 的 monster_attack 工具，AI 关闭同样成立）
+        await _monsters_take_turn(game)
+        game.combat_order = [
+            uid for uid in game.combat_order if uid in game.active_user_ids()
+        ]
+        if not game.combat_order:
+            # 全员倒地：结局安全网在下一轮循环顶接手
+            game.combat_index = 0
+            return
+        game.combat_index = 0
         game.combat_round += 1
     game.combat_deadline = _loop_time() + cfg.rpg_combat_turn_timeout
     next_player = game.player_by_user(game.combat_order[game.combat_index])
@@ -3521,6 +3588,62 @@ async def _advance_combat(game: Game, cfg: Config) -> None:
             game,
             f"〔战斗第 {game.combat_round} 轮〕轮到 {next_player.sheet.name if next_player.sheet else next_player.seat} 行动。",
         )
+
+
+def _living_scene_monsters(game: Game) -> list[Monster]:
+    """当前场景的存活怪物（按模组声明序）。"""
+    if game.module is None or game.current_scene is None:
+        return []
+    scene = game.module.scene(game.current_scene)
+    if scene is None:
+        return []
+    monsters: list[Monster] = []
+    for mid in scene.monsters:
+        if mid in game.dead_monsters:
+            continue
+        monster = game.module.monster(mid)
+        if monster is not None:
+            monsters.append(monster)
+    return monsters
+
+
+async def _monsters_take_turn(game: Game) -> None:
+    """战斗轮末的敌方回合：每只存活怪物袭击一名随机存活调查员。"""
+    for monster in _living_scene_monsters(game):
+        if not game.active_players():
+            return
+        await do_monster_attack(game, monster, None)
+
+
+async def _attempt_flee(
+    game: Game,
+    cfg: Config,
+    player: PlayerState,
+    target_text: str,
+) -> bool:
+    """战斗中 /前往 = 逃跑：先校验出口，再做 DEX 检定。
+
+    出口不存在 / 条件不满足 → 不掷骰、不消耗回合（返回 False）；
+    DEX 检定失败 → 消耗本回合并推进战斗顺序；成功 → 全队经该出口
+    撤离（enter_scene 清空战斗状态）。
+    """
+    chosen = _match_exit(game, target_text)
+    if chosen is None:
+        await _announce(game, f"这里没有通往「{target_text.strip()}」的路。")
+        return False
+    if not evaluate_condition(chosen.condition, game.condition_context()):
+        await _announce(game, "那条路走不通，无法从那里逃跑！")
+        return False
+    name = _player_name(player)
+    dex = player.sheet.attributes.get("dex", 0) if player.sheet is not None else 0
+    res = skill_check(dex)
+    await _announce(game, res.describe(f"{name} 的逃跑（敏捷）"))
+    if not res.success:
+        await _announce(game, f"{name} 没能脱身！")
+        await _advance_combat(game, cfg)
+        return True
+    await _announce(game, f"{name} 找到破绽，带着同伴夺路而逃！")
+    return await _transition_exit(game, player, chosen)
 
 
 def _combat_has_targets(game: Game) -> bool:
@@ -3553,11 +3676,15 @@ async def _process_action(
         if action.kind is ActionKind.SAY:
             return False
         current_uid = game.combat_order[game.combat_index]
-        if action.kind not in {ActionKind.ATTACK, ActionKind.PASS_TURN}:
+        if action.kind not in {
+            ActionKind.ATTACK,
+            ActionKind.PASS_TURN,
+            ActionKind.MOVE,
+        }:
             await _announce(
                 game,
                 MessageSegment.at(player.user_id)
-                + " 战斗中只能攻击或结束当前回合。",
+                + " 战斗中只能攻击、/前往 逃跑或结束当前回合。",
             )
             return False
         if current_uid != player.user_id:
@@ -3566,6 +3693,8 @@ async def _process_action(
                 MessageSegment.at(player.user_id) + " 现在不是你的战斗行动时机。",
             )
             return False
+        if action.kind is ActionKind.MOVE:
+            return await _attempt_flee(game, cfg, player, action.aux or "")
     if action.kind is ActionKind.SAY:
         return await _handle_say(game, cfg, action, say_batch)
     elif action.kind is ActionKind.CHECK:
@@ -3744,6 +3873,12 @@ async def _run_play(game: Game, cfg: Config) -> None:
                 if idle_deadline <= 0:
                     idle_deadline = now + cfg.rpg_idle_timeout
                     idle_warned = False
+                if now >= idle_deadline:
+                    # 空闲超时：按警告所言自动收尾（走正常结局路径）
+                    logger.info(f"跑团群 {game.group_id} 长时间无人行动，自动收尾")
+                    await _announce(game, "长时间无人行动，本团自动收尾~")
+                    await do_ending(game, _IDLE_ENDING)
+                    return
                 wait_deadline = min(game.explore_deadline, idle_deadline)
                 idle_remaining = idle_deadline - now
                 if not idle_warned and idle_remaining <= cfg.rpg_idle_warn_remain:
@@ -3754,9 +3889,9 @@ async def _run_play(game: Game, cfg: Config) -> None:
                         "无人行动，再过一会儿本团将自动收尾~",
                     )
             remaining = wait_deadline - _loop_time()
-            if remaining <= 0:
-                continue
-            waited = await _get_action(game, min(remaining, 1.0))
+            # 期限已过也必须真正 await 一次（极短等待），绝不空转冻结事件循环；
+            # 到期处理在下一轮循环顶统一进行
+            waited = await _get_action(game, min(max(remaining, 0.01), 1.0))
             if waited is None:
                 continue
             action = waited

@@ -11,6 +11,7 @@ from ..tool_support import (
     _compact_group_member,
     _compact_notice,
     _compact_onebot_message,
+    _opted_out_user_ids,
     _payload_list,
     _require_known_message,
     _tool_result_limit,
@@ -29,6 +30,13 @@ NAMES = frozenset(
         "get_group_honor",
     ]
 )
+
+
+def _sender_id(compact: dict[str, Any]) -> int | None:
+    try:
+        return int(compact.get("user_id") or 0) or None
+    except (TypeError, ValueError):
+        return None
 
 
 async def handle(  # noqa: C901, PLR0912, PLR0915
@@ -53,6 +61,8 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
         ):
             raise PermissionError("消息不属于当前群")
         result = _compact_onebot_message(raw_message)
+        if _sender_id(result) in await _opted_out_user_ids(session, group_id):
+            raise PermissionError("该成员已退出 Agent 记忆，无法读取其消息")
     elif name == "get_recent_group_messages":
         try:
             count = int(args.get("count") or 10)
@@ -70,11 +80,17 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             and not isinstance(raw_history, (list, dict))
         ):
             raise ValueError("群历史消息响应格式错误")
-        compact_messages = [
-            _compact_onebot_message(item)
-            for item in messages[-count:]
-            if isinstance(item, dict)
-        ]
+        # 退出 Agent 记忆的成员不得经工具结果重新进入 Prompt，与历史上下文
+        # 的发送者过滤保持一致。
+        opted_out = await _opted_out_user_ids(session, group_id)
+        compact_messages = []
+        for item in messages[-count:]:
+            if not isinstance(item, dict):
+                continue
+            compact = _compact_onebot_message(item)
+            if _sender_id(compact) in opted_out:
+                continue
+            compact_messages.append(compact)
         result = {"items": compact_messages, "count": len(compact_messages)}
     elif name == "list_group_notices":
         raw_notices = await bot.call_api("_get_group_notice", group_id=group_id)

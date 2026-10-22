@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import BigInteger, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class FriendRequest(Model):
     """好友申请审批记录，每个用户只保留一条。"""
@@ -28,6 +30,7 @@ class FriendRequest(Model):
     )
 
     created_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
     )
     processed_at: Mapped[Optional[datetime]] = (

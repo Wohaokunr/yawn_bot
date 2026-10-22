@@ -134,7 +134,9 @@ async def test_speech_fallback_is_dropped_after_phase_token_changes(
     async def send(*_args: object) -> bool:
         sent.append(str(_args[-1]))
         if len(sent) == 1:
+            # 窗口真正移交（阶段推进且发言权离开本座位）
             game.phase_token += 1
+            game.current_speaker = None
         return False
 
     monkeypatch.setattr(ai_player, "_llm_speech", speech)

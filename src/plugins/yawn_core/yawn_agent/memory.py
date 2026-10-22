@@ -29,6 +29,7 @@ from . import media_store
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .media import delete_remote_media_files, unlink_cache_file
+from .message_parser import redact_opted_out_media_refs, redact_opted_out_reply_chain
 
 _COMPACT_BATCH_LIMIT = 40
 _COMPACT_INPUT_CHAR_LIMIT = 12_000
@@ -1382,6 +1383,31 @@ async def _delete_member_memories_locked(
             GroupAgentMessage.group_id == group_id, GroupAgentMessage.user_id == user_id
         )
     )
+    # 其他成员引用过该成员的消息时，引用链/媒体引用里仍有其正文和图片副本；
+    # 一并替换为占位符，避免留下可重新识别的隐藏副本。
+    quoted_rows = (
+        await session.execute(
+            select(
+                GroupAgentMessage.id,
+                GroupAgentMessage.reply_chain,
+                GroupAgentMessage.media_refs,
+            ).where(GroupAgentMessage.group_id == group_id)
+        )
+    ).all()
+    redacted_ids = {user_id}
+    for row_id, raw_chain, raw_refs in quoted_rows:
+        chain, chain_changed = redact_opted_out_reply_chain(
+            list(raw_chain or []), redacted_ids
+        )
+        refs, refs_changed = redact_opted_out_media_refs(
+            list(raw_refs or []), redacted_ids
+        )
+        if chain_changed or refs_changed:
+            await session.execute(
+                update(GroupAgentMessage)
+                .where(GroupAgentMessage.id == row_id)
+                .values(reply_chain=chain, media_refs=refs)
+            )
     config = await session.get(GroupAgentConfig, group_id)
     if config is not None:
         config.last_compacted_message_id = None

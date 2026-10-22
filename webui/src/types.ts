@@ -293,6 +293,8 @@ export interface MemoryItem {
   createdAt?: string | null;
   updatedAt: string;
   expiresAt?: string | null;
+  /** 乐观锁版本（不透明字符串）；访客投影不含此字段。 */
+  version?: string | null;
 }
 
 // 记忆治理状态(口径见后端 webui/service.py agent_memory_status)

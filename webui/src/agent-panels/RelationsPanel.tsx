@@ -39,17 +39,20 @@ function RelationGraphPane({
   groupId,
   typeFilter,
   readOnly,
+  refreshToken,
   onEditRelation,
   onDeleteRelation,
 }: {
   groupId: string;
   typeFilter: string;
   readOnly: boolean;
+  /** 父组件删除关系边后递增，强制图谱重新拉取。 */
+  refreshToken: number;
   onEditRelation: (edge: AgentRelationItem) => void;
   onDeleteRelation: (edge: AgentRelationItem) => void;
 }): React.JSX.Element {
   const graphQuery = useApiQuery({
-    queryKey: ["agent-relation-graph", groupId],
+    queryKey: ["agent-relation-graph", groupId, refreshToken],
     fetcher: (signal) => api<AgentRelationGraph>(
       `/agent/groups/${groupId}/relations/graph`,
       { signal },
@@ -92,6 +95,7 @@ export function RelationsPanel({
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<AgentRelationItem | null>(null);
   const [saving, setSaving] = useState(false);
+  const [graphRefreshToken, setGraphRefreshToken] = useState(0);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
 
@@ -146,11 +150,16 @@ export function RelationsPanel({
 
   const remove = async (id: string) => {
     if (readOnly || query.stale) return;
-    await api(`/agent/groups/${groupId}/relations/${id}`, { method: "DELETE" });
-    message.success("关系边已删除");
-    query.reload();
-    typesQuery.reload();
-    summaryQuery.reload();
+    try {
+      await api(`/agent/groups/${groupId}/relations/${id}`, { method: "DELETE" });
+      message.success("关系边已删除");
+      query.reload();
+      typesQuery.reload();
+      summaryQuery.reload();
+      setGraphRefreshToken((value) => value + 1);
+    } catch (error) {
+      message.error((error as Error).message);
+    }
   };
   const saveCreate = async (values: {
     subjectUserId: number;
@@ -266,6 +275,7 @@ export function RelationsPanel({
             groupId={groupId}
             typeFilter={typeFilter}
             readOnly={readOnly}
+            refreshToken={graphRefreshToken}
             onEditRelation={openEdit}
             onDeleteRelation={(edge) => { void remove(edge.id); }}
           />

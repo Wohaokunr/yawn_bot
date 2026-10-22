@@ -311,6 +311,41 @@ _DM_ALLOWED: dict[Phase, frozenset[ActionKind]] = {
 }
 
 
+# 夜间技能的角色闸门（先于阶段闸门）：非技能持有者（含已出局者）不论
+# 当前处于哪个夜间子阶段都得到同一句回复，否则"静默受理 vs 还不是时候"
+# 的差异可被用来探测当前轮到哪个角色行动
+_NO_SKILL = "你没有这个技能（或已无法行动）~"
+
+# 夜间私聊行动 → 可使用它的角色
+_NIGHT_SKILL_ROLES: dict[ActionKind, frozenset[Role]] = {
+    ActionKind.KILL: frozenset({Role.WEREWOLF}),
+    ActionKind.SAY: frozenset({Role.WEREWOLF}),
+    ActionKind.SAVE: frozenset({Role.WITCH}),
+    ActionKind.POISON: frozenset({Role.WITCH}),
+    ActionKind.CHECK: frozenset({Role.SEER}),
+    ActionKind.CHOOSE_OWNER: frozenset({Role.HALFBLOOD}),
+    ActionKind.SILENCE: frozenset({Role.SILENT_ELDER}),
+    ActionKind.SKIP: frozenset({Role.WEREWOLF, Role.WITCH, Role.SILENT_ELDER}),
+}
+
+# 夜间子阶段 → 当前行动的角色
+_NIGHT_PHASE_ROLE: dict[Phase, Role] = {
+    Phase.NIGHT_HALFBLOOD: Role.HALFBLOOD,
+    Phase.NIGHT_WOLVES: Role.WEREWOLF,
+    Phase.NIGHT_WITCH: Role.WITCH,
+    Phase.NIGHT_SEER: Role.SEER,
+    Phase.NIGHT_ELDER: Role.SILENT_ELDER,
+}
+
+
+def _lacks_skill(game: Optional[Game], user_id: int, role: Role) -> bool:
+    """在局玩家不持有该角色或已出局（结果与当前阶段无关）。"""
+    if game is None:
+        return False
+    player = game.player_by_user(user_id)
+    return player is None or not player.alive or player.role is not role
+
+
 def _sender_display(event: GroupMessageEvent) -> str:
     """报名者显示名：群名片 > 昵称 > QQ 号。"""
     return event.sender.card or event.sender.nickname or str(event.user_id)
@@ -810,13 +845,12 @@ async def handle_choose_owner(
     """混血儿首夜选择主人。"""
     user_id = int(event.get_user_id())
     game = game_of_user(user_id)
+    if _lacks_skill(game, user_id, Role.HALFBLOOD):
+        await choose_owner_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_HALFBLOOD:
         await choose_owner_cmd.finish(
             _not_now(game, "认主 是混血儿首夜行动，请私聊发送 /认主 N~")
         )
-    player = game.player_by_user(user_id)
-    if player is None or player.role is not Role.HALFBLOOD:
-        await choose_owner_cmd.finish("当前只有混血儿可以认主~")
     seat = _parse_seat(arg)
     if seat is None:
         await choose_owner_cmd.finish("格式：/认主 N（N 为主人座位号）")
@@ -839,13 +873,12 @@ async def handle_silence(
     """禁言/禁票长老夜间选择目标。"""
     user_id = int(event.get_user_id())
     game = game_of_user(user_id)
+    if _lacks_skill(game, user_id, Role.SILENT_ELDER):
+        await silence_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_ELDER:
         await silence_cmd.finish(
             _not_now(game, "禁言（禁票板为禁票）是长老夜间行动，请私聊发送 /禁言 N~")
         )
-    player = game.player_by_user(user_id)
-    if player is None or player.role is not Role.SILENT_ELDER:
-        await silence_cmd.finish("当前只有禁言长老可以使用这条指令~")
     seat = _parse_seat(arg)
     if seat is None:
         await silence_cmd.finish("格式：/禁言 N（禁票板也可用 /禁票 N）")
@@ -869,6 +902,8 @@ async def handle_kill(
 ) -> None:
     """狼人刀人。"""
     game = game_of_user(int(event.get_user_id()))
+    if _lacks_skill(game, int(event.get_user_id()), Role.WEREWOLF):
+        await kill_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_WOLVES:
         await kill_cmd.finish(
             _not_now(game, "刀 是狼人的夜间行动，请按私聊提示在夜里回复 刀N~")
@@ -894,6 +929,8 @@ async def handle_check(
 ) -> None:
     """预言家查验。"""
     game = game_of_user(int(event.get_user_id()))
+    if _lacks_skill(game, int(event.get_user_id()), Role.SEER):
+        await check_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_SEER:
         await check_cmd.finish(
             _not_now(game, "查验 是预言家的夜间行动，请按私聊提示在夜里回复 查验N~")
@@ -918,6 +955,8 @@ async def handle_save(
 ) -> None:
     """女巫救人。"""
     game = game_of_user(int(event.get_user_id()))
+    if _lacks_skill(game, int(event.get_user_id()), Role.WITCH):
+        await save_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_WITCH:
         await save_cmd.finish(
             _not_now(game, "救 是女巫的夜间行动，请按私聊提示在夜里回复 救~")
@@ -940,6 +979,8 @@ async def handle_poison(
 ) -> None:
     """女巫毒人。"""
     game = game_of_user(int(event.get_user_id()))
+    if _lacks_skill(game, int(event.get_user_id()), Role.WITCH):
+        await poison_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_WITCH:
         await poison_cmd.finish(
             _not_now(game, "毒 是女巫的夜间行动，请按私聊提示在夜里回复 毒N~")
@@ -1286,7 +1327,24 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
         await private_listener.finish(
             _dm_hint_for(game, game.player_by_user(user_id), text)
         )
-    if action.kind not in _DM_ALLOWED.get(game.phase, frozenset()):
+    actor = game.player_by_user(user_id)
+    if game.phase in _NIGHT_PHASES:
+        # 夜间先查角色：非持有者的回复不随子阶段变化，防探测当前行动角色
+        skill_roles = _NIGHT_SKILL_ROLES.get(action.kind)
+        if skill_roles is not None and (
+            actor is None or not actor.alive or actor.role not in skill_roles
+        ):
+            await private_listener.finish(_NO_SKILL)
+    allowed = action.kind in _DM_ALLOWED.get(game.phase, frozenset())
+    phase_role = _NIGHT_PHASE_ROLE.get(game.phase)
+    if (
+        allowed
+        and phase_role is not None
+        and (actor is None or actor.role is not phase_role)
+    ):
+        # 持有该技能、但当前不是自己角色的子阶段（如狼人在女巫阶段回复 过）
+        allowed = False
+    if not allowed:
         logger.info(
             f"狼人杀群 {game.group_id} {user_id} 私聊行动 "
             f"{action.kind.value} 在阶段 {game.phase.value} 不可用，闸门拦截"
@@ -1294,7 +1352,6 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
         await private_listener.finish(
             _not_now(game, "这条指令在当前阶段不可用，请按私聊提示行动~")
         )
-    actor = game.player_by_user(user_id)
     seat_desc = f"{actor.seat}号" if actor is not None else str(user_id)
     target_desc = f"→{action.value}号" if action.value else ""
     logger.info(

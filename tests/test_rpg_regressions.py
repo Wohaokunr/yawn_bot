@@ -319,3 +319,239 @@ def test_ending_recap_has_public_statistics_only(
     assert "公开线索：1 条" in recap
     assert "hidden_flag" not in recap
     assert "私密纸条" not in recap
+
+
+# ── 回归：骰子 / 违规扫描 / 行动排序 / 过期 / 空闲收尾 / 战斗 / 私聊失败 ──
+
+
+def test_fumble_rule_matches_coc7e(rpg_modules: tuple[Any, Any]) -> None:
+    _state, engine = rpg_modules
+    dice = importlib.import_module("src.plugins.yawn_core.yawn_rpg.dice")
+    tier = dice.CheckTier
+    # 技能 < 50：96-100 大失败
+    assert dice.classify_roll(96, 40) is tier.FUMBLE
+    assert dice.classify_roll(100, 40) is tier.FUMBLE
+    assert dice.classify_roll(95, 40) is tier.FAILURE
+    # 技能 ≥ 50：仅 100 大失败
+    assert dice.classify_roll(96, 60) is tier.FAILURE
+    assert dice.classify_roll(99, 99) is tier.REGULAR
+    assert dice.classify_roll(100, 60) is tier.FUMBLE
+    assert engine is not None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["我去点火柴看看", "点火把照明", "我发烧了", "拿起汽油灯", "点燃这里的蜡烛"],
+)
+def test_benign_fire_words_are_not_arson(
+    rpg_modules: tuple[Any, Any], text: str
+) -> None:
+    _state, engine = rpg_modules
+    assert engine._scan_offense(text) != "arson"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["我要放火", "纵火！", "把房子烧了", "烧掉这栋房子", "点燃宅子", "往门上泼汽油"],
+)
+def test_clear_arson_intent_is_detected(
+    rpg_modules: tuple[Any, Any], text: str
+) -> None:
+    _state, engine = rpg_modules
+    assert engine._scan_offense(text) == "arson"
+
+
+def test_victim_statement_is_not_threat(rpg_modules: tuple[Any, Any]) -> None:
+    _state, engine = rpg_modules
+    assert engine._scan_offense("他被杀了") is None
+    assert engine._scan_offense("我杀了你") == "threat"
+
+
+@pytest.mark.asyncio
+async def test_say_batch_never_overwrites_pending_action(
+    rpg_modules: tuple[Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, engine = rpg_modules
+    game = _experience_game(state, engine)
+    earlier = state.Action(state.ActionKind.CHECK, 10, aux="侦查")
+    later = state.Action(state.ActionKind.CHECK, 11, aux="聆听")
+    game.pending = earlier
+    game.action_queue.put_nowait(later)
+
+    async def classify(_game: Any, _cfg: Any, action: Any) -> None:
+        action.route = "kp_say"
+
+    monkeypatch.setattr(engine, "_classify_say", classify)
+    await engine._collect_say_batch(
+        game,
+        engine.Config(rpg_say_settle_window=0.05),
+        state.Action(state.ActionKind.SAY, 10, aux="说话"),
+    )
+
+    assert engine._pop_ready_action(game) is earlier
+    assert engine._pop_ready_action(game) is later
+
+
+def test_say_is_not_stale_after_round_or_scene_change(
+    rpg_modules: tuple[Any, Any],
+) -> None:
+    state, engine = rpg_modules
+    game = _experience_game(state, engine)
+    say = state.Action(
+        state.ActionKind.SAY,
+        10,
+        aux="大家小心",
+        expected_phase=state.Phase.PLAY,
+        expected_scene="room",
+        expected_explore_round=1,
+    )
+    game.explore_round = 2
+    game.current_scene = "hall"
+    assert not engine._action_stale(game, engine.Config(), say)
+    game.phase = state.Phase.ENDED
+    assert engine._action_stale(game, engine.Config(), say)
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_ends_game_without_spinning(
+    rpg_modules: tuple[Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, engine = rpg_modules
+    game = _experience_game(state, engine)
+    messages: list[str] = []
+
+    async def capture(_game: Any, text: Any) -> None:
+        messages.append(str(text))
+
+    async def noop(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(engine, "_announce", capture)
+    monkeypatch.setattr(engine, "_tutorial_step", noop)
+    monkeypatch.setattr(engine, "_persist_end", noop)
+    cfg = engine.Config(
+        rpg_idle_timeout=0,
+        rpg_idle_warn_remain=0,
+        rpg_explore_round_timeout=3600,
+    )
+    await asyncio.wait_for(engine._run_play(game, cfg), timeout=5)
+
+    assert game.phase is state.Phase.ENDED
+    assert any("不了了之" in message for message in messages)
+
+
+def _combat_game(state: Any, engine: Any) -> Any:
+    schema = importlib.import_module("src.plugins.yawn_core.yawn_rpg.module_schema")
+    game = _experience_game(state, engine)
+    module = game.module
+    module.monsters.append(
+        schema.Monster(id="ghoul", name="食尸鬼", hp=99, attack_skill=50, damage="1d3")
+    )
+    room = module.scene("room")
+    room.monsters.append("ghoul")
+    room.exits.append(schema.Exit(to_scene="hall"))
+    game.combat_order[:] = [11, 10]
+    game.combat_index = 0
+    game.combat_round = 1
+    return game
+
+
+@pytest.mark.asyncio
+async def test_monsters_attack_after_all_players_act(
+    rpg_modules: tuple[Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, engine = rpg_modules
+    game = _combat_game(state, engine)
+    attacks: list[str] = []
+
+    async def quiet(*_args: object) -> None:
+        return None
+
+    async def monster_attack(_game: Any, monster: Any, _target: Any) -> str:
+        attacks.append(monster.id)
+        return ""
+
+    monkeypatch.setattr(engine, "_announce", quiet)
+    monkeypatch.setattr(engine, "do_monster_attack", monster_attack)
+    cfg = engine.Config()
+    await engine._advance_combat(game, cfg)
+    assert attacks == []
+    assert game.combat_index == 1
+    await engine._advance_combat(game, cfg)
+    assert attacks == ["ghoul"]
+    assert game.combat_index == 0
+    assert game.combat_round == 2  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("escaped", [True, False])
+async def test_move_during_combat_is_flee_attempt(
+    rpg_modules: tuple[Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    escaped: bool,
+) -> None:
+    state, engine = rpg_modules
+    game = _combat_game(state, engine)
+    player = game.player_by_user(11)
+    attacks: list[str] = []
+
+    async def quiet(*_args: object) -> None:
+        return None
+
+    async def monster_attack(_game: Any, monster: Any, _target: Any) -> str:
+        attacks.append(monster.id)
+        return ""
+
+    def fixed_check(skill_value: int, *_args: object, **_kwargs: object) -> Any:
+        dice = importlib.import_module("src.plugins.yawn_core.yawn_rpg.dice")
+        return dice.CheckResult(
+            roll=1 if escaped else 99,
+            skill_value=skill_value,
+            difficulty=dice.CheckDifficulty.REGULAR,
+            tier=dice.CheckTier.CRITICAL if escaped else dice.CheckTier.FAILURE,
+        )
+
+    monkeypatch.setattr(engine, "_announce", quiet)
+    monkeypatch.setattr(engine, "do_monster_attack", monster_attack)
+    monkeypatch.setattr(engine, "skill_check", fixed_check)
+    action = state.Action(state.ActionKind.MOVE, 11, aux="走廊")
+    assert await engine._process_action(game, engine.Config(), action, player)
+    if escaped:
+        assert game.current_scene == "hall"
+        assert not game.combat_order
+    else:
+        assert game.current_scene == "room"
+        assert game.combat_order
+        assert game.combat_index == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_npc_fact_dm_is_reported_with_real_bot(
+    rpg_modules: tuple[Any, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, engine = rpg_modules
+    schema = importlib.import_module("src.plugins.yawn_core.yawn_rpg.module_schema")
+    game = _experience_game(state, engine)
+    game.bot = object()
+    player = game.player_by_user(10)
+    npc = game.module.npc("caretaker")
+    node = schema.SocialNode.model_construct(id="ask", unlock_facts=["key_fact"])
+    messages: list[str] = []
+
+    async def capture(_game: Any, text: Any) -> None:
+        messages.append(str(text))
+
+    async def failed_dm(*_args: object) -> bool:
+        return False
+
+    monkeypatch.setattr(engine, "_announce", capture)
+    monkeypatch.setattr(engine.api, "send_dm", failed_dm)
+    await engine._deliver_social_rewards(game, player, npc, node, success=True)
+
+    assert any("私聊发送失败" in message and "/线索" in message for message in messages)
+    assert all("钥匙藏在井边" not in message for message in messages)

@@ -14,6 +14,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class AgentMediaAsset(Model):
     """Agent 媒体资产索引。
@@ -77,12 +79,16 @@ class AgentMediaAsset(Model):
     caption_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), index=True
+        DateTime,
+        default=beijing_now,
+        server_default=func.current_timestamp(),
+        index=True,
     )
     last_used_at: Mapped[datetime] = mapped_column(
         DateTime,
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
         index=True,
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)

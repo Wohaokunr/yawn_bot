@@ -388,6 +388,83 @@ def _append_media_refs(
         target.append(item)
 
 
+OPTED_OUT_REPLY_NICKNAME = "已退出成员"
+OPTED_OUT_REPLY_TEXT = "[该成员已退出 Agent 记忆，引用内容已隐藏]"
+
+
+def _as_user_id(value: Any) -> int | None:
+    try:
+        user_id = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return user_id if user_id > 0 else None
+
+
+def redact_opted_out_reply_chain(
+    chain: list[dict[str, Any]],
+    opted_out: set[int] | frozenset[int],
+) -> tuple[list[dict[str, Any]], bool]:
+    """把退出 Agent 记忆成员的引用条目替换为不可识别的占位符。
+
+    只保留 ``message_id``（用于引用结构/回复校验），去掉作者、昵称、正文和
+    媒体类型，避免被引用成员的内容经引用链进入 Prompt 或长期存储。
+    """
+
+    if not opted_out or not chain:
+        return chain, False
+    changed = False
+    output: list[dict[str, Any]] = []
+    for entry in chain:
+        if isinstance(entry, dict) and _as_user_id(entry.get("user_id")) in opted_out:
+            output.append(
+                {
+                    "message_id": entry.get("message_id"),
+                    "user_id": None,
+                    "nickname": OPTED_OUT_REPLY_NICKNAME,
+                    "text": OPTED_OUT_REPLY_TEXT,
+                    "media_types": [],
+                }
+            )
+            changed = True
+        else:
+            output.append(entry)
+    return output, changed
+
+
+def redact_opted_out_media_refs(
+    refs: list[dict[str, Any]],
+    opted_out: set[int] | frozenset[int],
+) -> tuple[list[dict[str, Any]], bool]:
+    """丢弃来自退出成员（引用/转发来源）的媒体引用。"""
+
+    if not opted_out or not refs:
+        return refs, False
+    kept = [
+        item
+        for item in refs
+        if not (
+            isinstance(item, dict)
+            and _as_user_id(item.get("source_user_id")) in opted_out
+        )
+    ]
+    return kept, len(kept) != len(refs)
+
+
+def redact_opted_out_replies(
+    normalized: NormalizedMessage,
+    opted_out: set[int] | frozenset[int],
+) -> bool:
+    """就地清除当前消息引用链/媒体中属于退出成员的内容，返回是否有改动。"""
+
+    chain, chain_changed = redact_opted_out_reply_chain(
+        normalized.reply_chain, opted_out
+    )
+    refs, refs_changed = redact_opted_out_media_refs(normalized.media_refs, opted_out)
+    normalized.reply_chain = chain
+    normalized.media_refs = refs
+    return chain_changed or refs_changed
+
+
 def _retag_media_refs(
     refs: list[dict[str, Any]],
     *,
@@ -818,4 +895,7 @@ __all__ = [
     "SegmentNode",
     "normalize_message",
     "parse_message",
+    "redact_opted_out_media_refs",
+    "redact_opted_out_replies",
+    "redact_opted_out_reply_chain",
 ]

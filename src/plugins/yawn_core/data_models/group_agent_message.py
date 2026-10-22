@@ -16,6 +16,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class GroupAgentMessage(Model):
     """短期群消息索引；媒体只保存可重建引用。"""
@@ -47,7 +49,10 @@ class GroupAgentMessage(Model):
     forward_tree: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     media_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     received_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), index=True
+        DateTime,
+        default=beijing_now,
+        server_default=func.current_timestamp(),
+        index=True,
     )
     expires_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True, index=True

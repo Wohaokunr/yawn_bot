@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import cast
 
 from nonebot import get_bot, get_driver, get_plugin_config, logger
+from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_localstore import get_plugin_data_dir
 from nonebot_plugin_orm import async_scoped_session, get_session
 from sqlalchemy import func, select
@@ -442,16 +443,18 @@ async def _run_job(job_id: int) -> None:
                     cast("async_scoped_session", check_session),
                 )
                 if not allowed:
+                    # commit 会过期 ORM 属性，提前缓存群号，避免 MissingGreenlet
+                    notify_group_id = current_job.group_id
                     logger.debug(
                         f"番茄任务后台权限拦截：job_id={job_id} "
-                        f"user_id={current_job.requester_user_id} group_id={current_job.group_id}"
+                        f"user_id={current_job.requester_user_id} group_id={notify_group_id}"
                     )
                     current_job.status = "failed"
                     current_job.last_error = "功能「番茄小说」已关闭，任务已暂停"
                     await check_session.commit()
                     await notify_group(
                         get_bot(),
-                        current_job.group_id,
+                        notify_group_id,
                         f"番茄任务 #{job_id} 已因功能关闭而暂停",
                     )
                     return
@@ -859,6 +862,33 @@ def cleanup_expired_files() -> int:
         f"retention_hours={config.fanqie_file_retention_hours}"
     )
     return removed
+
+
+_CLEANUP_JOB_ID = "yawn_core_fanqie:cleanup_files"
+
+
+async def _cleanup_expired_files_job() -> None:
+    """定时清理过期文件；失败只记录日志，不影响调度器。"""
+
+    try:
+        cleanup_expired_files()
+    except Exception:  # noqa: BLE001
+        logger.exception("番茄过期文件定时清理失败")
+
+
+@get_driver().on_startup
+async def _schedule_file_cleanup() -> None:
+    """除启动时清理外，每小时再清理一次过期文件。"""
+
+    scheduler.add_job(
+        _cleanup_expired_files_job,
+        "interval",
+        hours=1,
+        id=_CLEANUP_JOB_ID,
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
 
 
 @get_driver().on_startup

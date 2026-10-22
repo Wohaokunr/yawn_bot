@@ -24,6 +24,9 @@ class ToolExecutionContext:
     capabilities: BotGroupCapabilities
     actor_can_manage: bool | None = None
     privileged_allowlist: frozenset[str] | None = None
+    # 本轮触发消息中调用者本人写的正文；critical 工具据此校验显式动作意图。
+    # 主动/后台任务保持 None，因此永远无法执行 critical 工具。
+    current_intent_text: str | None = None
 
     def with_capabilities(
         self, capabilities: BotGroupCapabilities

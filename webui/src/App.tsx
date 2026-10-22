@@ -50,13 +50,13 @@ function App(): React.JSX.Element {
   useEffect(() => {
     api<AuthSessionData>("/auth/session")
       .then(({ data }) => {
-        setCsrfToken(data.csrfToken);
+        setCsrfToken(data.csrfToken, data.role);
         setSession(data);
       })
       .catch(() => setSession(null));
 
     const lost = () => {
-      setCsrfToken("");
+      setCsrfToken("", null);
       setSession(null);
     };
     window.addEventListener("yawnbot-auth-lost", lost);
@@ -70,7 +70,7 @@ function App(): React.JSX.Element {
     return (
       <Login
         onSuccess={(nextSession) => {
-          setCsrfToken(nextSession.csrfToken);
+          setCsrfToken(nextSession.csrfToken, nextSession.role);
           setSession(nextSession);
         }}
       />

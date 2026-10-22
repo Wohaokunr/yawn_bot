@@ -225,11 +225,13 @@ def test_guest_session_is_role_aware_and_cannot_access_admin_routes(  # noqa: C9
 
     guest_cookie = client.cookies.get(auth.COOKIE_NAME)
     assert guest_cookie
-    with pytest.raises(WebSocketDisconnect) as exc_info, client.websocket_connect(
+    with client.websocket_connect(
         "/webui/api/v1/stream",
         headers={"cookie": f"{auth.COOKIE_NAME}={guest_cookie}"},
-    ):
-        pass
+    ) as rejected_ws, pytest.raises(
+        WebSocketDisconnect
+    ) as exc_info:
+        rejected_ws.receive_text()
     assert exc_info.value.code == 4403  # noqa: PLR2004
 
 
@@ -276,18 +278,22 @@ def test_admin_stream_keeps_snapshot_behavior_but_guest_never_reaches_overview(
     assert overview_calls == 1
 
     guest_cookie = auth.create_session(role="guest", credential_version=7)[0]
-    with pytest.raises(WebSocketDisconnect) as exc_info, client.websocket_connect(
+    with client.websocket_connect(
         "/webui/api/v1/stream",
         headers={"cookie": f"{auth.COOKIE_NAME}={guest_cookie}"},
-    ):
-        pass
+    ) as rejected_ws, pytest.raises(
+        WebSocketDisconnect
+    ) as exc_info:
+        rejected_ws.receive_text()
     assert exc_info.value.code == 4403  # noqa: PLR2004
     assert overview_calls == 1
 
-    with pytest.raises(WebSocketDisconnect) as anonymous_exc, client.websocket_connect(
+    with client.websocket_connect(
         "/webui/api/v1/stream"
-    ):
-        pass
+    ) as rejected_ws, pytest.raises(
+        WebSocketDisconnect
+    ) as anonymous_exc:
+        rejected_ws.receive_text()
     assert anonymous_exc.value.code == 4401  # noqa: PLR2004
     assert overview_calls == 1
 

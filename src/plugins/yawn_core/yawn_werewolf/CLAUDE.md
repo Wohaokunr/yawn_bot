@@ -58,6 +58,14 @@
   禁言在 `_speech_rotation` 跳过发言人（全程不解禁），禁票在 `_vote_phase`
   经 `exclude_seats` 排除放逐环节投票资格（含 PK 投票，不含警长投票）。
   注意 `_collect_votes` 的逐条行动校验也查 `exclude_seats`，否则人类可绕过。
+- **警长投票排除警上玩家**：`SHERIFF_VOTE` 以投票时仍在竞选的候选人、
+  `SHERIFF_REVOTE` 以平票者为 `exclude_seats`（AI 驱动经 `vote_exclude`
+  同步不派票）；排除后无人可投直接判无警长，不开空投票窗口。
+- **警长竞选顺延**：竞选回合存于 `game.sheriff_campaign_round`（默认 1）。
+  竞选完成前被自爆打断（`run_game` 的 `_DetonatedError` 分支 →
+  `_postpone_sheriff_campaign`）首日顺延到次日，顺延后再被打断则警徽流失。
+- **夜间结算**：同一人被刀（未救）且被毒只死一次，死因记 `WITCH_POISON`
+  （猎人不能开枪、警徽失效）。
 - **混血儿胜负不对称**：阵营恒为 GOOD、屠边算民边（`VILLAGER_SIDE_ROLES`），
   但个人胜负随主人阵营——仅 `_persist_end` 特判 `is_winner`、`_finish` 附注主人。
 - **夜间播报必须角色盲**：全群禁言期间由 `_night_heartbeat` 每隔
@@ -65,7 +73,18 @@
   文案不含角色/座位/阶段信息——被跳过的子阶段（如女巫双药已用）
   若造成"播报缺席"即可反推角色状态。旧的按子阶段点名倒计时
   （"女巫行动还剩 30 秒"）已废弃。心跳任务在 `_run_night` 的
-  `try/finally` 里创建/取消，只调 `_announce`，不写任何引擎信号。
+  `try/finally` 里创建/取消，只调 `_announce`，不写任何引擎信号；
+  收尾用 `asyncio.wait` 等心跳结束，不得 `suppress(CancelledError)`——
+  那会吞掉 /结束游戏 对引擎任务本身的取消。
+- **角色缺席不缩短夜晚**：女巫已死/双药用尽、预言家已死、长老已死时
+  （板子里有该角色）子阶段不立即返回，而经 `_idle_phase` 随机等待
+  `_IDLE_PHASE_SECONDS`（夹到阶段超时），否则夜长泄漏角色状态。
+- **猎人开枪不预告身份**：`_hunter_prompt` 群内只播中性的
+  `_death_skill_wait_text`，猎人身份仅在真正开枪时公开；身份未公开的
+  夜间死者（含被毒猎人）一律经 `_death_skill_idle` 走同款等待（同样的
+  解禁/禁言与随机时长），无效目标只私聊反馈。
+- **私聊失败提示**：`_dm` 首次失败只在 `_DM_FAIL_NOTICE_PHASES`
+  （发牌、警徽移交——私聊语境本身公开）群内 @ 提示，其余阶段只记日志。
 - **投票必播计票汇总**：`_collect_votes` 结尾一律经
   `_announce_vote_tally` 群播汇总块（得票排序 + 警长 1.5 票标注
   + 弃票/未投票名单），覆盖警长投票/重投/放逐/PK。1.5 权重逻辑
@@ -84,7 +103,9 @@
   收到相同一份，不标注 AI（保持伪装）。
 - **阶段报错与私聊提示防泄漏**：`commands._PHASE_CN` 把五个夜间
   子阶段一律折叠为"夜晚"；阶段闸门错误经 `_not_now` 附当前阶段
-  与一行指引；私聊解析失败经 `_dm_hint_for` 按角色+阶段给裁剪提示，
+  与一行指引；夜间技能命令（含私聊自由文本）**先查角色再查阶段**：
+  非持有者/已出局者一律回 `_NO_SKILL`（与子阶段无关），持有者在非本角色
+  子阶段才走 `_not_now`；私聊解析失败经 `_dm_hint_for` 按角色+阶段给裁剪提示，
   `dsl._DM_HINT` 仅作兜底。`dsl.py` 的匹配行为与 `allow_votes`
   语义是人类与 AI 共用契约，不得擅改。
 
@@ -95,6 +116,9 @@
   否则 LLM 调用会阻塞循环，错过随后打开的发言窗口（历史上警长竞选
   AI 失声的根因）。
 - 发言窗口优先级最高：`_process_phase` 顶部先检查 `current_speaker`。
+  `_do_speech` 以 (阶段, 当前发言者) 判断窗口归属而非 phase token
+  （决斗失败/警徽移交会在同一窗口内推进 token），收尾 SKIP 显式携带
+  当前 token；窗口被暂时切走时撤销去重键，回到本窗口再重新处理。
 - **骑士决斗决策**：与上警/投票一样走 `_spawn` 后台任务（`_maybe_spawn_knight`
   于 DAY_SPEECH/PK_SPEECH 派发），绝不阻塞发言窗口；LLM 超时夹取到
   `ww_ai_discuss_timeout`，迟到的决斗被引擎阶段门安全丢弃，等价不决斗。

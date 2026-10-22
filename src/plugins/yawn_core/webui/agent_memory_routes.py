@@ -79,7 +79,7 @@ from .agent_route_helpers import memory_privacy_clauses as _memory_privacy_claus
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
 from .hub import hub
-from .route_helpers import check_version, require_group
+from .route_helpers import check_version, optimistic_write_lock, require_group
 from .route_models import (
     AgentConfigPatch,
     AgentDebugRunBody,
@@ -98,6 +98,7 @@ from .service import (
     group_feature_rows,
     iso,
     load_relation_graph,
+    memory_version,
     page_meta,
     serialize_agent_config,
     serialize_agent_message,
@@ -464,7 +465,7 @@ async def update_memory(
     updates = body.model_dump(exclude_unset=True, exclude={"version"})
     if not updates:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "没有可更新的字段")
-    async with get_session() as db:
+    async with optimistic_write_lock, get_session() as db:
         await require_group(db, group_id)
         row = await db.scalar(
             select(AgentMemory).where(
@@ -474,7 +475,7 @@ async def update_memory(
         )
         if row is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "记忆不存在")
-        check_version(row, body.version)
+        check_version(row, body.version, version_of=memory_version)
         if "content" in updates:
             row.content = str(updates["content"]).strip()
         if "salience" in updates:

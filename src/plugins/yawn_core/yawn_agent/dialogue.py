@@ -61,6 +61,7 @@ from .dialogue_turn_support import (
 )
 from .dialogue_runtime_support import (
     accumulate_turn_usage as _accumulate_turn_usage_impl,
+    abort_after_commit_failure as _abort_after_commit_failure,
     commit_tool_batch as _commit_tool_batch,
     extract_message_id as _extract_message_id,
     resolve_turn_tool_capabilities as _resolve_turn_tool_capabilities,
@@ -722,6 +723,7 @@ async def _process_group_message(
                 capabilities=capabilities,
                 actor_can_manage=(True if allow_admin_tools else None),
                 privileged_allowlist=frozenset(config.tool_allowlist or []),
+                current_intent_text=tool_intent_text,
             )
             turn_usage: dict[str, int] = {}
             while rounds < round_limit:
@@ -924,14 +926,9 @@ async def _process_group_message(
                                     round_needs_commit = True
                                     round_commit_tools.append(tool_name)
                                 if execution_result.immediate_commit:
-                                    await _commit_tool_batch(
-                                        session,
-                                        config,
-                                        group_id,
-                                        rounds,
-                                        [tool_name],
-                                        immediate=True,
-                                    )
+                                    if not await _commit_tool_batch(session, config, group_id, rounds, [tool_name], immediate=True):
+                                        await _abort_after_commit_failure(_send_unless_expired, _TURN_END_NOTICE, bot, group_id, enqueued_at=enqueued_at, message_id=message_id, sent=round_sent_message)
+                                        return
                                     round_needs_commit = False
                                     round_commit_tools.clear()
                     had_tool_results = True
@@ -1218,14 +1215,9 @@ async def _process_group_message(
                         # 一次模型决策最多执行一个用户可见发送动作；避免模型同一轮
                         # 同时调用 send_message/send_forward 连发多条。
                         break
-                if round_needs_commit:
-                    await _commit_tool_batch(
-                        session,
-                        config,
-                        group_id,
-                        rounds,
-                        round_commit_tools,
-                    )
+                if round_needs_commit and not await _commit_tool_batch(session, config, group_id, rounds, round_commit_tools):
+                    await _abort_after_commit_failure(_send_unless_expired, _TURN_END_NOTICE, bot, group_id, enqueued_at=enqueued_at, message_id=message_id, sent=round_sent_message)
+                    return
                 if round_tool_media_blocks and not round_sent_message:
                     messages.append(
                         {

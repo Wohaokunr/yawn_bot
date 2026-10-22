@@ -494,6 +494,55 @@ async def user_can_manage_group(bot: Any, group_id: int, user_id: int) -> bool:
     return allowed
 
 
+async def actor_can_act_on_target(
+    bot: Any, group_id: int, actor_user_id: int | None, target_user_id: int
+) -> bool:
+    """实时确认调用者本人有权处置目标成员。
+
+    机器人是群主时，它的群权限高于管理员；仅比较机器人与目标会让任意管理员
+    借机器人之手处置其他管理员。这里额外要求：目标是群主时一律拒绝，目标是
+    管理员时只有群主本人可以发起。任一角色读取失败都按无权处理。
+    """
+
+    if actor_user_id is None:
+        return False
+    try:
+        actor_role, _source = await _probe_member_role(bot, group_id, actor_user_id)
+        target_role, _source = await _probe_member_role(bot, group_id, target_user_id)
+    except Exception:  # noqa: BLE001
+        dbg_exc(
+            f"群 {group_id} 查询调用者 {actor_user_id} / 目标 {target_user_id} 角色失败,"
+            "视为无权处置"
+        )
+        return False
+    if actor_role not in {"owner", "admin"} or target_role == "owner":
+        allowed = False
+    elif target_role == "admin":
+        allowed = actor_role == "owner"
+    else:
+        allowed = True
+    dbg(
+        f"群 {group_id} 调用者处置目标判定: actor_role={actor_role!r} "
+        f"target_role={target_role!r} → {allowed}"
+    )
+    return allowed
+
+
+async def actor_is_group_owner(
+    bot: Any, group_id: int, actor_user_id: int | None
+) -> bool:
+    """实时确认调用者本人是群主；读取失败按否处理。"""
+
+    if actor_user_id is None:
+        return False
+    try:
+        role, _source = await _probe_member_role(bot, group_id, actor_user_id)
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {group_id} 查询调用者 {actor_user_id} 是否群主失败,视为否")
+        return False
+    return role == "owner"
+
+
 async def target_can_be_muted(
     bot: Any, group_id: int, user_id: int, bot_role: str
 ) -> bool:
@@ -522,6 +571,8 @@ __all__ = [
     "OPTIONAL_MESSAGE_SEGMENTS",
     "BotGroupCapabilities",
     "MessageSegmentCapabilities",
+    "actor_can_act_on_target",
+    "actor_is_group_owner",
     "capability_runtime_snapshot",
     "clear_group_capability_cache",
     "default_allowed_segment_types",

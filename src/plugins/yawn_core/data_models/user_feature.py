@@ -4,6 +4,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import BigInteger, Boolean, ForeignKeyConstraint, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class UserFeature(Model):
     """群内特定用户的功能覆盖（优先级高于群级别开关）。"""
@@ -24,6 +26,7 @@ class UserFeature(Model):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     updated_at: Mapped[datetime] = mapped_column(
+        default=beijing_now,
         server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        onupdate=beijing_now,
     )

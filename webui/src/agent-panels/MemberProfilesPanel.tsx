@@ -61,15 +61,19 @@ export function MemberProfilesPanel({ groupId, readOnly = false }: { groupId: st
 
   const remove = async (id: string) => {
     if (readOnly || memberQuery.stale) return;
-    await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" });
-    message.success("记忆已删除");
-    memberQuery.reload(); subjectsQuery.reload();
+    try {
+      await api(`/agent/groups/${groupId}/memories/${id}`, { method: "DELETE" });
+      message.success("记忆已删除");
+      memberQuery.reload(); subjectsQuery.reload();
+    } catch (error) {
+      message.error((error as Error).message);
+    }
   };
   const saveEdit = async (values: MemoryFormValues) => {
     if (readOnly || !editing || memberQuery.stale) return;
     setSaving(true);
     try {
-      await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.updatedAt }) });
+      await api<MemoryItem>(`/agent/groups/${groupId}/memories/${editing.id}`, { method: "PUT", body: JSON.stringify({ ...values, version: editing.version ?? null }) });
       message.success("记忆已更新");
       setEditing(null);
       memberQuery.reload(); subjectsQuery.reload();

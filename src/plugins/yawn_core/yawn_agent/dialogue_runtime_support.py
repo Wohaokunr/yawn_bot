@@ -31,12 +31,21 @@ async def resolve_turn_tool_capabilities(
     has_mentions: bool,
     has_media: bool,
 ) -> tuple[Any, bool, frozenset[str], str]:
-    """Build the minimal progressive-disclosure bootstrap capability bundle."""
+    """Build the minimal progressive-disclosure bootstrap capability bundle.
 
-    from .capabilities import local_group_capabilities
-    from .tools import select_dialogue_tool_names
+    critical 工具不能经 ``discover_tools`` 发现；只有当前触发消息的用户正文
+    显式包含对应动作词、且调用者实时仍是群管理时，才在本轮预装其 schema。
+    之后仍由 ``build_tool_schemas`` 按机器人角色/白名单过滤，并在执行时再次
+    校验同一条触发消息的意图。
+    """
 
-    del group_id, actor_user_id
+    from .capabilities import (
+        local_group_capabilities,
+        probe_group_capabilities,
+        user_can_manage_group,
+    )
+    from .tools import select_critical_tool_names, select_dialogue_tool_names
+
     baseline = local_group_capabilities(bot)
     bootstrap_names = select_dialogue_tool_names(
         tool_intent_text,
@@ -45,6 +54,15 @@ async def resolve_turn_tool_capabilities(
         has_media=has_media,
         allow_admin_tools=False,
     )
+    critical_names = select_critical_tool_names(tool_intent_text)
+    if critical_names and await user_can_manage_group(bot, group_id, actor_user_id):
+        capabilities = await probe_group_capabilities(bot, group_id)
+        return (
+            capabilities,
+            True,
+            bootstrap_names | critical_names,
+            "explicit_critical_intent",
+        )
     return baseline, False, bootstrap_names, "progressive_bootstrap"
 
 
@@ -71,6 +89,13 @@ async def commit_tool_batch(
         )
         dbg_exc(f"群 {group_id} 工具轮状态提交失败(已回滚)")
         await session.rollback()
+        # rollback 会让 config 过期；尽力异步重载，避免调用方后续读取属性时在
+        # 异步引擎上触发同步惰性加载（MissingGreenlet）。调用方收到 False 后
+        # 仍应结束本轮工具循环，不再依赖本轮未落库的状态。
+        try:
+            await session.refresh(config)
+        except SQLAlchemyError:
+            dbg_exc(f"群 {group_id} 工具轮提交失败后重载配置失败(忽略)")
         return False
     await session.refresh(config)
     trace_event(
@@ -83,6 +108,39 @@ async def commit_tool_batch(
         round_index=round_index,
     )
     return True
+
+
+async def abort_after_commit_failure(
+    send_unless_expired: Any,
+    notice: str,
+    bot: Any,
+    group_id: int,
+    *,
+    enqueued_at: float | None,
+    message_id: Any,
+    sent: bool,
+) -> None:
+    """工具批次提交失败后安全结束本轮，不再读取已回滚的 ORM 状态。
+
+    已发送过用户可见消息时直接结束，避免重复发送；否则只补一条收尾提示。
+    """
+
+    trace_event(
+        "state",
+        "工具循环中止",
+        status="degraded",
+        detail="工具批次提交失败，结束本轮以免读取已回滚状态",
+    )
+    if sent:
+        return
+    await send_unless_expired(
+        bot,
+        group_id,
+        notice,
+        enqueued_at,
+        label="工具收尾",
+        message_id=message_id,
+    )
 
 
 def accumulate_turn_usage(

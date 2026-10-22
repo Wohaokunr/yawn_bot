@@ -6,7 +6,8 @@ export interface MemoryFormValues {
   content: string;
   salience: number;
   confidence: number;
-  expiresInDays: number | null;
+  /** 只在用户改动有效期时提交；否则仅编辑内容也会把过期时间顺延。 */
+  expiresInDays?: number | null;
 }
 
 export function MemoryEditDrawer({
@@ -35,7 +36,15 @@ export function MemoryEditDrawer({
   }, [form, memory]);
 
   return <Drawer open={!!memory} width={520} title={`编辑记忆 · ${memory?.key ?? ""}`} onClose={onClose}>
-    <Form form={form} layout="vertical" onFinish={(values) => onSave(values as MemoryFormValues)}>
+    <Form
+      form={form}
+      layout="vertical"
+      onFinish={(values) => {
+        const next = { ...(values as MemoryFormValues) };
+        if (!form.isFieldTouched("expiresInDays")) delete next.expiresInDays;
+        onSave(next);
+      }}
+    >
       <Form.Item name="content" label="内容" rules={[{ required: true, message: "请输入内容" }]}>
         <Input.TextArea autoSize={{ minRows: 4, maxRows: 10 }} maxLength={2000} showCount />
       </Form.Item>

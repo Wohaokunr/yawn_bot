@@ -903,7 +903,7 @@ async def _is_char_create_dm(event: MessageEvent) -> bool:
 
 private_listener = on_message(
     rule=Rule(_is_char_create_dm),
-    # 必须抢先于 ai_chat 的对话模式监听器（同 block=True、priority=0
+    # 必须抢先于 ai_chat 的对话模式监听器（同 block=True、priority=1
     # 但注册更早）：否则建卡期玩家的私聊指令会被当成
     # 闲聊吃掉，角色卡只能等超时自动确认。负优先级保证本监听器在
     # CHAR_CREATE 期先于一切私聊拦截器运行（规则已把范围收窄到

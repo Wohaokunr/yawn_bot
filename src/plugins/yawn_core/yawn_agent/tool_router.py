@@ -6,7 +6,10 @@ from __future__ import annotations
 from .tool_registry import (
     CONTROLLED_TOOLS,
     CORE_DIALOGUE_TOOL_NAMES,
+    CRITICAL_TOOLS,
     MESSAGE_SEND_TOOLS,
+    TOOL_BY_NAME,
+    TOOL_PERMISSION_CRITICAL,
     ToolDefinition,
 )
 
@@ -66,6 +69,36 @@ def select_dialogue_tool_names(
     return frozenset(CORE_DIALOGUE_TOOL_NAMES)
 
 
+def has_explicit_critical_intent(name: str, text: str | None) -> bool:
+    """当前触发消息（调用者本人正文）是否显式提出了该 critical 工具的动作。
+
+    ``text`` 只能来自本轮触发消息的用户正文（``NormalizedMessage.intent_text``），
+    不能是历史、引用链或模型生成内容。非 critical 工具恒返回 False。
+    """
+
+    definition = TOOL_BY_NAME.get(name)
+    if definition is None or name not in CRITICAL_TOOLS:
+        return False
+    normalized = str(text or "").strip().casefold()
+    if not normalized:
+        return False
+    return any(
+        keyword.casefold() in normalized for keyword in definition.intent_keywords
+    )
+
+
+def select_critical_tool_names(text: str | None) -> frozenset[str]:
+    """按当前触发消息的显式动作意图选择可装载的 critical 工具。
+
+    critical 工具永远不能经 ``discover_tools`` 发现；只有当前用户消息里直接
+    出现对应动作词时，才把它们作为候选交给调用方继续做权限/白名单过滤。
+    """
+
+    return frozenset(
+        name for name in CRITICAL_TOOLS if has_explicit_critical_intent(name, text)
+    )
+
+
 def rank_discoverable_tools(
     query: str,
     candidates: list[ToolDefinition],
@@ -80,7 +113,11 @@ def rank_discoverable_tools(
     family_filter = str(family or "").strip().casefold()
     scored: list[tuple[int, str, ToolDefinition]] = []
     for definition in candidates:
-        if not definition.discoverable or definition.name == "discover_tools":
+        if (
+            not definition.discoverable
+            or definition.name == "discover_tools"
+            or definition.permission_level == TOOL_PERMISSION_CRITICAL
+        ):
             continue
         if family_filter:
             accepted_families = (
@@ -191,7 +228,9 @@ def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
 __all__ = [
     "MAX_TOOL_ROUNDS",
     "dialogue_tool_round_limit",
+    "has_explicit_critical_intent",
     "rank_discoverable_tools",
+    "select_critical_tool_names",
     "select_dialogue_message_segment_types",
     "select_dialogue_tool_names",
 ]

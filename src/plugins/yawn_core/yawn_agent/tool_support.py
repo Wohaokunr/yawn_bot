@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy import select
 
+from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.group_agent_message import GroupAgentMessage
 from .context import now_beijing
 from .log import dbg
@@ -34,6 +35,22 @@ _ALLOWED_FILE_HOSTS = frozenset(
     for host in os.environ.get("AGENT_FILE_ALLOWED_HOSTS", "").split(",")
     if host.strip()
 )
+
+async def _opted_out_user_ids(session: Any, group_id: int) -> frozenset[int]:
+    """读取当前群已退出 Agent 记忆的成员；与 Prompt 历史的隐私过滤保持一致。"""
+
+    if session is None or not callable(getattr(session, "execute", None)):
+        return frozenset()
+    rows = (
+        await session.execute(
+            select(AgentPrivacy.user_id).where(
+                AgentPrivacy.group_id == group_id,
+                AgentPrivacy.opted_out.is_(True),
+            )
+        )
+    ).scalars()
+    return frozenset(int(user_id) for user_id in rows if user_id is not None)
+
 
 def _compact_group_info(raw: Any) -> dict[str, Any]:
     """Project OneBot group metadata to fields useful to the model."""

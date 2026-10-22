@@ -13,6 +13,7 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, NoticeEvent
 from nonebot.plugin import on_message, on_notice
 from nonebot_plugin_orm import async_scoped_session
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -29,7 +30,11 @@ from .dialogue import contains_word, process_group_message
 from .emotion import update_emotion_state
 from .log import dbg, dbg_exc
 from .media import prepare_media_inputs
-from .message_parser import NormalizedMessage, parse_message
+from .message_parser import (
+    NormalizedMessage,
+    parse_message,
+    redact_opted_out_replies,
+)
 
 _EXPLICIT_WAKE_WORDS = ("小助手", "群聊agent", "群聊 agent", "yawn")
 
@@ -240,6 +245,20 @@ async def handle_group_agent_message(
         dbg(f"群 {event.group_id} 跳过: 用户 {event.get_user_id()} 已隐私退出")
         return
     normalized = await parse_message(bot, event.message, reply=event.reply)
+    if normalized.reply_chain:
+        # 引用了退出 Agent 记忆的成员时，其正文/图片不得经引用链进入存储与 Prompt。
+        opted_out = set(
+            (
+                await _session.execute(
+                    select(AgentPrivacy.user_id).where(
+                        AgentPrivacy.group_id == int(event.group_id),
+                        AgentPrivacy.opted_out.is_(True),
+                    )
+                )
+            ).scalars()
+        )
+        if redact_opted_out_replies(normalized, opted_out):
+            dbg(f"群 {event.group_id} 引用链含已退出成员内容,已替换为占位符")
     dbg(
         f"群 {event.group_id} 消息解析完成: plain_text={normalized.plain_text!r} "
         f"媒体引用={len(normalized.media_refs)} mentions={normalized.mentions} "

@@ -7,15 +7,17 @@ import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from nonebot_plugin_orm import get_session
 from sqlalchemy import func, select
 
 from ..data_models.guest_access import GuestAccessConfig, GuestGroupAccess
+from ..data_models.timeutil import beijing_now
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 _CONFIG_ID = 1
@@ -51,13 +53,13 @@ def apply_enabled(config: GuestAccessConfig, *, enabled: bool) -> None:
     if config.enabled and not enabled:
         config.credential_version = int(config.credential_version) + 1
     config.enabled = enabled
-    config.updated_at = utc_now()
+    config.updated_at = beijing_now()
 
 
 def apply_new_credential(config: GuestAccessConfig, credential: str) -> None:
     config.credential_hash = hash_guest_credential(credential)
     config.credential_version = int(config.credential_version) + 1
-    config.updated_at = utc_now()
+    config.updated_at = beijing_now()
 
 
 async def get_config(db: AsyncSession) -> GuestAccessConfig | None:
@@ -136,7 +138,3 @@ async def guest_group_is_allowed(group_id: int) -> bool:
         if row is None or not row.enabled or not row.credential_hash:
             return False
         return await db.get(GuestGroupAccess, group_id) is not None
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)

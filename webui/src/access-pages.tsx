@@ -117,6 +117,7 @@ function FeatureEditor({
   rows: FeatureState[];
   onChange: (key: string, value: boolean | null) => Promise<void>;
 }): React.JSX.Element {
+  const { message } = AntApp.useApp();
   const [saving, setSaving] = useState("");
   return (
     <Table
@@ -166,6 +167,9 @@ function FeatureEditor({
                 setSaving(row.key);
                 try {
                   await onChange(row.key, value === "inherit" ? null : value === "on");
+                } catch (error) {
+                  // 群功能、成员覆盖、全局用户功能三处共用；失败时提示而不是静默吞掉。
+                  message.error((error as Error).message);
                 } finally {
                   setSaving("");
                 }

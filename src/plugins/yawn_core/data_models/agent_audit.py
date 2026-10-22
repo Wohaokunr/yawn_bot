@@ -5,6 +5,8 @@ from nonebot_plugin_orm import Model
 from sqlalchemy import JSON, BigInteger, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .timeutil import beijing_now
+
 
 class AgentAudit(Model):
     """Agent 工具调用审计记录。"""
@@ -21,5 +23,5 @@ class AgentAudit(Model):
     result: Mapped[str] = mapped_column(String(24), default="success")
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        server_default=func.current_timestamp(), index=True
+        default=beijing_now, server_default=func.current_timestamp(), index=True
     )

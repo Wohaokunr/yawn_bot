@@ -80,7 +80,7 @@ from .agent_route_helpers import memory_privacy_clauses as _memory_privacy_claus
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
 from .hub import hub
-from .route_helpers import check_version, require_group
+from .route_helpers import check_version, optimistic_write_lock, require_group
 from .route_models import (
     AgentConfigPatch,
     AgentDebugRunBody,
@@ -100,6 +100,7 @@ from .service import (
     iso,
     load_relation_graph,
     page_meta,
+    persona_content_version,
     serialize_agent_config,
     serialize_agent_message,
     serialize_guest_memory,
@@ -110,6 +111,18 @@ from .service import (
 )
 
 router = APIRouter(prefix=API_PATH)
+
+
+def _new_config(group_id: int) -> GroupAgentConfig:
+    # 列默认值只在 INSERT 时生效；新建行显式给出人设字段初值，
+    # 否则 persona_version 为 None，``+= 1`` 会直接 500。
+    return GroupAgentConfig(
+        group_id=group_id,
+        persona_enabled=False,
+        persona_version=1,
+        persona_profile={},
+    )
+
 
 @router.get("/agent/groups/{group_id}/persona")
 async def get_agent_persona(
@@ -125,18 +138,18 @@ async def put_agent_persona(
     group_id: int, body: PersonaPatch, _session: AdminWriteSession
 ) -> dict[str, Any]:
     changed = False
-    async with get_session() as db:
+    async with optimistic_write_lock, get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, body.version)
+        check_version(row, body.version, version_of=persona_content_version)
         if row is None:
-            row = GroupAgentConfig(group_id=group_id)
+            row = _new_config(group_id)
             db.add(row)
         mutation = apply_persona_editor_profile(
             row, body.profile, enabled=body.enabled
         )
         if mutation.semantic_changed:
-            row.persona_version += 1
+            row.persona_version = int(row.persona_version or 1) + 1
             changed = True
         if mutation.storage_changed:
             await db.commit()
@@ -153,16 +166,16 @@ async def reset_agent_persona(
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> dict[str, Any]:
     changed = False
-    async with get_session() as db:
+    async with optimistic_write_lock, get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, if_match)
+        check_version(row, if_match, version_of=persona_content_version)
         if row is None:
-            row = GroupAgentConfig(group_id=group_id)
+            row = _new_config(group_id)
             db.add(row)
         mutation = reset_persona(row)
         if mutation.semantic_changed:
-            row.persona_version += 1
+            row.persona_version = int(row.persona_version or 1) + 1
             changed = True
         if mutation.storage_changed:
             await db.commit()
