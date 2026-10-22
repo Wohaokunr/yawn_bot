@@ -1,0 +1,45 @@
+# webui（后端）— 管理台 API
+
+FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API_PATH`），并从仓库根
+`webui/dist` 托管前端单页应用。前端源码与约定见 [仓库根 webui/CLAUDE.md](../../../../webui/CLAUDE.md)。
+
+## 启用与认证
+
+- `WEBUI_ENABLED=true` 时 `config.validate_enabled_config()` 快速失败：`WEBUI_ADMIN_TOKEN` 至少 32 字符，且 `webui/dist/index.html` 必须存在（先 `npm run build`）。
+- `auth.py`：单运维 Token 登录 → 签名会话 Cookie（`yawn_webui_session`）+ CSRF + 登录限速。会话角色分 `admin` / `guest`。
+- `deps.py`：路由共享依赖与响应信封；访客只能看 allowlist 内的群（`guest_access.py`）。**任何新只读接口都要想清楚访客能不能看、返回字段是否需要裁剪、opt-out 成员是否被过滤。**
+
+## 文件地图
+
+| 文件 | 职责 |
+|---|---|
+| `app.py` | 组装 FastAPI：`include_router` 所有路由、挂载静态资源、SPA 回退 |
+| `config.py` | `WebUIConfig`（`WEBUI_*`）、路径常量、`DIST_DIR` |
+| `auth.py` / `auth_routes.py` | 会话与登录/登出端点 |
+| `deps.py` / `route_helpers.py` / `route_models.py` | 共享依赖、小 helper、请求体模型 |
+| `service.py` | 查询与写入服务层（最大的文件）；路由尽量薄，逻辑放这里 |
+| `hub.py` | 单进程 WebSocket 状态广播（`/stream`），前端 `api.ts` 订阅 |
+| `overview_routes.py` | 概览与插件摘要（含子插件加载报告） |
+| `groups.py` / `users.py` | 群、群成员、全局用户管理 |
+| `agent.py` + `agent_*_routes.py` | 群聊 Agent：配置、人设、记忆、隐私、关系、消息、调试/dry-run；共用过滤在 `agent_route_helpers.py` |
+| `audits.py` | Agent 工具审计与 WebUI 操作审计（`web_admin_audit`） |
+| `games.py` | 狼人杀/跑团对局列表、详情、事件日志与回放 |
+| `rpg_modules.py` | 跑团模组库只读投影 |
+| `fanqie.py` | 番茄下载任务管理 |
+| `environment.py` / `environment_routes.py` | 根 `.env` 脱敏读取与原子写入、LLM 连通性测试 |
+| `environment_catalog.dotenv` | 「环境配置」页的完整配置项目录（**不是** `.env.example`） |
+| `guest_access.py` / `guest_access_routes.py` | 持久化访客访问策略 |
+
+## 关联位置（跨目录）
+
+| 后端 | 依赖的业务模块 | 前端页面（`webui/src/`） |
+|---|---|---|
+| `agent*.py` | [yawn_agent/](../yawn_agent/CLAUDE.md)（`execution_trace.py`、`speech_runtime.py` 等）、Agent 相关 [data_models](../data_models/CLAUDE.md) | `agent.tsx`、`agent-panels/`、`agent-workspace/`、`agent-debug/` |
+| `games.py` | [yawn_werewolf/](../yawn_werewolf/CLAUDE.md)（`game_log.py`）、[yawn_rpg/](../yawn_rpg/CLAUDE.md)、`../event_log.py`、`../replay.py` | `games.tsx` |
+| `rpg_modules.py` | `yawn_rpg/module_schema.py`、`yawn_rpg/modules/` | `modules.tsx` |
+| `fanqie.py` | [yawn_fanqie/](../yawn_fanqie/CLAUDE.md) | `fanqie.tsx` |
+| `environment*.py`、`environment_catalog.dotenv` | 各插件 `config.py`；文档 [docs/configuration/](../../../../docs/configuration/README.md) | `environment.tsx`、`environment-config.ts` |
+| `groups.py`、`users.py`、`guest_access*` | `../permission.py`、核心 data_models | `group-workspace.tsx`、`access-pages.tsx`、`guest-*.tsx` |
+
+- 新增插件 `Config` 字段时，要登记进 `environment_catalog.dotenv`，`tests/test_webui_environment.py` 会检查。
+- 测试：`tests/test_webui*.py`（`test_webui_spa.py` 需要先构建 `webui/dist`）。改 Agent 部分时另见 [yawn_agent/AGENTS.md](../yawn_agent/AGENTS.md) 的「质量门槛」。
