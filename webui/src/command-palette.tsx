@@ -1,4 +1,4 @@
-import { ApiOutlined, SafetyOutlined, SearchOutlined, TeamOutlined } from "@ant-design/icons";
+import { ApiOutlined, BugOutlined, SafetyOutlined, SearchOutlined, TeamOutlined } from "@ant-design/icons";
 import { Input, Modal, Spin, Typography } from "antd";
 import type { InputRef } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -22,13 +22,14 @@ function matches(entry: NavEntry, query: string): boolean {
   return query.split(/\s+/).every((part) => haystack.includes(part));
 }
 
-// 群组结果：主动作进 Agent 工作台，另附一条直达功能权限
+// 群组结果：主动作进 Agent 工作台，另附直达功能权限与调试台
 function groupItems(rows: GroupSummary[]): PaletteItem[] {
   return rows.flatMap((row) => {
     const name = row.groupName || "未命名群";
     return [
       { id: `agent-${row.groupId}`, to: `/agent/${row.groupId}`, title: name, hint: `${row.groupId} · Agent 工作台`, icon: <ApiOutlined />, section: "群组" },
       { id: `access-${row.groupId}`, to: `/groups/${row.groupId}`, title: name, hint: `${row.groupId} · 功能权限`, icon: <SafetyOutlined />, section: "群组" },
+      { id: `debug-${row.groupId}`, to: `/agent/${row.groupId}?tab=debug`, title: name, hint: `${row.groupId} · 调试台`, icon: <BugOutlined />, section: "群组" },
     ];
   });
 }

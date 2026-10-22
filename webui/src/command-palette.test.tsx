@@ -40,11 +40,12 @@ describe("CommandPalette", () => {
     expect(onNavigate).toHaveBeenCalledWith("/guest");
   });
 
-  it("管理员输入群名时查群，并提供 Agent 工作台与功能权限两个入口", async () => {
+  it("管理员输入群名时查群，并提供 Agent 工作台、功能权限与调试台入口", async () => {
     const { input, onNavigate } = renderPalette(true);
     fireEvent.change(input, { target: { value: "摸鱼" } });
     expect(await screen.findByText("10086 · Agent 工作台")).toBeInTheDocument();
     expect(screen.getByText("10086 · 功能权限")).toBeInTheDocument();
+    expect(screen.getByText("10086 · 调试台")).toBeInTheDocument();
     expect(apiMock).toHaveBeenCalledWith(
       "/groups?page=1&pageSize=5&search=%E6%91%B8%E9%B1%BC",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),

@@ -1,4 +1,5 @@
-import { List, Space, Tag, Typography } from "antd";
+import { Input, List, Segmented, Select, Space, Tag, Typography } from "antd";
+import { useMemo, useState } from "react";
 import type { AgentDebugResponse } from "../types";
 import { AdminEmpty } from "../shared";
 import {
@@ -58,6 +59,13 @@ export function ToolArgumentSummary({ name, value }: { name: string; value: unkn
   return null;
 }
 
+const PERMISSION_COLORS: Record<string, string> = {
+  critical: "volcano",
+  privileged: "red",
+  message_send: "blue",
+  state_write: "orange",
+};
+
 export function ToolInspector({
   tools,
   permissions,
@@ -65,36 +73,67 @@ export function ToolInspector({
   tools: AgentDebugResponse["tools"];
   permissions: AgentDebugResponse["toolPermissions"];
 }): React.JSX.Element {
-  if (permissions.length === 0) return <AdminEmpty description="当前调试场景不使用工具权限矩阵" />;
-  const schemas = new Map<string, Record<string, unknown>>();
-  tools.forEach((tool) => {
-    const row = debugRecord(tool);
-    const fn = debugRecord(row.function);
-    const name = String(fn.name || row.name || "");
-    if (name) schemas.set(name, tool);
-  });
-  return <List
-    className="agent-debug-list"
-    dataSource={permissions}
-    renderItem={(permission) => {
-      const tool = schemas.get(permission.name);
-      const row = tool ? debugRecord(tool) : {};
+  const [exposure, setExposure] = useState<"all" | "exposed" | "blocked">("all");
+  const [level, setLevel] = useState("");
+  const [query, setQuery] = useState("");
+  const schemas = useMemo(() => {
+    const map = new Map<string, Record<string, unknown>>();
+    tools.forEach((tool) => {
+      const row = debugRecord(tool);
       const fn = debugRecord(row.function);
-      return <List.Item key={permission.name}>
-        <div className="agent-debug-list-item">
-          <Space wrap>
-            <Text strong>{toolDisplayName(permission.name)}</Text>
-            <Text type="secondary" code>{permission.name}</Text>
-            <Tag color={permission.permissionLevel === "critical" ? "volcano" : permission.permissionLevel === "privileged" ? "red" : permission.permissionLevel === "message_send" ? "blue" : permission.permissionLevel === "state_write" ? "orange" : "default"}>{TOOL_PERMISSION_LABELS[permission.permissionLevel] ?? permission.permissionLevel}</Tag>
-            <Tag color={permission.exposed ? "green" : "default"}>{TOOL_PERMISSION_REASON_LABELS[permission.reason] ?? permission.reason}</Tag>
-          </Space>
-          {(fn.description || row.description) ? <Text type="secondary">{debugDisplay(fn.description || row.description)}</Text> : null}
-          {permission.actions.length > 0 && <Text type="secondary">OneBot：{permission.actions.join(" / ")}</Text>}
-          {tool && <details className="agent-debug-details"><summary>查看 Schema</summary><DebugRawBlock value={tool} /></details>}
-        </div>
-      </List.Item>;
-    }}
-  />;
+      const name = String(fn.name || row.name || "");
+      if (name) map.set(name, tool);
+    });
+    return map;
+  }, [tools]);
+  if (permissions.length === 0) return <AdminEmpty description="当前调试场景不使用工具权限矩阵" />;
+  const exposedCount = permissions.filter((item) => item.exposed).length;
+  const levels = [...new Set(permissions.map((item) => item.permissionLevel))];
+  const needle = query.trim().toLowerCase();
+  const rows = permissions.filter((item) => (
+    (exposure === "all" || (exposure === "exposed") === item.exposed)
+    && (!level || item.permissionLevel === level)
+    && (!needle || `${item.name} ${toolDisplayName(item.name)}`.toLowerCase().includes(needle))
+  ));
+  const reasonCounts = permissions.filter((item) => !item.exposed).reduce<Record<string, number>>((acc, item) => {
+    acc[item.reason] = (acc[item.reason] ?? 0) + 1;
+    return acc;
+  }, {});
+  return <div className="dbg-tools">
+    <div className="dbg-prompt-stats">
+      <span>开放 <strong>{exposedCount}</strong> / {permissions.length} 个工具</span>
+      <span>本轮实际下发 Schema <strong>{tools.length}</strong> 个</span>
+      {Object.entries(reasonCounts).map(([reason, count]) => <Tag key={reason}>{TOOL_PERMISSION_REASON_LABELS[reason] ?? reason} × {count}</Tag>)}
+    </div>
+    <div className="dbg-toolbar">
+      <Input allowClear size="small" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工具名" aria-label="搜索工具" className="dbg-toolbar-search" />
+      <Segmented size="small" value={exposure} onChange={(value) => setExposure(value as typeof exposure)} options={[{ value: "all", label: "全部" }, { value: "exposed", label: "已开放" }, { value: "blocked", label: "未开放" }]} />
+      <Select size="small" value={level} onChange={setLevel} options={[{ value: "", label: "全部权限等级" }, ...levels.map((value) => ({ value, label: TOOL_PERMISSION_LABELS[value] ?? value }))]} aria-label="按权限等级过滤" className="dbg-toolbar-select" />
+    </div>
+    {rows.length === 0 ? <AdminEmpty description="没有符合条件的工具" /> : <List
+      className="agent-debug-list"
+      dataSource={rows}
+      renderItem={(permission) => {
+        const tool = schemas.get(permission.name);
+        const row = tool ? debugRecord(tool) : {};
+        const fn = debugRecord(row.function);
+        return <List.Item key={permission.name}>
+          <div className="agent-debug-list-item">
+            <Space wrap>
+              <Text strong>{toolDisplayName(permission.name)}</Text>
+              <Text type="secondary" code>{permission.name}</Text>
+              <Tag color={PERMISSION_COLORS[permission.permissionLevel] ?? "default"}>{TOOL_PERMISSION_LABELS[permission.permissionLevel] ?? permission.permissionLevel}</Tag>
+              <Tag color={permission.exposed ? "green" : "default"}>{TOOL_PERMISSION_REASON_LABELS[permission.reason] ?? permission.reason}</Tag>
+              {permission.exposed && !tool && <Tag>本轮未下发 Schema</Tag>}
+            </Space>
+            {(fn.description || row.description) ? <Text type="secondary">{debugDisplay(fn.description || row.description)}</Text> : null}
+            {permission.actions.length > 0 && <Text type="secondary">OneBot：{permission.actions.join(" / ")}</Text>}
+            {tool && <details className="agent-debug-details"><summary>查看 Schema</summary><DebugRawBlock value={tool} /></details>}
+          </div>
+        </List.Item>;
+      }}
+    />}
+  </div>;
 }
 
 export function toolNames(result: AgentDebugResponse): string[] {

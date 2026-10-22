@@ -444,6 +444,33 @@ export interface AgentExecutionTraceSummary {
   hasTool: boolean;
   hasMedia: boolean;
   hasOutboundProblem: boolean;
+  /** 触发消息的脱敏短预览（来自 intake 事件），旧后端没有该字段。 */
+  preview?: string | null;
+  toolNames?: string[];
+  llmRounds?: number;
+  slowestPhase?: { phase: string; label: string; durationMs: number | null } | null;
+  /** 事件数达到单条 Trace 上限，后续事件已被丢弃。 */
+  truncated?: boolean;
+}
+
+export interface AgentExecutionTraceStats {
+  groupId: string;
+  capacity: number;
+  total: number;
+  failed: number;
+  degraded: number;
+  withTools: number;
+  withMedia: number;
+  outboundProblems: number;
+  running: number;
+  durationMs: { avg: number | null; p50: number | null; p95: number | null; max: number | null };
+  byMode: Record<string, number>;
+  byTrigger: Record<string, number>;
+  byOutcome: Record<string, number>;
+  phases: Array<{ phase: string; count: number; avgMs: number | null; maxMs: number | null; totalMs: number; failures: number }>;
+  tools: Array<{ name: string; count: number }>;
+  oldestAt: string | null;
+  newestAt: string | null;
 }
 
 export interface AgentExecutionTrace {
@@ -541,7 +568,7 @@ export interface AgentDebugResponse {
   };
   stats: Record<string, unknown>;
   warnings: string[];
-  speechSimulation: AgentSpeechSimulation;
+  speechSimulation?: AgentSpeechSimulation;
   executionTrace: AgentExecutionTrace;
   result: null | {
     outcome: string;

@@ -14,6 +14,7 @@ from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.bot_user import BotUser
 from ..data_models.group_agent_config import GroupAgentConfig
@@ -40,7 +41,9 @@ from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
+    clear_execution_traces,
     execution_trace_by_id,
+    execution_trace_stats,
     finish_execution_trace,
     recent_execution_trace_summaries,
     trace_event,
@@ -91,6 +94,7 @@ from .service import (
     agent_activity,
     agent_diagnostics,
     agent_tool_usage,
+    serialize_agent_audit,
 )
 
 
@@ -221,10 +225,16 @@ async def get_agent_capabilities(
 
 
 @_debug_router.get("/agent/groups/{group_id}/execution-traces")
-async def get_agent_execution_traces(
+async def get_agent_execution_traces(  # noqa: PLR0913, PLR0917
     group_id: int,
     _session: AdminReadSession,
     status: str | None = Query(default=None, max_length=24),
+    mode: str | None = Query(default=None, max_length=24),
+    trigger_source: str | None = Query(
+        default=None, alias="triggerSource", max_length=40
+    ),
+    actor_user_id: int | None = Query(default=None, alias="actorUserId", gt=0),
+    source: str | None = Query(default=None, max_length=16),
 ) -> dict[str, Any]:
     """返回当前进程内最近真实 Agent 执行的轻量摘要。
 
@@ -234,7 +244,39 @@ async def get_agent_execution_traces(
 
     async with get_session() as db:
         await require_group(db, group_id)
-    return ok(recent_execution_trace_summaries(group_id, status=status))
+    return ok(
+        recent_execution_trace_summaries(
+            group_id,
+            status=status,
+            mode=mode or None,
+            trigger_source=trigger_source or None,
+            actor_user_id=actor_user_id,
+            source=source or None,
+        )
+    )
+
+
+@_debug_router.get("/agent/groups/{group_id}/execution-traces/stats")
+async def get_agent_execution_trace_stats(
+    group_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
+    """缓冲内 Trace 的状态分布、耗时分位、阶段耗时与工具频次。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+    return ok(execution_trace_stats(group_id))
+
+
+@_debug_router.delete("/agent/groups/{group_id}/execution-traces")
+async def clear_agent_execution_traces(
+    group_id: int, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """清空本群的内存 Trace 缓冲；不影响数据库、审计与 Agent 状态。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+    cleared = clear_execution_traces(group_id)
+    return ok({"groupId": str(group_id), "cleared": cleared})
 
 
 @_debug_router.get("/agent/groups/{group_id}/execution-traces/{trace_id}")
@@ -249,6 +291,45 @@ async def get_agent_execution_trace(
     if trace is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "执行 Trace 不存在")
     return ok(trace)
+
+
+_TRACE_AUDIT_SCAN_LIMIT = 500
+_TRACE_ID_MAX_CHARS = 64
+
+
+@_debug_router.get("/agent/groups/{group_id}/execution-traces/{trace_id}/audits")
+async def get_agent_execution_trace_audits(
+    group_id: int, trace_id: str, _session: AdminReadSession
+) -> dict[str, Any]:
+    """返回同一 Trace 产生的特权工具审计记录。
+
+    审计表没有 trace 列（trace id 存在 arguments._trace_id 里），这里只扫描本群
+    最近一批审计做匹配；Trace 离开内存缓冲后仍然可以查询。
+    """
+
+    if not trace_id or len(trace_id) > _TRACE_ID_MAX_CHARS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Trace ID 无效")
+    async with get_session() as db:
+        await require_group(db, group_id)
+        rows = list(
+            (
+                await db.execute(
+                    select(AgentAudit)
+                    .where(AgentAudit.group_id == group_id)
+                    .order_by(AgentAudit.id.desc())
+                    .limit(_TRACE_AUDIT_SCAN_LIMIT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    matched = [
+        serialize_agent_audit(row)
+        for row in rows
+        if isinstance(row.arguments, dict)
+        and str(row.arguments.get("_trace_id") or "") == trace_id
+    ]
+    return ok(matched)
 
 
 @_debug_router.post("/agent/groups/{group_id}/capabilities/refresh")

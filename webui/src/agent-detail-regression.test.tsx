@@ -34,36 +34,41 @@ vi.mock("./agent-panels/PrivacyPanel", () => ({ PrivacyPanel: () => <div>privacy
 vi.mock("./agent-panels/AgentAuditsPanel", () => ({ AgentAuditsPanel: () => <div>audit mock</div> }));
 
 vi.mock("./agent-debug/useExecutionTraces", () => ({
+  TRACE_POLL_OPTIONS: [3000],
   useExecutionTraces: () => ({
-    rows: [],
-    loading: false,
-    error: "",
+    summaries: [],
+    visibleSummaries: [],
+    stats: null,
+    statsError: "",
     selectedTrace: null,
     detailLoading: false,
     detailError: "",
+    starred: [],
+    autoRefresh: true,
+    setAutoRefresh: vi.fn(),
     reloadSelected: vi.fn(),
+    selectRelative: vi.fn(),
+    clearBuffer: vi.fn(),
   }),
 }));
-vi.mock("./agent-debug/TraceSidebar", () => ({ TraceSidebar: () => <div>trace sidebar</div> }));
-vi.mock("./agent-debug/SimulationWorkbench", () => ({
-  SimulationWorkbench: ({ onResult }: { onResult: (value: { promptVersion: string }) => void }) => (
-    <button onClick={() => onResult({ promptVersion: "debug-v1" })}>生成测试结果</button>
-  ),
-}));
-vi.mock("./agent-debug/TraceWorkspace", () => ({
-  TraceWorkspace: ({
-    result,
-    baseline,
-    onPinBaseline,
-  }: {
-    result: { promptVersion?: string } | null;
-    baseline: { promptVersion?: string } | null;
-    onPinBaseline: () => void;
+vi.mock("./agent-debug/TraceNavigator", () => ({ TraceNavigator: () => <div>trace navigator</div> }));
+vi.mock("./agent-debug/TraceInspector", () => ({ TraceInspector: () => <div>trace inspector</div> }));
+vi.mock("./agent-debug/SimulationLab", () => ({
+  normalizeMode: (value: string) => value,
+  SimulationLab: ({ runs }: {
+    runs: {
+      add: (run: { input: unknown; result: { promptVersion: string }; elapsedMs: number }) => { id: string };
+      active: { result: { promptVersion: string } } | null;
+      baseline: { result: { promptVersion: string } } | null;
+      setBaseline: (id: string) => void;
+      activeId: string;
+    };
   }) => (
     <div>
-      <output aria-label="debug-result">{result?.promptVersion ?? "none"}</output>
-      <output aria-label="debug-baseline">{baseline?.promptVersion ?? "none"}</output>
-      {result && <button onClick={onPinBaseline}>固定当前为基准</button>}
+      <button onClick={() => runs.add({ input: {}, result: { promptVersion: "debug-v1" }, elapsedMs: 1 })}>生成测试结果</button>
+      <output aria-label="debug-result">{runs.active?.result.promptVersion ?? "none"}</output>
+      <output aria-label="debug-baseline">{runs.baseline?.result.promptVersion ?? "none"}</output>
+      {runs.active && <button onClick={() => runs.setBaseline(runs.activeId)}>设为基准 A</button>}
     </div>
   ),
 }));
@@ -137,7 +142,7 @@ function renderPage(): void {
 }
 
 describe("AgentDetailPage state retention", () => {
-  it("preserves both the real config draft and Debug baseline across top-level tab round trips", async () => {
+  it("preserves both the real config draft and the lab run history across top-level tab round trips", async () => {
     renderPage();
 
     const dailyLimit = await screen.findByLabelText("每日参与上限");
@@ -146,11 +151,10 @@ describe("AgentDetailPage state retention", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "调试台" }));
     // 调试面板首次切换时才懒加载，冷启动 CI 下可能超过 findBy 默认的 1s。
-    fireEvent.click(
-      await screen.findByRole("button", { name: "生成测试结果" }, { timeout: 5_000 }),
-    );
+    fireEvent.click(await screen.findByText("模拟实验室", undefined, { timeout: 5_000 }));
+    fireEvent.click(await screen.findByRole("button", { name: "生成测试结果" }));
     expect(screen.getByLabelText("debug-result").textContent).toBe("debug-v1");
-    fireEvent.click(screen.getByRole("button", { name: "固定当前为基准" }));
+    fireEvent.click(screen.getByRole("button", { name: "设为基准 A" }));
     expect(screen.getByLabelText("debug-baseline").textContent).toBe("debug-v1");
 
     fireEvent.click(screen.getByRole("tab", { name: "运行配置" }));

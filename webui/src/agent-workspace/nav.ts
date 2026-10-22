@@ -36,7 +36,7 @@ export const AGENT_NAV: AgentNavSection[] = [
   {
     key: "debug",
     label: "调试",
-    items: [{ key: "debug", label: "调试台", hint: "执行 Trace 与模拟回合" }],
+    items: [{ key: "debug", label: "调试台", hint: "Trace 分析、模拟实验室与对比" }],
   },
   {
     key: "governance",
