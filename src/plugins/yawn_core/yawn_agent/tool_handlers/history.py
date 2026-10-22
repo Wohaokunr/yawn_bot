@@ -3,18 +3,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..capabilities import probe_group_capabilities
 from ..context import now_beijing
+from ..log import dbg_exc
 from ..tool_execution import ToolExecutionContext, ToolHandlerResult
 from ..tool_support import (
     _compact_essence,
     _compact_group_info,
     _compact_group_member,
-    _compact_notice,
     _compact_onebot_message,
     _opted_out_user_ids,
     _payload_list,
     _require_known_message,
     _tool_result_limit,
+    readable_time,
 )
 
 FAMILY = "history"
@@ -24,7 +26,6 @@ NAMES = frozenset(
         "get_group_info",
         "get_message",
         "get_recent_group_messages",
-        "list_group_notices",
         "list_essence_messages",
         "list_muted_members",
         "get_group_honor",
@@ -50,6 +51,13 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
         result = _compact_group_info(
             await bot.call_api("get_group_info", group_id=group_id)
         )
+        try:
+            # 带上机器人在本群的身份，模型据此判断能不能承诺管理动作。
+            live = await probe_group_capabilities(bot, group_id)
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"群 {group_id} get_group_info 读取机器人身份失败(忽略)")
+        else:
+            result["bot_role"] = live.role
     elif name == "get_message":
         target_message_id = int(args["message_id"])
         await _require_known_message(session, group_id, target_message_id)
@@ -70,8 +78,13 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             raise ValueError("count 必须是整数") from exc
         if count < 1 or count > _MAX_RECENT_MESSAGE_COUNT:
             raise ValueError("count 必须在 1~30 之间")
+        scan = (
+            _MAX_RECENT_MESSAGE_COUNT
+            if args.get("user_id") is not None or args.get("keyword")
+            else count
+        )
         raw_history = await bot.call_api(
-            "get_group_msg_history", group_id=group_id, count=count
+            "get_group_msg_history", group_id=group_id, count=scan
         )
         messages = _payload_list(raw_history, "messages", "message_list", "items")
         if (
@@ -83,33 +96,32 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
         # 退出 Agent 记忆的成员不得经工具结果重新进入 Prompt，与历史上下文
         # 的发送者过滤保持一致。
         opted_out = await _opted_out_user_ids(session, group_id)
+        filter_user = args.get("user_id")
+        keyword = str(args.get("keyword") or "").strip().casefold()
+        filtered = filter_user is not None or bool(keyword)
         compact_messages = []
-        for item in messages[-count:]:
+        # 过滤时扫描整个返回窗口再取最近 count 条，否则过滤后常常一条不剩。
+        for item in messages if filtered else messages[-count:]:
             if not isinstance(item, dict):
                 continue
             compact = _compact_onebot_message(item)
-            if _sender_id(compact) in opted_out:
+            sender = _sender_id(compact)
+            if sender in opted_out:
+                continue
+            if filter_user is not None and sender != int(filter_user):
+                continue
+            if keyword and keyword not in str(compact.get("text") or "").casefold():
                 continue
             compact_messages.append(compact)
+        compact_messages = compact_messages[-count:]
         result = {"items": compact_messages, "count": len(compact_messages)}
-    elif name == "list_group_notices":
-        raw_notices = await bot.call_api("_get_group_notice", group_id=group_id)
-        notices = _payload_list(raw_notices, "notices", "items")
-        if (
-            isinstance(raw_notices, dict)
-            and not notices
-            and any(key in raw_notices for key in ("notice_id", "content", "message"))
-        ):
-            notices = [raw_notices]
-        result = [
-            _compact_notice(item) for item in notices[:20] if isinstance(item, dict)
-        ]
     elif name == "list_essence_messages":
         raw_essence = await bot.call_api("get_essence_msg_list", group_id=group_id)
         essence_items = _payload_list(raw_essence, "items", "messages", "list")
+        limit = _tool_result_limit(args, default=20, maximum=30)
         result = [
             _compact_essence(item)
-            for item in essence_items[:30]
+            for item in essence_items[:limit]
             if isinstance(item, dict)
         ]
     elif name == "list_muted_members":
@@ -122,7 +134,10 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
                 continue
             member = _compact_group_member(item)
             if item.get("shut_up_timestamp") is not None:
-                member["shut_up_timestamp"] = item.get("shut_up_timestamp")
+                member["muted_until"] = (
+                    readable_time(item.get("shut_up_timestamp"))
+                    or item.get("shut_up_timestamp")
+                )
             compact_muted.append(member)
         result = {"items": compact_muted, "count": len(compact_muted)}
     elif name == "get_group_honor":

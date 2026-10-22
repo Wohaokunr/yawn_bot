@@ -36,15 +36,19 @@ async def handle(
         if not emoji_id.isdigit():
             raise ValueError("emoji_id 必须是数字字符串")
         await _require_known_message(session, group_id, target_message_id)
-        await bot.call_api(
-            "set_msg_emoji_like",
-            message_id=target_message_id,
-            emoji_id=emoji_id,
-        )
+        remove = args.get("remove") is True
+        params: dict[str, Any] = {
+            "message_id": target_message_id,
+            "emoji_id": emoji_id,
+        }
+        if remove:
+            # NapCat/LLOneBot 用 set=false 取消回应；只在取消时传，兼容旧后端。
+            params["set"] = False
+        await bot.call_api("set_msg_emoji_like", **params)
         result = {
             "message_id": target_message_id,
             "emoji_id": emoji_id,
-            "reacted": True,
+            "reacted": not remove,
         }
     elif name == "send_message":
         sent = await send_outbound_message(

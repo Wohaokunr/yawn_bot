@@ -149,6 +149,9 @@ class AgentConfigPatch(BaseModel):
     tool_allowlist: list[
         Literal[
             "mute_member",
+            "unmute_member",
+            "recall_message",
+            "recall_bot_message",
             "create_group_announcement",
             "send_file",
             "set_essence_message",

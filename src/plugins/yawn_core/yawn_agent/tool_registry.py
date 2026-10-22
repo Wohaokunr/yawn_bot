@@ -100,6 +100,8 @@ class ToolDefinition:
     # critical 工具专用：当前触发消息（调用者本人正文）必须包含其中之一，
     # 才能装载 schema 并执行；历史、引用和模型推断均不算显式意图。
     intent_keywords: tuple[str, ...] = ()
+    # 给模型的前置依赖提示，随 discover_tools 结果返回；例如“先查 user_id”。
+    prerequisites: str = ""
 
 
 TOOL_DEFINITIONS = (
@@ -113,17 +115,41 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "get_group_member",
-        "读取当前群某成员的昵称、角色和头衔",
-        {"user_id": {"type": "integer"}},
+        "读取当前群某成员的昵称、角色、头衔、等级、入群时间和最后发言时间",
+        {"user_id": {"type": "integer", "minimum": 1}},
         required=("user_id",),
         actions=("get_group_member_info",),
         family="member",
-        keywords=("群成员", "管理员", "群主", "头衔", "这人是谁", "他是谁", "她是谁"),
+        keywords=("群成员", "管理员", "群主", "头衔", "这人是谁", "他是谁", "她是谁", "入群时间", "多久没说话", "最后发言", "等级"),
+        prerequisites="只知道昵称时先用 find_group_member 拿 user_id",
+    ),
+    ToolDefinition(
+        "find_group_member",
+        "按昵称或群名片模糊查找当前群成员，返回最匹配的 user_id（最多10人）",
+        {
+            "query": {"type": "string", "minLength": 1, "maxLength": 64, "description": "昵称、群名片或其中一部分"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+        required=("query",),
+        actions=("get_group_member_list",),
+        family="member",
+        keywords=("找人", "找一下", "是哪个", "qq号", "QQ号", "谁叫", "叫什么", "user_id", "是谁", "哪位"),
+    ),
+    ToolDefinition(
+        "list_group_admins",
+        "列出当前群的群主和管理员",
+        {},
+        actions=("get_group_member_list",),
+        family="member",
+        keywords=("管理员有谁", "谁是管理", "群主是谁", "管理名单", "有哪些管理", "找管理"),
     ),
     ToolDefinition(
         "list_group_members",
-        "读取当前群成员列表（默认30人，最多50人）",
-        {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+        "读取当前群成员列表（默认30人，最多50人），可按角色过滤",
+        {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "role": {"type": "string", "enum": ["owner", "admin", "member"]},
+        },
         actions=("get_group_member_list",),
         family="member",
         keywords=("成员列表", "都有谁", "群里有谁", "所有成员"),
@@ -139,12 +165,18 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "get_recent_group_messages",
-        "读取当前群最近消息（默认10条，最多30条）",
-        {"count": {"type": "integer", "minimum": 1, "maximum": 30}},
+        "读取当前群最近消息（默认10条，最多30条），可按发言人或关键词过滤",
+        {
+            "count": {"type": "integer", "minimum": 1, "maximum": 30},
+            "user_id": {"type": "integer", "minimum": 1, "description": "只看这位成员的发言"},
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 40, "description": "只看包含该词的消息"},
+        },
         actions=("get_group_msg_history",),
         family="history",
         keywords=(
             "最近消息",
+            "刚才说了",
+            "说了什么",
             "聊天记录",
             "消息记录",
             "历史消息",
@@ -267,7 +299,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "react_to_message",
-        "给当前群上下文中已知消息添加 QQ 表情回应；emoji_id 必须使用真实已知 ID",
+        "给当前群上下文中已知消息添加或取消 QQ 表情回应；emoji_id 必须使用真实已知 ID",
         {
             "message_id": {"type": "integer"},
             "emoji_id": {
@@ -276,6 +308,7 @@ TOOL_DEFINITIONS = (
                 "maxLength": 16,
                 "pattern": "^[0-9]+$",
             },
+            "remove": {"type": "boolean", "description": "true 表示取消之前的表情回应"},
         },
         required=("message_id", "emoji_id"),
         actions=("set_msg_emoji_like",),
@@ -312,16 +345,19 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "list_group_notices",
-        "读取当前群公告列表",
-        {},
+        "读取当前群公告列表（按发布时间倒序，默认10条），可按关键词过滤",
+        {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 40},
+        },
         actions=("_get_group_notice",),
         family="notice",
         keywords=("群公告", "公告内容", "公告列表", "之前公告", "当前公告"),
     ),
     ToolDefinition(
         "list_essence_messages",
-        "读取当前群精华消息列表",
-        {},
+        "读取当前群精华消息列表（默认20条，最多30条）",
+        {"limit": {"type": "integer", "minimum": 1, "maximum": 30}},
         actions=("get_essence_msg_list",),
         family="essence",
         keywords=("精华消息", "群精华", "精华列表", "哪些精华"),
@@ -359,22 +395,52 @@ TOOL_DEFINITIONS = (
         keywords=("群文件", "文件列表", "文件夹", "找文件", "有什么文件"),
     ),
     ToolDefinition(
+        "search_group_files",
+        "按文件名关键词搜索当前群文件（根目录和一级文件夹，最多20项）",
+        {
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 80},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        },
+        required=("keyword",),
+        actions=("get_group_root_files", "get_group_files_by_folder"),
+        family="file",
+        keywords=("搜文件", "搜索文件", "找文件", "有没有那个文件", "文件在哪", "哪个文件"),
+    ),
+    ToolDefinition(
+        "get_group_file_space",
+        "读取当前群文件的容量、已用空间和文件数",
+        {},
+        actions=("get_group_file_system_info",),
+        family="file",
+        keywords=("群文件空间", "文件容量", "还剩多少空间", "空间满", "文件数量"),
+    ),
+    ToolDefinition(
+        "list_agent_files",
+        "列出机器人文件库里可以用 send_file 发送的文件（只返回相对文件名）",
+        {
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 80},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        family="file",
+        keywords=("文件库", "能发什么文件", "可以发的文件", "有哪些文件可以发", "发文件", "发个文件", "资料包"),
+    ),
+    ToolDefinition(
         "get_group_file_link",
         "获取当前群已知群文件的下载链接",
         {
             "file_id": {"type": "string", "minLength": 1, "maxLength": 160},
-            "busid": {"type": "integer", "minimum": 0},
+            "busid": {"type": "integer", "minimum": 0, "description": "来自文件列表；省略时用 102"},
         },
-        required=("file_id", "busid"),
+        required=("file_id",),
         actions=("get_group_file_url",),
         family="file",
         keywords=("文件链接", "下载链接", "下载地址", "群文件链接"),
     ),
     ToolDefinition(
         "mute_member",
-        "禁言群成员",
+        "禁言群成员；duration 单位是秒（10分钟=600，1小时=3600，1天=86400）",
         {
-            "user_id": {"type": "integer"},
+            "user_id": {"type": "integer", "minimum": 1},
             "duration": {"type": "integer", "minimum": 1, "maximum": 2592000},
         },
         required=("user_id", "duration"),
@@ -382,18 +448,58 @@ TOOL_DEFINITIONS = (
         admin=True,
         permission_level=TOOL_PERMISSION_PRIVILEGED,
         family="moderation",
-        keywords=("禁言",),
+        keywords=("禁言", "闭嘴", "关小黑屋"),
+        prerequisites="只知道昵称时先用 find_group_member 拿 user_id",
+    ),
+    ToolDefinition(
+        "unmute_member",
+        "解除群成员禁言；白名单开启禁言时自动可用",
+        {"user_id": {"type": "integer", "minimum": 1}},
+        required=("user_id",),
+        actions=("set_group_ban",),
+        admin=True,
+        permission_level=TOOL_PERMISSION_PRIVILEGED,
+        family="moderation",
+        keywords=("解除禁言", "解禁", "取消禁言", "放出来", "解开禁言"),
+        prerequisites="不确定谁在禁言时先用 list_muted_members",
+    ),
+    ToolDefinition(
+        "recall_message",
+        "撤回当前群一条近期消息；撤回他人消息需要机器人是管理员",
+        {"message_id": {"type": "integer"}},
+        required=("message_id",),
+        actions=("delete_msg",),
+        admin=True,
+        permission_level=TOOL_PERMISSION_PRIVILEGED,
+        family="moderation",
+        keywords=("撤回", "撤回消息", "撤掉这条", "删掉这条消息", "把这条撤了"),
+        prerequisites="message_id 必须来自当前上下文、引用消息或 get_recent_group_messages",
+    ),
+    ToolDefinition(
+        "recall_bot_message",
+        "撤回机器人自己 2 分钟内在当前群发的消息；不传 message_id 时撤回最近一条",
+        {"message_id": {"type": "integer"}},
+        actions=("delete_msg",),
+        permission_level=TOOL_PERMISSION_PRIVILEGED,
+        family="moderation",
+        keywords=("撤回你刚才", "撤回刚才", "你撤回", "把你那条撤了", "撤回你的消息"),
     ),
     ToolDefinition(
         "create_group_announcement",
-        "创建群公告",
-        {"content": {"type": "string", "maxLength": 1000}},
+        "创建群公告；content 写成书面、完整的公告正文，不带角色口癖和 Markdown",
+        {
+            "content": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "pinned": {"type": "boolean", "description": "是否置顶"},
+            "confirm_required": {"type": "boolean", "description": "是否需要群成员确认收到"},
+            "show_edit_card": {"type": "boolean", "description": "是否引导成员修改群名片"},
+        },
         required=("content",),
         actions=("send_group_notice", "_send_group_notice"),
         admin=True,
         permission_level=TOOL_PERMISSION_PRIVILEGED,
         family="notice",
-        keywords=("发布公告", "发公告", "创建公告", "写公告"),
+        keywords=("发布公告", "发公告", "创建公告", "写公告", "置顶公告", "贴公告", "出个公告"),
+        prerequisites="发布前确认公告内容；重复内容会被拒绝",
     ),
     ToolDefinition(
         "set_essence_message",
@@ -427,6 +533,7 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_PRIVILEGED,
         family="notice",
         keywords=("删除公告", "删公告", "移除公告", "撤掉公告"),
+        prerequisites="先用 list_group_notices 找到 notice_id",
     ),
     ToolDefinition(
         "set_group_card",
@@ -589,16 +696,23 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "send_file",
-        "发送经过安全校验的群文件或文档",
+        "把机器人文件库里的文件（或白名单域名的链接）上传到当前群文件",
         {
-            "file": {"type": "string"},
-            "name": {"type": "string", "maxLength": 128},
+            "file": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "description": "list_agent_files 返回的相对文件名，或白名单域名 URL",
+            },
+            "name": {"type": "string", "minLength": 1, "maxLength": 128, "description": "群文件里显示的文件名"},
+            "folder_id": {"type": "string", "minLength": 1, "maxLength": 160, "description": "上传到哪个群文件夹；省略为根目录"},
         },
         required=("file", "name"),
         actions=("upload_group_file",),
         permission_level=TOOL_PERMISSION_PRIVILEGED,
         family="file",
-        keywords=("发文件", "发送文件", "上传文件"),
+        keywords=("发文件", "发送文件", "上传文件", "传文件", "发个文件", "传到群文件"),
+        prerequisites="先用 list_agent_files 拿到真实文件名，不要猜路径",
     ),
 )
 
@@ -615,6 +729,44 @@ CRITICAL_TOOLS = frozenset(
     if item.permission_level == TOOL_PERMISSION_CRITICAL
 )
 CONTROLLED_TOOLS = PRIVILEGED_TOOLS | CRITICAL_TOOLS
+# 白名单别名：开启左侧任一工具即视为允许该工具（解除禁言随禁言开放）。
+ALLOWLIST_ALIASES: dict[str, tuple[str, ...]] = {
+    "unmute_member": ("mute_member",),
+    "recall_bot_message": ("recall_message",),
+}
+
+
+def allowlist_covers(name: str, allowlist: set[str] | frozenset[str] | None) -> bool:
+    """群级白名单是否允许 ``name``；None 表示调用方不做白名单过滤。"""
+
+    if allowlist is None:
+        return True
+    if name in allowlist:
+        return True
+    return any(alias in allowlist for alias in ALLOWLIST_ALIASES.get(name, ()))
+
+
+def tool_argument_summary(definition: ToolDefinition) -> dict[str, list[str]]:
+    """紧凑参数说明：必填/可选参数名带类型，随 discover_tools 返回给模型。"""
+
+    def _render(key: str) -> str:
+        schema = definition.properties.get(key) or {}
+        kind = str(schema.get("type") or "any")
+        enum = schema.get("enum")
+        if enum:
+            kind = "|".join(str(item) for item in enum)
+        return f"{key}:{kind}"
+
+    required = [_render(key) for key in definition.required]
+    optional = [
+        _render(key) for key in definition.properties if key not in definition.required
+    ]
+    summary: dict[str, list[str]] = {}
+    if required:
+        summary["required"] = required
+    if optional:
+        summary["optional"] = optional
+    return summary
 MESSAGE_SEND_TOOLS = frozenset({"send_message", "send_forward"})
 CORE_DIALOGUE_TOOL_NAMES = frozenset(
     item.name for item in TOOL_DEFINITIONS if item.core
@@ -622,6 +774,7 @@ CORE_DIALOGUE_TOOL_NAMES = frozenset(
 
 __all__ = [
     "ADMIN_TOOLS",
+    "ALLOWLIST_ALIASES",
     "CONTROLLED_TOOLS",
     "CORE_DIALOGUE_TOOL_NAMES",
     "CRITICAL_TOOLS",
@@ -638,4 +791,6 @@ __all__ = [
     "TOOL_PERMISSION_READ",
     "TOOL_PERMISSION_STATE_WRITE",
     "ToolDefinition",
+    "allowlist_covers",
+    "tool_argument_summary",
 ]

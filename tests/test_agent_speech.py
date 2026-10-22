@@ -176,7 +176,8 @@ def test_direct_reply_is_not_hard_truncated_by_low_verbosity() -> None:
     )
     from src.plugins.yawn_core.yawn_agent.speech_quality import finalize_speech_plan
 
-    content = "这是必要步骤。" * 100
+    # 每句不同，避免被“同一回复重复句子”清洗合并。
+    content = "".join(f"这是第{index}个必要步骤。" for index in range(100))
     final = finalize_speech_plan(
         speech_plan_from_text(
             content,

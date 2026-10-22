@@ -1,4 +1,4 @@
-# ruff: noqa: TID252,TRY003,TRY004,TRY301,ASYNC240,C901,PLR0912,PLR0913,PLR0915,PLR2004
+# ruff: noqa: TID252, TRY003, TRY004, TRY301, C901, PLR0912, PLR0913, PLR0915, PLR2004
 """OneBot v11 群消息编排、校验与发送。
 
 模型只描述受限的结构化消息段；本模块负责把它们验证为 NoneBot Message，
@@ -12,7 +12,6 @@ import contextlib
 import json
 import mimetypes
 import os
-import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -41,6 +40,7 @@ from .execution_trace import trace_event
 from .log import dbg
 from .media import validate_outbound_image_path
 from .reactions import resolve_reaction
+from .safe_download import stream_download
 from .speech import (
     SpeechPlan,
     SpeechStyle,
@@ -337,26 +337,15 @@ async def _download_allowed_media(file_ref: str, media_type: str) -> Path:
     if not host or host not in _allowed_file_hosts():
         raise PermissionError("远程媒体域名不在白名单")
 
-    suffix = Path(parsed.path).suffix or ".download"
-    async with (
-        httpx.AsyncClient(timeout=15, follow_redirects=True) as client,
-        client.stream("GET", file_ref) as response,
-    ):
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "").split(";", 1)[0]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-            temporary = Path(handle.name)
-            total = 0
-            try:
-                async for chunk in response.aiter_bytes(64 * 1024):
-                    total += len(chunk)
-                    if total > MAX_OUTBOUND_FILE_BYTES:
-                        raise ValueError("媒体文件超过大小限制")
-                    handle.write(chunk)
-            except BaseException:
-                handle.close()
-                temporary.unlink(missing_ok=True)
-                raise
+    # 重定向逐跳校验白名单，Content-Length 预检；见 safe_download.py。
+    temporary, content_type = await stream_download(
+        file_ref,
+        allowed_hosts=_allowed_file_hosts(),
+        max_bytes=MAX_OUTBOUND_FILE_BYTES,
+        suffix=Path(parsed.path).suffix or ".download",
+        host_error="远程媒体域名不在白名单",
+        size_error="媒体文件超过大小限制",
+    )
     try:
         _check_media_mime(temporary, media_type, content_type)
     except Exception:

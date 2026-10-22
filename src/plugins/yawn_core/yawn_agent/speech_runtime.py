@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from .context_history import EffectiveTurn, effective_turn_from_context
@@ -170,6 +171,7 @@ def build_runtime_speech_plan(
     suggested_topic: object = None,
     reason: str = "",
     confidence: float = 1.0,
+    verified_tools: frozenset[str] | set[str] | None = None,
 ) -> SpeechPlan:
     resolved_context = context or {}
     scene = (
@@ -233,9 +235,14 @@ def build_runtime_speech_plan(
         "topic_action": transition.action,
         "interaction_plan": interaction_plan,
     }
-    if segments:
-        return speech_plan_from_segments(segments, **common)
-    return speech_plan_from_text(text, **common)
+    plan = (
+        speech_plan_from_segments(segments, **common)
+        if segments
+        else speech_plan_from_text(text, **common)
+    )
+    if verified_tools is None:
+        return plan
+    return replace(plan, verified_tools=tuple(sorted(verified_tools)))
 
 
 def trace_speech_decision(

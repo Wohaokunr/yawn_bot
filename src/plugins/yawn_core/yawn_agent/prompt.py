@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 
 from .context import CurrentTurn
@@ -11,8 +12,10 @@ from .context_history import EffectiveTurn, effective_turn_query
 from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
+from .tool_router import suggest_tool_families
 
-PROMPT_VERSION = "yawn-agent-v14"
+PROMPT_VERSION = "yawn-agent-v15"
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
 # Character Profile 决定，避免同一个 system prompt 同时给模型两套冲突指令。
@@ -36,6 +39,9 @@ _SEND_MESSAGE_RULES = (
     "使用 send_message 时，message_id/user_id 必须来自当前上下文；"
     "禁止 CQ 码、@all 或原始 OneBot payload。"
     "send_message 成功即结束本轮，不要再重复同一最终文本。"
+    "要提醒某人时用 at 段，不要在文字里手写“@昵称”（纯文本不会提醒对方）。"
+    "QQ 不渲染 Markdown：不用 # 标题、**粗体**、表格和 - 列表符号，"
+    "分点就用短句或换行；不自称 AI，不用客服式结尾。"
 )
 _REACTION_RULES = (
     "表情包先用 search_reactions 获取 reaction_id，再交给 send_message；"
@@ -54,6 +60,30 @@ _DISCOVERY_RULES = (
     "discover_tools 加载整包。"
     "discover_tools 只负责发现并让下一轮注入 schema，不代表任何业务动作已经执行；"
     "只能调用下一轮实际出现在 schema 中的工具。"
+    "发现结果里的 args 是参数清单、requires 是前置条件，照着准备参数再调用。"
+)
+_NOTICE_RULES = (
+    "发公告时 content 写成书面、完整的公告正文：说清事项、时间和要求，"
+    "不带角色口癖、表情和 Markdown；对方没给出正文时先问清楚，不要自己编。"
+)
+_FILE_RULES = (
+    "send_file 的 file 只能用 list_agent_files 返回的文件名或白名单链接，禁止猜路径；"
+    "name 用对群友友好的文件名。"
+)
+_TARGET_MEMBER_RULES = (
+    "对成员做管理操作时，user_id 必须是本轮明确指向的人：@、回复对象，"
+    "或用 find_group_member 按昵称查到的结果；查到多个候选时先确认，"
+    "绝不拿历史里别人的 id 代替。"
+)
+_TARGET_MEMBER_TOOLS = frozenset(
+    {
+        "mute_member",
+        "unmute_member",
+        "kick_member",
+        "set_group_card",
+        "set_special_title",
+        "set_group_admin",
+    }
 )
 
 # 稳定层字段与记忆来源：只在整理任务写入或群资料变更时变化。
@@ -248,6 +278,12 @@ def build_tool_guidance(tools: list[dict[str, Any]]) -> str:
         parts.append(_FORWARD_RULES)
     if "discover_tools" in tool_names:
         parts.append(_DISCOVERY_RULES)
+    if "create_group_announcement" in tool_names:
+        parts.append(_NOTICE_RULES)
+    if "send_file" in tool_names or "list_agent_files" in tool_names:
+        parts.append(_FILE_RULES)
+    if tool_names & _TARGET_MEMBER_TOOLS:
+        parts.append(_TARGET_MEMBER_RULES)
     if parts:
         parts.insert(0, TOOL_RESULT_SPEECH_INSTRUCTION)
     return "\n".join(parts)
@@ -312,6 +348,48 @@ def split_context(
     return stable, volatile
 
 
+def _clock_payload(current_turn: CurrentTurn | dict[str, Any] | None) -> dict[str, str]:
+    """由当前回合的 received_at 推出“现在几点、星期几”，到分钟粒度。"""
+
+    if current_turn is None:
+        return {}
+    raw = _turn_payload(current_turn).get("received_at")
+    if not raw:
+        return {}
+    try:
+        moment = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
+    except ValueError:
+        return {}
+    return {
+        "now": moment.strftime("%Y-%m-%d %H:%M"),
+        "weekday": _WEEKDAYS[moment.weekday()],
+    }
+
+
+def _realtime_extras(
+    current_turn: CurrentTurn | dict[str, Any] | None,
+    tools: list[dict[str, Any]],
+    *,
+    bot_role: str | None,
+) -> dict[str, Any]:
+    extras: dict[str, Any] = {}
+    clock = _clock_payload(current_turn)
+    if clock:
+        extras["clock"] = clock
+    if bot_role:
+        extras["bot_role"] = bot_role
+    tool_names = {
+        str(item.get("function", {}).get("name", "")) for item in tools
+    }
+    if "discover_tools" in tool_names and current_turn is not None:
+        families = suggest_tool_families(
+            str(_turn_payload(current_turn).get("content") or "")
+        )
+        if families:
+            extras["suggested_toolpacks"] = list(families)
+    return extras
+
+
 def build_messages(  # noqa: PLR0913
     *,
     persona: dict[str, str],
@@ -320,6 +398,7 @@ def build_messages(  # noqa: PLR0913
     user_prompt: str,
     current_turn: CurrentTurn | dict[str, Any] | None = None,
     media_inputs: list[dict[str, Any]] | None = None,
+    bot_role: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """返回消息和固定前缀指纹。
 
@@ -347,6 +426,10 @@ def build_messages(  # noqa: PLR0913
     user_content: str | list[dict[str, Any]] = rendered_user_prompt
     if media_inputs:
         user_content = [{"type": "text", "text": rendered_user_prompt}, *media_inputs]
+    realtime = {
+        **realtime,
+        **_realtime_extras(effective_current_turn, tools, bot_role=bot_role),
+    }
     realtime_content = f"{_REALTIME_SYSTEM_PREFIX}{canonical_json(realtime)}"
     if has_model_media:
         realtime_content += f"\n{_MEDIA_SYSTEM_PREFIX}{_CURRENT_MEDIA_POLICY}"

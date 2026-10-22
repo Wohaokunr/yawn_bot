@@ -61,8 +61,18 @@
 - `privileged`/`critical` 的配额必须在副作用**之前**预扣并提交；配额无法落库时不得执行动作，动作失败时退还配额。禁止“先踢人后计数”。
 - `critical` 必须显式命中当前用户消息中的动作意图、显式加入群级 allowlist、拥有真实 actor，并使用独立的低额度计数；主动/后台任务不得以空 actor 调用。`discover_tools` 永远不能发现 critical 工具，避免模型自行升级到高风险能力。
 - `discover_tools` 只能返回当前 Bot 能力、当前 actor 权限和当前群 allowlist 下真实可暴露的工具；发现结果只在下一轮动态装载正式 schema，禁止返回 raw OneBot action 让模型自行拼参数。
+- 工具参数在 `tool_args.py` 按注册表 schema 校验和规范化（严格布尔、整数字符串、enum、范围、长度、多余参数），校验失败不得进入权限/配额/副作用流程。handler 拿到的布尔值已经是真正的 bool，不要再用 `bool(args[...])`。
+- 同一回合同工具同参数的写操作由 `ToolCallLedger` 复用首次结果，不重复扣配额、不重复副作用；每回合 privileged/critical 最多 `MAX_CONTROLLED_CALLS_PER_TURN` 次。handler 发现动作其实没有发生（如同名文件夹已存在）时返回 `refund_quota=True`，由执行器退还配额。
+- 工具失败统一返回 `error_code` 与 `hint`（`tool_error_payload`）；报错文本必须经 `sanitize_error_text` 去掉 URL 和本机路径再进 Prompt/审计。
+- 白名单别名集中在 `tool_registry.ALLOWLIST_ALIASES`（如 `unmute_member` 随 `mute_member` 开放），曝光、发现和执行三处都必须用 `allowlist_covers` 判断。
+- 出站文件/媒体下载必须走 `safe_download.stream_download`：手动跟随重定向并逐跳校验白名单，禁止 `follow_redirects=True`。
 - 工具执行异常必须被隔离。尤其 SQLAlchemy/数据库异常后，不得继续用已进入 failed transaction 的 session 强行写审计；审计是尽力而为，不能反过来毒化主流程。
 - 工具结果只返回完成当前推理所需的最小数据，禁止把完整群成员原始 payload、文件路径或权限内部信息回灌模型。
+
+## 发言清洗与声明核验
+
+- QQ 纯文本规范化放在 `speech_format.py`（Markdown、重复标点/笑声/emoji、AI 免责声明、客服结尾、角色标签、泄漏的工具 JSON/内部字段/QQ 号、重复句子），由 `speech_quality._polish_text` 统一调用；代码块原样保留，清洗后为空时保留原文。
+- “已完成”声明核验放在 `speech_claims.py`。对话路径通过 `SpeechPlan.verified_tools` 传入本轮真实成功的工具；为 None 时（主动发言、调试）不做核验。新增写操作工具时同步补它的声明族。
 
 ## 主动发言与短会话
 

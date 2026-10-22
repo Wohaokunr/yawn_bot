@@ -27,6 +27,13 @@ from .speech_act import (
     SPEECH_ACT_REACT,
     SPEECH_ACT_REPAIR,
 )
+from .speech_claims import check_action_claims
+from .speech_format import (
+    FORMAT_DETAILS,
+    has_plain_text_mention,
+    normalize_qq_text,
+    strip_leading_mention,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -266,7 +273,7 @@ def _dedupe_issues(items: list[SpeechQualityIssue]) -> tuple[SpeechQualityIssue,
     return tuple(result)
 
 
-def _polish_text(  # noqa: C901,PLR0912
+def _polish_text(  # noqa: C901,PLR0912,PLR0915
     text: str,
     plan: SpeechPlan,
     *,
@@ -280,6 +287,52 @@ def _polish_text(  # noqa: C901,PLR0912
 
     cleaned = original
     issues: list[SpeechQualityIssue] = []
+
+    formatted = normalize_qq_text(cleaned)
+    for code in formatted.codes:
+        detail, severity = FORMAT_DETAILS[code]
+        issues.append(
+            _issue(code, detail, autofixed=autofix, severity=severity)
+        )
+    if autofix and formatted.codes:
+        cleaned = formatted.text
+
+    if plan.target.reply_to_message_id:
+        candidate, mention_prefix = strip_leading_mention(cleaned)
+        if mention_prefix:
+            issues.append(
+                _issue(
+                    "redundant_quote_mention",
+                    "已经引用回复，正文开头的“@某某”是多余的",
+                    autofixed=autofix,
+                )
+            )
+            if autofix:
+                cleaned = candidate
+    if has_plain_text_mention(cleaned):
+        issues.append(
+            _issue(
+                "plain_text_mention",
+                "正文里写了“@昵称”，但纯文本不会真正提醒对方；需要提醒时应使用 at 消息段",
+                severity="warning",
+            )
+        )
+
+    if plan.verified_tools is not None:
+        claims = check_action_claims(cleaned, frozenset(plan.verified_tools))
+        if claims.changed:
+            issues.append(
+                _issue(
+                    "unverified_action_claim",
+                    "正文声称已完成"
+                    + "、".join(claims.families)
+                    + "类操作，但本轮没有对应工具成功执行",
+                    autofixed=autofix,
+                    severity="warning",
+                )
+            )
+            if autofix:
+                cleaned = claims.text
 
     candidate, boilerplate = _strip_boilerplate(cleaned)
     if boilerplate:
@@ -385,7 +438,7 @@ def _polish_text(  # noqa: C901,PLR0912
     return _clean_lines(cleaned), _dedupe_issues(issues)
 
 
-def finalize_speech_plan(
+def finalize_speech_plan(  # noqa: C901
     plan: SpeechPlan,
     *,
     user_text: str = "",
@@ -428,6 +481,18 @@ def finalize_speech_plan(
     )
     if not autofix:
         return plan.with_content(segments=tuple(segments), issues=issues)
+
+    for index in text_indices:
+        formatted = normalize_qq_text(_clean_lines(segments[index].get("text")))
+        if formatted.text.strip():
+            segments[index]["text"] = formatted.text
+        if plan.verified_tools is not None:
+            claims = check_action_claims(
+                str(segments[index].get("text") or ""),
+                frozenset(plan.verified_tools),
+            )
+            if claims.changed:
+                segments[index]["text"] = claims.text
 
     first_index = text_indices[0]
     last_index = text_indices[-1]

@@ -88,6 +88,8 @@ export const TOOL_PRESETS: Array<{ key: string; label: string; tools: string[] }
     label: "全部低风险",
     tools: [
       "mute_member",
+      "unmute_member",
+      "recall_message",
       "create_group_announcement",
       "set_essence_message",
       "remove_essence_message",

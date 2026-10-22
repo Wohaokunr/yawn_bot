@@ -118,6 +118,9 @@ class SpeechPlan:
     topic_action: str = "continue"
     interaction_plan: dict[str, Any] = field(default_factory=dict)
     issues: tuple[SpeechQualityIssue, ...] = ()
+    # 本轮真实成功的工具名；None 表示调用方不提供（主动发言、调试等），
+    # 此时不做“已完成”声明核验。
+    verified_tools: tuple[str, ...] | None = None
 
     @property
     def should_speak(self) -> bool:
@@ -165,6 +168,11 @@ class SpeechPlan:
             "reason": self.reason,
             "interaction_plan": dict(self.interaction_plan),
             "quality": [item.as_dict() for item in self.issues],
+            **(
+                {"verified_tools": list(self.verified_tools)}
+                if self.verified_tools is not None
+                else {}
+            ),
             "confidence": max(0.0, min(float(self.confidence), 1.0)),
         }
 

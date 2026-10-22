@@ -96,7 +96,9 @@ def test_quality_removes_forced_binary_followup_from_repair() -> None:
 
 def test_quality_flags_and_trims_short_social_monologue() -> None:
     modules = _load_modules()
-    content = "在呢，刚才没接上。" + "我知道你是在说刚才那句太端着了。" * 12
+    content = "在呢，刚才没接上。" + "".join(
+        f"我知道你第{index}次是在说刚才那句太端着了。" for index in range(12)
+    )
     plan = modules["speech_plan_from_text"](
         content,
         scene="direct_reply",

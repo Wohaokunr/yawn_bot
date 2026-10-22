@@ -10,7 +10,7 @@ import nonebot
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_FAMILY_TOOL_COUNT = 36
+EXPECTED_FAMILY_TOOL_COUNT = 44
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 try:
@@ -107,8 +107,17 @@ async def test_normal_permission_levels_never_force_capability_refresh(
         capabilities=caps,
     )
 
-    for name in ("get_group_info", "record_user_relation", "send_message"):
-        result = await tools.execute_tool_with_meta(name, {}, context=context)
+    valid_args: dict[str, dict[str, Any]] = {
+        "get_group_info": {},
+        "record_user_relation": {
+            "subject_user_id": 10,
+            "object_user_id": 11,
+            "type": "好友",
+        },
+        "send_message": {"segments": [{"type": "text", "text": "hi"}]},
+    }
+    for name, args in valid_args.items():
+        result = await tools.execute_tool_with_meta(name, args, context=context)
         assert result.payload["ok"] is True
 
     assert probe_count == 0
@@ -156,7 +165,9 @@ async def test_privileged_tool_forces_fresh_bot_capability_before_dispatch(
         capabilities=stale,
     )
 
-    result = await tools.execute_tool_with_meta("set_group_name", {}, context=context)
+    result = await tools.execute_tool_with_meta(
+        "set_group_name", {"group_name": "新群名"}, context=context
+    )
     assert result.payload["ok"] is True
     assert probe_count == 1
 

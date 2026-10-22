@@ -1,4 +1,4 @@
-# ruff: noqa: C901,PLR0912,PLR2004
+# ruff: noqa: C901,PLR0912,PLR2004,E501
 """Deterministic, zero-AI-cost routing from one dialogue turn to tool schemas."""
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from .tool_registry import (
     ToolDefinition,
 )
 
-MAX_TOOL_ROUNDS = 4
+# discover → 查目标（如 find_group_member）→ 执行 → 可能的二次发现 → 最终回答。
+MAX_TOOL_ROUNDS = 5
 
 # Natural QQ requests often insert scope words inside a registered keyword, e.g.
 # "设置群精华" vs "设置精华" or "删除这条群消息精华".  Keep registry
@@ -47,6 +48,48 @@ def _keyword_matches(normalized: str, keyword: str) -> bool:
         compact_keyword
         and compact_keyword in _compact_tool_intent(normalized)
     )
+
+
+def _bigrams(text: str) -> set[str]:
+    compact = "".join(char for char in text if not char.isspace())
+    return {compact[index : index + 2] for index in range(len(compact) - 1)}
+
+
+def _fuzzy_overlap(query: str, keyword: str) -> float:
+    """中文二元组重叠率：容忍“置顶一下公告”与“置顶公告”这类语序/插词差异。"""
+
+    keyword_grams = _bigrams(keyword)
+    if len(keyword_grams) < 2:
+        return 0.0
+    return len(keyword_grams & _bigrams(query)) / len(keyword_grams)
+
+
+# 意图提示：当前消息里出现这些词时，在易变层提示模型优先发现对应工具包。
+# 只是提示，不注入 schema，也绝不涉及 critical 工具。
+_FAMILY_HINT_WORDS: dict[str, tuple[str, ...]] = {
+    "notice": ("公告",),
+    "file": ("文件", "群文件", "资料包", "文件夹"),
+    "moderation": ("禁言", "解禁", "撤回", "闭嘴"),
+    "member": ("管理员", "群主", "群名片", "头衔", "谁是"),
+    "essence": ("精华", "加精"),
+    "history": ("聊天记录", "刚才说", "说了什么", "之前的消息"),
+    "memory": ("记得", "还记不记得", "上次"),
+    "reaction": ("表情包",),
+}
+
+
+def suggest_tool_families(text: str | None, *, limit: int = 3) -> tuple[str, ...]:
+    """零成本按当前消息意图给出建议发现的工具包（最多 ``limit`` 个）。"""
+
+    normalized = str(text or "").casefold()
+    if not normalized.strip():
+        return ()
+    families = [
+        family
+        for family, words in _FAMILY_HINT_WORDS.items()
+        if any(word in normalized for word in words)
+    ]
+    return tuple(families[:limit])
 
 
 def select_dialogue_tool_names(
@@ -145,6 +188,8 @@ def rank_discoverable_tools(
                 score += 4
             elif normalized and normalized in folded:
                 score += 3
+            elif _fuzzy_overlap(normalized, folded) >= 0.6:
+                score += 2
         # A requested family is already a meaningful match; otherwise omit
         # zero-score noise so discovery does not become a catalog dump.
         if score > 0 or family_filter:
@@ -164,14 +209,19 @@ def select_dialogue_message_segment_types(
 
     normalized = str(text or "").strip().casefold()
     selected: set[str] = {"text"}
-    if has_reply or "回复" in normalized or "引用" in normalized:
+    if has_reply or any(
+        hint in normalized for hint in ("回复", "引用", "回他", "回她", "回一下", "回这条")
+    ):
         selected.add("reply")
     if has_reply:
         # P6: reply threads may naturally use one reaction instead of a
         # redundant acknowledgement sentence. Actual reaction_id still has to
         # come from search_reactions and outbound validation remains unchanged.
         selected.add("reaction")
-    if has_target_mentions or "艾特" in normalized:
+    if has_target_mentions or any(
+        hint in normalized
+        for hint in ("艾特", "提醒一下", "提醒他", "提醒她", "叫他", "叫她", "叫一下", "cue", "喊他", "喊她", "@一下")
+    ):
         selected.add("at")
     if "表情包" in normalized or "reaction" in normalized or any(
         hint in normalized for hint in ("无语", "吃瓜", "震惊")
@@ -233,4 +283,5 @@ __all__ = [
     "select_critical_tool_names",
     "select_dialogue_message_segment_types",
     "select_dialogue_tool_names",
+    "suggest_tool_families",
 ]

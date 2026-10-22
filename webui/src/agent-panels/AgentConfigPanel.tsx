@@ -338,7 +338,10 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                     mode="multiple"
                     placeholder="未选择时不允许调用特权工具"
                     options={[
-                      { value: "mute_member", label: "禁言成员" },
+                      { value: "mute_member", label: "禁言 / 解除禁言" },
+                      { value: "unmute_member", label: "仅解除禁言" },
+                      { value: "recall_message", label: "撤回群消息" },
+                      { value: "recall_bot_message", label: "仅撤回机器人自己的消息" },
                       { value: "create_group_announcement", label: "发布群公告" },
                       { value: "set_essence_message", label: "设置精华消息" },
                       { value: "remove_essence_message", label: "移出精华消息" },
