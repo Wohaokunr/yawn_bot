@@ -135,8 +135,47 @@ export interface AgentDiagnosticBlocker {
   detail: string;
 }
 
+export interface AgentToolQuota {
+  adminToday: number;
+  adminLimit: number;
+  criticalToday: number;
+  criticalLimit: number;
+  allowlist: string[];
+}
+
+// 群对话管线的固定节奏（后端代码常量，只读）。
+export interface AgentPipelineConstants {
+  callContinuationSeconds: number;
+  coalesceWindowSeconds: number;
+  maxCoalescedMessages: number;
+  conversationDirectQuietSeconds: number;
+  conversationQuietSeconds: number;
+  conversationMaxSeconds: number;
+  conversationMaxBotTurns: number;
+}
+
+export interface AgentActivity {
+  groupId: string;
+  hours: number;
+  buckets: Array<{ hour: string; members: number; bot: number }>;
+  totals: { members: number; bot: number; activeMembers: number };
+  topMembers: Array<{ userId: string; name: string | null; count: number }>;
+  generatedAt: string;
+}
+
+export interface AgentToolUsage {
+  groupId: string;
+  days: number;
+  total: number;
+  failed: number;
+  tools: Array<{ toolName: string; success: number; failed: number; total: number }>;
+  daily: Array<{ day: string; success: number; failed: number }>;
+}
+
 export interface AgentDiagnostics {
   groupId: string;
+  tools?: AgentToolQuota;
+  pipeline?: AgentPipelineConstants;
   effective: {
     enabled: boolean;
     replyTriggerEnabled: boolean;
@@ -152,6 +191,10 @@ export interface AgentDiagnostics {
     lastProactiveAt: string | null;
     activeTopic: string | null;
     mediaCacheEnabled: boolean;
+    idleThresholdMinutes?: number;
+    proactiveProbability?: number;
+    proactiveActiveProbability?: number;
+    proactiveActiveWindowMinutes?: number;
     shortConversation: {
       enabled: boolean;
       active: boolean;

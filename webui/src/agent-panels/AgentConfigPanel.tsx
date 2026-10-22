@@ -11,6 +11,8 @@ import {
   useUnsavedChanges,
 } from "../shared";
 import type { AgentConfig } from "../types";
+import { ConfigTransferBar } from "../agent-workspace/ConfigTransferBar";
+import { type PortableAgentConfig, TOOL_PRESETS } from "../agent-workspace/config-transfer";
 
 type ParticipationIntensity = "restrained" | "balanced" | "active" | "custom";
 
@@ -43,6 +45,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
   const watchedProactiveEnabled = Form.useWatch("proactiveEnabled", form) as boolean | undefined;
   const watchedWarmupProbability = Form.useWatch("proactiveProbability", form) as number | undefined;
   const watchedInterjectProbability = Form.useWatch("proactiveActiveProbability", form) as number | undefined;
+  const watchedAllowlist = Form.useWatch("toolAllowlist", form) as string[] | undefined;
   useUnsavedChanges(dirty);
 
   const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
@@ -87,6 +90,16 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
     setDirty(true);
   };
 
+  const applyDraft = (values: PortableAgentConfig, source: string): void => {
+    form.setFieldsValue(values);
+    setDirty(true);
+    message.success(`已从${source}填入 ${Object.keys(values).length} 项，确认后点“保存配置”生效`);
+  };
+  const activeToolPreset = TOOL_PRESETS.find((preset) => {
+    const current = [...(watchedAllowlist ?? data.toolAllowlist)].sort().join(",");
+    return [...preset.tools].sort().join(",") === current;
+  })?.key;
+
   return (
     <Form
       form={form}
@@ -118,20 +131,23 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                 <h2>群级运行配置</h2>
                 <p>控制 Agent 在这个群里的响应方式、主动行为、记忆边界与管理能力。</p>
               </div>
-              <SaveStatus dirty={dirty} saving={saving} />
+              <div className="agent-config-title-actions">
+                <SaveStatus dirty={dirty} saving={saving} />
+                <ConfigTransferBar groupId={groupId} getValues={() => form.getFieldsValue(true)} onApply={applyDraft} />
+              </div>
             </div>
             <div className="agent-config-metrics">
               <div className="agent-config-metric">
                 <span>今日主动发言</span>
-                <strong>{data.proactiveToday}</strong>
+                <strong>{data.proactiveToday}<small> / {data.dailyLimit}</small></strong>
               </div>
               <div className="agent-config-metric">
                 <span>今日管理工具</span>
-                <strong>{data.adminToolsToday}</strong>
+                <strong>{data.adminToolsToday}<small> / {data.adminToolDailyLimit}</small></strong>
               </div>
               <div className="agent-config-metric">
                 <span>今日高风险工具</span>
-                <strong>{data.criticalToolsToday}</strong>
+                <strong>{data.criticalToolsToday}<small> / {data.criticalToolDailyLimit}</small></strong>
               </div>
               <div className="agent-config-metric agent-config-metric-wide">
                 <span>配置范围</span>
@@ -294,6 +310,21 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                   <h3>特权工具权限</h3>
                   <p>限制 Agent 可以调用的高副作用能力，以及每天的调用额度。读取、记忆写入和普通消息发送不占此额度。</p>
                 </div>
+                <Segmented
+                  size="small"
+                  aria-label="特权工具预设"
+                  value={activeToolPreset ?? "custom"}
+                  onChange={(value) => {
+                    const preset = TOOL_PRESETS.find((item) => item.key === value);
+                    if (!preset) return;
+                    form.setFieldsValue({ toolAllowlist: preset.tools });
+                    setDirty(true);
+                  }}
+                  options={[
+                    ...TOOL_PRESETS.map((preset) => ({ value: preset.key, label: preset.label })),
+                    { value: "custom", label: "自定义", disabled: true },
+                  ]}
+                />
               </div>
               <div className="agent-config-grid agent-config-grid-2">
                 <Form.Item name="adminToolDailyLimit" label="每日特权工具上限" extra="群管理操作和群文件发送共用此额度">

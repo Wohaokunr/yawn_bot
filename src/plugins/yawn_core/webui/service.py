@@ -32,6 +32,8 @@ from ..data_models.web_admin_audit import WebAdminAudit
 from ..llm import resolve_llm_request, resolve_provider
 from ..metrics import ai_health_snapshot, snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
+from ..yawn_agent import conversation as _conversation_runtime
+from ..yawn_agent import turn_intake as _turn_intake
 from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.emotion import emotion_public_state
@@ -1399,8 +1401,30 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
             }
         )
 
+    # 旧测试与历史行可能缺少配额列，按运行时默认值兜底。
+    tool_same_day = getattr(config, "tool_day", None) == today
+    tools = {
+        "adminToday": (
+            int(getattr(config, "admin_tool_count", 0) or 0) if tool_same_day else 0
+        ),
+        "adminLimit": int(getattr(config, "admin_tool_daily_limit", 30) or 30),
+        "criticalToday": (
+            int(getattr(config, "critical_tool_count", 0) or 0)
+            if tool_same_day
+            else 0
+        ),
+        "criticalLimit": int(getattr(config, "critical_tool_daily_limit", 5) or 5),
+        "allowlist": (
+            list(getattr(config, "tool_allowlist", None) or [])
+            if config is not None
+            else default_tool_allowlist()
+        ),
+    }
+
     return {
         "groupId": str(group_id),
+        "tools": tools,
+        "pipeline": agent_pipeline_constants(),
         "effective": {
             "enabled": enabled,
             "replyTriggerEnabled": bool(enabled and reply_trigger_enabled),
@@ -1416,12 +1440,153 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
             "lastProactiveAt": iso(last_proactive_at),
             "activeTopic": active_topic,
             "mediaCacheEnabled": media_cache_enabled,
+            "idleThresholdMinutes": int(
+                getattr(config, "idle_threshold_minutes", 15) or 15
+            ),
+            "proactiveProbability": float(
+                getattr(config, "proactive_probability", 0.35) or 0
+            ),
+            "proactiveActiveProbability": float(
+                getattr(config, "proactive_active_probability", 0.25) or 0
+            ),
+            "proactiveActiveWindowMinutes": int(
+                getattr(config, "proactive_active_window_minutes", 12) or 12
+            ),
             "shortConversation": conversation,
         },
         "memory": memory,
         "llm": llm,
         "blockers": blockers,
         "generatedAt": datetime.now(BEIJING_TZ).isoformat(),
+    }
+
+
+def agent_pipeline_constants() -> dict[str, float | int]:
+    """群对话管线的固定节奏参数（代码常量，只读展示给管理员）。"""
+
+    return {
+        "callContinuationSeconds": _turn_intake.CALL_CONTINUATION_SECONDS,
+        "coalesceWindowSeconds": _turn_intake.COALESCE_WINDOW_SECONDS,
+        "maxCoalescedMessages": _turn_intake.MAX_COALESCED_MESSAGES,
+        "conversationDirectQuietSeconds": (
+            _conversation_runtime.CONVERSATION_DIRECT_QUIET_SECONDS
+        ),
+        "conversationQuietSeconds": _conversation_runtime.CONVERSATION_QUIET_SECONDS,
+        "conversationMaxSeconds": _conversation_runtime.CONVERSATION_MAX_SECONDS,
+        "conversationMaxBotTurns": _conversation_runtime.CONVERSATION_MAX_BOT_TURNS,
+    }
+
+
+AGENT_ACTIVITY_TOP_MEMBERS = 5
+
+
+async def agent_activity(
+    session: AsyncSession, group_id: int, *, now: datetime, hours: int = 24
+) -> dict[str, Any]:
+    """按小时聚合最近 N 小时群消息与 Bot 回复，供 Agent 工作台画活跃曲线。"""
+
+    end_hour = now.replace(minute=0, second=0, microsecond=0)
+    start = end_hour - timedelta(hours=hours - 1)
+    rows = (
+        await session.execute(
+            select(
+                GroupAgentMessage.received_at,
+                GroupAgentMessage.role,
+                GroupAgentMessage.user_id,
+                GroupAgentMessage.sender_name,
+            ).where(
+                GroupAgentMessage.group_id == group_id,
+                GroupAgentMessage.received_at >= start,
+            )
+        )
+    ).all()
+    buckets = [
+        {"hour": iso(start + timedelta(hours=index)), "members": 0, "bot": 0}
+        for index in range(hours)
+    ]
+    member_counts: dict[int, int] = {}
+    member_names: dict[int, str] = {}
+    totals = {"members": 0, "bot": 0}
+    for received_at, role, user_id, sender_name in rows:
+        if received_at is None:
+            continue
+        index = int((received_at - start).total_seconds() // 3600)
+        if not 0 <= index < hours:
+            continue
+        key = "bot" if role == "bot" else "members"
+        buckets[index][key] += 1
+        totals[key] += 1
+        if key == "members":
+            member_counts[int(user_id)] = member_counts.get(int(user_id), 0) + 1
+            if sender_name:
+                member_names[int(user_id)] = str(sender_name)
+    top_members = sorted(member_counts.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "groupId": str(group_id),
+        "hours": hours,
+        "buckets": buckets,
+        "totals": {**totals, "activeMembers": len(member_counts)},
+        "topMembers": [
+            {
+                "userId": str(user_id),
+                "name": member_names.get(user_id),
+                "count": count,
+            }
+            for user_id, count in top_members[:AGENT_ACTIVITY_TOP_MEMBERS]
+        ],
+        "generatedAt": iso(now),
+    }
+
+
+async def agent_tool_usage(
+    session: AsyncSession, group_id: int, *, now: datetime, days: int = 7
+) -> dict[str, Any]:
+    """最近 N 天特权工具调用按工具与结果聚合，外加逐日成功/失败趋势。"""
+
+    start = (now - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    rows = (
+        await session.execute(
+            select(
+                AgentAudit.tool_name, AgentAudit.result, AgentAudit.created_at
+            ).where(
+                AgentAudit.group_id == group_id,
+                AgentAudit.created_at >= start,
+            )
+        )
+    ).all()
+    by_tool: dict[str, dict[str, int]] = {}
+    daily = [
+        {
+            "day": (start + timedelta(days=index)).strftime("%Y-%m-%d"),
+            "success": 0,
+            "failed": 0,
+        }
+        for index in range(days)
+    ]
+    for tool_name, result, created_at in rows:
+        ok_result = result == "success"
+        entry = by_tool.setdefault(str(tool_name), {"success": 0, "failed": 0})
+        entry["success" if ok_result else "failed"] += 1
+        if created_at is not None:
+            index = (created_at.date() - start.date()).days
+            if 0 <= index < days:
+                daily[index]["success" if ok_result else "failed"] += 1
+    tools = sorted(
+        (
+            {"toolName": name, **counts, "total": counts["success"] + counts["failed"]}
+            for name, counts in by_tool.items()
+        ),
+        key=lambda item: (-item["total"], item["toolName"]),
+    )
+    return {
+        "groupId": str(group_id),
+        "days": days,
+        "total": sum(item["total"] for item in tools),
+        "failed": sum(item["failed"] for item in tools),
+        "tools": tools,
+        "daily": daily,
     }
 
 

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -99,14 +99,14 @@ beforeEach(() => {
 });
 
 describe("AgentDetailPage information architecture", () => {
-  it("shows four top-level groups, the group name and number, and keeps Studio panels lazy", async () => {
+  it("shows the grouped workspace nav, the group name and number, and keeps Studio panels lazy", async () => {
     renderPage("/agent/1");
     await screen.findByText("Agent · 测试群（1）");
-    expect(screen.getByText("运行")).toBeTruthy();
-    expect(screen.getByText("知识")).toBeTruthy();
-    expect(screen.getByText("调试")).toBeTruthy();
-    expect(screen.getByText("治理")).toBeTruthy();
-    expect(screen.getByText("诊断")).toBeTruthy();
+    const nav = screen.getByRole("navigation", { name: "Agent 工作台导航" });
+    for (const heading of ["运行", "知识", "调试", "治理"]) {
+      expect(within(nav).getByText(heading)).toBeTruthy();
+    }
+    expect(screen.getByRole("tab", { name: "驾驶舱" }).getAttribute("aria-selected")).toBe("true");
     expect(panelLoads).toEqual({
       config: 0,
       persona: 0,
@@ -119,41 +119,34 @@ describe("AgentDetailPage information architecture", () => {
       audits: 0,
     });
 
-    fireEvent.click(screen.getByText("配置"));
+    fireEvent.click(screen.getByRole("tab", { name: "运行配置" }));
     await screen.findByLabelText("config draft");
     expect(panelLoads.config).toBe(1);
     expect(panelLoads.persona).toBe(0);
     expect(panelLoads.debug).toBe(0);
   });
 
-  it("keeps the last leaf in each group mounted and preserves namespaced URL state", async () => {
+  it("keeps visited panels mounted and preserves namespaced URL state", async () => {
     renderPage("/agent/1?tab=config&profiles.userId=42&debug.trace=trace-a");
     const input = await screen.findByLabelText("config draft");
     fireEvent.change(input, { target: { value: "unsaved local draft" } });
 
-    fireEvent.click(screen.getByText("知识"));
+    fireEvent.click(screen.getByRole("tab", { name: "记忆" }));
     await screen.findByText("memories mock");
     expect(screen.getByLabelText("location").textContent).toContain("tab=memories");
     expect(screen.getByLabelText("location").textContent).toContain("profiles.userId=42");
     expect(screen.getByLabelText("location").textContent).toContain("debug.trace=trace-a");
 
-    fireEvent.click(screen.getByText("运行"));
+    fireEvent.click(screen.getByRole("tab", { name: "运行配置" }));
     await screen.findByLabelText("config draft");
     expect(screen.getByLabelText("location").textContent).toContain("tab=config");
     expect((screen.getByLabelText("config draft") as HTMLInputElement).value).toBe("unsaved local draft");
-
-    fireEvent.click(screen.getByText("人设"));
-    await screen.findByText("persona mock");
-    fireEvent.click(screen.getByText("知识"));
-    await screen.findByText("memories mock");
-    fireEvent.click(screen.getByText("运行"));
-    await screen.findByText("persona mock");
   });
 
-  it("maps legacy leaf deep links into the correct top-level group", async () => {
+  it("maps legacy leaf deep links onto the matching nav item", async () => {
     renderPage("/agent/1?tab=relations&relations.view=graph");
     await screen.findByText("relations mock");
-    expect(screen.getByRole("tab", { name: "知识" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "关系" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByLabelText("location").textContent).toContain("tab=relations");
     expect(screen.getByLabelText("location").textContent).toContain("relations.view=graph");
   });
