@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
+
+from .tool_args import ToolCallLedger
 
 if TYPE_CHECKING:
     from .capabilities import BotGroupCapabilities
@@ -27,6 +29,8 @@ class ToolExecutionContext:
     # 本轮触发消息中调用者本人写的正文；critical 工具据此校验显式动作意图。
     # 主动/后台任务保持 None，因此永远无法执行 critical 工具。
     current_intent_text: str | None = None
+    # 本回合写操作去重/次数账本；with_capabilities() 复制上下文时共享同一个账本。
+    ledger: ToolCallLedger = field(default_factory=ToolCallLedger)
 
     def with_capabilities(
         self, capabilities: BotGroupCapabilities
@@ -43,6 +47,8 @@ class ToolHandlerResult:
     needs_commit: bool = False
     immediate_commit: bool = False
     ends_turn: bool = False
+    # 副作用其实没有发生（例如同名文件夹已存在），执行器据此退还预扣配额。
+    refund_quota: bool = False
 
 
 @dataclass(frozen=True, slots=True)

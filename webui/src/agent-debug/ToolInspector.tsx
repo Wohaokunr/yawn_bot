@@ -51,7 +51,17 @@ export function ToolArgumentSummary({ name, value }: { name: string; value: unkn
     return <Text type="secondary">公告内容：{content ? `${content.slice(0, 80)}${content.length > 80 ? "…" : ""}` : "（空）"}</Text>;
   }
   if (name === "send_file") {
-    return <Text type="secondary">发送一个经过 Agent 文件安全校验的群文件</Text>;
+    const file = String(args.name ?? args.file ?? "");
+    return <Text type="secondary">上传群文件：{file || "（未指定）"}{args.folder_id ? `（文件夹 ${String(args.folder_id)}）` : ""}</Text>;
+  }
+  if (name === "unmute_member") {
+    return <Text type="secondary">解除禁言：{String(args.user_id ?? "未知")}</Text>;
+  }
+  if (name === "recall_message" || name === "recall_bot_message") {
+    return <Text type="secondary">撤回消息：{String(args.message_id ?? "机器人最近一条")}</Text>;
+  }
+  if (name === "find_group_member") {
+    return <Text type="secondary">按昵称查找：{String(args.query ?? "未指定")}</Text>;
   }
   if (name === "search_reactions") {
     return <Text type="secondary">搜索表情：{String(args.query ?? args.keyword ?? args.tag ?? "未指定")}</Text>;

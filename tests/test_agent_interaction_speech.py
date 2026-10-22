@@ -173,7 +173,7 @@ def test_prompt_policy_exposes_separated_repair_interaction() -> None:
 def test_quality_guard_trims_overlong_direct_repair() -> None:
     modules = _load_modules()
     plan = modules["speech_plan_from_text"](
-        "这句话确实太端了，我会收一点。" * 20,
+        "".join(f"这句话第{index}次确实太端了，我会收一点。" for index in range(20)),
         scene="direct_reply",
         style=modules["SpeechStyle"](soft_target_chars=55),
         act=modules["speech_act"].SPEECH_ACT_REPAIR,

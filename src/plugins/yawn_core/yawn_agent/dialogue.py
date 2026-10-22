@@ -46,6 +46,7 @@ from ..metrics import (
 )
 from .capabilities import (
     BotGroupCapabilities,
+    cached_bot_role,
     get_segment_capabilities,
     local_group_capabilities,
     probe_group_capabilities,
@@ -337,6 +338,7 @@ async def _finalize_reply(
     current_turn: CurrentTurn | None = None,
     after_tool: bool = False,
     reply_to_message_id: int | None = None,
+    verified_tools: frozenset[str] | None = None,
 ) -> None:
     """Compatibility wrapper; stateful finalization now lives in speech_finalize.py."""
 
@@ -350,6 +352,7 @@ async def _finalize_reply(
             source="dialogue",
             after_tool=after_tool,
             reply_to_message_id=reply_to_message_id,
+            verified_tools=verified_tools,
         )
     else:
         plan_or_prepared = content
@@ -452,6 +455,8 @@ class _DialogueTurn:
     had_tool_results: bool = False
     fallback_attempted: bool = False
     deadline: float = 0.0
+    # 本轮真实成功的工具；最终发言据此核验“已完成”声明。
+    succeeded_tools: set[str] = field(default_factory=set)
 
     @property
     def query_text(self) -> str:
@@ -481,6 +486,7 @@ class _DialogueTurn:
             media_inputs=self.media_blocks
             if resolve_llm_request("agent_dialogue").multimodal != "unsupported"
             else None,
+            bot_role=cached_bot_role(self.bot, self.group_id),
         )
         return fingerprint
 
@@ -998,6 +1004,7 @@ async def _finalize_turn_reply(turn: _DialogueTurn, content: str) -> None:
         current_turn=turn.current_turn,
         after_tool=turn.had_tool_results,
         reply_to_message_id=reply_to,
+        verified_tools=frozenset(turn.succeeded_tools),
     )
 
 
@@ -1267,6 +1274,8 @@ async def _run_tool_round(
         )
         args, result = await _execute_tool_call(turn, state, tool_name, raw_args)
         turn.had_tool_results = True
+        if result.get("ok"):
+            turn.succeeded_tools.add(tool_name)
         if tool_name == "discover_tools":
             _observe_discovery(turn, state, result)
         projected, media_note = await _project_tool_media(

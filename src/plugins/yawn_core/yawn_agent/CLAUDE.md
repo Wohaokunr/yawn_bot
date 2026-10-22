@@ -28,9 +28,9 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 对话编排 | `dialogue.py`、`dialogue_support.py`、`dialogue_turn_support.py`、`dialogue_runtime_support.py` |
 | 上下文 | `context.py`、`context_loader.py`、`context_repository.py`、`context_history.py`、`context_budget.py`、`topic_state.py`、`emotion.py` |
 | 提示词与人设 | `prompt.py`、`persona.py`、`reactions.py` |
-| 工具 | `tool_registry.py`（schema/权限）、`tool_router.py`（选择）、`tools.py`（执行与二次校验）、`tool_execution.py`、`tool_support.py`、`tool_result_speech.py`、`tool_handlers/`（按族：`admin`、`files`、`history`、`member`、`memory`、`message`） |
-| 发言 | `speech.py`、`speech_act.py`、`speech_policy.py`、`speech_native.py`、`speech_quality.py`、`speech_scorecard.py`、`speech_runtime.py`、`speech_finalize.py` |
-| 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限） |
+| 工具 | `tool_registry.py`（schema/权限/白名单别名）、`tool_router.py`（选择/发现打分/意图提示）、`tools.py`（执行与二次校验）、`tool_args.py`（参数校验、错误分类、回合账本）、`tool_execution.py`、`tool_support.py`、`tool_result_speech.py`、`tool_handlers/`（按族：`admin`、`files`、`history`、`member`、`memory`、`message`、`notice`） |
+| 发言 | `speech_format.py`（QQ 纯文本清洗）、`speech_claims.py`（完成声明核验）、`speech.py`、`speech_act.py`、`speech_policy.py`、`speech_native.py`、`speech_quality.py`、`speech_scorecard.py`、`speech_runtime.py`、`speech_finalize.py` |
+| 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限）、`safe_download.py`（出站下载白名单与重定向校验） |
 | 主动与短会话 | `proactive.py`、`proactive_policy.py`、`conversation.py` |
 | 记忆 | `memory.py` |
 | 媒体 | `media.py`、`media_context.py`、`media_provider.py`、`media_store.py`、`media_caption.py` |

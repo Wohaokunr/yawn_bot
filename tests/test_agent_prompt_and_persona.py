@@ -479,7 +479,7 @@ def test_prompt_does_not_repeat_tool_schema_or_catalog() -> None:
         user_prompt="你好",
     )
 
-    assert prompt.PROMPT_VERSION == "yawn-agent-v14"
+    assert prompt.PROMPT_VERSION == "yawn-agent-v15"
     assert "search_group_memory" not in str(messages[0]["content"])
     assert "SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in str(messages[0]["content"])
     assert '"properties"' not in str(messages[0]["content"])

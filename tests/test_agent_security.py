@@ -253,7 +253,10 @@ async def test_create_group_announcement_prefers_napcat_action(
         capabilities=caps,
     )
 
-    assert result == {"ok": True, "result": {"ok": True}}
+    assert result == {
+        "ok": True,
+        "result": {"published": True, "chars": 4, "preview": "测试公告"},
+    }
     assert bot.calls == [
         (
             "_send_group_notice",
@@ -343,7 +346,11 @@ async def test_send_file_is_privileged_and_rechecks_actor_role() -> None:
         capabilities=stale,
     )
 
-    assert result == {"ok": False, "error": "特权工具仅允许群主或管理员触发"}
+    assert {key: result[key] for key in ("ok", "error")} == {
+        "ok": False,
+        "error": "特权工具仅允许群主或管理员触发",
+    }
+    assert result["error_code"] == "permission"
     assert not bot.uploaded
 
 
@@ -802,6 +809,8 @@ async def test_group_read_tools_project_onebot_payloads(
         capabilities=current,
     )
 
+    # get_group_info 额外带上机器人在本群的实时身份。
+    assert group["result"].pop("bot_role") in {"owner", "admin", "member"}
     assert group["result"] == {
         "group_id": 1,
         "group_name": "测试群",
@@ -811,8 +820,11 @@ async def test_group_read_tools_project_onebot_payloads(
     assert member["result"] == {
         "user_id": 2,
         "name": "群名片",
+        "nickname": "昵称",
         "role": "admin",
         "title": "管理员头衔",
+        "join_time": "2023-11-15 06:13",
+        "last_sent_time": "2027-01-15 16:00",
     }
 
 
@@ -1000,20 +1012,25 @@ async def test_new_onebot_read_tools_return_compact_payloads(
     }
     assert "secret.invalid" not in str(public_history)
     assert notices["result"] == [
-        {"notice_id": "n1", "sender_id": 2, "publish_time": 123, "content": "公告正文"}
+        {
+            "notice_id": "n1",
+            "sender_id": 2,
+            "publish_time": "1970-01-01 08:02",
+            "content": "公告正文",
+        }
     ]
     assert essence["result"][0]["content"] == "精华正文"
     assert muted["result"]["items"][0] == {
         "user_id": 4,
         "name": "丙",
-        "shut_up_timestamp": 456,
+        "muted_until": "1970-01-01 08:07",
     }
     assert "raw" not in honor["result"]
     assert files["result"]["files"][0] == {
         "file_id": "f1",
         "name": "说明.pdf",
         "busid": 7,
-        "size": 100,
+        "size": "100B",
     }
     assert link["result"] == {
         "file_id": "f1",
@@ -1207,7 +1224,11 @@ async def test_admin_tool_execution_rechecks_actor_role() -> None:
         capabilities=stale,
     )
 
-    assert result == {"ok": False, "error": "调用者没有群管理权限"}
+    assert {key: result[key] for key in ("ok", "error")} == {
+        "ok": False,
+        "error": "调用者没有群管理权限",
+    }
+    assert result["error_code"] == "permission"
     assert not bot.muted
 
 
@@ -1241,7 +1262,11 @@ async def test_tool_execution_ignores_stale_bot_admin_cache() -> None:
         capabilities=stale,
     )
 
-    assert result == {"ok": False, "error": "机器人没有群管理权限"}
+    assert {key: result[key] for key in ("ok", "error")} == {
+        "ok": False,
+        "error": "机器人没有群管理权限",
+    }
+    assert result["error_code"] == "permission"
     assert not bot.muted
 
 

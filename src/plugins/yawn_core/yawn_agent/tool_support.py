@@ -1,4 +1,4 @@
-# ruff: noqa: E501,TRY003,TRY004,TRY300,TRY301,ASYNC240,TID252
+# ruff: noqa: E501, TRY003, TRY004, TRY300, TID252,PLR2004
 """Tool handler 共用的紧凑投影、参数校验与文件安全 helper。"""
 
 from __future__ import annotations
@@ -7,18 +7,20 @@ import json
 import mimetypes
 import os
 import re
-import tempfile
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
 from sqlalchemy import select
 
 from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.group_agent_message import GroupAgentMessage
 from .context import now_beijing
 from .log import dbg
+from .safe_download import stream_download
+from .tool_args import ToolArgumentError
 
 MAX_FILE_BYTES = 32 * 1024 * 1024
 DEFAULT_MEMBER_TOOL_LIMIT = 30
@@ -35,6 +37,113 @@ _ALLOWED_FILE_HOSTS = frozenset(
     for host in os.environ.get("AGENT_FILE_ALLOWED_HOSTS", "").split(",")
     if host.strip()
 )
+
+_CST = timezone(timedelta(hours=8))
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+# QQ 群文件/文件夹名里不允许的字符；同时拦截路径穿越。
+_FILE_NAME_FORBIDDEN = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]')
+# 不允许机器人上传到群文件的可执行/脚本类扩展名。
+BLOCKED_FILE_EXTENSIONS = frozenset(
+    {
+        ".exe", ".bat", ".cmd", ".com", ".scr", ".pif", ".msi", ".msp",
+        ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
+        ".hta", ".cpl", ".reg", ".lnk", ".jar", ".apk", ".sh", ".dll",
+    }
+)
+
+
+def readable_time(value: Any) -> str | None:
+    """OneBot 时间戳（秒/毫秒）或 datetime → 北京时间 ``YYYY-MM-DD HH:MM``。"""
+
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo else value.replace(tzinfo=_CST)
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)[:32]
+        if number <= 0:
+            return None
+        if number > 10_000_000_000:
+            number /= 1000
+        try:
+            moment = datetime.fromtimestamp(number, tz=_CST)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return moment.astimezone(_CST).strftime("%Y-%m-%d %H:%M")
+
+
+def readable_size(value: Any) -> str | None:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    if size < 0:
+        return None
+    if size < 1024:
+        return f"{size}B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f}KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / 1024 / 1024:.1f}MB"
+    return f"{size / 1024 / 1024 / 1024:.2f}GB"
+
+
+def weekday_label(moment: datetime) -> str:
+    return _WEEKDAYS[moment.weekday()]
+
+
+def clean_single_line(value: Any, *, limit: int) -> str:
+    """去掉换行和控制字符，用于群名、群名片、头衔这类单行文本。"""
+
+    text = "".join(
+        " " if char in "\r\n\t" else char
+        for char in str(value or "")
+        if char in "\r\n\t" or unicodedata.category(char)[0] != "C"
+    )
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def validate_file_component(value: Any, *, field_name: str, limit: int = 120) -> str:
+    """群文件/文件夹名：去首尾空白，拒绝路径分隔符和非法字符。"""
+
+    name = str(value or "").strip()
+    if not name or name in {".", ".."}:
+        raise ToolArgumentError(f"{field_name} 不能为空")
+    if _FILE_NAME_FORBIDDEN.search(name):
+        raise ToolArgumentError(
+            f"{field_name} 含有非法字符",
+            hint='名字里不能有 \\ / : * ? " < > | 和换行',
+        )
+    if len(name) > limit:
+        raise ToolArgumentError(f"{field_name} 超过 {limit} 字符")
+    return name
+
+
+def sanitize_upload_name(value: Any, *, source_name: str) -> str:
+    """群文件显示名：剥路径、去非法字符，没有扩展名时补源文件扩展名。"""
+
+    raw = str(value or "").replace("\\", "/").split("/")[-1]
+    cleaned = _FILE_NAME_FORBIDDEN.sub("", raw).strip().strip(".")
+    if not cleaned:
+        cleaned = Path(source_name).name
+    source_suffix = Path(source_name).suffix
+    if source_suffix and not Path(cleaned).suffix:
+        cleaned += source_suffix
+    if len(cleaned) > 128:
+        suffix = Path(cleaned).suffix[:16]
+        cleaned = cleaned[: 128 - len(suffix)] + suffix
+    return cleaned
+
+
+def check_file_extension(*names: str) -> None:
+    for name in names:
+        suffix = Path(str(name or "")).suffix.lower()
+        if suffix in BLOCKED_FILE_EXTENSIONS:
+            raise PermissionError(f"不允许发送 {suffix} 类型的可执行/脚本文件")
+
 
 async def _opted_out_user_ids(session: Any, group_id: int) -> frozenset[int]:
     """读取当前群已退出 Agent 记忆的成员；与 Prompt 历史的隐私过滤保持一致。"""
@@ -62,6 +171,25 @@ def _compact_group_info(raw: Any) -> dict[str, Any]:
         for key in ("group_id", "group_name", "member_count", "max_member_count")
         if raw.get(key) is not None
     }
+
+
+def _compact_group_member_detail(raw: Any) -> dict[str, Any]:
+    """单个成员详情：在基础投影上补等级、入群和最后发言时间。"""
+
+    compact = _compact_group_member(raw)
+    nickname = str(raw.get("nickname") or "").strip()
+    if nickname and nickname != compact.get("name"):
+        compact["nickname"] = nickname[:64]
+    level = str(raw.get("level") or "").strip()
+    if level and level != "0":
+        compact["level"] = level[:16]
+    joined = readable_time(raw.get("join_time"))
+    if joined:
+        compact["join_time"] = joined
+    last_sent = readable_time(raw.get("last_sent_time"))
+    if last_sent:
+        compact["last_sent_time"] = last_sent
+    return compact
 
 
 def _compact_group_member(raw: Any) -> dict[str, Any]:
@@ -138,6 +266,21 @@ def _message_media_refs(raw: Any) -> list[dict[str, Any]]:
     return output
 
 
+def _reply_target(raw: dict[str, Any]) -> int | None:
+    message = raw.get("message")
+    if not isinstance(message, list):
+        return None
+    for segment in message[:4]:
+        if isinstance(segment, dict) and str(segment.get("type") or "") == "reply":
+            raw_data = segment.get("data")
+            data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+            try:
+                return int(data.get("id") or 0) or None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _compact_onebot_message(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("消息响应格式错误")
@@ -151,7 +294,10 @@ def _compact_onebot_message(raw: Any) -> dict[str, Any]:
         "text": _compact_message_text(raw),
     }
     if raw.get("time") is not None:
-        compact["time"] = raw.get("time")
+        compact["time"] = readable_time(raw.get("time")) or raw.get("time")
+    reply_to = _reply_target(raw)
+    if reply_to is not None:
+        compact["reply_to_message_id"] = reply_to
     media_refs = _message_media_refs(raw)
     if media_refs:
         compact["media_types"] = ["image"] * len(media_refs)
@@ -163,12 +309,20 @@ def _compact_notice(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("群公告响应格式错误")
     sender = raw.get("sender_id") or raw.get("user_id")
-    content = raw.get("message") or raw.get("content") or raw.get("text") or ""
+    content: Any = raw.get("message") or raw.get("content") or raw.get("text") or ""
+    if isinstance(content, dict):
+        # NapCat: {"text": "...", "images": [...]}；只保留正文，图片记数量。
+        images = content.get("images") or content.get("image") or []
+        content = str(content.get("text") or "")
+        if isinstance(images, list) and images:
+            content = f"{content}[图片x{len(images)}]"
+    raw_time = raw.get("publish_time") or raw.get("time")
     result = {
         "notice_id": raw.get("notice_id") or raw.get("id"),
         "sender_id": sender,
-        "publish_time": raw.get("publish_time") or raw.get("time"),
-        "content": str(content)[:1000],
+        "publish_time": readable_time(raw_time),
+        "_sort_time": raw_time,
+        "content": str(content).replace("&#10;", "\n")[:1000],
     }
     return {key: value for key, value in result.items() if value not in (None, "")}
 
@@ -187,6 +341,7 @@ def _compact_essence(raw: Any) -> dict[str, Any]:
         "sender_name": str(raw.get("sender_nick") or raw.get("sender_name") or "")[:64],
         "operator_id": raw.get("operator_id"),
         "operator_name": str(raw.get("operator_nick") or raw.get("operator_name") or "")[:64],
+        "operator_time": readable_time(raw.get("operator_time")),
         "content": compact_content,
     }
     return {key: value for key, value in result.items() if value not in (None, "")}
@@ -206,14 +361,16 @@ def _payload_list(raw: Any, *keys: str) -> list[Any]:
 def _compact_group_file(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("群文件响应格式错误")
+    raw_size = raw.get("file_size") or raw.get("size")
     result = {
         "file_id": raw.get("file_id") or raw.get("id"),
         "name": str(raw.get("file_name") or raw.get("name") or "")[:160],
         "busid": raw.get("busid") or raw.get("bus_id"),
-        "size": raw.get("file_size") or raw.get("size"),
+        "size": readable_size(raw_size) or raw_size,
         "uploader_id": raw.get("uploader") or raw.get("uploader_id"),
         "uploader_name": str(raw.get("uploader_name") or "")[:64],
-        "upload_time": raw.get("upload_time"),
+        "upload_time": readable_time(raw.get("upload_time")),
+        "_sort_time": raw.get("upload_time"),
     }
     return {key: value for key, value in result.items() if value not in (None, "")}
 
@@ -321,6 +478,36 @@ def _validate_image_path(path: Path) -> Path:
     return path
 
 
+def sort_by_time_desc(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按内部 ``_sort_time`` 倒序并移除该内部字段。"""
+
+    def _key(item: dict[str, Any]) -> float:
+        try:
+            return float(item.get("_sort_time") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ordered = sorted(items, key=_key, reverse=True)
+    return [strip_sort_key(item) for item in ordered]
+
+
+def strip_sort_key(item: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in item.items() if key != "_sort_time"}
+
+
+def agent_file_root() -> Path:
+    return _FILE_ROOT
+
+
+def resolve_agent_file(file_ref: str) -> Path:
+    """相对名按 Agent 文件目录解析；绝对路径仍必须落在该目录内。"""
+
+    candidate = Path(file_ref).expanduser()
+    if not candidate.is_absolute():
+        candidate = _FILE_ROOT / candidate
+    return _check_local_path(candidate)
+
+
 async def _download_allowed_file(file_ref: str) -> tuple[Path, str | None]:
     parsed = urlparse(file_ref)
     if parsed.hostname is None or parsed.hostname.lower() not in _ALLOWED_FILE_HOSTS:
@@ -329,26 +516,13 @@ async def _download_allowed_file(file_ref: str) -> tuple[Path, str | None]:
             f"{sorted(_ALLOWED_FILE_HOSTS)}"
         )
         raise PermissionError("远程文件域名不在白名单")
-    dbg(f"远程文件开始下载: {file_ref}")
-    # 流式下载并边下边校验大小，防止白名单域名投递超大文件耗尽内存。
-    async with (
-        httpx.AsyncClient(timeout=15, follow_redirects=True) as client,
-        client.stream("GET", file_ref) as response,
-    ):
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=Path(parsed.path).suffix or ".download"
-        ) as handle:
-            total = 0
-            try:
-                async for chunk in response.aiter_bytes(64 * 1024):
-                    total += len(chunk)
-                    if total > MAX_FILE_BYTES:
-                        raise ValueError("文件超过大小限制")
-                    handle.write(chunk)
-            except BaseException:
-                handle.close()
-                Path(handle.name).unlink(missing_ok=True)
-                raise
-            return Path(handle.name), content_type or None
+    dbg(f"远程文件开始下载: host={parsed.hostname!r}")
+    # 流式下载并边下边校验大小；重定向逐跳校验白名单，不能跳出允许的域名。
+    return await stream_download(
+        file_ref,
+        allowed_hosts=_ALLOWED_FILE_HOSTS,
+        max_bytes=MAX_FILE_BYTES,
+        suffix=Path(parsed.path).suffix or ".download",
+        host_error="远程文件域名不在白名单",
+        size_error="文件超过大小限制",
+    )

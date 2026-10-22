@@ -106,6 +106,22 @@ AGENT_DEBUG_LOG=false
 
 图片类表情包放在 `AGENT_FILE_ROOT/reactions/`，索引文件为 `index.json`。模型只接触 reaction id、标签和描述，不直接猜本地路径。
 
+### 群文件发送
+
+- 要让 Agent 能发的文件直接放进 `AGENT_FILE_ROOT`（可以有子目录，`reactions/` 和以 `.` 开头的路径除外）。模型先用 `list_agent_files` 看到相对文件名，再用 `send_file` 上传，不会接触绝对路径。
+- `send_file` 可以带 `folder_id` 上传到指定群文件夹；显示名会去掉路径和非法字符，没写扩展名时自动补上源文件扩展名。
+- exe、bat、ps1、vbs、apk、jar、sh 等可执行/脚本类文件一律拒绝发送。
+- 远程链接仍然只允许 `AGENT_FILE_ALLOWED_HOSTS` 里的域名；重定向会逐跳重新校验白名单，跳出白名单的下载直接拒绝。
+
+## Agent 群管理工具
+
+特权工具都要同时满足：调用者实时是群主/管理员、在 WebUI「允许的特权工具」里勾选、当日特权额度还有剩余。执行顺序固定为参数校验 → 权限校验 → 预扣额度 → 执行 → 审计，失败自动退还额度；同一轮对话里重复的同一操作只执行一次，每轮最多 3 次管理操作。
+
+- 公告：`create_group_announcement` 支持置顶（`pinned`）、需要群成员确认（`confirm_required`）、引导修改群名片（`show_edit_card`）；与现有公告内容几乎相同时会拒绝重复发布。
+- 禁言：勾选「禁言」后 `unmute_member`（解除禁言）自动可用，也可以只勾选「仅解除禁言」。
+- 撤回：`recall_message` 撤回群里的消息（机器人需要是管理员）；`recall_bot_message` 只撤回机器人自己 2 分钟内的消息，勾选 `recall_message` 时自动可用。
+- 只读辅助：`find_group_member`（按昵称找人）、`list_group_admins`、`search_group_files`、`get_group_file_space`、`list_agent_files` 不需要白名单。
+
 ## Agent Persona v2
 
 Persona v2 把**角色、临时情绪、系统策略**拆成三个不同层级：

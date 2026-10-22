@@ -119,6 +119,10 @@ _MEMBER_ACTIONS = frozenset(
         # OneBot adapters may allow file delivery for ordinary members; the
         # executor still validates path/domain/size before sending.
         "upload_group_file",
+        "get_group_file_system_info",
+        # 普通成员也能撤回机器人自己 2 分钟内的消息；撤回他人消息由
+        # recall_message 的 admin 标记和执行时角色校验再收紧。
+        "delete_msg",
     }
 )
 _ADMIN_ACTIONS = frozenset(
@@ -278,6 +282,19 @@ async def probe_group_capabilities(
         f"actions={sorted(result.actions)} degraded={degraded} source={probe_source!r}"
     )
     return result
+
+
+def cached_bot_role(bot: Any, group_id: int) -> str | None:
+    """只读缓存里的机器人群身份；没有新鲜的成功探测时返回 None，不发网络请求。"""
+
+    key = (int(getattr(bot, "self_id", 0) or 0), int(group_id))
+    cached = _capability_cache.get(key)
+    status = _capability_probe_status.get(key) or {}
+    if cached is None or status.get("degraded"):
+        return None
+    if time.monotonic() - cached[0] >= cached[2]:
+        return None
+    return cached[1].role
 
 
 def _optional_segments_enabled() -> frozenset[str]:
@@ -573,6 +590,7 @@ __all__ = [
     "MessageSegmentCapabilities",
     "actor_can_act_on_target",
     "actor_is_group_owner",
+    "cached_bot_role",
     "capability_runtime_snapshot",
     "clear_group_capability_cache",
     "default_allowed_segment_types",

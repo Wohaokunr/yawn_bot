@@ -88,7 +88,7 @@ def test_current_media_overrides_stale_bot_cannot_see_claim() -> None:
     )
 
     # Media authority stays in the volatile per-turn prompt tail.
-    assert prompt.PROMPT_VERSION == "yawn-agent-v14"
+    assert prompt.PROMPT_VERSION == "yawn-agent-v15"
     realtime = next(
         str(item["content"])
         for item in messages

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from typing import Any
 
 from nonebot import logger
@@ -41,6 +42,16 @@ from .tool_registry import (
     TOOL_PERMISSION_READ,
     TOOL_PERMISSION_STATE_WRITE,
     ToolDefinition as _ToolDefinition,
+    allowlist_covers,
+    tool_argument_summary,
+)
+from .tool_args import (
+    ToolArgumentError,
+    audit_safe_value,
+    classify_tool_error,
+    sanitize_error_text,
+    tool_error_payload,
+    validate_tool_arguments,
 )
 from .tool_execution import ToolExecutionContext, ToolExecutionResult, ToolHandlerResult
 from .tool_handlers import dispatch_tool
@@ -98,8 +109,7 @@ def _tool_exposure_reason(  # noqa: PLR0911
     if (
         definition.permission_level
         in {TOOL_PERMISSION_PRIVILEGED, TOOL_PERMISSION_CRITICAL}
-        and privileged_allowlist is not None
-        and definition.name not in privileged_allowlist
+        and not allowlist_covers(definition.name, privileged_allowlist)
     ):
         return False, "not_allowlisted"
     return True, "exposed"
@@ -316,6 +326,12 @@ async def _discover_tools_for_actor(
                 "description": item.description,
                 "family": item.family,
                 "permission": item.permission_level,
+                **(
+                    {"args": tool_argument_summary(item)}
+                    if item.properties
+                    else {}
+                ),
+                **({"requires": item.prerequisites} if item.prerequisites else {}),
             }
             for item in matches
         ],
@@ -332,6 +348,9 @@ async def _audit(
     args: dict[str, Any],
     result: str,
     detail: str = "",
+    *,
+    duration_ms: float | None = None,
+    error_code: str | None = None,
 ) -> None:
     """审计尽力而为；真 AsyncSession 用 SAVEPOINT 隔离审计失败。"""
 
@@ -340,12 +359,17 @@ async def _audit(
 
     trace = current_execution_trace()
     safe_arguments = {
-        key: _jsonable(value)
+        key: audit_safe_value(_jsonable(value))
         for key, value in args.items()
         if key not in {"file", "url"}
     }
     if trace is not None:
         safe_arguments["_trace_id"] = trace.trace_id
+    if duration_ms is not None:
+        safe_arguments["_duration_ms"] = round(float(duration_ms), 1)
+    if error_code:
+        safe_arguments["_error_code"] = error_code
+    detail = sanitize_error_text(detail, limit=2000) if detail else ""
 
     async def _write() -> None:
         session.add(
@@ -452,7 +476,7 @@ async def _check_tool_policy(
     # 空白名单即全部禁用。send_file 在 P5 后也属于显式特权工具，默认配置
     # 不包含它，因此升级不会自动获得群文件发送能力。
     allowlist = set(config.tool_allowlist or [])
-    if name not in allowlist:
+    if not allowlist_covers(name, allowlist):
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 不在白名单 {sorted(allowlist)}")
         raise PermissionError("该特权工具未加入 Agent 白名单")
     # 只读校验：跨天时视为 0，真正的重置与计数在预扣时一起落库。
@@ -650,10 +674,32 @@ async def execute_tool_with_meta(
     )
     session = context.session
     controlled = name in _CONTROLLED_TOOLS
+    definition = _TOOL_BY_NAME.get(name)
     reserved = False
+    turn_reserved = False
+    started = time.monotonic()
     try:
+        if definition is None:
+            raise ToolArgumentError(f"未知工具: {name}", hint="只能调用当前 schema 中的工具")
+        # 1) schema 校验与规范化：不合法的参数不进入权限/配额/副作用流程。
+        args = validate_tool_arguments(
+            name, definition.properties, definition.required, args
+        )
+        # 2) 同回合重复写操作直接复用首次结果，不再扣配额、不再执行副作用。
+        writes_state = (
+            _TOOL_PERMISSION_RANK[definition.permission_level]
+            >= _TOOL_PERMISSION_RANK[TOOL_PERMISSION_STATE_WRITE]
+            and name not in _MESSAGE_SEND_TOOLS
+        )
+        if writes_state:
+            duplicate = context.ledger.duplicate_of(name, args)
+            if duplicate is not None:
+                dbg(f"群 {context.group_id} 工具 {name} 同回合重复调用,复用首次结果")
+                return ToolExecutionResult(payload=duplicate)
         runtime_context = await _authorize_tool(name, context)
         if controlled:
+            context.ledger.reserve_controlled()
+            turn_reserved = True
             reserved = bool(
                 await _consume_admin_quota(session, context.group_id, name)
             )
@@ -665,6 +711,12 @@ async def execute_tool_with_meta(
         else:
             handled = await _dispatch_authorized(name, args, runtime_context)
 
+        if reserved and handled.refund_quota:
+            # 动作其实没有发生（例如目标已存在），退还预扣配额与回合次数。
+            await _refund_admin_quota(session, context.group_id, name)
+            reserved = False
+        if turn_reserved and handled.refund_quota:
+            context.ledger.release_controlled()
         await _audit(
             session,
             context.group_id,
@@ -672,11 +724,14 @@ async def execute_tool_with_meta(
             name,
             args,
             "success",
+            duration_ms=(time.monotonic() - started) * 1000,
         )
         dbg(f"群 {context.group_id} 工具 {name} 执行成功")
         payload: dict[str, Any] = {"ok": True, "result": handled.result}
         if name in _MESSAGE_SEND_TOOLS:
             payload["sent"] = handled.ends_turn
+        if writes_state:
+            context.ledger.record_success(name, args, payload)
 
         # 有 DB 会话时审计本身也是一次待提交写入；state_write 同样只标记
         # needs_commit，由 dialogue 在本轮 Tool 批次末统一提交。特权工具的
@@ -695,7 +750,7 @@ async def execute_tool_with_meta(
             ends_turn=handled.ends_turn,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("群聊 Agent 工具执行失败: %s", name)
+        logger.exception(f"群聊 Agent 工具执行失败: {name}")
         # 真 AsyncSession 的 begin_nested 已只回滚当前 SAVEPOINT；兼容没有
         # SAVEPOINT 的测试/旧会话实现时，维持原来的失败后 rollback 语义。
         if session is not None and not callable(getattr(session, "begin_nested", None)):
@@ -703,17 +758,22 @@ async def execute_tool_with_meta(
                 await session.rollback()
         if reserved:
             await _refund_admin_quota(session, context.group_id, name)
+        if turn_reserved:
+            context.ledger.release_controlled()
+        error_code = classify_tool_error(exc)
         await _audit(
             session,
             context.group_id,
             context.actor_user_id,
             name,
-            args,
+            args if isinstance(args, dict) else {},
             "error",
             str(exc),
+            duration_ms=(time.monotonic() - started) * 1000,
+            error_code=error_code,
         )
         return ToolExecutionResult(
-            payload={"ok": False, "error": str(exc)},
+            payload=tool_error_payload(exc),
             needs_commit=session is not None,
         )
 
