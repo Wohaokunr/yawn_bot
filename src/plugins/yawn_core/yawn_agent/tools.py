@@ -23,7 +23,7 @@ from .capabilities import (
 )
 from .context import now_beijing
 from .execution_trace import current_execution_trace
-from .log import dbg
+from .log import dbg, dbg_exc
 from .outbound import MAX_FORWARD_NODES
 from .tool_registry import (
     ADMIN_TOOLS as _ADMIN_TOOLS,
@@ -455,18 +455,14 @@ async def _check_tool_policy(
     if name not in allowlist:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 不在白名单 {sorted(allowlist)}")
         raise PermissionError("该特权工具未加入 Agent 白名单")
-    today = now_beijing().strftime("%Y-%m-%d")
-    if config.tool_day != today:
-        config.tool_day = today
-        config.admin_tool_count = 0
-        config.critical_tool_count = 0
-        dbg(f"群 {group_id} 管理工具配额计数按新的一天重置")
+    # 只读校验：跨天时视为 0，真正的重置与计数在预扣时一起落库。
+    same_day = config.tool_day == now_beijing().strftime("%Y-%m-%d")
     if name in _CRITICAL_TOOLS:
-        used = int(config.critical_tool_count or 0)
+        used = int(config.critical_tool_count or 0) if same_day else 0
         daily_limit = max(int(config.critical_tool_daily_limit or 0), 1)
         quota_label = "高风险工具"
     else:
-        used = int(config.admin_tool_count or 0)
+        used = int(config.admin_tool_count or 0) if same_day else 0
         daily_limit = max(int(config.admin_tool_daily_limit or 0), 1)
         quota_label = "管理工具"
     if used >= daily_limit:
@@ -478,39 +474,93 @@ async def _check_tool_policy(
     dbg(f"群 {group_id} 工具策略通过: {name}")
 
 
-async def _consume_admin_quota(session: Any, group_id: int, name: str) -> None:
-    """特权工具配额只在成功后消耗，失败尝试不计入。"""
-
-    if name not in _CONTROLLED_TOOLS or session is None:
-        return
-    config = await session.get(GroupAgentConfig, group_id)
-    if config is None:
-        return
+def _reset_tool_day(config: Any) -> None:
     today = now_beijing().strftime("%Y-%m-%d")
     if config.tool_day != today:
         config.tool_day = today
         config.admin_tool_count = 0
         config.critical_tool_count = 0
+
+
+async def _persist_quota_change(session: Any, config: Any, group_id: int) -> None:
+    """立即提交配额计数，并在提交后重载 config 以免后续读到过期属性。
+
+    没有 ``commit`` 的测试/兼容会话退化为 flush。提交失败时回滚并抛出，
+    由调用方决定是否继续执行副作用。
+    """
+
+    if not callable(getattr(session, "commit", None)):
+        await session.flush()
+        return
+    try:
+        await session.commit()
+    except SQLAlchemyError:
+        dbg_exc(f"群 {group_id} 工具配额提交失败,已回滚")
+        with contextlib.suppress(SQLAlchemyError):
+            await session.rollback()
+        raise
+    if callable(getattr(session, "refresh", None)):
+        with contextlib.suppress(SQLAlchemyError):
+            await session.refresh(config)
+
+
+async def _consume_admin_quota(session: Any, group_id: int, name: str) -> bool:
+    """在执行副作用之前预扣并提交特权/高风险工具配额。
+
+    旧实现先踢人/禁言、再 flush 计数，计数提交失败时动作已发生却报失败，
+    模型可能重试导致重复副作用，SQLite 锁竞争时还能绕过每日上限。现在
+    先把计数落库，再执行动作；动作失败由 ``_refund_admin_quota`` 退还。
+    返回是否真的预扣了配额。
+    """
+
+    if name not in _CONTROLLED_TOOLS or session is None:
+        return False
+    config = await session.get(GroupAgentConfig, group_id)
+    if config is None:
+        return False
+    _reset_tool_day(config)
     if name in _CRITICAL_TOOLS:
-        config.critical_tool_count += 1
+        config.critical_tool_count = int(config.critical_tool_count or 0) + 1
         dbg(
-            f"群 {group_id} 消耗高风险工具配额: {name} "
+            f"群 {group_id} 预扣高风险工具配额: {name} "
             f"(今日已用 {config.critical_tool_count}/{config.critical_tool_daily_limit})"
         )
     else:
-        config.admin_tool_count += 1
+        config.admin_tool_count = int(config.admin_tool_count or 0) + 1
         dbg(
-            f"群 {group_id} 消耗特权工具配额: {name} "
+            f"群 {group_id} 预扣特权工具配额: {name} "
             f"(今日已用 {config.admin_tool_count}/{config.admin_tool_daily_limit})"
         )
-    await session.flush()
+    await _persist_quota_change(session, config, group_id)
+    return True
 
 
-async def _run_handler_with_policy(
+async def _refund_admin_quota(session: Any, group_id: int, name: str) -> None:
+    """副作用失败时退还预扣的配额；尽力而为，失败不影响主流程。"""
+
+    try:
+        config = await session.get(GroupAgentConfig, group_id)
+        if config is None:
+            return
+        if callable(getattr(session, "refresh", None)):
+            await session.refresh(config)
+        if name in _CRITICAL_TOOLS:
+            config.critical_tool_count = max(int(config.critical_tool_count or 0) - 1, 0)
+        else:
+            config.admin_tool_count = max(int(config.admin_tool_count or 0) - 1, 0)
+        await _persist_quota_change(session, config, group_id)
+    except SQLAlchemyError:
+        dbg_exc(f"群 {group_id} 工具 {name} 失败后退还配额失败(忽略)")
+    else:
+        dbg(f"群 {group_id} 工具 {name} 执行失败,已退还预扣配额")
+
+
+async def _authorize_tool(
     name: str,
-    args: dict[str, Any],
     context: ToolExecutionContext,
-) -> ToolHandlerResult:
+) -> ToolExecutionContext:
+    """校验工具策略并返回执行副作用时使用的上下文；本函数没有副作用。"""
+
     definition = _TOOL_BY_NAME.get(name)
     if definition is None:
         raise ValueError(f"未知工具: {name}")
@@ -536,7 +586,14 @@ async def _run_handler_with_policy(
         actor_user_id=runtime_context.actor_user_id,
         intent_text=runtime_context.current_intent_text,
     )
+    return runtime_context
 
+
+async def _dispatch_authorized(
+    name: str,
+    args: dict[str, Any],
+    runtime_context: ToolExecutionContext,
+) -> ToolHandlerResult:
     if name == "discover_tools":
         query = str(args.get("query") or "").strip()
         if not query:
@@ -564,29 +621,49 @@ async def _run_handler_with_policy(
     return await dispatch_tool(name, args, runtime_context)
 
 
+async def _run_handler_with_policy(
+    name: str,
+    args: dict[str, Any],
+    context: ToolExecutionContext,
+) -> ToolHandlerResult:
+    """校验后直接执行；不涉及配额的调用方（含测试）使用。"""
+
+    runtime_context = await _authorize_tool(name, context)
+    return await _dispatch_authorized(name, args, runtime_context)
+
+
 async def execute_tool_with_meta(
     name: str,
     args: dict[str, Any],
     *,
     context: ToolExecutionContext,
 ) -> ToolExecutionResult:
-    """执行工具并返回不进入模型 Prompt 的事务/收尾元数据。"""
+    """执行工具并返回不进入模型 Prompt 的事务/收尾元数据。
+
+    顺序固定为：策略校验 → 预扣并提交配额 → 执行副作用 → 审计。
+    副作用失败退还配额；配额无法落库时副作用根本不会发生。
+    """
 
     dbg(
         f"群 {context.group_id} 执行工具: name={name!r} "
         f"args={json.dumps(args, ensure_ascii=False)} actor={context.actor_user_id}"
     )
     session = context.session
+    controlled = name in _CONTROLLED_TOOLS
+    reserved = False
     try:
+        runtime_context = await _authorize_tool(name, context)
+        if controlled:
+            reserved = bool(
+                await _consume_admin_quota(session, context.group_id, name)
+            )
         # AsyncSession 使用 SAVEPOINT 隔离单个 Tool 失败；这样同一模型轮次里
         # 先前成功、尚未批量 commit 的 Tool 不会被后一个失败 Tool 一起回滚。
         if session is not None and callable(getattr(session, "begin_nested", None)):
             async with session.begin_nested():
-                handled = await _run_handler_with_policy(name, args, context)
-                await _consume_admin_quota(session, context.group_id, name)
+                handled = await _dispatch_authorized(name, args, runtime_context)
         else:
-            handled = await _run_handler_with_policy(name, args, context)
-            await _consume_admin_quota(session, context.group_id, name)
+            handled = await _dispatch_authorized(name, args, runtime_context)
 
         await _audit(
             session,
@@ -601,9 +678,9 @@ async def execute_tool_with_meta(
         if name in _MESSAGE_SEND_TOOLS:
             payload["sent"] = handled.ends_turn
 
-        controlled = name in _CONTROLLED_TOOLS
-        # 有 DB 会话时审计本身也是一次待提交写入；state_write / 配额写入
-        # 同样只标记 needs_commit，由 dialogue 在本轮 Tool 批次末统一提交。
+        # 有 DB 会话时审计本身也是一次待提交写入；state_write 同样只标记
+        # needs_commit，由 dialogue 在本轮 Tool 批次末统一提交。特权工具的
+        # 配额已在副作用之前提交，这里立即提交的只是审计。
         needs_commit = bool(
             session is not None
             or handled.needs_commit
@@ -624,6 +701,8 @@ async def execute_tool_with_meta(
         if session is not None and not callable(getattr(session, "begin_nested", None)):
             with contextlib.suppress(SQLAlchemyError):
                 await session.rollback()
+        if reserved:
+            await _refund_admin_quota(session, context.group_id, name)
         await _audit(
             session,
             context.group_id,

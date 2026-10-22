@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 CONVERSATION_QUIET_SECONDS = 20.0
+# 只有一个成员在接 Bot 的话时，说明是在跟 Bot 一来一回，不必等满 20 秒；
+# 多人同时说话才需要更长的静默窗口看清话题走向。
+CONVERSATION_DIRECT_QUIET_SECONDS = 8.0
 CONVERSATION_MAX_BATCH_SECONDS = 45.0
 CONVERSATION_MAX_SECONDS = 12 * 60.0
 CONVERSATION_MAX_BOT_TURNS = 4
@@ -161,11 +164,19 @@ def mark_bot_reply(
     return session
 
 
+def batch_quiet_seconds(session: ConversationSession) -> float:
+    """当前合批需要的静默窗口：单人接话短、多人讨论长。"""
+
+    if len(session.batch_user_ids) == 1:
+        return min(CONVERSATION_DIRECT_QUIET_SECONDS, CONVERSATION_QUIET_SECONDS)
+    return CONVERSATION_QUIET_SECONDS
+
+
 def batch_due_at(session: ConversationSession) -> float | None:
     if session.batch_first_at is None or session.batch_last_at is None:
         return None
     return min(
-        session.batch_last_at + CONVERSATION_QUIET_SECONDS,
+        session.batch_last_at + batch_quiet_seconds(session),
         session.batch_first_at + CONVERSATION_MAX_BATCH_SECONDS,
     )
 
@@ -385,6 +396,7 @@ def reset_for_tests() -> None:
 
 
 __all__ = [
+    "CONVERSATION_DIRECT_QUIET_SECONDS",
     "CONVERSATION_MAX_BATCH_SECONDS",
     "CONVERSATION_MAX_BOT_TURNS",
     "CONVERSATION_MAX_CONSECUTIVE_WAITS",
@@ -394,6 +406,7 @@ __all__ = [
     "ConversationBatch",
     "ConversationSession",
     "batch_due_at",
+    "batch_quiet_seconds",
     "begin_followup_evaluation",
     "close_conversation",
     "close_group_conversations",

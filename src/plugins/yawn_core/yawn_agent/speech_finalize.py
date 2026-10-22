@@ -220,4 +220,95 @@ async def finalize_reply(  # noqa: PLR0913
             dbg_exc(f"群 {group_id} 短会话状态推进失败(忽略)")
 
 
-__all__ = ["apply_speech_topic", "finalize_reply"]
+async def record_tool_send(  # noqa: PLR0913
+    session: Any,
+    config: GroupAgentConfig,
+    result: dict[str, Any],
+    *,
+    bot_id: int,
+    group_id: int,
+    current_turn: Any,
+    context: dict[str, Any],
+    persist_func: PersistFunc,
+    mark_func: MarkFunc,
+) -> None:
+    """send_message/send_forward 成功后与正文发送一致地落库并推进状态。
+
+    状态写入随本轮工具批次一起提交，这里不单独 commit。
+    """
+
+    from .outbound import extract_message_id
+    from .persona import resolve_persona
+    from .prompt import render_current_turn
+    from .speech_runtime import build_runtime_speech_plan
+
+    raw_result = result.get("result")
+    payload = raw_result.get("outbound", {}) if isinstance(raw_result, dict) else {}
+    if not isinstance(payload, dict):
+        return
+
+    def _list(key: str) -> list[Any]:
+        value = payload.get(key)
+        return value if isinstance(value, list) else []
+
+    text = str(payload.get("text") or "")
+    await persist_func(
+        session,
+        bot_id,
+        group_id,
+        extract_message_id(payload.get("message_id")),
+        text,
+        int(config.raw_retention_days),
+        segments=_list("segments"),
+        reply_chain=_list("reply_chain"),
+        forward_tree=_list("forward_tree"),
+        media_refs=_list("media_refs"),
+    )
+    now = now_beijing()
+    fingerprint_source = text or json.dumps(
+        {
+            "segments": payload.get("segments", []),
+            "forward_tree": payload.get("forward_tree", []),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    response_fingerprint = hashlib.sha256(
+        fingerprint_source.casefold().encode("utf-8")
+    ).hexdigest()
+    input_fingerprint = hashlib.sha256(
+        render_current_turn(current_turn).casefold().encode("utf-8")
+    ).hexdigest()
+    recent = list(config.recent_response_fingerprints or [])
+    recent.append(
+        {
+            "input": input_fingerprint,
+            "response": response_fingerprint,
+            "text": text[:500],
+            "at": now.isoformat(),
+        }
+    )
+    config.recent_response_fingerprints = recent[-8:]
+    config.last_response_fingerprint = response_fingerprint
+    config.last_response_input_fingerprint = input_fingerprint
+    config.last_response_at = now
+    config.last_agent_at = now
+    speech_plan = build_runtime_speech_plan(
+        text=text,
+        persona=resolve_persona(config),
+        current_turn=current_turn,
+        context=context,
+        source="dialogue",
+    )
+    topic = apply_speech_topic(config, speech_plan)
+    if config.short_conversation_enabled:
+        mark_func(
+            bot_id,
+            group_id,
+            topic=topic,
+            source="dialogue",
+            max_bot_turns=persona_behavior(config).max_followup_bot_turns,
+        )
+
+
+__all__ = ["apply_speech_topic", "finalize_reply", "record_tool_send"]

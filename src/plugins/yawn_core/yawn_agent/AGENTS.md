@@ -8,6 +8,14 @@
 - `short_conversation_enabled`、`proactive_active_enabled` 等子开关只能进一步收窄能力，不能绕过总开关。
 - LLM 配置缺失、超时、空回复或多模态不兼容必须可降级；不得因为单次模型失败导致监听器、调度器或数据库会话永久失效。
 
+## 群消息入口与回合整形
+
+- 入口整形逻辑放在 `turn_intake.py`，`agent.py` 只负责判定触发、落库和分发。整形全部是进程内有界状态，不落库。
+- 只有 @/唤醒词、没有任何正文或附件的“只喊一声”先暂存 `CALL_CONTINUATION_SECONDS`；同一成员在窗口内补上的下一条消息（即使没有 @）与之合并成一个明确触发回合。超时没有补充时照常回应原触发，不能让呼叫石沉大海。
+- worker 取到队首后只合并**同一成员**、时间相近的后续触发（上限 `MAX_COALESCED_MESSAGES`）。不同成员必须保持 FIFO 各自成回合：工具权限、隐私和配额都以单个 actor 为准。
+- 合并回合的 `NormalizedMessage.merged_message_ids` 列出被吸收的消息；上下文加载必须把它们和本条一起排除出历史，避免同一句话在 Prompt 里出现两次。
+- 明确触发之后群里有其他成员发言、或本轮合并了多条消息时，最终正文通过 `SpeechPlan.target.reply_to_message_id` 自动引用触发消息；一对一的连续对话不引用。引用仍走 `outbound.py` 的当前群消息校验，校验失败降级为普通发送。
+
 ## 当前回合与上下文
 
 - `current_turn` 是本轮最高优先级事实。历史消息、`active_topic`、画像、关系和长期记忆只能帮助理解，不能覆盖当前消息的说话人、问题和指向。
@@ -50,6 +58,7 @@
 - `state_write` 必须有明确的当前群成员调用者；主动/后台任务不能借空 actor 身份写人物关系。
 - `message_send` 只覆盖受控的当前回合回复能力，不等价于任意 OneBot action 权限。
 - `privileged` 必须同时满足调用者实时群管理权限、群级 allowlist 和每日特权额度；其中禁言/公告还必须满足机器人自身群管理权限。`send_file` 属于 privileged，升级后默认不自动加入 allowlist。
+- `privileged`/`critical` 的配额必须在副作用**之前**预扣并提交；配额无法落库时不得执行动作，动作失败时退还配额。禁止“先踢人后计数”。
 - `critical` 必须显式命中当前用户消息中的动作意图、显式加入群级 allowlist、拥有真实 actor，并使用独立的低额度计数；主动/后台任务不得以空 actor 调用。`discover_tools` 永远不能发现 critical 工具，避免模型自行升级到高风险能力。
 - `discover_tools` 只能返回当前 Bot 能力、当前 actor 权限和当前群 allowlist 下真实可暴露的工具；发现结果只在下一轮动态装载正式 schema，禁止返回 raw OneBot action 让模型自行拼参数。
 - 工具执行异常必须被隔离。尤其 SQLAlchemy/数据库异常后，不得继续用已进入 failed transaction 的 session 强行写审计；审计是尽力而为，不能反过来毒化主流程。
@@ -60,12 +69,14 @@
 - 主动发言策略、Prompt 和结构化决策解析放在 `proactive_policy.py`；`proactive.py` 负责调度、数据库和发送副作用。
 - “要不要说”与“说什么”必须保持逻辑分离。`speak / wait / close` 是主动/续聊的合法决策，不得把沉默当异常强行补一句话。
 - 被动回复后的短守卫与主动→主动冷却分开；被 @ 回复不能刷新完整主动冷却期。
+- 短会话合批的静默窗口随参与人数变化：只有一个成员在接话时用 `CONVERSATION_DIRECT_QUIET_SECONDS`，多人讨论时用 `CONVERSATION_QUIET_SECONDS`，两者都受 `CONVERSATION_MAX_BATCH_SECONDS` 硬期限约束。
+- 主动发言 tick 对候选群有界并发处理，并优先使用最近在该群收发消息的机器人取群锁，保证与该群对话 worker 互斥。
 - 短会话是进程内临时状态，不是业务持久化状态。总时长、Bot 发言数、评估数、连续 wait 数和合批硬期限必须保持有界。
 - 明确 @/reply Bot 的消息由普通对话 FIFO 路径处理，不得与短会话自动批次重复消费。
 
 ## 模块边界
 
-- `dialogue.py` 只负责一轮对话编排，不再继续吸收历史选择算法；历史筛选放 `context_history.py`。
+- `dialogue.py` 只负责一轮对话编排（`_prepare_turn` → `_run_turn`/`_run_tool_round` → `_finalize_turn_reply`），不再继续吸收历史选择算法；历史筛选放 `context_history.py`，工具发送后的状态推进放 `speech_finalize.py`。
 - `proactive.py` 只负责主动调度与副作用，不再继续吸收策略/Prompt/决策解析；纯策略放 `proactive_policy.py`。
 - `outbound.py` 负责消息准备、验证、实际发送和 segment fallback；`capabilities.py` 负责 action/segment 能力视图。
 - `memory.py` 负责记忆沉淀、检索排序和治理；不要把通用 Prompt 历史选择逻辑塞回记忆模块。

@@ -38,6 +38,7 @@ from .capabilities import (
 )
 from .context import now_beijing
 from .execution_trace import trace_event
+from .log import dbg
 from .media import validate_outbound_image_path
 from .reactions import resolve_reaction
 from .speech import (
@@ -484,7 +485,18 @@ async def prepare_speech_plan(
     )
     if not resolved.should_speak:
         raise ValueError("SpeechPlan 当前动作不应发送消息")
-    if resolved.segments:
+    quoted = await _prepare_quoted_plan(
+        resolved,
+        session=session,
+        group_id=group_id,
+        actor_user_id=actor_user_id,
+        allowed_segment_types=allowed_segment_types,
+        speech_user_text=speech_user_text,
+        recent_speech=recent_speech,
+    )
+    if quoted is not None:
+        prepared = quoted
+    elif resolved.segments:
         prepared = await prepare_outbound_message(
             list(resolved.segments),
             session=session,
@@ -513,6 +525,49 @@ async def prepare_speech_plan(
         speech_scene=resolved.scene,
         quality_issues=_quality_codes(resolved),
     )
+
+
+async def _prepare_quoted_plan(
+    plan: SpeechPlan,
+    *,
+    session: Any,
+    group_id: int,
+    actor_user_id: int | None,
+    allowed_segment_types: frozenset[str] | None,
+    speech_user_text: str,
+    recent_speech: tuple[str, ...] | list[str],
+) -> PreparedOutboundMessage | None:
+    """按 SpeechPlan.target 给正文补一个引用段；无法引用时返回 None 走原路径。
+
+    目标消息仍要经过 ``_get_known_message`` 的当前群校验，所以这里不会
+    引用模型凭空给出的 id。模型自己已经带 reply 段时不重复添加。
+    """
+
+    reply_to = plan.target.reply_to_message_id
+    if not reply_to or session is None:
+        return None
+    segments = [dict(item) for item in plan.segments] or (
+        [{"type": "text", "text": plan.text}] if plan.text else []
+    )
+    if not segments or any(item.get("type") == "reply" for item in segments):
+        return None
+    try:
+        return await prepare_outbound_message(
+            [{"type": "reply", "message_id": int(reply_to)}, *segments],
+            session=session,
+            group_id=group_id,
+            actor_user_id=actor_user_id,
+            allowed_segment_types=allowed_segment_types,
+            speech_scene=plan.scene,
+            speech_style=plan.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=False,
+            trace_speech=False,
+        )
+    except (ValueError, PermissionError, LookupError) as exc:
+        dbg(f"群 {group_id} 自动引用 {reply_to} 不可用,改为普通发送: {exc}")
+        return None
 
 
 def prepare_text_message(

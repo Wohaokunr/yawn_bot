@@ -35,8 +35,23 @@ from .message_parser import (
     parse_message,
     redact_opted_out_replies,
 )
+from .turn_intake import (
+    coalesce_same_actor,
+    continue_bare_call,
+    drop_bare_call,
+    hold_bare_call,
+    is_bare_call,
+    take_bare_call,
+)
 
 _EXPLICIT_WAKE_WORDS = ("小助手", "群聊agent", "群聊 agent", "yawn")
+
+
+def wake_words_for(bot: Bot) -> tuple[str, ...]:
+    nickname = str(getattr(bot, "nickname", "") or "").strip().lower()
+    if nickname:
+        return (*_EXPLICIT_WAKE_WORDS, f"@{nickname}")
+    return _EXPLICIT_WAKE_WORDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,10 +109,7 @@ def resolve_trigger(
     mentioned = at_me or (to_me and not replied)
     text = " ".join(event.get_plaintext().strip().lower().split())
     group_id = getattr(event, "group_id", "?")
-    words = _EXPLICIT_WAKE_WORDS
-    nickname = str(getattr(bot, "nickname", "") or "").strip().lower()
-    if nickname:
-        words = (*_EXPLICIT_WAKE_WORDS, f"@{nickname}")
+    words = wake_words_for(bot)
     wake_word = any(contains_word(text, word) for word in words)
 
     source: str | None = None
@@ -294,23 +306,47 @@ async def handle_group_agent_message(
             f"directed={trigger.respond}"
         )
     await _persist_message(bot, event, normalized, _session)
+    group_id = int(event.group_id)
+    bot_id = int(bot.self_id)
+    held_key = (bot_id, group_id, int(event.get_user_id()))
+    item = (bot, event, normalized)
+    continuation = False
+    if trigger.respond:
+        # 新的明确触发本身带着内容，之前暂存的“只喊一声”不再单独回应。
+        drop_bare_call(held_key)
+    else:
+        held = take_bare_call(held_key)
+        if held is not None:
+            item = continue_bare_call(held, item)
+            continuation = True
+            dbg(f"群 {group_id} 成员 {held_key[2]} 补充了正文,与刚才的呼叫合并为一个回合")
     if short_conversation_enabled:
         observe_member_message(
-            int(bot.self_id),
-            int(event.group_id),
+            bot_id,
+            group_id,
             user_id=int(event.get_user_id()),
             message_id=int(getattr(event, "message_id", 0) or 0) or None,
-            explicit_trigger=trigger.respond,
+            explicit_trigger=trigger.respond or continuation,
             observed_at=now_beijing(),
         )
-    if not trigger.respond:
+    if not trigger.respond and not continuation:
         return
-    if not enqueue(int(event.group_id), (bot, event, normalized), int(bot.self_id)):
-        logger.warning("群聊 Agent 队列已满: %s", event.group_id)
-        dbg(f"群 {event.group_id} 队列已满,消息被丢弃")
+    if trigger.respond and is_bare_call(normalized, wake_words=wake_words_for(bot)):
+        hold_bare_call(held_key, item, _dispatch_turn)
         return
-    dbg(f"群 {event.group_id} 已入队,等待 worker 处理")
-    ensure_worker(int(event.group_id), process_group_message, int(bot.self_id))
+    _dispatch_turn(item)
+
+
+def _dispatch_turn(item: tuple[Any, Any, Any]) -> None:
+    bot, event, _normalized = item
+    group_id = int(event.group_id)
+    bot_id = int(bot.self_id)
+    if not enqueue(group_id, item, bot_id):
+        logger.warning("群聊 Agent 队列已满: %s", group_id)
+        dbg(f"群 {group_id} 队列已满,消息被丢弃")
+        return
+    dbg(f"群 {group_id} 已入队,等待 worker 处理")
+    ensure_worker(group_id, process_group_message, bot_id, coalesce=coalesce_same_actor)
 
 
 @member_notice.handle()

@@ -70,6 +70,8 @@ class NormalizedMessage:
     # Process-only trigger metadata. It is intentionally excluded from as_dict/storage_dict.
     trigger_source: str | None = None
     trigger_signals: dict[str, bool] = field(default_factory=dict)
+    # 入口合批时被吸收进本轮的其他群消息 id（不含本条）；同样只在进程内使用。
+    merged_message_ids: list[int] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {

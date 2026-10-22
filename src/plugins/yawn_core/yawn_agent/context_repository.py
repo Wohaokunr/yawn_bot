@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, case, func, or_, select
 
@@ -18,6 +18,9 @@ from ..data_models.bot_group import BotGroup
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 LOCAL_MEMORY_CANDIDATE_LIMIT = 260
 RECENT_MEMORY_DAYS = 21
@@ -69,7 +72,7 @@ class AgentContextRepository:
         bot_id: int | None,
         opted_out: set[int] | frozenset[int],
         message_cutoff: datetime | None,
-        exclude_message_id: int | None,
+        exclude_message_id: int | Sequence[int] | None,
     ) -> list[GroupAgentMessage]:
         statement = select(GroupAgentMessage).where(
             GroupAgentMessage.group_id == group_id,
@@ -84,10 +87,16 @@ class AgentContextRepository:
             statement = statement.where(GroupAgentMessage.user_id.not_in(opted_out))
         if bot_id is not None:
             statement = statement.where(GroupAgentMessage.bot_id == bot_id)
-        if exclude_message_id is not None:
-            statement = statement.where(
-                GroupAgentMessage.message_id != int(exclude_message_id)
-            )
+        excluded = (
+            [int(exclude_message_id)]
+            if isinstance(exclude_message_id, int)
+            else [int(item) for item in exclude_message_id or ()]
+        )
+        if len(excluded) == 1:
+            statement = statement.where(GroupAgentMessage.message_id != excluded[0])
+        elif excluded:
+            # 入口合批的回合会把多条消息一起作为当前回合，历史里不能重复出现。
+            statement = statement.where(GroupAgentMessage.message_id.not_in(excluded))
         return list(
             (
                 await self._execute(

@@ -1,4 +1,4 @@
-# ruff: noqa: TID252, TC001, TC002, PLR0913, PLR0917, RUF001
+# ruff: noqa: TID252, TC001, PLR0913, PLR0917
 """Small compatibility-safe helpers shared by dialogue/proactive paths."""
 
 from __future__ import annotations
@@ -7,25 +7,12 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from nonebot import logger
-from nonebot.adapters.onebot.v11 import Bot
 from sqlalchemy import select
 
 from ..data_models.group_agent_message import GroupAgentMessage
-from .collector import is_pending_trigger_expired
 from .context import now_beijing
-from .execution_trace import trace_event
-from .log import dbg, dbg_exc
+from .log import dbg
 from .message_parser import NormalizedMessage
-from .outbound import (
-    DELIVERY_CONFIRMED_FAILURE,
-    PreparedOutboundMessage,
-    SendResult,
-    prepare_text_message,
-    send_prepared_outbound,
-)
-
-_GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "在吗", "在不在")
 
 
 def contains_word(text: str, word: str) -> bool:
@@ -82,81 +69,6 @@ def is_recent_duplicate(
         return False
 
 
-def deterministic_reply(text: str) -> str | None:
-    normalized = " ".join(text.lower().split())
-    if any(contains_word(normalized, word) for word in _GREETING_WORDS):
-        return "我在呀，有事直接说～"
-    if "agent状态" in normalized or "群聊agent" in normalized:
-        return "群聊 Agent 在线；复杂对话需要配置 AI_API_KEY。"
-    return None
-
-
-async def send_group_text(
-    bot: Bot, group_id: int, text: str
-) -> tuple[bool, int | None]:
-    try:
-        prepared = prepare_text_message(text)
-        result = await send_prepared_outbound(bot, group_id, prepared)
-    except Exception:  # noqa: BLE001
-        logger.warning("群聊 Agent 发送群消息失败: %s", group_id)
-        dbg_exc(f"群 {group_id} 发送群消息失败 text={text!r}")
-        return False, None
-    dbg(f"群 {group_id} 发送群消息成功 text={text!r}")
-    return result.ends_turn, result.message_id
-
-
-async def send_unless_expired(
-    bot: Bot,
-    group_id: int,
-    message: str | PreparedOutboundMessage,
-    enqueued_at: float | None,
-    *,
-    label: str,
-    message_id: Any = None,
-    session: Any = None,
-    actor_user_id: int | None = None,
-    source: str = "dialogue",
-) -> SendResult:
-    if enqueued_at is not None and is_pending_trigger_expired(enqueued_at):
-        trace_event(
-            "outbound",
-            label,
-            status="skipped",
-            output={"sent": False, "reason": "trigger_expired"},
-            detail="触发消息在队列/群锁等待期间过期，取消用户可见发送",
-        )
-        dbg(f"群 {group_id} {label}前触发已过期,跳过发送: message_id={message_id}")
-        return SendResult(
-            sent=False,
-            message_id=None,
-            normalized_text="",
-            segment_types=(),
-            outcome="expired",
-            delivery_state=DELIVERY_CONFIRMED_FAILURE,
-        )
-    prepared = prepare_text_message(message) if isinstance(message, str) else message
-    try:
-        return await send_prepared_outbound(
-            bot,
-            group_id,
-            prepared,
-            session=session,
-            actor_user_id=actor_user_id,
-            source=source,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("群聊 Agent 发送群消息失败: %s", group_id)
-        dbg_exc(f"群 {group_id} {label}失败")
-        return SendResult(
-            sent=False,
-            message_id=None,
-            normalized_text=prepared.normalized_text,
-            segment_types=(),
-            outcome="send_failed",
-            delivery_state=DELIVERY_CONFIRMED_FAILURE,
-        )
-
-
 async def persist_bot_reply(
     session: Any,
     bot_id: int,
@@ -209,9 +121,6 @@ async def persist_bot_reply(
 __all__ = [
     "contains_word",
     "current_turn_focus_ids",
-    "deterministic_reply",
     "is_recent_duplicate",
     "persist_bot_reply",
-    "send_group_text",
-    "send_unless_expired",
 ]
