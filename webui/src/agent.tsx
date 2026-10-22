@@ -1,32 +1,27 @@
 import {
-  Alert,
-  App as AntApp,
-  Button,
-  Card,
-  Col,
-  List,
-  Row,
-  Space,
-  Spin,
-  Statistic,
-  Tabs,
-  Tag,
-  Typography,
-} from "antd";
+  AuditOutlined,
+  BookOutlined,
+  BugOutlined,
+  DashboardOutlined,
+  IdcardOutlined,
+  LockOutlined,
+  MessageOutlined,
+  SettingOutlined,
+  ShareAltOutlined,
+  SmileOutlined,
+} from "@ant-design/icons";
+import { Spin } from "antd";
 import { lazy, Suspense, useEffect, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { api } from "./api";
+import { AgentCockpit } from "./agent-workspace/AgentCockpit";
+import { AgentStatusBar } from "./agent-workspace/AgentStatusBar";
+import { AGENT_NAV, AGENT_NAV_ORDER, AGENT_TAB_KEYS } from "./agent-workspace/nav";
+import { useVisiblePolling } from "./agent-workspace/polling";
+import { useAgentTabShortcuts } from "./agent-workspace/shortcuts";
 import { GroupWorkspaceSwitch } from "./group-workspace";
-import {
-  AdminEmpty,
-  formatTime,
-  PageHeader,
-  QueryErrorAlert,
-  useApiQuery,
-} from "./shared";
-import type { AgentCapabilities, AgentDiagnostics } from "./types";
-
-const { Text } = Typography;
+import { PageHeader, useApiQuery } from "./shared";
+import type { AgentDiagnostics } from "./types";
 
 const LazyAgentConfigPanel = lazy(() =>
   import("./agent-panels/AgentConfigPanel").then(({ AgentConfigPanel }) => ({ default: AgentConfigPanel })),
@@ -56,40 +51,38 @@ const LazyAgentAuditsPanel = lazy(() =>
   import("./agent-panels/AgentAuditsPanel").then(({ AgentAuditsPanel }) => ({ default: AgentAuditsPanel })),
 );
 
-const AGENT_TAB_KEYS = new Set([
-  "overview",
-  "config",
-  "persona",
-  "memories",
-  "profiles",
-  "relations",
-  "messages",
-  "debug",
-  "privacy",
-  "audit",
-]);
-
-type AgentSectionKey = "runtime" | "knowledge" | "debug" | "governance";
-
-const AGENT_SECTION_BY_TAB: Record<string, AgentSectionKey> = {
-  overview: "runtime",
-  config: "runtime",
-  persona: "runtime",
-  memories: "knowledge",
-  profiles: "knowledge",
-  relations: "knowledge",
-  messages: "knowledge",
-  debug: "debug",
-  privacy: "governance",
-  audit: "governance",
+const NAV_ICONS: Record<string, React.ReactNode> = {
+  overview: <DashboardOutlined />,
+  config: <SettingOutlined />,
+  persona: <SmileOutlined />,
+  memories: <BookOutlined />,
+  profiles: <IdcardOutlined />,
+  relations: <ShareAltOutlined />,
+  messages: <MessageOutlined />,
+  debug: <BugOutlined />,
+  privacy: <LockOutlined />,
+  audit: <AuditOutlined />,
 };
 
-const AGENT_SECTION_DEFAULT: Record<AgentSectionKey, string> = {
-  runtime: "overview",
-  knowledge: "memories",
-  debug: "debug",
-  governance: "privacy",
-};
+// 诊断数据每 30 秒在页面可见时刷新一次，状态条与驾驶舱共用这一份。
+const DIAGNOSTICS_POLL_MS = 30_000;
+const AUTO_REFRESH_KEY = "yawnbot.agent.autoRefresh";
+
+function readAutoRefresh(): boolean {
+  try {
+    return window.localStorage.getItem(AUTO_REFRESH_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function writeAutoRefresh(value: boolean): void {
+  try {
+    window.localStorage.setItem(AUTO_REFRESH_KEY, value ? "on" : "off");
+  } catch {
+    // 隐私模式等场景写不进去就只在本次会话生效。
+  }
+}
 
 interface AgentGroupDetail {
   groupId: string;
@@ -105,15 +98,30 @@ function panel(content: React.ReactNode): React.JSX.Element {
   return <Suspense fallback={<AgentPanelFallback />}>{content}</Suspense>;
 }
 
+function shortcutDigit(key: string): string {
+  const index = AGENT_NAV_ORDER.indexOf(key);
+  return index === 9 ? "0" : String(index + 1);
+}
+
+function navBadge(key: string, diagnostics: AgentDiagnostics | null): "error" | "warning" | null {
+  if (!diagnostics) return null;
+  if (key === "overview") {
+    if (diagnostics.blockers.some((item) => item.severity === "error")) return "error";
+    if (diagnostics.blockers.some((item) => item.severity === "warning")) return "warning";
+  }
+  if (key === "memories" && (diagnostics.memory.rebuildRequired || diagnostics.memory.consecutiveFailures > 0)) {
+    return "warning";
+  }
+  return null;
+}
+
 export function AgentDetailPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab") ?? "overview";
   const tab = AGENT_TAB_KEYS.has(requestedTab) ? requestedTab : "overview";
-  const section = AGENT_SECTION_BY_TAB[tab] ?? "runtime";
-  const [lastLeafBySection, setLastLeafBySection] = useState<Record<AgentSectionKey, string>>({
-    ...AGENT_SECTION_DEFAULT,
-  });
+  // 访问过的面板保持挂载，切走再回来时草稿、调试基准等本地状态都还在。
+  const [visited, setVisited] = useState<Set<string>>(() => new Set([tab]));
   const groupQuery = useApiQuery({
     queryKey: ["agent-group-detail", groupId],
     fetcher: (signal) => api<AgentGroupDetail>(`/groups/${groupId}`, { signal }).then((response) => response.data),
@@ -122,159 +130,7 @@ export function AgentDetailPage(): React.JSX.Element {
       scope: { groupId },
     },
   });
-
-  useEffect(() => {
-    if (requestedTab === tab) return;
-    const next = new URLSearchParams(searchParams);
-    next.delete("tab");
-    setSearchParams(next, { replace: true });
-  }, [requestedTab, searchParams, setSearchParams, tab]);
-
-  useEffect(() => {
-    setLastLeafBySection((current) => current[section] === tab
-      ? current
-      : { ...current, [section]: tab });
-  }, [section, tab]);
-
-  const changeTab = (key: string) => {
-    if (!AGENT_TAB_KEYS.has(key)) return;
-    const next = new URLSearchParams(searchParams);
-    if (key === "overview") next.delete("tab"); else next.set("tab", key);
-    setSearchParams(next, { replace: true });
-  };
-  const changeSection = (key: string) => {
-    if (!(key in AGENT_SECTION_DEFAULT)) return;
-    const sectionKey = key as AgentSectionKey;
-    changeTab(lastLeafBySection[sectionKey] ?? AGENT_SECTION_DEFAULT[sectionKey]);
-  };
-
-  const groupName = groupQuery.data?.groupName?.trim() || "未命名群";
-  const title = groupQuery.data ? `Agent · ${groupName}（${groupId}）` : `Agent · ${groupId}`;
-
-  return <>
-    <PageHeader
-      title={title}
-      subtitle="群级运行状态、知识、调试与数据治理"
-      extra={<GroupWorkspaceSwitch groupId={groupId} active="agent" />}
-    />
-    <Tabs
-      className="agent-ia-tabs"
-      activeKey={section}
-      onChange={changeSection}
-      items={[
-        {
-          key: "runtime",
-          label: "运行",
-          children: <div className="agent-ia-section">
-            <Tabs
-              className="agent-ia-subtabs"
-              activeKey={tab}
-              onChange={changeTab}
-              items={[
-                {
-                  key: "overview",
-                  label: "诊断",
-                  children: <AgentOverviewPanel groupId={groupId} onNavigate={changeTab} />,
-                },
-                {
-                  key: "config",
-                  label: "配置",
-                  children: panel(<LazyAgentConfigPanel groupId={groupId} />),
-                },
-                {
-                  key: "persona",
-                  label: "人设",
-                  children: panel(<LazyPersonaPanel groupId={groupId} />),
-                },
-              ]}
-            />
-          </div>,
-        },
-        {
-          key: "knowledge",
-          label: "知识",
-          children: <div className="agent-ia-section">
-            <Tabs
-              className="agent-ia-subtabs"
-              activeKey={tab}
-              onChange={changeTab}
-              items={[
-                {
-                  key: "memories",
-                  label: "记忆",
-                  children: panel(<LazyMemoriesPanel groupId={groupId} />),
-                },
-                {
-                  key: "profiles",
-                  label: "画像",
-                  children: panel(<LazyMemberProfilesPanel groupId={groupId} />),
-                },
-                {
-                  key: "relations",
-                  label: "关系",
-                  children: panel(<LazyRelationsPanel groupId={groupId} />),
-                },
-                {
-                  key: "messages",
-                  label: "消息",
-                  children: panel(<LazyAgentMessagesPanel groupId={groupId} />),
-                },
-              ]}
-            />
-          </div>,
-        },
-        {
-          key: "debug",
-          label: "调试",
-          children: <div className="agent-ia-section agent-ia-single">
-            <div className="agent-ia-section-label">Dialogue Debug</div>
-            {panel(<LazyAgentDebugger groupId={groupId} />)}
-          </div>,
-        },
-        {
-          key: "governance",
-          label: "治理",
-          children: <div className="agent-ia-section">
-            <Tabs
-              className="agent-ia-subtabs"
-              activeKey={tab}
-              onChange={changeTab}
-              items={[
-                {
-                  key: "privacy",
-                  label: "隐私",
-                  children: panel(<LazyPrivacyPanel groupId={groupId} />),
-                },
-                {
-                  key: "audit",
-                  label: "审计",
-                  children: panel(<LazyAgentAuditsPanel groupId={groupId} />),
-                },
-              ]}
-            />
-          </div>,
-        },
-      ]}
-    />
-  </>;
-}
-
-const LLM_TASK_LABELS: Record<string, string> = {
-  agent_dialogue: "群聊对话",
-  agent_proactive: "主动发言",
-  agent_memory: "记忆整理",
-  agent_image: "图片理解",
-};
-
-function AgentOverviewPanel({
-  groupId,
-  onNavigate,
-}: {
-  groupId: string;
-  onNavigate: (tab: string) => void;
-}): React.JSX.Element {
-  const { message } = AntApp.useApp();
-  const query = useApiQuery({
+  const diagnosticsQuery = useApiQuery({
     queryKey: ["agent-diagnostics", groupId],
     fetcher: (signal) => api<AgentDiagnostics>(
       `/agent/groups/${groupId}/diagnostics`,
@@ -285,166 +141,113 @@ function AgentOverviewPanel({
       scope: { groupId },
     },
   });
-  const capabilityQuery = useApiQuery({
-    queryKey: ["agent-capabilities", groupId],
-    fetcher: (signal) => api<AgentCapabilities>(
-      `/agent/groups/${groupId}/capabilities`,
-      { signal },
-    ).then((response) => response.data),
-    invalidation: { resources: ["agent_config"], scope: { groupId } },
-  });
-  const [capabilityRefreshing, setCapabilityRefreshing] = useState(false);
-  const data = query.data;
-  if (!data) {
-    return query.error
-      ? <QueryErrorAlert error={query.error} onRetry={query.reload} />
-      : <Spin />;
-  }
+  const [autoRefresh, setAutoRefresh] = useState(readAutoRefresh);
+  useVisiblePolling(diagnosticsQuery.reload, autoRefresh ? DIAGNOSTICS_POLL_MS : null);
 
-  const effective = data.effective;
-  const memory = data.memory;
-  const conversation = effective.shortConversation;
-  const capabilities = capabilityQuery.data;
-  const refreshCapabilities = async (): Promise<void> => {
-    setCapabilityRefreshing(true);
-    try {
-      await api<AgentCapabilities>(`/agent/groups/${groupId}/capabilities/refresh`, { method: "POST" });
-      capabilityQuery.reload();
-    } catch (error) {
-      message.error((error as Error).message);
-    } finally {
-      setCapabilityRefreshing(false);
-    }
+  useEffect(() => {
+    if (requestedTab === tab) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("tab");
+    setSearchParams(next, { replace: true });
+  }, [requestedTab, searchParams, setSearchParams, tab]);
+
+  useEffect(() => {
+    setVisited((current) => current.has(tab) ? current : new Set(current).add(tab));
+  }, [tab]);
+
+  const navigate = (key: string, extra?: Record<string, string>) => {
+    if (!AGENT_TAB_KEYS.has(key)) return;
+    const next = new URLSearchParams(searchParams);
+    if (key === "overview") next.delete("tab"); else next.set("tab", key);
+    for (const [name, value] of Object.entries(extra ?? {})) next.set(name, value);
+    setSearchParams(next, { replace: true });
   };
 
-  return <Space orientation="vertical" size="large" style={{ width: "100%" }}>
-    <Card
-      title="实际生效配置"
-      extra={<Button onClick={query.reload} loading={query.refreshing}>刷新诊断</Button>}
-    >
-      <Row gutter={[16, 16]}>
-        <Col xs={12} md={6}><Statistic title="Agent" value={effective.enabled ? "开启" : "关闭"} /></Col>
-        <Col xs={12} md={6}><Statistic title="叫名唤醒" value={effective.explicitWakeupEnabled ? "开启" : "关闭"} /></Col>
-        <Col xs={12} md={6}><Statistic title="主动参与" value={effective.proactiveEnabled ? "开启" : "关闭"} /></Col>
-        <Col xs={12} md={6}><Statistic title="今日主动额度" value={effective.dailyRemaining} suffix={`/ ${effective.dailyLimit}`} /></Col>
-        <Col xs={12} md={6}><Statistic title="主动冷却剩余" value={effective.cooldownRemainingMinutes} suffix="分钟" /></Col>
-      </Row>
-      <Row gutter={[16, 16]} className="section-row">
-        <Col xs={24} lg={8}>
-          <Card size="small" title="主动参与">
-            <Space orientation="vertical" size={6}>
-              <Text>功能：<Tag color={effective.proactiveEnabled ? "green" : "default"}>{effective.proactiveEnabled ? "开启" : "关闭"}</Tag></Text>
-              <Text>活跃聊天：{effective.proactiveActiveEnabled ? "允许自然加入" : "仅冷场参与"}</Text>
-              <Text>上次参与：{formatTime(effective.lastProactiveAt)}</Text>
-              <Text type="secondary">当前话题：{effective.activeTopic || "—"}</Text>
-            </Space>
-          </Card>
-        </Col>
-        <Col xs={24} lg={8}>
-          <Card size="small" title="短会话">
-            <Space orientation="vertical" size={6}>
-              <Text>功能：<Tag color={conversation.enabled ? "green" : "default"}>{conversation.enabled ? "开启" : "关闭"}</Tag></Text>
-              <Text>运行：<Tag color={conversation.active ? "processing" : "default"}>{conversation.active ? "进行中" : conversation.enabled ? "空闲" : "停用"}</Tag></Text>
-              <Text>Bot 回合：{conversation.botTurns}</Text>
-              <Text>续聊评估：{conversation.evaluations}</Text>
-              <Text type="secondary">话题：{conversation.topic || "—"}</Text>
-            </Space>
-          </Card>
-        </Col>
-        <Col xs={24} lg={8}>
-          <Card size="small" title="记忆整理">
-            <Space orientation="vertical" size={6}>
-              <Text>待整理消息：{memory.pendingMessages} 条</Text>
-              <Text>连续失败：<Tag color={memory.consecutiveFailures > 0 ? "red" : "green"}>{memory.consecutiveFailures} 次</Tag></Text>
-              <Text>运行：<Tag color={!memory.runtimeEnabled ? "default" : memory.inFlight ? "processing" : "green"}>{!memory.runtimeEnabled ? "已停用" : memory.inFlight ? "整理中" : "空闲"}</Tag></Text>
-              <Text type="secondary">最近成功：{formatTime(memory.lastSuccessAt)}</Text>
-            </Space>
-          </Card>
-        </Col>
-      </Row>
-    </Card>
+  useAgentTabShortcuts((index) => {
+    const key = AGENT_NAV_ORDER[index];
+    if (key) navigate(key);
+  });
 
-    <Card title="为什么 Agent 现在可能不回复 / 不主动说话">
-      {data.blockers.length === 0
-        ? <Alert type="success" showIcon message="当前没有发现硬性阻塞" description="触发条件、LLM 路由、主动额度和记忆治理状态均未发现明确异常。" />
-        : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-          {data.blockers.map((item) => (
-            <Alert
-              key={item.code}
-              type={item.severity}
-              showIcon
-              message={item.title}
-              description={item.detail}
-            />
+  const groupName = groupQuery.data?.groupName?.trim() || "未命名群";
+  const title = groupQuery.data ? `Agent · ${groupName}（${groupId}）` : `Agent · ${groupId}`;
+  const diagnostics = diagnosticsQuery.data;
+
+  const panels: Record<string, () => React.ReactNode> = {
+    overview: () => <AgentCockpit
+      groupId={groupId}
+      groupLabel={`${groupName}（${groupId}）`}
+      diagnosticsQuery={diagnosticsQuery}
+      autoRefresh={autoRefresh}
+      onAutoRefreshChange={(value) => {
+        setAutoRefresh(value);
+        writeAutoRefresh(value);
+      }}
+      onNavigate={navigate}
+    />,
+    config: () => panel(<LazyAgentConfigPanel groupId={groupId} />),
+    persona: () => panel(<LazyPersonaPanel groupId={groupId} />),
+    memories: () => panel(<LazyMemoriesPanel groupId={groupId} />),
+    profiles: () => panel(<LazyMemberProfilesPanel groupId={groupId} />),
+    relations: () => panel(<LazyRelationsPanel groupId={groupId} />),
+    messages: () => panel(<LazyAgentMessagesPanel groupId={groupId} />),
+    debug: () => panel(<LazyAgentDebugger groupId={groupId} />),
+    privacy: () => panel(<LazyPrivacyPanel groupId={groupId} />),
+    audit: () => panel(<LazyAgentAuditsPanel groupId={groupId} />),
+  };
+
+  return <>
+    <PageHeader
+      title={title}
+      subtitle="群级运行状态、知识、调试与数据治理"
+      extra={<GroupWorkspaceSwitch groupId={groupId} active="agent" />}
+    />
+    <AgentStatusBar groupId={groupId} diagnosticsQuery={diagnosticsQuery} onNavigate={navigate} />
+    <div className="agent-ws">
+      <nav className="agent-ws-nav" aria-label="Agent 工作台导航">
+        <div role="tablist" aria-orientation="vertical" className="agent-ws-nav-list">
+          {AGENT_NAV.map((section) => (
+            <div key={section.key} className="agent-ws-nav-group">
+              <div className="agent-ws-nav-heading">{section.label}</div>
+              {section.items.map((item) => {
+                const badge = navBadge(item.key, diagnostics);
+                const active = item.key === tab;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    role="tab"
+                    id={`agent-ws-tab-${item.key}`}
+                    aria-selected={active}
+                    aria-controls={`agent-ws-panel-${item.key}`}
+                    className={`agent-ws-nav-item${active ? " is-active" : ""}`}
+                    title={`${item.hint}（Alt+${shortcutDigit(item.key)}）`}
+                    onClick={() => navigate(item.key)}
+                  >
+                    <span className="agent-ws-nav-icon" aria-hidden="true">{NAV_ICONS[item.key]}</span>
+                    <span className="agent-ws-nav-label">{item.label}</span>
+                    {badge && <span className={`agent-ws-nav-badge is-${badge}`} aria-label={badge === "error" ? "有阻塞" : "需要关注"} />}
+                  </button>
+                );
+              })}
+            </div>
           ))}
-        </Space>}
-      <Space wrap className="section-row">
-        <Button type="link" onClick={() => onNavigate("config")}>调整运行配置</Button>
-        <Button type="link" onClick={() => onNavigate("memories")}>检查记忆治理</Button>
-        <Link to="/environment">检查 LLM Provider / 模型路由</Link>
-      </Space>
-    </Card>
-
-    <Card
-      title="OneBot 协议能力"
-      extra={<Button onClick={() => void refreshCapabilities()} loading={capabilityRefreshing}>清缓存并重新探测</Button>}
-    >
-      {capabilityQuery.error
-        ? <QueryErrorAlert error={capabilityQuery.error} onRetry={capabilityQuery.reload} />
-        : !capabilities
-          ? <Spin />
-          : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-            <Space wrap>
-              <Tag color={capabilities.offline ? "default" : capabilities.action.degraded ? "orange" : "green"}>
-                {capabilities.offline ? "Bot 离线" : capabilities.action.degraded ? "探测降级" : `角色 ${capabilities.action.role || "unknown"}`}
-              </Tag>
-              <Text>Actions：{capabilities.action.actions.length}</Text>
-              <Text>Segments：{capabilities.segments.filter((item) => item.exposed).length} 可暴露</Text>
-              {capabilities.action.lastError && <Text type="danger">最近探测：{capabilities.action.lastError}</Text>}
-            </Space>
-            <Space wrap>
-              {capabilities.segments.map((item) => (
-                <Tag
-                  key={item.type}
-                  color={item.forbidden ? "red" : item.runtimeUnsupported ? "orange" : item.exposed ? "green" : "default"}
-                >
-                  {item.type}{item.runtimeUnsupported ? ` · 降级 ${Math.ceil(item.retryAfterSeconds ?? 0)}s` : ""}
-                </Tag>
-              ))}
-            </Space>
-            {capabilities.segments.some((item) => item.runtimeUnsupported) && (
-              <Alert
-                type="warning"
-                showIcon
-                message="存在运行时降级能力"
-                description={capabilities.segments
-                  .filter((item) => item.runtimeUnsupported)
-                  .map((item) => `${item.type}: ${item.lastFailureReason || "后端不兼容"}`)
-                  .join("；")}
-              />
-            )}
-          </Space>}
-    </Card>
-
-    <Card
-      title="LLM 实际路由"
-      extra={data.llm.unconfiguredProviders.length > 0
-        ? <Tag color="red">Provider 未配置</Tag>
-        : <Tag color="green">路由可用</Tag>}
-    >
-      <List
-        dataSource={data.llm.routes}
-        locale={{ emptyText: <AdminEmpty description="暂无 LLM 路由" /> }}
-        renderItem={(route) => (
-          <List.Item>
-            <List.Item.Meta
-              title={<Space><Text strong>{LLM_TASK_LABELS[route.task] ?? route.task}</Text><Tag>{route.profile}</Tag></Space>}
-              description={`${route.provider} · ${route.model || "未配置模型"} · thinking=${route.thinking}`}
-            />
-            <Tag color={route.configured ? "green" : "red"}>{route.configured ? "可用" : "不可用"}</Tag>
-          </List.Item>
-        )}
-      />
-    </Card>
-  </Space>;
+        </div>
+        <div className="agent-ws-nav-tip">Alt + 数字键快速切换</div>
+      </nav>
+      <div className="agent-ws-content">
+        {[...visited].filter((key) => key in panels).map((key) => (
+          <section
+            key={key}
+            role="tabpanel"
+            id={`agent-ws-panel-${key}`}
+            aria-labelledby={`agent-ws-tab-${key}`}
+            hidden={key !== tab}
+            className="agent-ws-panel"
+          >
+            {panels[key]()}
+          </section>
+        ))}
+      </div>
+    </div>
+  </>;
 }

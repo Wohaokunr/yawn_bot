@@ -36,6 +36,7 @@ from ..yawn_agent.capabilities import (
 from ..yawn_agent.context import build_current_turn, now_beijing, trim_context_messages
 from ..yawn_agent.context_history import history_message_meta as _history_message_meta
 from ..yawn_agent.context_loader import load_context as _load_context
+from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
@@ -87,7 +88,9 @@ from .route_models import (
     AgentDebugRunBody,
 )
 from .service import (
+    agent_activity,
     agent_diagnostics,
+    agent_tool_usage,
 )
 
 
@@ -145,6 +148,45 @@ async def get_agent_diagnostics(
     async with get_session() as db:
         await require_group(db, group_id)
         return ok(await agent_diagnostics(db, group_id))
+
+
+@_debug_router.get("/agent/groups/{group_id}/activity")
+async def get_agent_activity(
+    group_id: int,
+    _session: AdminReadSession,
+    hours: int = Query(default=24, ge=1, le=168),
+) -> dict[str, Any]:
+    """最近 N 小时按小时聚合的群消息 / Bot 回复数量与最活跃成员。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+        return ok(await agent_activity(db, group_id, now=now_beijing(), hours=hours))
+
+
+@_debug_router.get("/agent/groups/{group_id}/tool-usage")
+async def get_agent_tool_usage(
+    group_id: int,
+    _session: AdminReadSession,
+    days: int = Query(default=7, ge=1, le=90),
+) -> dict[str, Any]:
+    """最近 N 天特权工具调用统计（来自审计表）。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+        return ok(await agent_tool_usage(db, group_id, now=now_beijing(), days=days))
+
+
+@_debug_router.post("/agent/groups/{group_id}/conversation/close")
+async def close_agent_conversation(
+    group_id: int, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """立即结束本群进行中的短会话；不影响配置、记忆与后续触发。"""
+
+    async with get_session() as db:
+        await require_group(db, group_id)
+    closed = close_group_conversations(group_id, reason="WebUI 手动结束短会话")
+    await hub.notify_change("agent_config", str(group_id), group_id=group_id)
+    return ok({"groupId": str(group_id), "closed": closed})
 
 
 @_debug_router.get("/agent/groups/{group_id}/capabilities")
