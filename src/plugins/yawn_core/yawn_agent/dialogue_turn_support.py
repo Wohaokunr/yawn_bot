@@ -72,6 +72,93 @@ def trace_message_shape(
     }
 
 
+def trace_intake(
+    normalized: NormalizedMessage,
+    *,
+    bot_id: int,
+    started: float,
+    enqueued_at: float | None,
+) -> None:
+    """把解析阶段与入口整形结果写进执行追踪。"""
+
+    from .execution_trace import trace_event
+
+    trace_shape = trace_message_shape(normalized, bot_id=bot_id)
+    mention_fields = {
+        "mentions": len(trace_shape["effective_mentions"]),
+        "mention_bot": trace_shape["mention_bot"],
+        "observed_mentions": trace_shape["observed_mentions"],
+        "effective_mentions": trace_shape["effective_mentions"],
+        "original_segment_types": trace_shape["original_segment_types"],
+        "observed_segment_types": trace_shape["observed_segment_types"],
+        "effective_segment_types": trace_shape["effective_segment_types"],
+        "mention_stripped_for_prompt": trace_shape["mention_stripped_for_prompt"],
+        "mention_recovered_from_trigger": trace_shape["mention_recovered_from_trigger"],
+    }
+    for stage in normalized.parse_trace:
+        if not isinstance(stage, dict):
+            continue
+        stage_label = str(stage.get("label") or "消息解析")
+        raw_stage_output = stage.get("output")
+        stage_output: dict[str, Any] = (
+            {str(key): value for key, value in raw_stage_output.items()}
+            if isinstance(raw_stage_output, dict)
+            else {}
+        )
+        if stage_label == "消息段归一化":
+            stage_output.update(mention_fields)
+        trace_event(
+            "parse",
+            stage_label,
+            output=stage_output,
+            duration_ms=(
+                float(stage.get("duration_ms") or 0.0)
+                if stage.get("duration_ms") is not None
+                else None
+            ),
+        )
+    trace_event(
+        "intake",
+        "消息归一化完成",
+        output={
+            "trigger_source": normalized.trigger_source or "explicit_call",
+            "trigger_signals": dict(normalized.trigger_signals),
+            "trigger": {
+                "source": normalized.trigger_source or "explicit_call",
+                "mention_bot": trace_shape["mention_bot"],
+                "reply": bool(normalized.trigger_signals.get("reply")),
+                "wake_word": bool(normalized.trigger_signals.get("wake_word")),
+                "continuation": bool(normalized.trigger_signals.get("continuation")),
+            },
+            "merged_message_ids": list(normalized.merged_message_ids),
+            "text_chars": len(normalized.plain_text),
+            "text_preview": normalized.plain_text[:240],
+            "segment_types": trace_shape["effective_segment_types"],
+            "original_segment_types": trace_shape["original_segment_types"],
+            "observed_segment_types": trace_shape["observed_segment_types"],
+            "media": [
+                {"type": item.get("type"), "source": item.get("source", "current")}
+                for item in normalized.media_refs
+            ],
+            "reply_depth": len(normalized.reply_chain),
+            "forward_nodes": len(normalized.forward_tree),
+            "mentions": trace_shape["effective_mentions"],
+            "observed_mentions": trace_shape["observed_mentions"],
+            "mention_bot": trace_shape["mention_bot"],
+            "mention_stripped_for_prompt": trace_shape["mention_stripped_for_prompt"],
+            "mention_recovered_from_trigger": trace_shape[
+                "mention_recovered_from_trigger"
+            ],
+            "truncated": normalized.truncated,
+            "queue_wait_ms": (
+                round(max(started - enqueued_at, 0.0) * 1000, 1)
+                if enqueued_at is not None
+                else None
+            ),
+        },
+    )
+
+
 @dataclass(slots=True)
 class DiscoveryRoundGuard:
     """Bound progressive tool discovery and stop no-op discovery loops."""

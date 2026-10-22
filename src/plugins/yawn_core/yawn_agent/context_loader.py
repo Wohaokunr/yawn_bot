@@ -156,7 +156,7 @@ async def load_context(
     compact_history: bool = False,
     message_cutoff: datetime | None = None,
     include_active_profiles: bool = False,
-    exclude_message_id: int | None = None,
+    exclude_message_id: int | Sequence[int] | None = None,
     reference_at: datetime | None = None,
     selection_trace: list[dict[str, Any]] | None = None,
     budget_trace: list[dict[str, Any]] | None = None,

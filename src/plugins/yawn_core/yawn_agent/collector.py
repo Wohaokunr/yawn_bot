@@ -1,12 +1,17 @@
 # ruff: noqa: E501,F401,I001,TID252,PLR0912,PLR0913,PLR0917,C901,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100
-"""群消息有界队列和批处理。"""
+"""群消息有界队列和批处理。
+
+每个 (bot, group) 一条 FIFO 队列和一个 worker。worker 取到队首后可以调用
+可选的 ``coalesce`` 钩子，把队列里同一成员的后续触发一起吸收成一个回合
+（见 ``turn_intake.coalesce_same_actor``）；不同成员之间仍严格按序处理。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
 import weakref
-from collections import defaultdict
+from collections import deque
 from typing import Any, Awaitable, Callable
 
 from nonebot import logger
@@ -19,7 +24,60 @@ PENDING_TRIGGER_TTL_SECONDS = 120.0
 _MAX_TRACKED_GROUPS = 512
 QueueKey = tuple[int, int]
 QueueItem = tuple[Any, Any, Any, float]
-_queues: dict[QueueKey, asyncio.Queue[QueueItem]] = {}
+Coalescer = Callable[
+    [QueueItem, Callable[[Callable[[QueueItem], bool], int], list[QueueItem]]],
+    QueueItem,
+]
+
+
+class TriggerQueue:
+    """有界 FIFO；相比 asyncio.Queue 额外支持按条件摘取待处理项。"""
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = maxsize
+        self._items: deque[QueueItem] = deque()
+        self._ready = asyncio.Event()
+
+    def qsize(self) -> int:
+        return len(self._items)
+
+    def empty(self) -> bool:
+        return not self._items
+
+    def put_nowait(self, item: QueueItem) -> None:
+        if len(self._items) >= self.maxsize:
+            raise asyncio.QueueFull
+        self._items.append(item)
+        self._ready.set()
+
+    async def get(self) -> QueueItem:
+        while not self._items:
+            self._ready.clear()
+            await self._ready.wait()
+        return self._items.popleft()
+
+    def take_matching(
+        self, predicate: Callable[[QueueItem], bool], limit: int
+    ) -> list[QueueItem]:
+        """按原顺序摘出最多 ``limit`` 个满足条件的项，其余保持不动。"""
+
+        if limit <= 0:
+            return []
+        taken: list[QueueItem] = []
+        kept: deque[QueueItem] = deque()
+        for item in self._items:
+            if len(taken) < limit and predicate(item):
+                taken.append(item)
+            else:
+                kept.append(item)
+        self._items = kept
+        return taken
+
+    def task_done(self) -> None:
+        """兼容 asyncio.Queue 接口；本队列不跟踪 join。"""
+
+
+_queues: dict[QueueKey, TriggerQueue] = {}
 _workers: dict[QueueKey, asyncio.Task[None]] = {}
 _locks: weakref.WeakValueDictionary[QueueKey, asyncio.Lock] = (
     weakref.WeakValueDictionary()
@@ -64,12 +122,12 @@ def _key(
 
 def _queue(
     group_id: int, bot_id: int | None = None, item: tuple[Any, Any, Any] | None = None
-) -> asyncio.Queue[QueueItem]:
+) -> TriggerQueue:
     key = _key(group_id, bot_id, item)
     queue = _queues.get(key)
     if queue is None:
         _prune_idle()
-        queue = asyncio.Queue(maxsize=MAX_QUEUE_PER_GROUP)
+        queue = TriggerQueue(MAX_QUEUE_PER_GROUP)
         _queues[key] = queue
     return queue
 
@@ -117,6 +175,8 @@ def ensure_worker(
     group_id: int,
     process: Callable[..., Awaitable[None]],
     bot_id: int | None = None,
+    *,
+    coalesce: Coalescer | None = None,
 ) -> asyncio.Task[None]:
     key = _key(group_id, bot_id)
     task = _workers.get(key)
@@ -149,6 +209,14 @@ def ensure_worker(
                             f"等待 {pending_trigger_age(enqueued_at):.1f}s"
                         )
                         continue
+                    if coalesce is not None:
+                        try:
+                            bot, event, normalized, enqueued_at = coalesce(
+                                (bot, event, normalized, enqueued_at),
+                                queue.take_matching,
+                            )
+                        except Exception:  # noqa: BLE001
+                            dbg_exc(f"群 {group_id} 触发合批失败,按单条处理")
                     dbg(
                         f"群 {group_id} worker 按序处理消息: "
                         f"message_id={getattr(event, 'message_id', None)} "
@@ -191,6 +259,7 @@ __all__ = [
     "DEBOUNCE_SECONDS",
     "MAX_QUEUE_PER_GROUP",
     "PENDING_TRIGGER_TTL_SECONDS",
+    "TriggerQueue",
     "enqueue",
     "ensure_worker",
     "group_lock",

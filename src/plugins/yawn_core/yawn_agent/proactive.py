@@ -82,6 +82,7 @@ from .proactive_policy import (
 
 _PROACTIVE_MIN_MAX_TOKENS = 2048
 _PROACTIVE_TIMEOUT_SECONDS = 25.0
+_PROACTIVE_CONCURRENCY = 3
 
 
 async def _generate_proactive_reply(messages: list[Any]) -> str | None:
@@ -92,6 +93,38 @@ async def _generate_proactive_reply(messages: list[Any]) -> str | None:
         task="agent_proactive",
         max_tokens=max(_PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)),
         timeout=_PROACTIVE_TIMEOUT_SECONDS,
+    )
+
+
+def _add_participation_audit(
+    session: Any,
+    group_id: int,
+    *,
+    scene: str,
+    action: str,
+    session_turn: int,
+    reason: str,
+    result: str | None = None,
+    detail: str | None = None,
+    **extra: Any,
+) -> None:
+    """主动/续聊每个决策都留一条审计；所有分支共用同一格式。"""
+
+    session.add(
+        AgentAudit(
+            group_id=group_id,
+            actor_user_id=None,
+            tool_name="proactive_reply",
+            arguments={
+                "scene": scene,
+                "action": action,
+                "session_turn": session_turn,
+                **extra,
+                "reason": reason[:240],
+            },
+            result=result or action,
+            detail=(reason if detail is None else detail)[:500],
+        )
     )
 
 
@@ -158,6 +191,7 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                     "group_id": int(config.group_id),
                     "scene": scene,
                     "day_count": count,
+                    "bot_id": await _latest_group_bot_id(session, int(config.group_id)),
                 }
             )
         except Exception:  # noqa: BLE001
@@ -294,9 +328,37 @@ async def _prepare_proactive_message(
 
 
 
+async def _latest_group_bot_id(session: Any, group_id: int) -> int | None:
+    """最近一条入库消息所属的机器人，即真正在这个群里的那个连接。"""
+
+    value = await session.scalar(
+        select(GroupAgentMessage.bot_id)
+        .where(GroupAgentMessage.group_id == group_id)
+        .order_by(GroupAgentMessage.id.desc())
+        .limit(1)
+    )
+    return int(value) if value is not None else None
+
+
+def _order_bots_for_group(bots: list[Any], preferred_bot_id: int | None) -> list[Any]:
+    """把群里真正在线的机器人排到首位。
+
+    群锁按 (bot_id, group_id) 区分；主动发言若拿错机器人的锁，就无法与
+    该群的对话 worker 互斥，两个路径会互相覆盖配置状态。
+    """
+
+    if preferred_bot_id is None:
+        return list(bots)
+    preferred = [
+        bot for bot in bots if int(str(getattr(bot, "self_id", "") or 0)) == preferred_bot_id
+    ]
+    return preferred + [bot for bot in bots if bot not in preferred]
+
+
 async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) -> str:
     group_id = candidate["group_id"]
     scene = candidate["scene"]
+    bots = _order_bots_for_group(bots, candidate.get("bot_id"))
     primary = bots[0]
     primary_self_id = int(str(getattr(primary, "self_id", "") or 0))
     # 与对话路径(process_group_message)保持同一锁协议：上下文加载、生成、
@@ -387,20 +449,13 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     reason="LLM 返回空内容",
                     session_turn=1,
                 )
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": scene,
-                            "action": "error",
-                            "session_turn": 1,
-                            "reason": "LLM 返回空内容",
-                        },
-                        result="error",
-                        detail="LLM 返回空内容",
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene=scene,
+                    action="error",
+                    session_turn=1,
+                    reason="LLM 返回空内容",
                 )
                 await session.commit()
                 return "error"
@@ -446,22 +501,15 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     f"群 {group_id} 主动发言被内容门拦截: "
                     f"reason={decision.reason!r} topic={decision.topic!r}"
                 )
-                session.add(
-                    AgentAudit(
-                        group_id=config.group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": scene,
-                            "action": decision.action,
-                            "session_turn": 1,
-                            "reason": decision.reason[:240],
-                            "target_user_id": decision.target_user_id,
-                            "confidence": decision.confidence,
-                        },
-                        result=decision.action,
-                        detail=decision.reason[:500],
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene=scene,
+                    action=decision.action,
+                    session_turn=1,
+                    reason=decision.reason,
+                    target_user_id=decision.target_user_id,
+                    confidence=decision.confidence,
                 )
                 await _apply_result(
                     session,
@@ -490,20 +538,13 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 if isinstance(item, dict)
             }:
                 dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {history_text!r}")
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": scene,
-                            "action": "wait",
-                            "session_turn": 1,
-                            "reason": "近期回复撞重",
-                        },
-                        result="wait",
-                        detail="近期回复撞重",
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene=scene,
+                    action="wait",
+                    session_turn=1,
+                    reason="近期回复撞重",
                 )
                 await _apply_result(
                     session,
@@ -530,20 +571,13 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             except Exception as exc:  # noqa: BLE001
                 reason = f"主动消息计划无效: {exc}"
                 logger.warning("群 %s 主动消息计划无效: %s", group_id, exc)
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": scene,
-                            "action": "wait",
-                            "session_turn": 1,
-                            "reason": reason[:240],
-                        },
-                        result="wait",
-                        detail=reason[:500],
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene=scene,
+                    action="wait",
+                    session_turn=1,
+                    reason=reason,
                 )
                 await _apply_result(
                     session,
@@ -587,20 +621,14 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             if sent_result is None:
                 logger.warning("群 %s 主动消息无可用机器人发送", group_id)
                 dbg(f"群 {group_id} 主动发言失败: {len(bots)} 个机器人均发送失败")
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": scene,
-                            "action": "send_failed",
-                            "session_turn": 1,
-                            "reason": "无可用机器人发送",
-                        },
-                        result="send_failed",
-                        detail="所有机器人发送失败",
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene=scene,
+                    action="send_failed",
+                    session_turn=1,
+                    reason="无可用机器人发送",
+                    detail="所有机器人发送失败",
                 )
                 await session.commit()
                 return "send_failed"
@@ -813,21 +841,14 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                     duration_ms=(time.monotonic() - llm_started) * 1000,
                 )
                 reason = "LLM 返回空内容"
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": "followup",
-                            "action": "error",
-                            "session_turn": batch.bot_turns + 1,
-                            "session_id": batch.session_id,
-                            "reason": reason,
-                        },
-                        result="error",
-                        detail=reason,
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene="followup",
+                    action="error",
+                    session_turn=batch.bot_turns + 1,
+                    reason=reason,
+                    session_id=batch.session_id,
                 )
                 await session.commit()
                 finish_followup_evaluation(batch, "error")
@@ -882,23 +903,16 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                     emotion_state=context.get("emotion_state"),
                     participation_action=action,
                 )
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": "followup",
-                            "action": action,
-                            "session_turn": batch.bot_turns + 1,
-                            "session_id": batch.session_id,
-                            "reason": reason[:240],
-                            "target_user_id": decision.target_user_id,
-                            "confidence": decision.confidence,
-                        },
-                        result=action,
-                        detail=reason[:500],
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene="followup",
+                    action=action,
+                    session_turn=batch.bot_turns + 1,
+                    reason=reason,
+                    session_id=batch.session_id,
+                    target_user_id=decision.target_user_id,
+                    confidence=decision.confidence,
                 )
                 await session.commit()
                 dbg(
@@ -929,21 +943,14 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 dbg_exc(
                     f"群 {group_id} 短会话发送失败 session={batch.session_id}"
                 )
-                session.add(
-                    AgentAudit(
-                        group_id=group_id,
-                        actor_user_id=None,
-                        tool_name="proactive_reply",
-                        arguments={
-                            "scene": "followup",
-                            "action": "send_failed",
-                            "session_turn": batch.bot_turns + 1,
-                            "session_id": batch.session_id,
-                            "reason": "群消息发送失败",
-                        },
-                        result="send_failed",
-                        detail="群消息发送失败",
-                    )
+                _add_participation_audit(
+                    session,
+                    group_id,
+                    scene="followup",
+                    action="send_failed",
+                    session_turn=batch.bot_turns + 1,
+                    reason="群消息发送失败",
+                    session_id=batch.session_id,
                 )
                 await session.commit()
                 finish_followup_evaluation(batch, "send_failed")
@@ -1050,12 +1057,21 @@ async def _tick() -> None:
     dbg(f"主动发言 tick 开始: bots={len(bots)}")
     async with get_session() as session:
         candidates = await _collect_candidates(session, now)
-    for candidate in candidates:
-        try:
-            await _process_candidate(candidate, bots)
-        except Exception:  # noqa: BLE001
-            logger.exception("群聊 Agent 主动插话失败: %s", candidate["group_id"])
-            dbg_exc(f"群 {candidate['group_id']} 主动插话流程异常")
+    if not candidates:
+        return
+    # 每个候选群都要等一次 LLM（最长 25 秒）。串行处理时一个慢群会拖住
+    # 后面所有群，甚至让每分钟的 tick 被 coalesce 掉；这里有界并发处理。
+    limiter = asyncio.Semaphore(_PROACTIVE_CONCURRENCY)
+
+    async def _run(candidate: dict[str, Any]) -> None:
+        async with limiter:
+            try:
+                await _process_candidate(candidate, bots)
+            except Exception:  # noqa: BLE001
+                logger.exception("群聊 Agent 主动插话失败: %s", candidate["group_id"])
+                dbg_exc(f"群 {candidate['group_id']} 主动插话流程异常")
+
+    await asyncio.gather(*(_run(candidate) for candidate in candidates))
 
 
 set_followup_handler(_process_followup)
