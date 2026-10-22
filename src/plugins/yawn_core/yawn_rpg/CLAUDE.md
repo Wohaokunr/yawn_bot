@@ -299,3 +299,13 @@ finish_reason=length 截断返空）/ `RPG_KP_TEMPERATURE` /
 沿用 `from nonebot import logger` + f-string，统一前缀 `跑团群 {group_id}`。
 对局事件（阶段切换、场景进入、检定、工具执行、线索发现、结局、AI 降级、
 时间推进、NPC 死亡、flag 记录）记 `info`；完整 KP 提示词记 `debug`。
+
+## 关联位置（跨目录）
+
+- **维护约束**：仓库根 [AGENTS.md](../../../../AGENTS.md) 中的 RPG 条目（一群一局、只校验并入队、`submit_action()`/`release_action()`、`/局面` 可见性等）同样适用。
+- **上级与共享模块**：[yawn_core/CLAUDE.md](../CLAUDE.md)；KP/NPC/路由器用 `../llm.py` 的 `complete_with_tools()` / `complete()`；占用登记 `../game_registry.py`、短命令路由 `../game_command_routing.py`、事件日志 `../event_log.py`、回放 `../replay.py`、指标 `../metrics.py`。
+- **模组写作规范**：[modules/README.md](modules/README.md)；玩家向说明 [docs/rpg-gameplay-guide.md](../../../../docs/rpg-gameplay-guide.md)。
+- **模组工具**：TUI 编辑器 [tools/rpg_module_editor/](../../../../tools/rpg_module_editor/CLAUDE.md) 与离线试玩器 `tools/rpg_playtest/`（[tools/CLAUDE.md](../../../../tools/CLAUDE.md)）直接加载本目录的 `module_schema.py`；改 schema 或条件表达式要同步跑它们的测试。
+- **WebUI**：模组库 [../webui/rpg_modules.py](../webui/CLAUDE.md)、对局管理 `../webui/games.py`；前端 `webui/src/modules.tsx`、`games.tsx`。
+- **迁移正本**：RPG 修订在 `data/nonebot_plugin_orm/migrations/` 根目录，见 [data/CLAUDE.md](../../../../data/CLAUDE.md)。
+- **测试**：本目录 `tests/`，以及仓库根 `tests/test_rpg_*.py`、`tests/test_webui_rpg.py`。

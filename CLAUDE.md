@@ -6,6 +6,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 YawnBot is a QQ chat bot built on **NoneBot2** with the **OneBot V11** adapter. Python ≥3.10, dependencies managed by **uv**. All bot logic lives in a single local plugin package, `src/plugins/yawn_core`. Comments, docstrings, and user-facing text are in Chinese.
 
+## 项目结构与文档导航
+
+本仓库的 `CLAUDE.md` 是分层的：本文件给全局规则与目录总览，各重要目录下的 `CLAUDE.md` 讲该目录的职责、结构和关键文件，并互相链接。进入某个目录工作前，先读对应的 `CLAUDE.md`。
+
+| 路径 | 职责 | 文档 |
+|---|---|---|
+| `src/plugins/yawn_core/` | 唯一的本地 NoneBot 插件：核心功能模块 + 可选子插件 | [yawn_core/CLAUDE.md](src/plugins/yawn_core/CLAUDE.md) |
+| `├─ data_models/` | yawn_core 与 Agent 共用的 ORM 模型 | [data_models/CLAUDE.md](src/plugins/yawn_core/data_models/CLAUDE.md) |
+| `├─ webui/` | WebUI 后端（FastAPI，`/webui/api/v1`） | [webui/CLAUDE.md](src/plugins/yawn_core/webui/CLAUDE.md) |
+| `├─ yawn_agent/` | 群聊 Agent 子插件 | [yawn_agent/CLAUDE.md](src/plugins/yawn_core/yawn_agent/CLAUDE.md)（约束见同目录 [AGENTS.md](src/plugins/yawn_core/yawn_agent/AGENTS.md)） |
+| `├─ yawn_werewolf/` | 狼人杀子插件 | [yawn_werewolf/CLAUDE.md](src/plugins/yawn_core/yawn_werewolf/CLAUDE.md) |
+| `├─ yawn_rpg/` | CoC 跑团子插件（AI KP + YAML 模组） | [yawn_rpg/CLAUDE.md](src/plugins/yawn_core/yawn_rpg/CLAUDE.md) |
+| `└─ yawn_fanqie/` | 番茄小说公开内容下载子插件 | [yawn_fanqie/CLAUDE.md](src/plugins/yawn_core/yawn_fanqie/CLAUDE.md) |
+| `webui/` | WebUI 前端（React 19 + antd + Vite），构建产物 `webui/dist` 由后端托管 | [webui/CLAUDE.md](webui/CLAUDE.md) |
+| `tests/` | 主 pytest 套件（运行时、插件、WebUI 后端、部署契约） | [tests/CLAUDE.md](tests/CLAUDE.md) |
+| `tools/` | 仓库卫生/许可证审计脚本、RPG 模组编辑器与离线试玩器 | [tools/CLAUDE.md](tools/CLAUDE.md) |
+| `data/` | SQLite 与 **迁移正本**（`data/nonebot_plugin_orm/migrations/`） | [data/CLAUDE.md](data/CLAUDE.md) |
+| `deploy/`、`Dockerfile`、`compose.yaml` | Docker 镜像、NapCat、生产发布与主机初始化 | [deploy/CLAUDE.md](deploy/CLAUDE.md) |
+| `docs/` | 配置参考、部署、设计说明与路线图 | [docs/CLAUDE.md](docs/CLAUDE.md) |
+| `.github/workflows/` | CI（`ci.yml`，Python 3.10 跑 ruff/pyright/pytest + WebUI 测试构建）、发布、部署、审计 | 见 [deploy/CLAUDE.md](deploy/CLAUDE.md) 与 [tests/CLAUDE.md](tests/CLAUDE.md) |
+| `AGENTS.md` | RPG 与 RPG 模组编辑器的维护约束（下方已导入） | [AGENTS.md](AGENTS.md) |
+
+根目录其他文件：`pyproject.toml`（依赖、NoneBot 插件声明、ruff/pyright/pytest 配置）、`.env.example`（最小可运行配置；完整配置项目录在 `src/plugins/yawn_core/webui/environment_catalog.dotenv`，说明在 [docs/configuration/](docs/configuration/README.md)）、`README.md` / `CONTRIBUTING.md` / `SECURITY.md`（面向使用者与贡献者）。
+
+### 跨目录关联速查
+
+相距较远但必须一起改的位置：
+
+- **ORM 模型 ↔ 迁移**：`src/plugins/yawn_core/data_models/`、各子插件 `models.py` ↔ `data/nonebot_plugin_orm/migrations/`（迁移由用户手动执行，见下文）。
+- **WebUI 前后端**：`webui/src/*.tsx` 通过 `webui/src/api.ts` 调用 `src/plugins/yawn_core/webui/*_routes.py`；后端 `webui/config.py` 从 `webui/dist` 托管前端。
+- **配置项**：插件 `config.py` 的字段 ↔ `webui/environment_catalog.dotenv`（`tests/test_webui_environment.py` 会检查）↔ `docs/configuration/*.md` ↔ `.env.example`。
+- **RPG 模组**：`yawn_rpg/modules/*.yaml` + `yawn_rpg/module_schema.py` ↔ `tools/rpg_module_editor/`、`tools/rpg_playtest/` ↔ WebUI `webui/rpg_modules.py` 与前端 `webui/src/modules.tsx`。
+- **对局记录**：狼人杀/跑团引擎 ↔ `yawn_core/event_log.py`、`replay.py`、`metrics.py` ↔ WebUI `webui/games.py` 与前端 `webui/src/games.tsx`；设计见 [docs/game-event-log.md](docs/game-event-log.md)、[docs/game-replay.md](docs/game-replay.md)。
+- **共享 LLM**：`yawn_core/llm.py` 被 `ai_chat`、`yawn_agent`、`yawn_rpg`、`yawn_werewolf` 共用。
+- **发布链路**：`Dockerfile` / `deploy/` ↔ `.github/workflows/release.yml`、`deploy-existing.yml` ↔ `tests/test_production_*.py`、`tests/test_deployment_cache_contract.py`。
+
+@AGENTS.md
+
 ## Commands
 
 ```bash
@@ -16,15 +54,17 @@ uv run ruff format src         # format (LF line endings, 88 cols)
 uv run pyright src             # type check (standard mode, python 3.9 target in config)
 ```
 
-There is no project-wide test suite; `yawn_rpg` has focused tests under
-`src/plugins/yawn_core/yawn_rpg/tests/`. Run them with the project virtual
-environment when changing RPG behavior.
+Tests: `uv run pytest -q` runs the default suite (`testpaths` = `tests/` +
+`src/plugins/`, including `yawn_rpg/tests/`). The RPG editor/playtest suites
+under `tools/` are run explicitly by path. CI uses Python 3.10. See
+[tests/CLAUDE.md](tests/CLAUDE.md) for the layout and which tests to run for
+each area.
 
 ### Database migrations (nonebot-plugin-orm + Alembic)
 
 **数据库迁移一律由用户手动执行，Claude 不要运行 `nb orm revision/upgrade/downgrade`。** 模型变更后只需提醒用户生成并应用迁移。
 
-The SQLite database lives at `data/nonebot_plugin_orm/db.sqlite3` (`LOCALSTORE_USE_CWD=true` keeps data under the repo). Canonical migrations are in `data/nonebot_plugin_orm/migrations/yawn_core/`, with the game sub-plugins nested per bind_key (`data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf/`, `.../yawn_rpg/`) (the copies under `src/plugins/yawn_core/*/migrations/` are duplicates — do not edit those).
+The SQLite database lives at `data/nonebot_plugin_orm/db.sqlite3` (`LOCALSTORE_USE_CWD=true` keeps data under the repo). Canonical migrations are in `data/nonebot_plugin_orm/migrations/yawn_core/`, with the game sub-plugins nested per bind_key (`data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf/`, `.../yawn_fanqie/`); the main-branch (RPG, reminders) revisions plus some follow-ups of other branches sit directly in `data/nonebot_plugin_orm/migrations/` — branch membership is decided by `down_revision`, not by directory (see [data/CLAUDE.md](data/CLAUDE.md)) (the copies under `src/plugins/yawn_core/*/migrations/` are duplicates — do not edit those).
 
 ```bash
 uv run nb orm revision -m "description"   # generate from model changes (autogenerate by default; --sql to disable)
@@ -44,7 +84,7 @@ Warnings (learned from the a0445ad1df97 incident, 2026-08):
 
 ### Plugin loading
 
-`src/plugins/yawn_core/__init__.py` explicitly imports every feature module (`ai_chat`, `checkin`, `friend_approve`, `help_panel`, `panel`, `permission`, `presence`) — **a new module is not loaded until it is imported there**. The game sub-plugins (`yawn_werewolf/`, `yawn_rpg/`) are different: they are loaded dynamically by `_load_sub_plugins()` (iterating a known name list) via `nonebot.load_plugin`, and a load failure is logged and skipped without taking down the other features. Every attempt is retained in `get_sub_plugin_load_report()`, and startup emits a summary; keep this report in sync when adding optional sub-plugins. `__init__.py` also registers an `on_startup` hook that enables SQLite WAL mode + busy_timeout on all sqlite engines.
+`src/plugins/yawn_core/__init__.py` explicitly imports every feature module (`ai_chat`, `checkin`, `friend_approve`, `help_panel`, `panel`, `permission`, `presence`, `reminder`, `replay`, … — see the import list there) — **a new module is not loaded until it is imported there**. The sub-plugins (`yawn_werewolf/`, `yawn_rpg/`, `yawn_fanqie/`, `yawn_agent/`) are different: they are loaded dynamically by `_load_sub_plugins()` (iterating `_SUB_PLUGIN_SPECS`) via `nonebot.load_plugin`, and a load failure is logged and skipped without taking down the other features. Every attempt is retained in `get_sub_plugin_load_report()`, and startup emits a summary; keep this report in sync when adding optional sub-plugins. `__init__.py` also registers an `on_startup` hook that enables SQLite WAL mode + busy_timeout on all sqlite engines.
 
 Third-party nonebot plugins must be declared in `pyproject.toml` under `[tool.nonebot.plugins]` (package → module mapping); adapters under `[tool.nonebot.adapters]`.
 
