@@ -30,7 +30,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}" \
     HOST=0.0.0.0 \
     PORT=8080 \
-    LOCALSTORE_USE_CWD=true
+    LOCALSTORE_USE_CWD=true \
+    YAWNBOT_PINNED_ENV_KEYS=HOST,PORT,LOCALSTORE_USE_CWD \
+    YAWNBOT_SUPERVISED=1
 WORKDIR /app
 
 # HTMLKit uses Fontconfig at runtime. The slim base image has no CJK font, so

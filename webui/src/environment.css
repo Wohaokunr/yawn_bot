@@ -1,0 +1,254 @@
+/* 环境配置 2.0：左侧分类导航 + 右侧单分类字段列表。
+   中性底色 + 单一樱粉强调，状态色只用于错误/提醒/未保存。加载顺序在 theme-anime.css 之前。 */
+
+.envx {
+  --envx-gap: 14px;
+  --envx-radius: 14px;
+  --envx-error: #d9534f;
+  --envx-warn: #d48806;
+  --envx-ok: #2fa86a;
+  --envx-dirty: #e0a100;
+  display: flex;
+  flex-direction: column;
+  gap: var(--envx-gap);
+  min-width: 0;
+}
+
+.envx-small { font-size: 12px; line-height: 1.55; }
+.envx-mono,
+.envx-mono input,
+.envx-mono textarea { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12.5px; }
+.envx-grow { flex: 1; }
+.envx-tag { margin-inline-end: 0 !important; font-size: 11px; line-height: 18px; padding-inline: 6px; }
+
+/* ── 工具条 ── */
+.envx-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.envx-search { max-width: 420px; flex: 1 1 260px; }
+.envx-filter-select { display: none; min-width: 120px; }
+
+/* ── 布局 ── */
+.envx-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--envx-gap);
+  align-items: start;
+}
+.envx-main {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--envx-radius);
+  padding: 18px 20px 20px;
+  box-shadow: var(--shadow-xs);
+}
+
+/* ── 分类导航 ── */
+.envx-nav {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--envx-radius);
+  box-shadow: var(--shadow-xs);
+}
+.envx-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.envx-nav-item:hover { background: var(--surface-muted); }
+.envx-nav-item:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.envx-nav-item.is-active { background: var(--brand-50); color: var(--brand-active); font-weight: 700; }
+.envx-nav-icon { width: 20px; text-align: center; flex: none; }
+.envx-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.envx-nav-badges { display: inline-flex; gap: 4px; flex: none; }
+.envx-nav-count { font-size: 11.5px; color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+.envx-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 6px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.envx-nav-badges .envx-pill { margin-left: 0; }
+.envx-pill.is-error { background: var(--envx-error); }
+.envx-pill.is-dirty { background: var(--envx-dirty); }
+
+/* ── 分类与分组标题 ── */
+.envx-category-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.envx-category-head h2 { margin: 0; font-size: 18px; font-weight: 800; }
+.envx-section + .envx-section { margin-top: 18px; }
+.envx-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0 2px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  letter-spacing: 0.02em;
+}
+.envx-section-count { font-size: 11.5px; font-weight: 500; color: var(--ink-tertiary); }
+
+/* ── 字段行 ── */
+.envx-fields { display: flex; flex-direction: column; }
+.envx-field {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 380px) 64px;
+  gap: 6px 18px;
+  align-items: start;
+  padding: 12px 10px 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 8px;
+  transition: background 0.2s ease;
+}
+.envx-field:last-child { border-bottom: 0; }
+.envx-field:hover { background: var(--surface-muted); }
+.envx-field::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 2px;
+  background: transparent;
+}
+.envx-field.is-dirty::before { background: var(--envx-dirty); }
+.envx-field.has-error::before { background: var(--envx-error); }
+.envx-field.is-highlighted,
+.envx-mini.is-highlighted { animation: envx-flash 2.4s ease; }
+@keyframes envx-flash {
+  0%, 30% { background: var(--brand-100); box-shadow: 0 0 0 2px var(--brand-200); }
+  100% { background: transparent; box-shadow: none; }
+}
+.envx-field-head { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.envx-field-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.envx-key.ant-typography { font-size: 11.5px; color: var(--ink-tertiary); margin: 0; word-break: break-all; }
+.envx-key code { background: transparent !important; border: 0 !important; padding: 0 !important; }
+.envx-desc { font-size: 12.5px; line-height: 1.6; color: var(--ink-secondary); }
+.envx-field-control { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.envx-field-actions { display: flex; justify-content: flex-end; gap: 2px; padding-top: 2px; }
+.envx-hint { font-size: 11.5px; color: var(--ink-tertiary); }
+.envx-error { font-size: 12px; color: var(--envx-error); }
+.envx-removing {
+  padding: 5px 10px;
+  border: 1px dashed var(--envx-dirty);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  background: #fffbea;
+}
+.envx-token-meter { display: flex; flex-direction: column; gap: 2px; }
+.envx-token-meter .ant-progress { margin: 0; line-height: 1; }
+
+/* ── 模型区 ── */
+.envx-card.ant-card { height: 100%; border-radius: 12px; }
+.envx-form { display: flex; flex-direction: column; gap: 10px; }
+.envx-form-row { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; font-weight: 600; color: var(--ink-secondary); }
+.envx-card-foot { justify-content: space-between; width: 100%; }
+.envx-route { font-size: 12px; color: var(--ink-secondary); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.envx-mini { display: flex; flex-direction: column; gap: 4px; border-radius: 8px; }
+.envx-mini.is-dirty .ant-select-selector,
+.envx-mini.is-dirty .ant-input,
+.envx-mini.is-dirty .ant-select { border-color: var(--envx-dirty) !important; }
+.envx-mini-label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink-secondary); }
+.envx-mini-label:empty { display: none; }
+.envx-task-table .ant-table-cell { vertical-align: middle; }
+
+/* ── 搜索结果 ── */
+.envx-results { display: flex; flex-direction: column; gap: 12px; }
+.envx-results-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.envx-result-category { font-size: 15px; font-weight: 800; margin-top: 6px; }
+
+/* ── 体检 ── */
+.envx-health {
+  border: 1px solid var(--border);
+  border-radius: var(--envx-radius);
+  background: var(--surface);
+  padding: 12px 16px;
+  box-shadow: var(--shadow-xs);
+}
+.envx-health.is-ok { display: flex; align-items: center; gap: 8px; padding: 9px 16px; color: var(--envx-ok); font-weight: 600; font-size: 13px; }
+.envx-health.is-error { border-color: #f3c7c6; }
+.envx-health.is-warning { border-color: #f2dfb3; }
+.envx-health-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.envx-health-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.envx-health-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--surface-muted); }
+.envx-health-icon { flex: none; font-size: 15px; line-height: 22px; }
+.envx-health-item.is-error .envx-health-icon { color: var(--envx-error); }
+.envx-health-item.is-warning .envx-health-icon { color: var(--envx-warn); }
+.envx-health-item.is-info .envx-health-icon { color: var(--ink-tertiary); }
+.envx-health-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+
+/* ── 待重启 ── */
+.envx-restart {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--brand-200);
+  border-radius: var(--envx-radius);
+  background: var(--brand-50);
+  color: var(--brand-active);
+}
+.envx-restart > .anticon { font-size: 18px; }
+.envx-restart-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+/* ── 保存预览 ── */
+.envx-diff-area { font-size: 12.5px; font-weight: 700; color: var(--ink-secondary); margin-bottom: 4px; }
+.envx-diff-value { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
+.envx-diff-value.is-new { color: var(--brand-active); font-weight: 600; }
+
+/* ── 窄屏：导航变成顶部横向标签，字段行改为上下排列 ── */
+@media (max-width: 1100px) {
+  .envx-field { grid-template-columns: minmax(0, 1fr) minmax(200px, 300px) 56px; }
+}
+@media (max-width: 900px) {
+  .envx-layout { grid-template-columns: minmax(0, 1fr); }
+  .envx-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .envx-nav::-webkit-scrollbar { display: none; }
+  .envx-nav-item { width: auto; flex: none; padding: 7px 12px; }
+  .envx-main { padding: 14px; }
+  .envx-field { grid-template-columns: minmax(0, 1fr) auto; padding-left: 12px; }
+  .envx-field-control { grid-column: 1 / -1; grid-row: 2; }
+  .envx-field-actions { grid-column: 2; grid-row: 1; }
+  .envx-filter { display: none !important; }
+  .envx-filter-select { display: inline-flex; }
+  .envx-search { max-width: none; }
+  .envx-restart { flex-wrap: wrap; }
+}

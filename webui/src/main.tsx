@@ -14,6 +14,7 @@ import "./design-system.css";
 import "./agent-workspace/agent-workspace.css";
 import "./agent-debug/debug-console.css";
 import "./relations/relations.css";
+import "./environment.css";
 import "./theme-anime.css";
 
 installGlassGlow();

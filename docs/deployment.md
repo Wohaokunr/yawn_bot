@@ -271,7 +271,7 @@ YawnBot :8080
 
 ```dotenv
 WEBUI_ENABLED=true
-WEBUI_ADMIN_TOKEN=<至少32字符高熵随机值>
+WEBUI_ADMIN_TOKEN=<建议16位以上的随机值>
 WEBUI_COOKIE_SECURE=true
 ```
 
@@ -286,7 +286,9 @@ Actions 下发，`deploy-release` 在健康检查通过后启动它。要公开 
 2. `deploy-release` 会在服务器本地补齐 `/opt/yawnbot/config/.env` 里缺失的 WebUI 三项：
    `WEBUI_ENABLED=true`、`WEBUI_COOKIE_SECURE=true`，以及用 `secrets.token_hex(32)`
    生成的 `WEBUI_ADMIN_TOKEN`。已有的键不会被覆盖，改动前备份为 `.env.bak-<时间>`，
-   token 只写入服务器文件，不打印、不经过 GitHub。登录 WebUI 时到服务器上查看该值；
+   token 只写入服务器文件，不打印、不经过 GitHub。登录 WebUI 时到服务器上查看该值。
+   已有 Token 较短时只打印提示、不中断部署；登录后可在「环境配置 → 管理后台与安全」
+   里换成新 Token，再点页面上的「重启 YawnBot」生效；
 3. 腾讯云安全组入站放行 TCP 80、TCP 443（以及 UDP 443 供 HTTP/3），服务器
    firewalld 如启用也要放行；8080 不要放行；
 4. 发版部署。证书自动签发并存放在 `/opt/yawnbot/caddy/`。

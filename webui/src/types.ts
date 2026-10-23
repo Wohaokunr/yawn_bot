@@ -649,7 +649,33 @@ export interface WebAudit {
 }
 
 export type EnvironmentValueKind = "string" | "boolean" | "integer" | "number" | "json" | "enum";
-export type EnvironmentValueSource = "process" | "environment" | "env" | "default";
+export type EnvironmentValueSource = "process" | "pinned" | "environment" | "env" | "default";
+export type EnvironmentValueFormat =
+  | "json-string-list"
+  | "csv-list"
+  | "bytes"
+  | "seconds"
+  | "minutes"
+  | "hours"
+  | "days"
+  | "url";
+
+// 后端 environment_schema.field_meta 从目录默认值与说明推断的展示元数据
+export interface EnvironmentEntryMeta {
+  label: string;
+  min: number | null;
+  max: number | null;
+  format: EnvironmentValueFormat | null;
+  suggestions: string[];
+  deprecated: boolean;
+}
+
+export interface EnvironmentDiagnostic {
+  level: "error" | "warning" | "info";
+  title: string;
+  detail: string;
+  keys: string[];
+}
 
 export interface EnvironmentEntry {
   key: string;
@@ -664,6 +690,9 @@ export interface EnvironmentEntry {
   options: string[];
   source: EnvironmentValueSource;
   overridden: boolean;
+  /** 旧版后端没有这两个字段，前端按缺省处理 */
+  meta?: EnvironmentEntryMeta;
+  issue?: string | null;
 }
 
 export interface LLMProviderSnapshot {
@@ -684,6 +713,17 @@ export interface EnvironmentSnapshot {
   environmentFile: string | null;
   entries: EnvironmentEntry[];
   llmProviders: LLMProviderSnapshot[];
+  diagnostics?: EnvironmentDiagnostic[];
+  pendingRestart?: boolean;
+  restartSupported?: boolean;
+}
+
+export interface SystemStatus {
+  restartSupported: boolean;
+  restartScheduled: boolean;
+  pendingRestart: boolean;
+  startedAt: number;
+  uptimeSeconds: number;
 }
 
 export interface EnvironmentPatchResult {

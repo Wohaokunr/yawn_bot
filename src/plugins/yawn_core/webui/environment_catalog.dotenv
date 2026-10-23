@@ -93,7 +93,7 @@ AI_MAX_TOKENS=1024
 
 # 是否启用 /webui 管理端；关闭后重启即无法再通过 WebUI 访问
 WEBUI_ENABLED=false
-# 运维管理员登录令牌，至少 32 个字符；修改后当前会话将失效
+# 运维管理员登录令牌，建议 16 位以上随机值（过短只会提示，不会阻止启动）；修改后当前会话将失效
 WEBUI_ADMIN_TOKEN=
 # 登录会话有效时长（小时，1-168）
 WEBUI_SESSION_TTL_HOURS=12
@@ -168,7 +168,7 @@ AGENT_RECEIVED_MEDIA_REUSE=deny
 # Agent 海量调试日志，会包含完整群消息与 LLM 回复，仅供本地短时排障
 AGENT_DEBUG_LOG=false
 
-# ── Core/Agent AI 开关 ───────────────────────────────────────────────────────────
+# ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 
 # RPG 是否启用 AI 叙事/工具流程；false 为确定性模式
 RPG_AI_ENABLED=true

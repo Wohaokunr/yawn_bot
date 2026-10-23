@@ -4,29 +4,78 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
+from nonebot import logger
 from pydantic import ValidationError
 
 from ..llm import LLMProviderConfig, test_llm_connection
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, ok
 from .environment import (
+    PROCESS_STARTED_AT,
     EnvironmentConflictError,
     EnvironmentValidationError,
     load_environment,
+    pending_restart,
     resolve_llm_provider,
+    restart_supported,
     update_environment,
 )
 from .route_models import EnvironmentPatch, LLMConnectionTestBody
 
 router = APIRouter(prefix=API_PATH)
 _LLM_TEST_CONCURRENCY = asyncio.Semaphore(2)
+# 给响应和审计留出写出的时间再退出
+_RESTART_DELAY_SECONDS = 1.0
+_restart_scheduled = False
+
+
+def _system_status() -> dict[str, Any]:
+    return {
+        "restartSupported": restart_supported(),
+        "restartScheduled": _restart_scheduled,
+        "pendingRestart": pending_restart(),
+        "startedAt": int(PROCESS_STARTED_AT),
+        "uptimeSeconds": int(time.time() - PROCESS_STARTED_AT),
+    }
+
+
+def _terminate_for_restart() -> None:
+    logger.warning("WebUI 请求重启：进程退出，由容器 restart 策略拉起")
+    os.kill(os.getpid(), signal.SIGTERM)
+
 
 @router.get("/environment")
 async def get_environment(_session: AdminReadSession) -> dict[str, Any]:
     return ok(await asyncio.to_thread(load_environment))
+
+
+@router.get("/system/status")
+async def get_system_status(_session: AdminReadSession) -> dict[str, Any]:
+    return ok(await asyncio.to_thread(_system_status))
+
+
+@router.post("/system/restart")
+async def restart_system(_session: AdminWriteSession) -> dict[str, Any]:
+    """只在容器托管（YAWNBOT_SUPERVISED=1）时允许：退出后由 restart 策略拉起。"""
+
+    global _restart_scheduled  # noqa: PLW0603
+    if not restart_supported():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "当前运行方式不支持从 WebUI 重启，请在服务器上手动重启 YawnBot",
+        )
+    if not _restart_scheduled:
+        _restart_scheduled = True
+        asyncio.get_running_loop().call_later(
+            _RESTART_DELAY_SECONDS, _terminate_for_restart
+        )
+    return ok({"scheduled": True, "startedAt": int(PROCESS_STARTED_AT)})
 
 
 @router.patch("/environment")
