@@ -4,8 +4,7 @@
 from .config import config, validate_enabled_config
 
 
-if config.webui_enabled:
-    validate_enabled_config()
+if validate_enabled_config():
     from .app import install
 
     install()

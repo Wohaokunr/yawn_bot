@@ -5,7 +5,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 
 ## 启用与认证
 
-- `WEBUI_ENABLED=true` 时 `config.validate_enabled_config()` 快速失败：`WEBUI_ADMIN_TOKEN` 至少 32 字符，且 `webui/dist/index.html` 必须存在（先 `npm run build`）。
+- `WEBUI_ENABLED=true` 时 `config.validate_enabled_config()` 检查 Token 非空、`webui/dist/index.html` 存在；不满足只记错误日志并**跳过挂载 WebUI，绝不让 Bot 启动失败**。Token 长度不强制，偏弱只告警（`environment_schema.admin_token_warnings`）。会话签名密钥 = `data/webui/session.key` 本地随机密钥 + Token（`auth._secret`）。
 - `auth.py`：单运维 Token 登录 → 签名会话 Cookie（`yawn_webui_session`）+ CSRF + 登录限速。会话角色分 `admin` / `guest`。
 - `deps.py`：路由共享依赖与响应信封；访客只能看 allowlist 内的群（`guest_access.py`）。**任何新只读接口都要想清楚访客能不能看、返回字段是否需要裁剪、opt-out 成员是否被过滤。**
 
@@ -26,7 +26,8 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `games.py` | 狼人杀/跑团对局列表、详情、事件日志与回放 |
 | `rpg_modules.py` | 跑团模组库只读投影 |
 | `fanqie.py` | 番茄下载任务管理 |
-| `environment.py` / `environment_routes.py` | 根 `.env` 脱敏读取与原子写入、LLM 连通性测试 |
+| `environment.py` / `environment_routes.py` | 根 `.env` 脱敏读取与原子写入、配置体检（`diagnostics`）、锁门保护、LLM 连通性测试、`/system/status` 与 `/system/restart`（仅 `YAWNBOT_SUPERVISED=1` 时可用：SIGTERM 后由容器 restart 策略拉起） |
+| `environment_schema.py` | 纯函数：从目录默认值/说明推断类型、范围（如“1-168”“最大 120”）、格式（秒/字节/列表），写入校验与 Token 强度提示；前端 `environment-fields.ts` 镜像同一套规则 |
 | `environment_catalog.dotenv` | 「环境配置」页的完整配置项目录（**不是** `.env.example`） |
 | `guest_access.py` / `guest_access_routes.py` | 持久化访客访问策略 |
 

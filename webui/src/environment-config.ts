@@ -1,9 +1,5 @@
 import type { EnvironmentEntry, EnvironmentValueSource } from "./types";
 
-export const PROVIDER_PANEL_KEY = "llm-providers";
-export const LLM_PANEL_KEY = "llm-models";
-export const TASK_PANEL_KEY = "task-routing";
-
 export const MODEL_CONFIGS = [
   {
     title: "默认模型",
@@ -70,26 +66,6 @@ export const PLUGIN_META: Record<string, { icon: string; tone: string }> = {
   "狼人杀": { icon: "🐺", tone: "tone-sky" },
 };
 
-export const SECTION_ICONS: Record<string, string> = {
-  "NoneBot 运行时": "🤖",
-  "本地数据与 SQLite/ORM": "💾",
-  "OneBot V11 连接": "📡",
-  "Sentry 可选错误上报": "🛟",
-  "OpenAI-compatible 服务": "🧠",
-  "Core / Agent 管理 WebUI": "🖥️",
-  "子插件 LLM 任务路由": "🔀",
-  "Agent 媒体与文件工具": "🖼️",
-  "Core/Agent AI 开关": "🔆",
-  "Agent 全局默认人设": "🎀",
-  "番茄小说插件（可选）": "📚",
-  "跑团 RPG": "🎲",
-  "狼人杀": "🐺",
-  "游戏插件常用覆盖": "🎮",
-  "维护提示": "🔧",
-  "自定义配置": "✨",
-  "其他配置": "🌸",
-};
-
 export const MODEL_PANEL_KEYS = MODEL_CONFIGS.flatMap((item) => [
   item.modelKey,
   item.providerKey,
@@ -112,8 +88,9 @@ export const LLM_CONFIG_KEYS = new Set<string>([
 
 export const SOURCE_META: Record<EnvironmentValueSource, { label: string; color: string }> = {
   process: { label: "进程环境覆盖", color: "red" },
+  pinned: { label: "部署固定", color: "default" },
   environment: { label: "环境文件覆盖", color: "orange" },
-  env: { label: "根 .env", color: "green" },
+  env: { label: "配置文件", color: "green" },
   default: { label: "默认值", color: "default" },
 };
 
@@ -140,7 +117,8 @@ export function enumLabel(item: EnvironmentEntry, value: string): string {
       ? "auto（自动探测图片能力）"
       : "auto（不发送推理参数）";
   }
-  return `${value}（${ENUM_LABELS[value] ?? value}）`;
+  const label = ENUM_LABELS[value];
+  return label ? `${value}（${label}）` : value;
 }
 
 export function filterEnvironmentEntries(

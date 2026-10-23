@@ -1,112 +1,191 @@
+import { PlusOutlined, SaveOutlined, SearchOutlined } from "@ant-design/icons";
 import {
-  DeleteOutlined,
-  PlusOutlined,
-  RedoOutlined,
-  SaveOutlined,
-} from "@ant-design/icons";
-import {
-  Alert,
   App as AntApp,
   Button,
   Col,
-  Collapse,
   Empty,
   Input,
   Row,
+  Segmented,
   Select,
+  Skeleton,
   Space,
+  Tabs,
   Tag,
   Typography,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
-import type { CollapseProps } from "antd";
-import { useCallback, useMemo, useState } from "react";
+import type { InputRef } from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, ApiError } from "./api";
 import {
+  CategoryNav,
+  DiagnosticsPanel,
   DirtySaveBar,
   EnvironmentDiffPreview,
-  EnvironmentSection,
   ModelProfileCard,
   ProviderEditor,
-  TaskRoutingPanel,
+  RestartBanner,
+  TaskRoutingTable,
 } from "./environment-components";
-import type { EnvironmentDiffRow, LLMProviderDraft, ModelTestState } from "./environment-components";
+import type {
+  CategoryStat,
+  EnvironmentDiffRow,
+  LLMProviderDraft,
+  ModelTestState,
+  TaskRouteRow,
+} from "./environment-components";
 import {
-  defaultPlaceholder,
-  enumLabel,
-  filterEnvironmentEntries,
-  groupEnvironmentEntries,
   LLM_CONFIG_KEYS,
-  LLM_PANEL_KEY,
   MODEL_BADGES,
   MODEL_CONFIGS,
   MODEL_PANEL_KEYS,
   PLUGIN_META,
-  PROVIDER_PANEL_KEY,
-  SECTION_ICONS,
-  SOURCE_META,
   TASK_CONFIGS,
-  TASK_PANEL_KEY,
   TASK_PANEL_KEYS,
 } from "./environment-config";
+import { FieldEditor, FieldRow } from "./environment-editors";
+import {
+  categoryByKey,
+  categoryOf,
+  compactJson,
+  dangerousChanges,
+  diagnosticKeySet,
+  draftErrors,
+  ENV_CATEGORIES,
+  FILTER_OPTIONS,
+  isFilter,
+  matchesFilter,
+  MODELS_CATEGORY,
+  PROVIDER_STORAGE_KEYS,
+  searchEntries,
+  sortDiagnostics,
+} from "./environment-fields";
+import type { EnvironmentFilter } from "./environment-fields";
 export { filterEnvironmentEntries, groupEnvironmentEntries } from "./environment-config";
 import { PageHeader, QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "./shared";
 import type {
+  EnvironmentDiagnostic,
   EnvironmentEntry,
   EnvironmentPatchResult,
   EnvironmentSnapshot,
   LLMConnectionTestResult,
+  SystemStatus,
 } from "./types";
 
 const { Text } = Typography;
 
+const PROFILE_PROVIDER_KEYS = new Set<string>(MODEL_CONFIGS.map((item) => item.providerKey));
+const MODEL_KEY_SET = new Set<string>(MODEL_PANEL_KEYS);
+const TASK_KEY_SET = new Set<string>(TASK_PANEL_KEYS);
+type ModelTab = "providers" | "profiles" | "routing" | "other";
+const MODEL_TABS: ModelTab[] = ["providers", "profiles", "routing", "other"];
+const RESTART_POLL_MS = 2000;
+const RESTART_TIMEOUT_MS = 120_000;
+const HIGHLIGHT_MS = 2400;
+
+function modelTabFor(key: string): ModelTab {
+  if (PROVIDER_STORAGE_KEYS.has(key)) return "providers";
+  if (MODEL_KEY_SET.has(key)) return "profiles";
+  if (TASK_KEY_SET.has(key)) return "routing";
+  return "other";
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
 export function EnvironmentPage(): React.JSX.Element {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const load = useCallback(
     () => api<EnvironmentSnapshot>("/environment").then((response) => response.data),
     [],
   );
   const query = useApiQuery(load);
-  const [search, setSearch] = useState("");
+  const [params, setParams] = useSearchParams();
   const [changes, setChanges] = useState<Record<string, string | null>>({});
   const [providerChanges, setProviderChanges] = useState<LLMProviderDraft[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [testingProfile, setTestingProfile] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, ModelTestState>>({});
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [expanded, setExpanded] = useState<string[]>([
-    PROVIDER_PANEL_KEY,
-    LLM_PANEL_KEY,
-    TASK_PANEL_KEY,
-  ]);
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const [justSaved, setJustSaved] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const searchRef = useRef<InputRef>(null);
 
-  const nonLlmEntries = useMemo(
-    () => (query.data?.entries ?? []).filter((item) => !LLM_CONFIG_KEYS.has(item.key)),
-    [query.data?.entries],
-  );
-  const filtered = useMemo(
-    () => filterEnvironmentEntries(nonLlmEntries, search),
-    [nonLlmEntries, search],
-  );
-  const entryByKey = useMemo(
-    () => new Map((query.data?.entries ?? []).map((item) => [item.key, item])),
-    [query.data?.entries],
-  );
-  const groups = useMemo(() => groupEnvironmentEntries(filtered), [filtered]);
-  const changedKeys = Object.keys(changes);
+  // URL 状态：分类 / 模型子页 / 搜索 / 筛选，刷新和分享链接都能还原
+  const category = categoryByKey(params.get("env.cat")).key;
+  const rawTab = params.get("env.tab");
+  const modelTab: ModelTab = MODEL_TABS.includes(rawTab as ModelTab) ? rawTab as ModelTab : "providers";
+  const search = params.get("env.q") ?? "";
+  const rawFilter = params.get("env.filter");
+  const filter: EnvironmentFilter = isFilter(rawFilter) ? rawFilter : "all";
+  const updateParams = useCallback((patch: Record<string, string | null>) => {
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null || value === "") next.delete(key);
+        else next.set(key, value);
+      }
+      return next;
+    }, { replace: true });
+  }, [setParams]);
+
+  const entries = useMemo(() => query.data?.entries ?? [], [query.data?.entries]);
+  const entryByKey = useMemo(() => new Map(entries.map((item) => [item.key, item])), [entries]);
   const baseProviderDrafts = useMemo<LLMProviderDraft[]>(
-    () => (query.data?.llmProviders ?? []).map((provider) => ({
-      ...provider,
-      draftKey: provider.id,
-    })),
+    () => (query.data?.llmProviders ?? []).map((provider) => ({ ...provider, draftKey: provider.id })),
     [query.data?.llmProviders],
   );
   const providerDrafts = providerChanges ?? baseProviderDrafts;
+  const changedKeys = Object.keys(changes);
   const totalChanges = changedKeys.length + (providerChanges === null ? 0 : 1);
+  const errors = useMemo(() => draftErrors(entryByKey, changes), [entryByKey, changes]);
+  const errorCount = Object.keys(errors).length;
+  const diagnostics = useMemo(() => sortDiagnostics(query.data?.diagnostics ?? []), [query.data?.diagnostics]);
+  const diagnosticKeys = useMemo(() => diagnosticKeySet(diagnostics), [diagnostics]);
   useUnsavedChanges(totalChanges > 0);
 
-  const countDirty = (keys: readonly string[]): number =>
-    changedKeys.filter((key) => keys.includes(key)).length;
+  // 档位提供商字段在任何位置都渲染成提供商下拉
+  const decorate = useCallback((entry: EnvironmentEntry): EnvironmentEntry => {
+    if (!PROFILE_PROVIDER_KEYS.has(entry.key)) return entry;
+    return { ...entry, kind: "enum", options: providerDrafts.map((provider) => provider.id) };
+  }, [providerDrafts]);
+
+  // 普通字段：提供商存储键只能走提供商表单
+  const fieldEntries = useMemo(
+    () => entries.filter((item) => !PROVIDER_STORAGE_KEYS.has(item.key)),
+    [entries],
+  );
+  const filterContext = useMemo(
+    () => ({ changes, errors, diagnosticKeys }),
+    [changes, errors, diagnosticKeys],
+  );
+  const resultsMode = search.trim() !== "" || filter !== "all";
+  const results = useMemo(
+    () => searchEntries(fieldEntries, search).filter((item) => matchesFilter(item, filter, filterContext)),
+    [fieldEntries, search, filter, filterContext],
+  );
+
+  const stats = useMemo(() => {
+    const next: Record<string, CategoryStat> = {};
+    for (const item of fieldEntries) {
+      const key = categoryOf(item.section);
+      const stat = next[key] ?? { total: 0, customized: 0, dirty: 0, issues: 0 };
+      stat.total += 1;
+      if (item.configured) stat.customized += 1;
+      if (Object.hasOwn(changes, item.key)) stat.dirty += 1;
+      if (item.issue || errors[item.key] || diagnosticKeys.has(item.key)) stat.issues += 1;
+      next[key] = stat;
+    }
+    const models = next[MODELS_CATEGORY] ?? { total: 0, customized: 0, dirty: 0, issues: 0 };
+    if (providerChanges !== null) models.dirty += 1;
+    if (diagnostics.some((item) => item.keys.some((key) => PROVIDER_STORAGE_KEYS.has(key)) && item.level !== "info")) models.issues += 1;
+    next[MODELS_CATEGORY] = models;
+    return next;
+  }, [fieldEntries, changes, errors, diagnosticKeys, diagnostics, providerChanges]);
 
   const setValue = (key: string, value: string | null) => {
     setChanges((current) => ({ ...current, [key]: value }));
@@ -131,6 +210,14 @@ export function EnvironmentPage(): React.JSX.Element {
     return MODEL_CONFIGS[0];
   };
 
+  const resolvedProfile = (profile: typeof MODEL_CONFIGS[number]) => {
+    const configuredModel = currentValue(profile.modelKey).trim();
+    if (profile.modelKey !== "AI_MODEL" && !configuredModel) {
+      return { providerId: currentValue("AI_DEFAULT_PROVIDER") || "default", model: currentValue("AI_MODEL").trim(), fallback: true };
+    }
+    return { providerId: currentValue(profile.providerKey) || "default", model: configuredModel, fallback: false };
+  };
+
   const providerUsage = (providerId: string): string[] => {
     const usage: string[] = [];
     for (const profile of MODEL_CONFIGS) {
@@ -139,10 +226,16 @@ export function EnvironmentPage(): React.JSX.Element {
     for (const group of TASK_CONFIGS) {
       for (const [label, profileKey] of group.tasks) {
         const profile = profileForRoute(currentValue(profileKey));
-        if ((currentValue(profile.providerKey) || "default") === providerId) usage.push(`${group.plugin} · ${label}`);
+        if (resolvedProfile(profile).providerId === providerId) usage.push(`${group.plugin} · ${label}`);
       }
     }
     return usage;
+  };
+
+  const areaOf = (key: string): string => {
+    const item = entryByKey.get(key);
+    if (!item) return "其他";
+    return `${categoryByKey(categoryOf(item.section)).label} · ${item.section}`;
   };
 
   const diffRows: EnvironmentDiffRow[] = changedKeys.map((key) => {
@@ -151,9 +244,9 @@ export function EnvironmentPage(): React.JSX.Element {
     const secret = item?.secret ?? false;
     return {
       key,
-      area: item?.section ?? "环境配置",
-      before: secret ? (item?.effectiveConfigured ? "已配置（值隐藏）" : "未配置") : (item?.value ?? item?.defaultValue ?? "未配置"),
-      after: secret ? (next === null ? "待移除" : "待替换（值隐藏）") : (next === null ? "移除根 .env 配置" : next),
+      area: areaOf(key),
+      before: secret ? (item?.effectiveConfigured ? "已配置（值隐藏）" : "未配置") : (item?.value ?? (item?.defaultValue ? `默认 ${item.defaultValue}` : "未配置")),
+      after: secret ? (next === null ? "移除" : "替换为新值（隐藏）") : (next === null ? `恢复默认${item?.defaultValue ? `（${item.defaultValue}）` : ""}` : next),
       secret,
       restartRequired: true,
     };
@@ -161,31 +254,27 @@ export function EnvironmentPage(): React.JSX.Element {
   if (providerChanges !== null) {
     diffRows.push({
       key: "AI_PROVIDERS",
-      area: "LLM 提供商",
+      area: "模型与提供商 · LLM 提供商",
       before: `当前 ${baseProviderDrafts.length} 个提供商（敏感值隐藏）`,
       after: `保存 ${providerDrafts.length} 个提供商（敏感值隐藏）`,
       secret: true,
       restartRequired: true,
     });
   }
+  diffRows.sort((left, right) => left.area.localeCompare(right.area, "zh-CN"));
 
   const changeProviders = (mutate: (drafts: LLMProviderDraft[]) => LLMProviderDraft[]) => {
     setProviderChanges((current) => mutate(current ?? baseProviderDrafts));
   };
-
   const updateProvider = (draftKey: string, patch: Partial<LLMProviderDraft>) => {
-    changeProviders((drafts) => drafts.map((provider) => (
-      provider.draftKey === draftKey ? { ...provider, ...patch } : provider
-    )));
+    changeProviders((drafts) => drafts.map((provider) => (provider.draftKey === draftKey ? { ...provider, ...patch } : provider)));
   };
-
   const addProvider = () => {
     const existing = new Set(providerDrafts.map((provider) => provider.id));
     let index = 1;
     while (existing.has(`provider${index}`)) index += 1;
-    const id = `provider${index}`;
     changeProviders((drafts) => [...drafts, {
-      id,
+      id: `provider${index}`,
       draftKey: `new-${Date.now()}-${index}`,
       baseUrl: "https://example.com/v1",
       builtIn: false,
@@ -197,29 +286,45 @@ export function EnvironmentPage(): React.JSX.Element {
       isNew: true,
     }]);
   };
-
-  const providerInUse = (providerId: string): boolean =>
-    MODEL_CONFIGS.some((profile) => currentValue(profile.providerKey) === providerId);
-
   const deleteProvider = (draftKey: string) => {
     const provider = providerDrafts.find((item) => item.draftKey === draftKey);
     if (!provider) return;
-    if (providerInUse(provider.id)) {
+    if (MODEL_CONFIGS.some((profile) => currentValue(profile.providerKey) === provider.id)) {
       message.error("请先把使用该提供商的模型档位切换到其他提供商");
       return;
     }
     changeProviders((drafts) => drafts.filter((item) => item.draftKey !== draftKey));
   };
 
+  const discardAll = () => {
+    setChanges({});
+    setProviderChanges(null);
+  };
+
+  const openPreview = useCallback(() => {
+    if (totalChanges === 0) return;
+    if (errorCount > 0) {
+      message.error(`还有 ${errorCount} 项填写有误，修正后才能保存`);
+      return;
+    }
+    setPreviewOpen(true);
+  }, [totalChanges, errorCount, message]);
+
   const save = async () => {
     if (!query.data || totalChanges === 0) return;
     setSaving(true);
+    // .env 只能单行：JSON 草稿统一压成紧凑格式再提交
+    const payloadChanges = changedKeys.map((key) => {
+      const value = changes[key];
+      const kind = entryByKey.get(key)?.kind;
+      return { key, value: kind === "json" && value ? compactJson(value) ?? value : value };
+    });
     try {
       const { data } = await api<EnvironmentPatchResult>("/environment", {
         method: "PATCH",
         body: JSON.stringify({
           version: query.data.version,
-          changes: changedKeys.map((key) => ({ key, value: changes[key] })),
+          changes: payloadChanges,
           ...(providerChanges === null ? {} : {
             providers: providerDrafts.map((provider) => ({
               id: provider.id,
@@ -229,23 +334,17 @@ export function EnvironmentPage(): React.JSX.Element {
           }),
         }),
       });
-      setChanges({});
-      setProviderChanges(null);
+      discardAll();
       setPreviewOpen(false);
+      setJustSaved(true);
       query.reload();
-      if (data.restartRequired) message.success("环境配置已保存，重启 YawnBot 后生效");
-      if (data.updatedKeys.includes("WEBUI_ADMIN_TOKEN")) {
-        message.warning("重启后当前管理会话将失效，请使用新 Token 登录");
-      }
-      if (changes.WEBUI_ENABLED === "false") {
-        message.warning("重启后 WebUI 将关闭");
-      }
+      message.success(`已保存 ${data.updatedKeys.length} 项，重启 YawnBot 后生效`);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 409) {
-        setChanges({});
-        setProviderChanges(null);
+        // 文件在别处被改：刷新基线但保留草稿，让人确认后再存
         query.reload();
-        message.error("配置文件已变化，页面已刷新，请重新修改");
+        setPreviewOpen(false);
+        message.warning("配置文件刚被其他操作修改，已刷新到最新版本；你的修改还在，请检查后再保存");
       } else {
         message.error(reason instanceof Error ? reason.message : "保存失败");
       }
@@ -254,176 +353,153 @@ export function EnvironmentPage(): React.JSX.Element {
     }
   };
 
-  /* 搜索命中哪个分组就自动展开哪个,避免命中内容被折叠藏住 */
-  const handleSearchChange = (value: string) => {
-    setSearch(value);
-    if (!value.trim()) return;
-    const matched = new Set(
-      filterEnvironmentEntries(nonLlmEntries, value).map((item) => item.section),
-    );
-    if (matched.size === 0) return;
-    setExpanded((current) => {
-      const next = new Set(current);
-      for (const section of matched) next.add(section);
-      return next.size === current.length ? current : [...next];
+  const restart = () => {
+    modal.confirm({
+      title: "重启 YawnBot？",
+      content: "Bot 与管理台会断开十几秒到一分钟。若刚修改了运维 Token，重启后需要用新 Token 登录。",
+      okText: "立即重启",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const { data } = await api<{ scheduled: boolean; startedAt: number }>("/system/restart", { method: "POST" });
+          setRestarting(true);
+          const startedAt = data.startedAt;
+          const deadline = Date.now() + RESTART_TIMEOUT_MS;
+          const poll = async () => {
+            if (Date.now() > deadline) {
+              setRestarting(false);
+              message.warning("等待超时：YawnBot 可能还在启动，请稍后刷新页面或到服务器上查看日志");
+              return;
+            }
+            try {
+              const status = await api<SystemStatus>("/system/status");
+              if (status.data.startedAt !== startedAt) {
+                setRestarting(false);
+                setJustSaved(false);
+                query.reload();
+                message.success("YawnBot 已重启，新配置已生效");
+                return;
+              }
+            } catch {
+              // 重启期间请求失败是正常的，继续等
+            }
+            window.setTimeout(() => void poll(), RESTART_POLL_MS);
+          };
+          window.setTimeout(() => void poll(), RESTART_POLL_MS);
+        } catch (reason) {
+          message.error(reason instanceof Error ? reason.message : "重启失败");
+        }
+      },
     });
   };
 
-  const editor = (item: EnvironmentEntry): React.ReactNode => {
-    const dirty = Object.hasOwn(changes, item.key);
-    const draft = dirty ? changes[item.key] : item.value;
-    if (draft === null && dirty) return <Tag color="red">保存后移除根 .env 配置</Tag>;
-    const common = {
-      value: draft ?? "",
-      onChange: (value: string) => setValue(item.key, value),
+  // 快捷键：Ctrl/⌘+S 保存预览，/ 聚焦搜索
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        openPreview();
+      } else if (event.key === "/" && !isTypingTarget(event.target)) {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
     };
-    if (item.kind === "enum") {
-      return (
-        <Select
-          value={draft ?? undefined}
-          placeholder={defaultPlaceholder(item)}
-          onChange={(value) => setValue(item.key, value)}
-          style={{ width: "100%" }}
-          options={item.options.map((value) => ({
-            value,
-            label: enumLabel(item, value),
-          }))}
-        />
-      );
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openPreview]);
+
+  // 定位后滚动并短暂高亮目标字段
+  useEffect(() => {
+    if (!highlight) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(`env-field-${highlight}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    const timer = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [highlight, category, modelTab]);
+
+  const locate = (item: EnvironmentDiagnostic) => {
+    if (item.keys.length > 1) {
+      const overridden = item.keys.every((key) => entryByKey.get(key)?.overridden);
+      updateParams({ "env.q": null, "env.filter": overridden ? "overridden" : "customized" });
+      return;
     }
-    if (item.kind === "boolean") {
-      return (
-        <Select
-          value={draft ?? undefined}
-          placeholder={defaultPlaceholder(item)}
-          onChange={(value) => setValue(item.key, value)}
-          style={{ width: "100%" }}
-          options={[
-            { value: "true", label: "true（开启）" },
-            { value: "false", label: "false（关闭）" },
-          ]}
-        />
-      );
-    }
-    if (item.secret) {
-      return (
-        <Input.Password
-          value={dirty ? draft ?? "" : ""}
-          placeholder={item.effectiveConfigured ? "已配置，输入新值以替换" : "未配置"}
-          onChange={(event) => setValue(item.key, event.target.value)}
-          visibilityToggle={false}
-        />
-      );
-    }
+    const key = item.keys[0];
+    const entry = entryByKey.get(key);
+    const target = entry ? categoryOf(entry.section) : MODELS_CATEGORY;
+    updateParams({
+      "env.q": null,
+      "env.filter": null,
+      "env.cat": target,
+      "env.tab": target === MODELS_CATEGORY ? modelTabFor(key) : null,
+    });
+    setHighlight(key);
+  };
+
+  const fieldRow = (entry: EnvironmentEntry) => {
+    const decorated = decorate(entry);
     return (
-      <Input
-        value={common.value}
-        placeholder={defaultPlaceholder(item)}
-        onChange={(event) => common.onChange(event.target.value)}
+      <FieldRow
+        key={entry.key}
+        entry={decorated}
+        draft={changes[entry.key]}
+        dirty={Object.hasOwn(changes, entry.key)}
+        error={errors[entry.key]}
+        highlighted={highlight === entry.key}
+        onChange={(value) => setValue(entry.key, value)}
+        onUndo={() => undo(entry.key)}
       />
     );
   };
 
-  const columns: ColumnsType<EnvironmentEntry> = [
-    {
-      title: "配置项",
-      dataIndex: "key",
-      width: 260,
-      render: (key: string, item) => (
-        <Space orientation="vertical" size={2}>
-          <Text code copyable>{key}</Text>
-          {item.description && <Text type="secondary">{item.description}</Text>}
-        </Space>
-      ),
-    },
-    {
-      title: "来源",
-      width: 150,
-      render: (_, item) => (
-        <Space orientation="vertical" size={2}>
-          <Tag color={SOURCE_META[item.source].color}>{SOURCE_META[item.source].label}</Tag>
-          {item.secret && item.effectiveConfigured && <Text type="secondary">已配置（值已隐藏）</Text>}
-          {item.overridden && <Text type="danger">根 .env 修改当前不生效</Text>}
-        </Space>
-      ),
-    },
-    { title: "根 .env 值", render: (_, item) => editor(item) },
-    {
-      title: "操作",
-      width: 110,
-      render: (_, item) => (
-        <Space>
-          <Button
-            aria-label={`移除 ${item.key}`}
-            title="移除根 .env 配置"
-            icon={<DeleteOutlined />}
-            disabled={!item.configured && !Object.hasOwn(changes, item.key)}
-            onClick={() => setValue(item.key, null)}
-          />
-          <Button
-            aria-label={`撤销 ${item.key}`}
-            title="撤销未保存修改"
-            icon={<RedoOutlined />}
-            disabled={!Object.hasOwn(changes, item.key)}
-            onClick={() => undo(item.key)}
-          />
-        </Space>
-      ),
-    },
-  ];
-
-  const llmEditor = (key: string, label: string): React.ReactNode => {
-    const item = entryByKey.get(key);
-    if (!item) return null;
-    return (
-      <Space orientation="vertical" size={4} style={{ width: "100%" }}>
-        <Space size={4} wrap>
-          <Text strong>{label}</Text>
-          <Text code>{key}</Text>
-          {item.overridden && <Tag color="red">当前被外部环境覆盖</Tag>}
-        </Space>
-        {editor(item)}
-      </Space>
-    );
-  };
-
-  const providerEditor = (key: string): React.ReactNode => {
-    const item = entryByKey.get(key);
-    if (!item) return null;
-    return (
-      <Space orientation="vertical" size={4} style={{ width: "100%" }}>
-        <Space size={4} wrap>
-          <Text strong>提供商</Text>
-          <Text code>{key}</Text>
-          {item.overridden && <Tag color="red">当前被外部环境覆盖</Tag>}
-        </Space>
-        <Select
-          value={currentValue(key) || "default"}
-          style={{ width: "100%" }}
-          onChange={(value) => setValue(key, value)}
-          options={providerDrafts.map((provider) => ({
-            value: provider.id,
-            label: provider.id === "default" ? "default（内置）" : provider.id,
-          }))}
-        />
-      </Space>
-    );
-  };
-
-  const resolvedProfile = (profile: typeof MODEL_CONFIGS[number]) => {
-    const configuredModel = currentValue(profile.modelKey).trim();
-    if (profile.modelKey !== "AI_MODEL" && !configuredModel) {
-      return {
-        providerId: currentValue("AI_DEFAULT_PROVIDER") || "default",
-        model: currentValue("AI_MODEL").trim(),
-        fallback: true,
-      };
+  const sectionBlocks = (list: EnvironmentEntry[]) => {
+    const sections = new Map<string, EnvironmentEntry[]>();
+    for (const item of list) {
+      const group = sections.get(item.section) ?? [];
+      group.push(item);
+      sections.set(item.section, group);
     }
-    return {
-      providerId: currentValue(profile.providerKey) || "default",
-      model: configuredModel,
-      fallback: false,
-    };
+    return [...sections].map(([section, items]) => {
+      // 已弃用的项沉到分组末尾
+      const sorted = [...items].sort((left, right) => Number(Boolean(left.meta?.deprecated)) - Number(Boolean(right.meta?.deprecated)));
+      return (
+        <section key={section} className="envx-section">
+          <h3 className="envx-section-title">
+            {section}
+            <span className="envx-section-count">{items.length} 项</span>
+          </h3>
+          <div className="envx-fields">{sorted.map(fieldRow)}</div>
+        </section>
+      );
+    });
+  };
+
+  // ── 模型与提供商 ──
+
+  const compactEditor = (key: string, label: string): React.ReactNode => {
+    const item = entryByKey.get(key);
+    if (!item) return null;
+    const decorated = decorate(item);
+    const dirty = Object.hasOwn(changes, key);
+    return (
+      <div className={`envx-mini${dirty ? " is-dirty" : ""}${highlight === key ? " is-highlighted" : ""}`} id={`env-field-${key}`}>
+        <div className="envx-mini-label">
+          <span>{label}</span>
+          {item.overridden && <Tag color="red" className="envx-tag">外部覆盖</Tag>}
+        </div>
+        <FieldEditor
+          entry={decorated}
+          value={dirty ? changes[key] ?? "" : item.value ?? ""}
+          dirty={dirty}
+          onChange={(value) => setValue(key, value)}
+        />
+        {errors[key] && <div className="envx-error">{errors[key]}</div>}
+      </div>
+    );
   };
 
   const testProfile = async (profile: typeof MODEL_CONFIGS[number]) => {
@@ -450,23 +526,14 @@ export function EnvironmentPage(): React.JSX.Element {
       });
       setTestResults((current) => ({
         ...current,
-        [profile.modelKey]: {
-          ok: true,
-          latencyMs: data.latencyMs,
-          message: `${resolved.providerId} / ${resolved.model}`,
-          testedAt: new Date().toLocaleString(),
-        },
+        [profile.modelKey]: { ok: true, latencyMs: data.latencyMs, message: `${resolved.providerId} / ${resolved.model}`, testedAt: new Date().toLocaleString() },
       }));
       message.success(`连接成功，耗时 ${data.latencyMs.toFixed(1)} ms`);
     } catch (reason) {
       const errorMessage = reason instanceof Error ? reason.message : "连接测试失败";
       setTestResults((current) => ({
         ...current,
-        [profile.modelKey]: {
-          ok: false,
-          message: errorMessage,
-          testedAt: new Date().toLocaleString(),
-        },
+        [profile.modelKey]: { ok: false, message: errorMessage, testedAt: new Date().toLocaleString() },
       }));
       message.error(errorMessage);
     } finally {
@@ -474,207 +541,225 @@ export function EnvironmentPage(): React.JSX.Element {
     }
   };
 
-  const providerCards = (
+  const providersView = (
     <Row gutter={[16, 16]}>
-      {providerDrafts.map((provider) => <Col xs={24} lg={12} xl={8} key={provider.draftKey}>
-        <ProviderEditor
-          provider={provider}
-          usage={providerUsage(provider.id)}
-          onUpdate={(patch) => updateProvider(provider.draftKey, patch)}
-          onDelete={() => deleteProvider(provider.draftKey)}
-        />
-      </Col>)}
+      {providerDrafts.map((provider) => (
+        <Col xs={24} lg={12} xl={8} key={provider.draftKey}>
+          <div id={provider.builtIn ? "env-field-AI_API_KEY" : undefined} className={provider.builtIn && highlight === "AI_API_KEY" ? "envx-mini is-highlighted" : undefined}>
+            <ProviderEditor
+              provider={provider}
+              usage={providerUsage(provider.id)}
+              onUpdate={(patch) => updateProvider(provider.draftKey, patch)}
+              onDelete={() => deleteProvider(provider.draftKey)}
+            />
+          </div>
+        </Col>
+      ))}
       <Col xs={24} lg={12} xl={8}>
-        <Button className="env-add-provider" block icon={<PlusOutlined />} onClick={addProvider}>
-          添加提供商
-        </Button>
+        <Button className="env-add-provider" block icon={<PlusOutlined />} onClick={addProvider}>添加提供商</Button>
       </Col>
     </Row>
   );
 
-  /* 折叠面板头部:标题 + 提示 + 条目数 + 未保存角标(折叠时也可见) */
-  const panelLabel = (icon: string, title: string): React.ReactNode => (
-    <Space size={10}>
-      <span aria-hidden>{icon}</span>
-      <span>{title}</span>
-    </Space>
+  const profilesView = (
+    <Row gutter={[16, 16]}>
+      {MODEL_CONFIGS.map((model, index) => {
+        const badge = MODEL_BADGES[index];
+        const resolved = resolvedProfile(model);
+        return (
+          <Col xs={24} xl={8} key={model.modelKey}>
+            <ModelProfileCard
+              title={model.title}
+              description={model.description}
+              icon={badge.icon}
+              tone={badge.tone}
+              editors={[
+                compactEditor(model.providerKey, "提供商"),
+                compactEditor(model.modelKey, "模型 ID"),
+                compactEditor(model.thinkingKey, "推理"),
+                ...(model.multimodalKey ? [compactEditor(model.multimodalKey, "图片能力")] : []),
+              ]}
+              resolvedRoute={`${resolved.providerId} / ${resolved.model || "未配置"}`}
+              fallback={resolved.fallback}
+              testing={testingProfile === model.modelKey}
+              testResult={testResults[model.modelKey]}
+              onTest={() => void testProfile(model)}
+            />
+          </Col>
+        );
+      })}
+    </Row>
   );
-  const panelExtra = (
-    dirty: number,
-    hint?: string,
-    count?: number,
-  ): React.ReactNode => (
-    <Space size={12}>
-      {hint && <Text type="secondary">{hint}</Text>}
-      {count !== undefined && <span className="env-count-chip">{count} 项</span>}
-      {dirty > 0 && <span className="env-dirty-badge">{dirty} 项未保存</span>}
-    </Space>
+
+  const taskRows: TaskRouteRow[] = TASK_CONFIGS.flatMap((group) =>
+    group.tasks.map(([label, profileKey, thinkingKey]) => {
+      const profile = profileForRoute(currentValue(profileKey));
+      const route = resolvedProfile(profile);
+      return {
+        key: profileKey,
+        plugin: group.plugin,
+        pluginIcon: PLUGIN_META[group.plugin]?.icon ?? "✨",
+        label,
+        profileEditor: compactEditor(profileKey, ""),
+        thinkingEditor: compactEditor(thinkingKey, ""),
+        route: `${profile.title} → ${route.providerId} / ${route.model || "未配置"}`,
+        dirty: Object.hasOwn(changes, profileKey) || Object.hasOwn(changes, thinkingKey),
+      };
+    }),
   );
 
-  const llmItems: CollapseProps["items"] = [
-    {
-      key: PROVIDER_PANEL_KEY,
-      label: panelLabel("🔌", "LLM 提供商"),
-      extra: panelExtra(providerChanges === null ? 0 : 1, "Base URL 与密钥集中管理"),
-      children: providerCards,
-    },
-    {
-      key: LLM_PANEL_KEY,
-      label: panelLabel("🧠", "LLM 模型档位"),
-      extra: panelExtra(countDirty(MODEL_PANEL_KEYS), "保存后重启生效"),
-      children: (
-        <Row gutter={[16, 16]}>
-          {MODEL_CONFIGS.map((model, index) => {
-            const badge = MODEL_BADGES[index];
-            const resolved = resolvedProfile(model);
-            return (
-              <Col xs={24} xl={8} key={model.modelKey}>
-                <ModelProfileCard
-                  title={model.title}
-                  description={model.description}
-                  icon={badge.icon}
-                  tone={badge.tone}
-                  editors={[
-                    providerEditor(model.providerKey),
-                    llmEditor(model.modelKey, "模型 ID"),
-                    llmEditor(model.thinkingKey, "全局推理"),
-                    ...(model.multimodalKey ? [llmEditor(model.multimodalKey, "图片能力")] : []),
-                  ]}
-                  resolvedRoute={`${resolved.providerId} / ${resolved.model || "未配置"}`}
-                  fallback={resolved.fallback}
-                  testing={testingProfile === model.modelKey}
-                  testResult={testResults[model.modelKey]}
-                  onTest={() => void testProfile(model)}
-                />
-              </Col>
-            );
-          })}
-        </Row>
-      ),
-    },
-    {
-      key: TASK_PANEL_KEY,
-      label: panelLabel("🔀", "子插件任务路由"),
-      extra: panelExtra(
-        countDirty(TASK_PANEL_KEYS),
-        "任务推理选择 inherit 时继承模型档位",
-      ),
-      children: (
-        <Row gutter={[16, 16]}>
-          {TASK_CONFIGS.map((group) => {
-            const badge = PLUGIN_META[group.plugin] ?? { icon: "✨", tone: "tone-sakura" };
-            return (
-              <Col xs={24} xl={8} key={group.plugin}>
-                <TaskRoutingPanel
-                  plugin={group.plugin}
-                  icon={badge.icon}
-                  tone={badge.tone}
-                  tasks={group.tasks.map(([label, profileKey, thinkingKey]) => {
-                    const profile = profileForRoute(currentValue(profileKey));
-                    const route = resolvedProfile(profile);
-                    return {
-                      key: profileKey,
-                      label,
-                      profileEditor: llmEditor(profileKey, "模型档位"),
-                      thinkingEditor: llmEditor(thinkingKey, "推理覆盖"),
-                      routeHint: `${profile.title} → ${route.providerId}`,
-                    };
-                  })}
-                />
-              </Col>
-            );
-          })}
-        </Row>
-      ),
-    },
-  ];
+  const otherModelEntries = fieldEntries.filter(
+    (item) => categoryOf(item.section) === MODELS_CATEGORY && !LLM_CONFIG_KEYS.has(item.key),
+  );
+  const countDirty = (keys: readonly string[]) => keys.filter((key) => Object.hasOwn(changes, key)).length;
+  const tabLabel = (label: string, dirty: number) => (
+    <span>{label}{dirty > 0 && <span className="envx-pill is-dirty">{dirty}</span>}</span>
+  );
 
-  const groupItems: CollapseProps["items"] = groups.map((group) => ({
-    key: group.section,
-    label: panelLabel(SECTION_ICONS[group.section] ?? "🌸", group.section),
-    extra: panelExtra(countDirty(group.entries.map((item) => item.key)), undefined, group.entries.length),
-    children: <EnvironmentSection entries={group.entries} columns={columns} loading={query.loading} />,
-  }));
+  const modelsView = (
+    <Tabs
+      activeKey={modelTab}
+      onChange={(key) => updateParams({ "env.tab": key === "providers" ? null : key })}
+      items={[
+        { key: "providers", label: tabLabel("提供商", providerChanges === null ? 0 : 1), children: providersView },
+        { key: "profiles", label: tabLabel("模型档位", countDirty(MODEL_PANEL_KEYS)), children: profilesView },
+        {
+          key: "routing",
+          label: tabLabel("任务路由", countDirty(TASK_PANEL_KEYS)),
+          children: (
+            <Space orientation="vertical" size={10} style={{ width: "100%" }}>
+              <Text type="secondary" className="envx-small">每个任务选用哪个模型档位；推理选「inherit」时沿用档位自己的推理设置。</Text>
+              <TaskRoutingTable rows={taskRows} />
+            </Space>
+          ),
+        },
+        {
+          key: "other",
+          label: tabLabel("其他参数", countDirty(otherModelEntries.map((item) => item.key))),
+          children: otherModelEntries.length ? <div className="envx-fields">{otherModelEntries.map(fieldRow)}</div> : <Empty description="没有其他参数" />,
+        },
+      ]}
+    />
+  );
 
-  const allPanelKeys = [
-    PROVIDER_PANEL_KEY,
-    LLM_PANEL_KEY,
-    TASK_PANEL_KEY,
-    ...groups.map((group) => group.section),
-  ];
+  // ── 主体 ──
+
+  const activeCategory = categoryByKey(category);
+  const categoryEntries = fieldEntries.filter((item) => categoryOf(item.section) === category);
+
+  let body: React.ReactNode;
+  if (query.loading && !query.data) {
+    body = <Skeleton active paragraph={{ rows: 8 }} />;
+  } else if (resultsMode) {
+    const grouped = ENV_CATEGORIES.map((item) => ({
+      category: item,
+      list: results.filter((entry) => categoryOf(entry.section) === item.key),
+    })).filter((group) => group.list.length > 0);
+    body = (
+      <div className="envx-results">
+        <div className="envx-results-head">
+          <Text strong>找到 {results.length} 项</Text>
+          <Button size="small" onClick={() => updateParams({ "env.q": null, "env.filter": null })}>清除搜索和筛选</Button>
+        </div>
+        {grouped.length === 0 && <Empty description="没有匹配的配置项" />}
+        {grouped.map((group) => (
+          <div key={group.category.key} className="envx-result-group">
+            <div className="envx-result-category">{group.category.icon} {group.category.label}</div>
+            {sectionBlocks(group.list)}
+          </div>
+        ))}
+      </div>
+    );
+  } else {
+    body = (
+      <>
+        <div className="envx-category-head">
+          <h2>{activeCategory.icon} {activeCategory.label}</h2>
+          <Text type="secondary">{activeCategory.hint}</Text>
+        </div>
+        {category === MODELS_CATEGORY
+          ? modelsView
+          : categoryEntries.length
+            ? sectionBlocks(categoryEntries)
+            : <Empty description="这个分类下没有配置项" />}
+      </>
+    );
+  }
+
+  const dangers = dangerousChanges(changes);
+  const showRestart = Boolean(query.data?.pendingRestart) || justSaved || restarting;
 
   return (
-    <Space
-      orientation="vertical"
-      size="large"
-      style={{ width: "100%", paddingBottom: totalChanges > 0 ? 96 : undefined }}
-    >
+    <div className="envx" style={{ paddingBottom: totalChanges > 0 ? 96 : undefined }}>
       <PageHeader
         title="环境配置"
-        subtitle="集中修改根 .env；全部变更仅在重启 YawnBot 后生效"
+        subtitle={`编辑 ${query.data?.file ?? ".env"}（环境：${query.data?.environment ?? "—"}）；敏感值只能替换，不会回显。`}
         status={<SaveStatus dirty={totalChanges > 0} saving={saving} />}
+        onRefresh={totalChanges === 0 ? query.reload : undefined}
+        refreshing={query.loading}
         extra={(
-          <Button
-            type="primary"
-            icon={<SaveOutlined />}
-            disabled={totalChanges === 0}
-            loading={saving}
-            onClick={() => setPreviewOpen(true)}
-          >
-            预览保存 {totalChanges > 0 ? `${totalChanges} 项` : ""}
+          <Button type="primary" icon={<SaveOutlined />} disabled={totalChanges === 0 || errorCount > 0} loading={saving} onClick={openPreview}>
+            保存{totalChanges > 0 ? ` ${totalChanges} 项` : ""}
           </Button>
         )}
       />
-      <Alert
-        type="warning"
-        showIcon
-        title="敏感配置只允许替换，不会从服务端回显"
-        description={`当前环境：${query.data?.environment ?? "—"}。进程环境变量或 ${query.data?.environmentFile ?? ".env.<ENVIRONMENT>"} 的值优先于根 .env。`}
-      />
-      <Collapse
-        ghost
-        className="env-collapse"
-        activeKey={expanded}
-        onChange={setExpanded}
-        items={llmItems}
-      />
-      <Space size={12} wrap>
-        <Input.Search
-          className="env-search"
-          allowClear
-          placeholder="搜索配置名、分组或说明"
-          value={search}
-          onChange={(event) => handleSearchChange(event.target.value)}
-        />
-        <Button size="small" onClick={() => setExpanded(allPanelKeys)}>全部展开</Button>
-        <Button size="small" onClick={() => setExpanded([])}>全部收起</Button>
-      </Space>
       {query.error && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
-      {!query.loading && groups.length === 0 && <Empty description="没有匹配的配置项" />}
-      {groups.length > 0 && (
-        <Collapse
-          ghost
-          className="env-collapse"
-          activeKey={expanded}
-          onChange={setExpanded}
-          items={groupItems}
-        />
+      {showRestart && (
+        <RestartBanner supported={Boolean(query.data?.restartSupported)} restarting={restarting} onRestart={restart} />
       )}
+      {query.data && <DiagnosticsPanel items={diagnostics} onLocate={locate} />}
+      <div className="envx-toolbar">
+        <Input
+          ref={searchRef}
+          className="envx-search"
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="搜索配置名、中文名或说明（按 / 聚焦）"
+          value={search}
+          onChange={(event) => updateParams({ "env.q": event.target.value })}
+          aria-label="搜索配置"
+        />
+        <Segmented
+          className="envx-filter"
+          value={filter}
+          onChange={(value) => updateParams({ "env.filter": value === "all" ? null : String(value) })}
+          options={FILTER_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
+        />
+        <Select
+          className="envx-filter-select"
+          value={filter}
+          onChange={(value: EnvironmentFilter) => updateParams({ "env.filter": value === "all" ? null : value })}
+          options={FILTER_OPTIONS}
+          aria-label="筛选"
+        />
+      </div>
+      <div className="envx-layout">
+        <CategoryNav
+          categories={ENV_CATEGORIES.filter((item) => item.key !== "other" || (stats.other?.total ?? 0) > 0)}
+          active={resultsMode ? null : category}
+          stats={stats}
+          onSelect={(key) => updateParams({ "env.cat": key === MODELS_CATEGORY ? null : key, "env.q": null, "env.filter": null, "env.tab": null })}
+        />
+        <main className="envx-main">{body}</main>
+      </div>
       {totalChanges > 0 && (
         <DirtySaveBar
           totalChanges={totalChanges}
+          errorCount={errorCount}
           saving={saving}
-          onDiscard={() => { setChanges({}); setProviderChanges(null); }}
-          onPreview={() => setPreviewOpen(true)}
+          onDiscard={discardAll}
+          onPreview={openPreview}
         />
       )}
       <EnvironmentDiffPreview
         open={previewOpen}
         rows={diffRows}
+        dangers={dangers}
         saving={saving}
         onCancel={() => setPreviewOpen(false)}
         onConfirm={() => void save()}
       />
-    </Space>
+    </div>
   );
 }
+

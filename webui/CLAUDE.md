@@ -38,7 +38,7 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | `/games` | `games.tsx` | `games.py` |
 | `/modules` | `modules.tsx` | `rpg_modules.py` |
 | `/fanqie` | `fanqie.tsx` | `fanqie.py` |
-| `/environment` | `environment.tsx`、`environment-components.tsx`、`environment-config.ts` | `environment*.py` |
+| `/environment` | `environment.tsx`（页面：分类导航 + 单分类字段列表 / 跨分类搜索结果，状态在 URL `env.*`）、`environment-editors.tsx`（按类型的字段编辑器、Token 编辑器）、`environment-components.tsx`（提供商/档位卡片、任务路由表、体检、待重启横幅、保存栏与预览）、`environment-fields.ts`（纯逻辑：分类、筛选、校验——镜像后端 `environment_schema.py`）、`environment-config.ts`（模型档位/任务路由表）、`environment.css` | `environment*.py` |
 | `/guest-access` | `guest-access.tsx` | `guest_access_routes.py` |
 | `/audits` | `audits.tsx` | `audits.py` |
 | `/guest`、`/guest/:groupId`（访客） | `guest-home.tsx` | 访客只读接口（`deps.py` 过滤） |

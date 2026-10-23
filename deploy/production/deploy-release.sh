@@ -197,9 +197,11 @@ enabled = values["WEBUI_ENABLED"].lower() in {"1", "true", "yes", "on"}
 if enabled and "WEBUI_ADMIN_TOKEN" not in values:
     lines.append(f"WEBUI_ADMIN_TOKEN={secrets.token_hex(32)}")
     added.append("WEBUI_ADMIN_TOKEN")
-elif enabled and len(values["WEBUI_ADMIN_TOKEN"]) < 32:
-    print("[deploy:webui] WEBUI_ADMIN_TOKEN is shorter than 32 characters; fix .env", file=sys.stderr)
-    raise SystemExit(8)
+elif enabled and not values["WEBUI_ADMIN_TOKEN"].strip():
+    # 空 Token 时 WebUI 只是不挂载，Bot 照常运行，所以不中断发布
+    print("[deploy:webui] WEBUI_ADMIN_TOKEN is empty; WebUI will stay disabled until it is set", file=sys.stderr)
+elif enabled and len(values["WEBUI_ADMIN_TOKEN"]) < 16:
+    print("[deploy:webui] WEBUI_ADMIN_TOKEN is short; consider a longer random token for public access", file=sys.stderr)
 
 if not added:
     raise SystemExit(0)

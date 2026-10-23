@@ -184,12 +184,20 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
             DOCKERFILE.read_text(encoding="utf-8"),
         )
 
-    def test_deploy_release_rejects_short_webui_token(self) -> None:
+    def test_deploy_release_only_warns_about_short_webui_token(self) -> None:
+        # 短 Token 不再中断发布：Bot 照常部署，WebUI 也能用这个 Token 登录
         result, _ = self._run_fake_deploy(
             env_text="WEBUI_ENABLED=true\nWEBUI_ADMIN_TOKEN=short\n"
         )
-        self.assertEqual(result.returncode, 8)
-        self.assertNotIn("[deploy:pull]", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WEBUI_ADMIN_TOKEN is short", result.stderr)
+
+    def test_deploy_release_keeps_going_with_empty_webui_token(self) -> None:
+        result, _ = self._run_fake_deploy(
+            env_text="WEBUI_ENABLED=true\nWEBUI_ADMIN_TOKEN=\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WEBUI_ADMIN_TOKEN is empty", result.stderr)
 
     def test_public_proxy_is_profiled_and_app_stays_on_loopback(self) -> None:
         compose = PRODUCTION_COMPOSE.read_text(encoding="utf-8")

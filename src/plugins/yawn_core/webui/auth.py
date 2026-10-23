@@ -3,18 +3,29 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal, cast
 
 from fastapi import HTTPException, Request, WebSocket, status
 
-from .config import COOKIE_NAME, config
+from .config import COOKIE_NAME, DIST_DIR, config
+
+# 会话签名密钥 = 服务器本地随机密钥 + 运维 Token：
+# Token 偏短时，拿到一份 Cookie 也无法离线穷举出 Token；改 Token 仍会让旧会话失效。
+SESSION_KEY_PATH = Path(
+    os.environ.get("YAWNBOT_WEBUI_SESSION_KEY_FILE")
+    or DIST_DIR.parents[1] / "data" / "webui" / "session.key"
+)
 
 _LOGIN_WINDOW_SECONDS = 300
 _LOGIN_MAX_FAILURES = 5
@@ -37,9 +48,36 @@ class Session:
         return hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
 
 
+_SERVER_KEY_BYTES = 32
+
+
+@lru_cache(maxsize=1)
+def _server_key() -> bytes:
+    """读取或生成持久化的本地签名密钥；写不进磁盘时退化为进程内随机值。"""
+
+    with contextlib.suppress(OSError):
+        existing = SESSION_KEY_PATH.read_bytes()
+        if len(existing) >= _SERVER_KEY_BYTES:
+            return existing[:64]
+    key = secrets.token_bytes(_SERVER_KEY_BYTES)
+    with contextlib.suppress(OSError):
+        SESSION_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(SESSION_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(key)
+    with contextlib.suppress(OSError):
+        # 并发启动时另一个进程可能先写好了，以磁盘上的为准
+        stored = SESSION_KEY_PATH.read_bytes()
+        if len(stored) >= _SERVER_KEY_BYTES:
+            return stored[:64]
+    return key
+
+
 def _secret() -> bytes:
     token = config.webui_admin_token.get_secret_value().encode()
-    return hashlib.sha256(b"YawnBot WebUI session\0" + token).digest()
+    return hashlib.sha256(
+        b"YawnBot WebUI session v2\0" + _server_key() + b"\0" + token
+    ).digest()
 
 
 def _b64encode(value: bytes) -> str:
@@ -141,7 +179,10 @@ def check_admin_token(key: str, supplied: str, *, now: float | None = None) -> b
     if not login_allowed(key, now=current):
         return False
     expected = config.webui_admin_token.get_secret_value()
-    valid = hmac.compare_digest(supplied.encode(), expected.encode())
+    # 空 Token 永远不算登录成功，即便启用检查被绕过
+    valid = bool(expected) and hmac.compare_digest(
+        supplied.encode(), expected.encode()
+    )
     if valid:
         clear_login_failures(key)
     else:

@@ -1,4 +1,4 @@
-# ruff: noqa: C901,TRY003
+# ruff: noqa: C901,PLR0911,PLR0912,TRY003
 """根 ``.env`` 的脱敏读取与原子更新。
 
 生产容器通过 ``YAWNBOT_ENV_FILE`` 指向挂载进来的可写配置文件；入口脚本启动时把它
@@ -14,12 +14,22 @@ import json
 import os
 import re
 import tempfile
+import time
 from io import StringIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
+
+from .environment_schema import (
+    EXTRA_ENUM_OPTIONS,
+    LOCKOUT_KEYS,
+    admin_token_warnings,
+    field_meta,
+    sample_kind,
+    validate_value,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 ENV_PATH = Path(os.environ.get("YAWNBOT_ENV_FILE") or PROJECT_ROOT / ".env")
@@ -92,7 +102,11 @@ _ENUM_OPTIONS: dict[str, list[str]] = {
         key: ["auto", "supported", "unsupported"]
         for key in _MULTIMODAL_KEYS
     },
+    **EXTRA_ENUM_OPTIONS,
 }
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+# 近似本进程启动时间：配置文件在此之后被改过，就说明有修改还没生效
+PROCESS_STARTED_AT = time.time()
 _MAX_VALUE_LENGTH = 16384
 _PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _MAX_CUSTOM_PROVIDERS = 16
@@ -276,7 +290,11 @@ def _parse_sample(raw: str) -> str | None:
 def _value_kind(key: str, sample: str | None, current: str | None) -> str:
     if key in _ENUM_OPTIONS:
         return "enum"
-    value = (current if current is not None else sample or "").strip()
+    # 以目录默认值为准：当前值写错（例如整数项填了文字）时类型不能跟着变
+    from_sample = sample_kind(sample)
+    if from_sample is not None:
+        return from_sample
+    value = (current or "").strip()
     if value.lower() in {"true", "false"}:
         return "boolean"
     if _INTEGER_RE.fullmatch(value):
@@ -343,16 +361,17 @@ def _parse_catalog(
             comments.clear()
 
 
-def load_environment() -> dict[str, Any]:
-    """返回根 .env 的全部已知键，敏感值只报告是否已配置。"""
-
-    root_values = _parsed_values(ENV_PATH)
+def _environment_values(
+    root_values: dict[str, str | None],
+) -> tuple[str, Path, dict[str, str | None]]:
     environment_name = (
         os.environ.get("ENVIRONMENT") or root_values.get("ENVIRONMENT") or "prod"
     )
     environment_path = PROJECT_ROOT / f".env.{environment_name}"
-    environment_values = _parsed_values(environment_path)
+    return str(environment_name), environment_path, _parsed_values(environment_path)
 
+
+def _full_catalog(root_values: dict[str, str | None]) -> list[dict[str, Any]]:
     catalog = _catalog()
     catalog_keys = {item["key"] for item in catalog}
     for key in root_values:
@@ -365,14 +384,168 @@ def load_environment() -> dict[str, Any]:
                     "sample": None,
                 }
             )
+    return catalog
 
+
+def _field_spec(item: dict[str, Any], current: str | None) -> dict[str, Any]:
+    key = str(item["key"])
+    sample = item.get("sample")
+    kind = _value_kind(key, sample, current)
+    return {
+        "kind": kind,
+        "sample": sample,
+        "options": _ENUM_OPTIONS.get(key, []),
+        "meta": field_meta(key, str(item["description"]), kind),
+    }
+
+
+def _value_issue(key: str, value: str | None, spec: dict[str, Any]) -> str | None:
+    if value is None:
+        return None
+    return validate_value(
+        key,
+        value,
+        kind=spec["kind"],
+        sample=spec["sample"],
+        meta=spec["meta"],
+        options=spec["options"],
+    )
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in _TRUE_VALUES
+
+
+def _diagnostics(
+    entries: list[dict[str, Any]],
+    root_values: dict[str, str | None],
+    environment_values: dict[str, str | None],
+) -> list[dict[str, Any]]:
+    """配置体检：只描述问题，不回显任何敏感值。"""
+
+    result: list[dict[str, Any]] = []
+
+    def add(level: str, title: str, detail: str, keys: list[str]) -> None:
+        result.append({"level": level, "title": title, "detail": detail, "keys": keys})
+
+    for entry in entries:
+        if entry["issue"]:
+            add(
+                "error",
+                f"{entry['key']} 的当前值无效",
+                f"{entry['issue']}。这类值可能让对应插件启动失败，请修正或恢复默认。",
+                [entry["key"]],
+            )
+
+    def effective(key: str) -> str | None:
+        return _effective_value(key, root_values, environment_values)[0]
+
+    if _truthy(effective("WEBUI_ENABLED")):
+        token = str(effective("WEBUI_ADMIN_TOKEN") or "")
+        if not token.strip():
+            add(
+                "error",
+                "WebUI 已启用但没有运维 Token",
+                "重启后 WebUI 不会挂载（Bot 本体照常运行）。请先设置 Token。",
+                ["WEBUI_ADMIN_TOKEN"],
+            )
+        else:
+            warnings = admin_token_warnings(token)
+            if warnings:
+                add(
+                    "warning",
+                    "运维 Token 偏弱",
+                    "；".join(warnings)
+                    + "。可以正常使用，但公网访问时建议点「生成随机 Token」换掉。",
+                    ["WEBUI_ADMIN_TOKEN"],
+                )
+        if not _truthy(effective("WEBUI_COOKIE_SECURE")):
+            add(
+                "info",
+                "会话 Cookie 未限定 HTTPS",
+                "通过 HTTPS 域名访问时建议开启，避免 Cookie 经明文 HTTP 发送。",
+                ["WEBUI_COOKIE_SECURE"],
+            )
+    if not effective("AI_API_KEY"):
+        add(
+            "warning",
+            "default 提供商没有 API Key",
+            "AI 对话、Agent、KP 等功能会走降级。请在「模型与提供商」里填写。",
+            ["AI_API_KEY"],
+        )
+    if not effective("ONEBOT_V11_ACCESS_TOKEN"):
+        add(
+            "info",
+            "OneBot 访问令牌未配置",
+            "NapCat/Lagrange 与 Bot 之间的连接没有令牌保护；同机内网可忽略。",
+            ["ONEBOT_V11_ACCESS_TOKEN"],
+        )
+    if _truthy(effective("AGENT_DEBUG_LOG")):
+        add(
+            "warning",
+            "Agent 调试日志已开启",
+            "日志会包含完整群消息与 LLM 回复，排障结束后请关闭。",
+            ["AGENT_DEBUG_LOG"],
+        )
+    deprecated = [
+        entry["key"]
+        for entry in entries
+        if entry["meta"]["deprecated"] and entry["configured"]
+    ]
+    if deprecated:
+        add(
+            "info",
+            "仍配置了已弃用的项",
+            "这些项已不再读取，可以移除：" + "、".join(deprecated),
+            deprecated,
+        )
+    overridden = [
+        entry["key"]
+        for entry in entries
+        if entry["source"] in {"process", "environment"}
+    ]
+    if overridden:
+        add(
+            "info",
+            f"{len(overridden)} 项被外部环境覆盖",
+            "这些项以进程环境或 .env.<环境名> 为准，在面板里修改不会生效。",
+            overridden,
+        )
+    return result
+
+
+def pending_restart() -> bool:
+    try:
+        return ENV_PATH.resolve().stat().st_mtime > PROCESS_STARTED_AT + 1
+    except OSError:
+        return False
+
+
+def restart_supported() -> bool:
+    return _truthy(os.environ.get("YAWNBOT_SUPERVISED"))
+
+
+def load_environment() -> dict[str, Any]:
+    """返回根 .env 的全部已知键，敏感值只报告是否已配置。"""
+
+    root_values = _parsed_values(ENV_PATH)
+    environment_name, environment_path, environment_values = _environment_values(
+        root_values
+    )
+
+    # 镜像/compose 固定下来的部署参数单独标注，免得看起来像“被人覆盖了”
+    pinned = {
+        item
+        for item in os.environ.get("YAWNBOT_PINNED_ENV_KEYS", "").split(",")
+        if item
+    }
     entries: list[dict[str, Any]] = []
-    for item in catalog:
+    for item in _full_catalog(root_values):
         key = str(item["key"])
         secret = _is_secret(key)
         configured = key in root_values
         if _process_override(key):
-            source = "process"
+            source = "pinned" if key in pinned else "process"
         elif key in environment_values:
             source = "environment"
         elif configured:
@@ -380,33 +553,38 @@ def load_environment() -> dict[str, Any]:
         else:
             source = "default"
         current = root_values.get(key)
-        sample = item.get("sample")
+        spec = _field_spec(item, current)
         entries.append(
             {
                 "key": key,
                 "section": item["section"],
                 "description": item["description"],
                 "value": None if secret else current,
-                "defaultValue": None if secret else sample,
+                "defaultValue": None if secret else spec["sample"],
                 "configured": configured,
                 "effectiveConfigured": source != "default",
                 "secret": secret,
-                "kind": _value_kind(key, sample, current),
-                "options": _ENUM_OPTIONS.get(key, []),
+                "kind": spec["kind"],
+                "options": spec["options"],
                 "source": source,
-                "overridden": source in {"process", "environment"},
+                "overridden": source in {"process", "pinned", "environment"},
+                "meta": spec["meta"],
+                "issue": _value_issue(key, current, spec) if configured else None,
             }
         )
     providers, _secrets = _provider_state(root_values, environment_values)
     return {
         "file": ".env",
         "version": _file_version(),
-        "environment": str(environment_name),
+        "environment": environment_name,
         "environmentFile": (
             environment_path.name if environment_path.is_file() else None
         ),
         "entries": entries,
         "llmProviders": providers,
+        "diagnostics": _diagnostics(entries, root_values, environment_values),
+        "pendingRestart": pending_restart(),
+        "restartSupported": restart_supported(),
     }
 
 
@@ -558,6 +736,38 @@ def _validate_llm_candidate(candidate: str) -> None:
             raise EnvironmentValidationError(f"{key} 引用了未知提供商：{provider_id}")
 
 
+def _validate_typed_values(changes: list[tuple[str, str | None]]) -> None:
+    """按目录推断的类型与范围校验，避免写入会让插件启动失败的值。"""
+
+    root_values = _parsed_values(ENV_PATH)
+    catalog = {str(item["key"]): item for item in _full_catalog(root_values)}
+    for key, value in changes:
+        item = catalog.get(key)
+        if value is None or item is None or key in _PROVIDER_STORAGE_KEYS:
+            continue
+        issue = _value_issue(key, value, _field_spec(item, None))
+        if issue:
+            raise EnvironmentValidationError(f"{key}：{issue}")
+
+
+def _validate_not_locked_out(candidate: str) -> None:
+    """WebUI 启用时必须留有可用 Token，否则重启后谁也进不来。"""
+
+    root_values = dict(dotenv_values(stream=StringIO(candidate)))
+    _name, _path, environment_values = _environment_values(root_values)
+    enabled, _source = _effective_value(
+        "WEBUI_ENABLED", root_values, environment_values
+    )
+    token, _source = _effective_value(
+        "WEBUI_ADMIN_TOKEN", root_values, environment_values
+    )
+    if _truthy(enabled) and not str(token or "").strip():
+        raise EnvironmentValidationError(
+            "WEBUI_ADMIN_TOKEN：WebUI 启用时不能移除或清空运维 Token，"
+            "否则重启后无法登录"
+        )
+
+
 def _copy_ownership(source: Path, temp_path: Path) -> None:
     """沿用原文件的权限位和属组，宿主部署用户才能继续读写面板改过的文件。"""
 
@@ -586,6 +796,7 @@ def update_environment(
     if providers is not None:
         changes = [*changes, *_provider_changes(providers, _parsed_values(ENV_PATH))]
     _validate_changes(changes)
+    _validate_typed_values(changes)
     if _file_version() != expected_version:
         raise EnvironmentConflictError
 
@@ -595,6 +806,8 @@ def update_environment(
         key in _PROFILE_PROVIDER_KEYS for key, _ in changes
     ):
         _validate_llm_candidate(candidate)
+    if any(key in LOCKOUT_KEYS for key, _ in changes):
+        _validate_not_locked_out(candidate)
     parsed = dict(dotenv_values(stream=StringIO(candidate)))
     for key, value in changes:
         if value is None:
