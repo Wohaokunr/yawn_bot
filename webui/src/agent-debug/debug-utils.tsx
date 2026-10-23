@@ -132,6 +132,8 @@ export const TOOL_NAME_LABELS: Record<string, string> = {
   get_person_profile: "查看成员画像",
   list_user_relations: "查看成员关系",
   record_user_relation: "记录成员关系",
+  remember_about_me: "记住成员自述",
+  forget_about_me: "忘掉成员自述",
   search_reactions: "搜索表情包",
   send_message: "发送消息",
   send_forward: "发送合并转发",

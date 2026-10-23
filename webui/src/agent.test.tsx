@@ -47,6 +47,8 @@ describe("memoryTypeLabel", () => {
 describe("PROFILE_KEY_META", () => {
   it("覆盖后端 _FACT_KEYS 的全部画像键，防止口径漂移", () => {
     expect(Object.keys(PROFILE_KEY_META).sort()).toEqual([
+      "current_status",
+      "dislike",
       "display_name",
       "hobby",
       "preference",

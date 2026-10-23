@@ -13,7 +13,7 @@ from typing import Any
 
 from nonebot import get_bots
 from nonebot_plugin_orm import get_session
-from sqlalchemy import String, exists, func, or_, select
+from sqlalchemy import String, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..data_models.agent_audit import AgentAudit
@@ -38,6 +38,7 @@ from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.emotion import emotion_public_state
 from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
+from ..yawn_agent.memory_access import pending_access_count
 from ..yawn_agent.persona import (
     PERSONA_SCHEMA_VERSION,
     persona_behavior,
@@ -993,6 +994,8 @@ def serialize_memory(row: AgentMemory) -> dict[str, Any]:
         "createdAt": iso(row.created_at),
         "updatedAt": iso(row.updated_at),
         "expiresAt": iso(row.expires_at),
+        "accessCount": int(getattr(row, "access_count", 0) or 0),
+        "lastAccessedAt": iso(getattr(row, "last_accessed_at", None)),
         "version": memory_version(row),
     }
 
@@ -1210,7 +1213,53 @@ async def agent_memory_status(session: AsyncSession, group_id: int) -> dict[str,
         )
     ).all()
     counts_by_type = {str(row[0]): int(row[1] or 0) for row in type_rows}
+    source_rows = (
+        await session.execute(
+            select(AgentMemory.source_kind, func.count())
+            .where(*memory_clauses)
+            .group_by(AgentMemory.source_kind)
+        )
+    ).all()
+    # 用 SUM(CASE) 而不是 COUNT(...) FILTER：老版本 SQLite 不支持 FILTER 子句。
+    access_total, accessed_rows, expiring_soon, weekly = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(AgentMemory.access_count), 0),
+                func.coalesce(
+                    func.sum(case((AgentMemory.access_count > 0, 1), else_=0)), 0
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                AgentMemory.expires_at.is_not(None)
+                                & (AgentMemory.expires_at < now + timedelta(days=7)),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (AgentMemory.memory_key.startswith("weekly:"), 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            ).where(*memory_clauses)
+        )
+    ).one()
     return {
+        "countsBySource": {str(row[0]): int(row[1] or 0) for row in source_rows},
+        "accessTotal": int(access_total or 0),
+        "accessedMemories": int(accessed_rows or 0),
+        "expiringWithin7Days": int(expiring_soon or 0),
+        "weeklySummaries": int(weekly or 0),
+        "pendingAccessFlush": pending_access_count(),
         "groupId": str(group_id),
         "runtimeEnabled": runtime_enabled,
         "pendingMessages": pending,

@@ -47,7 +47,7 @@ from ..yawn_agent.execution_trace import (
     trace_event,
 )
 from ..yawn_agent.memory import (
-    compact_group_memory,
+    compact_group_memory_backlog,
     delete_group_memories,
     delete_member_memories,
     is_memory_compacting,
@@ -111,6 +111,7 @@ from .service import (
 
 router = APIRouter(prefix=API_PATH)
 _compact_inflight: set[int] = set()
+_REBUILD_MAX_BATCHES = 20
 _bg_tasks: set[asyncio.Task[Any]] = set()
 
 
@@ -347,7 +348,7 @@ async def get_memory_status(
 async def _run_manual_compact(group_id: int) -> None:
     try:
         async with get_session() as db:
-            await compact_group_memory(db, group_id)
+            await compact_group_memory_backlog(db, group_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("WebUI 手动记忆整理失败: %s", group_id)
         try:
@@ -367,7 +368,10 @@ async def _run_manual_rebuild(group_id: int) -> None:
         async with get_session() as db:
             await rebuild_group_memories(db, group_id)
         async with get_session() as db:
-            await compact_group_memory(db, group_id)
+            # 重建会把全部存量原文重新入队，手动触发时多推进一些批次。
+            await compact_group_memory_backlog(
+                db, group_id, max_batches=_REBUILD_MAX_BATCHES
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("WebUI 手动记忆重建失败: %s", group_id)
         try:

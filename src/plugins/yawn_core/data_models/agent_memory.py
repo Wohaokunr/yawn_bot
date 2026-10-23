@@ -52,7 +52,8 @@ class AgentMemory(Model):
     memory_key: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text)
     evidence_message_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
-    # auto 由整理任务维护；manual 由管理员维护且自动重建不会覆盖。
+    # auto 由整理任务维护；agent 来自成员在对话中让 Agent 记住的自述，
+    # 重建不清除；manual 由管理员维护且自动重建不会覆盖。
     source_kind: Mapped[str] = mapped_column(String(16), default="auto", index=True)
     # 冗余涉及成员，保证原始证据过期后仍可完成隐私删除。
     related_user_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
@@ -68,7 +69,20 @@ class AgentMemory(Model):
         onupdate=beijing_now,
     )
     expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+    # 被注入 Prompt 或被工具检索命中的次数；整理任务据此强化常用记忆
+    # （排序衰减变慢、自动记忆续期），冷门记忆照常按 TTL 遗忘。
+    access_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
+
+Index(
+    "ix_agent_memory_group_subject_type",
+    AgentMemory.group_id,
+    AgentMemory.subject_user_id,
+    AgentMemory.memory_type,
+)
 
 Index(
     "ix_agent_memory_group_type_updated_desc",

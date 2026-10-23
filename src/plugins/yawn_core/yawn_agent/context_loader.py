@@ -25,10 +25,13 @@ from .context_repository import AgentContextRepository
 from .emotion import emotion_context_state
 from .log import dbg
 from .memory import effective_relation_confidence, rank_memories
+from .memory_access import record_access
 from .persona import persona_editor_profile
 
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 _MEMORY_CONTEXT_LIMIT = 24
+# 话题记忆的最低相关性：与近期消息和活跃话题毫无交集的记忆不作为话题记忆注入。
+TOPIC_MEMORY_MIN_RELEVANCE = 0.05
 
 
 async def activity_window_counts(
@@ -309,6 +312,9 @@ async def load_context(
         ):
             break
     summaries = [row for row in local_rows if row.memory_type == "summary"]
+    # 话题记忆必须与近期消息/活跃话题至少有一点交集：旧实现在无关时也按
+    # 显著度塞进 3 条，白占预算还会把模型带偏到旧话题；同时 MMR 去掉与
+    # 已选条目近似重复的表述。
     ranked_local = rank_memories(
         local_rows,
         recent_texts,
@@ -316,6 +322,8 @@ async def load_context(
         context_now,
         limit=40,
         topic_hint=str(config.active_topic or ""),
+        diversify=True,
+        min_relevance=TOPIC_MEMORY_MIN_RELEVANCE,
     )
 
     shared_rows: list[AgentMemory] = []
@@ -370,6 +378,7 @@ async def load_context(
         if item.get("name") and user_id not in name_by_id:
             name_by_id[user_id] = str(item["name"])
     memories: list[dict[str, Any]] = []
+    injected_memory_ids: list[int] = []
     # 以最终 JSON 数组的真实字符数计预算（含 [] 和条目间的 ", "）。
     memory_chars = 2
     for row, source in ordered:
@@ -409,7 +418,9 @@ async def load_context(
         item["content"] = content[:remaining]
         item_chars = len(json.dumps(item, ensure_ascii=False))
         memories.append(item)
+        injected_memory_ids.append(int(row.id or 0))
         memory_chars += separator_chars + item_chars
+    record_access(injected_memory_ids, now=now)
     dbg(
         f"群 {group_id} 加载上下文: 记忆 {len(memories)} 条/"
         f"{memory_chars} 字(预算 {_MEMORY_CONTEXT_CHAR_BUDGET},当前发言人={speaker_id})"
