@@ -131,10 +131,43 @@ chmod 700 "$root/deployments"
 exec 9>"$root/deploy.lock"
 flock -n 9 || { echo "another production deployment is running" >&2; exit 3; }
 
+# WebUI 环境配置页直接管理 config/.env：容器把 config/ 挂到 /app/config，入口脚本
+# 每次启动都重新加载它。旧布局的根 .env 在这里一次性迁入 config/，并留下指向它的
+# 符号链接，主机上的其他脚本和人工操作仍可沿用 $root/.env。
+# config/ 属于部署用户组且带 setgid，容器通过 group_add 以同组身份读写，文件保持 660。
+migrate_env_layout() {
+    config_dir="$root/config"
+    managed_env="$config_dir/.env"
+    mkdir -p "$config_dir"
+    chmod 2770 "$config_dir" 2>/dev/null || true
+    if [ ! -e "$managed_env" ]; then
+        if [ -f "$root/.env" ] && [ ! -L "$root/.env" ]; then
+            cp -p "$root/.env" "$managed_env.tmp"
+        else
+            : > "$managed_env.tmp"
+        fi
+        chmod 660 "$managed_env.tmp"
+        mv -f "$managed_env.tmp" "$managed_env"
+        echo "[deploy:config] created config/.env"
+    fi
+    # 面板写回后文件属主是容器用户，部署用户无权 chmod，靠属组读写即可
+    chmod 660 "$managed_env" 2>/dev/null || true
+    if [ -f "$root/.env" ] && [ ! -L "$root/.env" ]; then
+        mv -f "$root/.env" "$root/.env.pre-config-$(date -u +%Y%m%dT%H%M%SZ)"
+    fi
+    if [ ! -e "$root/.env" ] && [ ! -L "$root/.env" ]; then
+        ln -s config/.env "$root/.env"
+        echo "[deploy:config] linked .env -> config/.env"
+    fi
+    YAWNBOT_CONFIG_GID=$(stat -c %g "$config_dir")
+    export YAWNBOT_CONFIG_GID
+}
+migrate_env_layout
+
 # 公网 WebUI 依赖服务器 .env 里的 WEBUI_*。缺失时在服务器本地补齐：只添加缺失的键，
 # 不覆盖已有值；admin token 在本机生成，不经过 GitHub，也不打印。
 ensure_webui_env() {
-    env_file="$root/.env"
+    env_file="$root/config/.env"
     [ -e "$root/public-https.disabled" ] && return 0
     [ -f "$env_file" ] || return 0
     YAWNBOT_ENV_FILE="$env_file" YAWNBOT_ENV_STAMP="$(date -u +%Y%m%dT%H%M%SZ)" python3 - <<'PY'
@@ -385,6 +418,7 @@ echo "[deploy:pull] success"
         printf 'YAWNBOT_BROWSER_IMAGE=\n'
         printf 'FANQIE_BROWSER_WS_ENDPOINT=\n'
     fi
+    printf 'YAWNBOT_CONFIG_GID=%s\n' "$YAWNBOT_CONFIG_GID"
 } > "$root/image.env.tmp"
 chmod 600 "$root/image.env.tmp"
 mv -f "$root/image.env.tmp" "$root/image.env"

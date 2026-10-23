@@ -4,10 +4,15 @@ services:
   yawnbot:
     image: "${YAWNBOT_IMAGE:?YAWNBOT_IMAGE must be an immutable digest reference}"
     restart: unless-stopped
+    # 应用配置由入口脚本每次启动时从 config/.env 加载（WebUI 环境配置页写的就是它），
+    # 不经 env_file 注入，否则面板改动重启后不生效且全部显示为外部覆盖。
     env_file:
-      - .env
       - onebot.env
+    # 宿主 config/ 属于部署用户组（setgid 2770），容器以该组身份读写配置文件
+    group_add:
+      - "${YAWNBOT_CONFIG_GID:-10001}"
     environment:
+      YAWNBOT_ENV_FILE: /app/config/.env
       HOST: 0.0.0.0
       PORT: 8080
       LOCALSTORE_USE_CWD: "true"
@@ -17,6 +22,7 @@ services:
       - "127.0.0.1:${YAWNBOT_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data
+      - ./config:/app/config
     networks:
       - yawnbot-internal
     healthcheck:

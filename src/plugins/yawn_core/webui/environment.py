@@ -1,8 +1,14 @@
 # ruff: noqa: C901,TRY003
-"""根 ``.env`` 的脱敏读取与原子更新。"""
+"""根 ``.env`` 的脱敏读取与原子更新。
+
+生产容器通过 ``YAWNBOT_ENV_FILE`` 指向挂载进来的可写配置文件；入口脚本启动时把它
+加载进进程环境，并在 ``YAWNBOT_DOTENV_KEYS`` 里记下由该文件注入的键。这些键属于
+面板管理的配置本身，不算外部覆盖。
+"""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -16,7 +22,7 @@ from urllib.parse import urlparse
 from dotenv import dotenv_values
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-ENV_PATH = PROJECT_ROOT / ".env"
+ENV_PATH = Path(os.environ.get("YAWNBOT_ENV_FILE") or PROJECT_ROOT / ".env")
 EXAMPLE_PATH = PROJECT_ROOT / ".env.example"
 # 完整配置目录随代码打包；.env.example 只保留最小可运行配置，且不进 Docker 镜像
 CATALOG_PATH = Path(__file__).with_name("environment_catalog.dotenv")
@@ -129,13 +135,22 @@ def _parsed_values(path: Path) -> dict[str, str | None]:
     return dict(dotenv_values(path))
 
 
+def _process_override(key: str) -> bool:
+    """进程环境里的值是否来自受管配置文件之外。"""
+
+    if key not in os.environ:
+        return False
+    managed = os.environ.get("YAWNBOT_DOTENV_KEYS", "")
+    return key not in {item for item in managed.split(",") if item}
+
+
 def _effective_value(
     key: str,
     root_values: dict[str, str | None],
     environment_values: dict[str, str | None],
     default: str | None = None,
 ) -> tuple[str | None, str]:
-    if key in os.environ:
+    if _process_override(key):
         return os.environ[key], "process"
     if key in environment_values:
         return environment_values[key], "environment"
@@ -356,7 +371,7 @@ def load_environment() -> dict[str, Any]:
         key = str(item["key"])
         secret = _is_secret(key)
         configured = key in root_values
-        if key in os.environ:
+        if _process_override(key):
             source = "process"
         elif key in environment_values:
             source = "environment"
@@ -543,6 +558,18 @@ def _validate_llm_candidate(candidate: str) -> None:
             raise EnvironmentValidationError(f"{key} 引用了未知提供商：{provider_id}")
 
 
+def _copy_ownership(source: Path, temp_path: Path) -> None:
+    """沿用原文件的权限位和属组，宿主部署用户才能继续读写面板改过的文件。"""
+
+    if not source.is_file():
+        return
+    stat = source.stat()
+    temp_path.chmod(stat.st_mode & 0o777)
+    if hasattr(os, "chown"):
+        with contextlib.suppress(OSError):
+            os.chown(temp_path, -1, stat.st_gid)
+
+
 def update_environment(
     expected_version: str,
     changes: list[tuple[str, str | None]],
@@ -576,12 +603,14 @@ def update_environment(
         elif parsed.get(key) != value:
             raise EnvironmentValidationError(f"配置值解析结果不一致：{key}")
 
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 符号链接指向的才是真实配置文件；临时文件必须与它同目录才能原子替换
+    target = ENV_PATH.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            dir=ENV_PATH.parent,
+            dir=target.parent,
             prefix=".env.",
             suffix=".tmp",
             delete=False,
@@ -590,9 +619,10 @@ def update_environment(
             handle.flush()
             os.fsync(handle.fileno())
             temp_path = Path(handle.name)
+        _copy_ownership(target, temp_path)
         if _file_version() != expected_version:
             raise EnvironmentConflictError
-        temp_path.replace(ENV_PATH)
+        temp_path.replace(target)
         temp_path = None
     finally:
         if temp_path is not None:
