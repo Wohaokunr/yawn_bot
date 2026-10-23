@@ -584,8 +584,30 @@
   gap: 8px;
   font-size: 12px;
 }
-.agent-tool-rank-row .ant-progress {
-  margin: 0;
+.agent-tool-rank-bar {
+  display: flex;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.06);
+}
+.agent-tool-rank-bar > span {
+  height: 100%;
+}
+.agent-tool-rank-bar .is-success {
+  background: #52c41a;
+}
+.agent-tool-rank-bar .is-skipped {
+  background: #bfbfbf;
+}
+.agent-tool-rank-bar .is-unknown {
+  background: #faad14;
+}
+.agent-tool-rank-bar .is-failed {
+  background: #f0a2bf;
+}
+.agent-tool-rank-skipped {
+  color: var(--ant-color-text-tertiary, #8c8c8c);
 }
 .agent-tool-rank-name {
   overflow: hidden;

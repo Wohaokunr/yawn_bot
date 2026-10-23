@@ -399,7 +399,7 @@ TOOL_DEFINITIONS = (
         },
         actions=("_get_group_notice",),
         family="notice",
-        keywords=("群公告", "公告内容", "公告列表", "之前公告", "当前公告"),
+        keywords=("公告内容", "公告列表", "之前公告", "当前公告", "看公告", "查公告"),
     ),
     ToolDefinition(
         "list_essence_messages",
@@ -545,7 +545,10 @@ TOOL_DEFINITIONS = (
         admin=True,
         permission_level=TOOL_PERMISSION_PRIVILEGED,
         family="notice",
-        keywords=("发布公告", "发公告", "创建公告", "写公告", "置顶公告", "贴公告", "出个公告"),
+        keywords=(
+            "发布公告", "发公告", "创建公告", "写公告", "置顶公告", "贴公告", "出个公告",
+            "发群公告", "发个通知", "群通知", "新公告", "notice", "announcement",
+        ),
         prerequisites="发布前确认公告内容；重复内容会被拒绝",
     ),
     ToolDefinition(
@@ -579,7 +582,7 @@ TOOL_DEFINITIONS = (
         admin=True,
         permission_level=TOOL_PERMISSION_PRIVILEGED,
         family="notice",
-        keywords=("删除公告", "删公告", "移除公告", "撤掉公告"),
+        keywords=("删除公告", "删公告", "移除公告", "撤掉公告", "删群公告", "撤公告"),
         prerequisites="先用 list_group_notices 找到 notice_id",
     ),
     ToolDefinition(

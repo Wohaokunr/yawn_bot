@@ -60,11 +60,23 @@ from .tool_router import (
     MAX_TOOL_ROUNDS,
     dialogue_tool_round_limit,
     has_explicit_critical_intent,
+    normalize_tool_family,
     rank_discoverable_tools,
     select_critical_tool_names,
     select_dialogue_message_segment_types,
     select_dialogue_tool_names,
 )
+
+# 发现阶段可以向模型说明的“存在但当前不可用”原因；其余原因（权限等级上限）
+# 属于内部策略，不回报。
+_BLOCKED_TOOL_REASONS: dict[str, str] = {
+    "actor_not_admin": "需要群主或管理员本人发起",
+    "not_allowlisted": "本群还没在 WebUI 的 Agent 工具白名单里开放它",
+    "bot_not_admin": "机器人在本群不是管理员",
+    "bot_not_owner": "机器人在本群不是群主",
+    "onebot_action": "当前 QQ 协议端不支持这个动作",
+}
+
 
 def _max_tool_permission_level(
     *, allow_admin_tools: bool, max_permission_level: str | None
@@ -263,25 +275,46 @@ async def _discover_tools_for_actor(
         allow_admin_tools=allow_admin_tools,
         max_permission_level=None,
     )
+    # 模型常用中文/英文复数称呼工具包；能归一就归一，认不出来就把它当作任务描述
+    # 去搜索，避免 family="公告" 这类调用被过滤成空结果、让模型以为没有这个工具。
+    requested_family = str(family or "").strip() or None
+    family_key = normalize_tool_family(requested_family)
+    if requested_family and family_key is None:
+        query = " ".join(part for part in (query, requested_family) if part).strip()
+        requested_family = None
+    elif family_key is not None:
+        requested_family = family_key
     candidates: list[_ToolDefinition] = []
+    hidden: list[tuple[_ToolDefinition, str]] = []
     for definition in _TOOL_DEFINITIONS:
-        exposed, _reason = _tool_exposure_reason(
+        if (
+            not definition.discoverable
+            or definition.permission_level == TOOL_PERMISSION_CRITICAL
+        ):
+            # critical 工具永远不能被发现，只能由当前触发消息的显式动作意图装载。
+            continue
+        exposed, reason = _tool_exposure_reason(
             definition,
             effective_capabilities,
             allow_admin_tools=allow_admin_tools,
             max_permission_level=resolved_level,
             privileged_allowlist=allowlist,
         )
-        # critical 工具永远不能被发现，只能由当前触发消息的显式动作意图装载。
-        if (
-            exposed
-            and definition.discoverable
-            and definition.permission_level != TOOL_PERMISSION_CRITICAL
-        ):
+        if exposed:
             candidates.append(definition)
+            continue
+        if (
+            not allow_admin_tools
+            and definition.permission_level == TOOL_PERMISSION_PRIVILEGED
+        ):
+            # 普通成员用的是不带管理 action 的本地能力基线，此时 onebot_action /
+            # permission_level 都不是真正原因；对成员来说原因只有“需要管理发起”。
+            reason = "actor_not_admin"
+        if reason in _BLOCKED_TOOL_REASONS:
+            hidden.append((definition, reason))
 
     normalized_query = str(query or "").strip().casefold()
-    catalog_request = not family and normalized_query in {
+    catalog_request = not requested_family and normalized_query in {
         "*",
         "全部",
         "全部工具",
@@ -296,7 +329,7 @@ async def _discover_tools_for_actor(
         else rank_discoverable_tools(
             query,
             candidates,
-            family=family,
+            family=requested_family,
             limit=limit,
         )
     )
@@ -318,8 +351,8 @@ async def _discover_tools_for_actor(
                 "load_with": {"family": pack_name},
             }
         )
-    return {
-        "mode": "catalog" if catalog_request else ("toolpack" if family else "search"),
+    payload: dict[str, Any] = {
+        "mode": "catalog" if catalog_request else ("toolpack" if requested_family else "search"),
         "tools": [
             {
                 "name": item.name,
@@ -338,6 +371,35 @@ async def _discover_tools_for_actor(
         "toolpacks": toolpacks,
         "count": len(matches),
     }
+    if not catalog_request:
+        # 被权限/白名单挡住的同类工具只回报“存在但不可用 + 原因”，不给参数、
+        # 不装载 schema；模型据此如实说明，而不是回答“没有这个功能”。
+        matched_names = {item.name for item in matches}
+        blocked = [
+            definition
+            for definition in rank_discoverable_tools(
+                query,
+                [definition for definition, _reason in hidden],
+                family=requested_family,
+                limit=3,
+            )
+            if definition.name not in matched_names
+        ]
+        if blocked:
+            reasons = dict((definition.name, reason) for definition, reason in hidden)
+            payload["unavailable"] = [
+                {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "reason": _BLOCKED_TOOL_REASONS[reasons[definition.name]],
+                }
+                for definition in blocked
+            ]
+            payload["message"] = (
+                "unavailable 里的工具当前不能用；如实告诉成员原因，"
+                "不要声称已经执行，也不要换别的工具硬做。"
+            )
+    return payload
 
 
 async def _audit(
@@ -619,10 +681,14 @@ async def _dispatch_authorized(
     runtime_context: ToolExecutionContext,
 ) -> ToolHandlerResult:
     if name == "discover_tools":
+        # schema 允许只传 family（按工具包加载）；只有两者都缺时才是无效调用。
         query = str(args.get("query") or "").strip()
-        if not query:
-            raise ValueError("query 不能为空")
         family = str(args.get("family") or "").strip() or None
+        if not query and family is None:
+            raise ToolArgumentError(
+                "query 和 family 至少提供一个",
+                hint="用 query 描述任务，或用 family 加载 toolpacks 里的工具包",
+            )
         limit = _tool_result_limit(args, default=5, maximum=8)
         result = await _discover_tools_for_actor(
             query=query,

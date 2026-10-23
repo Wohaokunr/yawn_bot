@@ -34,6 +34,7 @@ from ..metrics import ai_health_snapshot, snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent import conversation as _conversation_runtime
 from ..yawn_agent import turn_intake as _turn_intake
+from ..yawn_agent.audit_outcome import classify_audit_result
 from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.emotion import emotion_public_state
@@ -1590,7 +1591,11 @@ async def agent_activity(
 async def agent_tool_usage(
     session: AsyncSession, group_id: int, *, now: datetime, days: int = 7
 ) -> dict[str, Any]:
-    """最近 N 天特权工具调用按工具与结果聚合，外加逐日成功/失败趋势。"""
+    """最近 N 天 Agent 审计按工具与结果分类聚合，外加逐日趋势。
+
+    结果先经 ``classify_audit_result`` 归为 成功 / 跳过 / 失败 / 待确认；主动
+    发言的 ``wait/close`` 是正常的“不说话”决策，不能计入失败。
+    """
 
     start = (now - timedelta(days=days - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -1605,26 +1610,26 @@ async def agent_tool_usage(
             )
         )
     ).all()
+    buckets = ("success", "skipped", "failed", "unknown")
     by_tool: dict[str, dict[str, int]] = {}
     daily = [
         {
             "day": (start + timedelta(days=index)).strftime("%Y-%m-%d"),
-            "success": 0,
-            "failed": 0,
+            **dict.fromkeys(buckets, 0),
         }
         for index in range(days)
     ]
     for tool_name, result, created_at in rows:
-        ok_result = result == "success"
-        entry = by_tool.setdefault(str(tool_name), {"success": 0, "failed": 0})
-        entry["success" if ok_result else "failed"] += 1
+        outcome = classify_audit_result(result)
+        entry = by_tool.setdefault(str(tool_name), dict.fromkeys(buckets, 0))
+        entry[outcome] += 1
         if created_at is not None:
             index = (created_at.date() - start.date()).days
             if 0 <= index < days:
-                daily[index]["success" if ok_result else "failed"] += 1
+                daily[index][outcome] += 1
     tools = sorted(
         (
-            {"toolName": name, **counts, "total": counts["success"] + counts["failed"]}
+            {"toolName": name, **counts, "total": sum(counts.values())}
             for name, counts in by_tool.items()
         ),
         key=lambda item: (-item["total"], item["toolName"]),
@@ -1633,7 +1638,10 @@ async def agent_tool_usage(
         "groupId": str(group_id),
         "days": days,
         "total": sum(item["total"] for item in tools),
-        "failed": sum(item["failed"] for item in tools),
+        **{
+            bucket: sum(item[bucket] for item in tools)
+            for bucket in ("success", "skipped", "failed", "unknown")
+        },
         "tools": tools,
         "daily": daily,
     }
@@ -1652,6 +1660,7 @@ def serialize_agent_audit(row: AgentAudit) -> dict[str, Any]:
         "arguments": arguments,
         "traceId": str(trace_id) if trace_id else None,
         "result": row.result,
+        "outcome": classify_audit_result(row.result),
         "detail": row.detail,
         "createdAt": iso(row.created_at),
     }

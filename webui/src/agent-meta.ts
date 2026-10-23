@@ -1,4 +1,4 @@
-import type { PersonaBehavior, PersonaEmotion, PersonaProfile, PersonaPreset } from "./types";
+import type { AgentAudit, AuditOutcome, PersonaBehavior, PersonaEmotion, PersonaProfile, PersonaPreset } from "./types";
 
 export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> = {
   summary: { label: "群摘要", color: "geekblue" },
@@ -149,3 +149,35 @@ export const MEMORY_ROLE_OPTIONS = [
   { value: "owner", label: "群主" },
   { value: "bot", label: "Bot" },
 ];
+
+// 审计结果分类与后端 yawn_agent/audit_outcome.py 同一口径：主动发言的 wait/close
+// 是“这会儿不说话”的正常决策，属于跳过而不是失败。
+const AUDIT_SUCCESS_RESULTS = new Set(["success", "speak", "degraded_to_text"]);
+const AUDIT_SKIPPED_RESULTS = new Set(["wait", "close"]);
+const AUDIT_UNKNOWN_RESULTS = new Set(["delivery_unknown"]);
+
+export const AUDIT_OUTCOME_META: Record<AuditOutcome, { label: string; color: string }> = {
+  success: { label: "成功", color: "green" },
+  skipped: { label: "跳过", color: "default" },
+  failed: { label: "失败", color: "red" },
+  unknown: { label: "待确认", color: "orange" },
+};
+
+export function auditOutcome(row: Pick<AgentAudit, "result" | "outcome">): AuditOutcome {
+  if (row.outcome) return row.outcome;
+  const value = String(row.result ?? "").trim().toLowerCase();
+  if (AUDIT_SUCCESS_RESULTS.has(value)) return "success";
+  if (AUDIT_SKIPPED_RESULTS.has(value)) return "skipped";
+  if (AUDIT_UNKNOWN_RESULTS.has(value)) return "unknown";
+  return "failed";
+}
+
+// 主动发言审计的 result 是参与决策；标签用更贴切的说法。
+export function auditOutcomeLabel(row: Pick<AgentAudit, "result" | "outcome" | "toolName">): string {
+  const outcome = auditOutcome(row);
+  if (row.toolName === "proactive_reply") {
+    if (outcome === "success") return "发言";
+    if (outcome === "skipped") return "不说话";
+  }
+  return AUDIT_OUTCOME_META[outcome].label;
+}

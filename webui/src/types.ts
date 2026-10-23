@@ -163,13 +163,18 @@ export interface AgentActivity {
   generatedAt: string;
 }
 
+export type AuditOutcome = "success" | "skipped" | "failed" | "unknown";
+
 export interface AgentToolUsage {
   groupId: string;
   days: number;
   total: number;
+  success: number;
+  skipped: number;
   failed: number;
-  tools: Array<{ toolName: string; success: number; failed: number; total: number }>;
-  daily: Array<{ day: string; success: number; failed: number }>;
+  unknown: number;
+  tools: Array<{ toolName: string; success: number; skipped: number; failed: number; unknown: number; total: number }>;
+  daily: Array<{ day: string; success: number; skipped: number; failed: number; unknown: number }>;
 }
 
 export interface AgentDiagnostics {
@@ -632,6 +637,7 @@ export interface AgentAudit {
   toolName: string;
   arguments: Record<string, unknown>;
   result: string;
+  outcome?: AuditOutcome;
   detail?: string | null;
   createdAt: string;
 }
