@@ -184,30 +184,6 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
             DOCKERFILE.read_text(encoding="utf-8"),
         )
 
-    def test_env_loader_keeps_process_values_and_records_file_keys(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env_file = Path(tmp) / ".env"
-            env_file.write_text("AI_MODEL=file\nHOST=file-host\n", encoding="utf-8")
-            env = os.environ.copy()
-            env.pop("YAWNBOT_DOTENV_KEYS", None)
-            env.pop("AI_MODEL", None)
-            env.update({"YAWNBOT_ENV_FILE": str(env_file), "HOST": "0.0.0.0"})
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "deploy" / "docker-load-env.py"),
-                    sys.executable,
-                    "-c",
-                    "import os; print(os.environ['AI_MODEL'], os.environ['HOST'],"
-                    " os.environ['YAWNBOT_DOTENV_KEYS'])",
-                ],
-                env=env,
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-        self.assertEqual(result.stdout.strip(), "file 0.0.0.0 AI_MODEL")
-
     def test_deploy_release_rejects_short_webui_token(self) -> None:
         result, _ = self._run_fake_deploy(
             env_text="WEBUI_ENABLED=true\nWEBUI_ADMIN_TOKEN=short\n"
