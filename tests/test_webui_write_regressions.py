@@ -108,7 +108,7 @@ def test_patch_bodies_default_version_and_reject_explicit_null() -> None:
         route_models.MemoryPatchBody.model_validate({"salience": 0.5}).version is None
     )
     persona = route_models.PersonaPatch.model_validate(
-        {"enabled": True, "profile": {"presetId": "natural", "name": "Yawn"}}
+        {"enabled": True, "card": {"presetId": "natural", "name": "Yawn"}}
     )
     assert persona.version is None
 
@@ -208,7 +208,7 @@ async def test_first_persona_save_initialises_persona_version(
     body = route_models.PersonaPatch.model_validate(
         {
             "enabled": True,
-            "profile": {"presetId": "quiet_observer", "name": "Yawn", "warmth": 1},
+            "card": {"presetId": "quiet_observer", "name": "Yawn", "warmth": 1},
         }
     )
 

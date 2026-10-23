@@ -78,6 +78,8 @@
 - 出站文件/媒体下载必须走 `safe_download.stream_download`：手动跟随重定向并逐跳校验白名单，禁止 `follow_redirects=True`。
 - 工具执行异常必须被隔离。尤其 SQLAlchemy/数据库异常后，不得继续用已进入 failed transaction 的 session 强行写审计；审计是尽力而为，不能反过来毒化主流程。
 - 工具结果只返回完成当前推理所需的最小数据，禁止把完整群成员原始 payload、文件路径或权限内部信息回灌模型。
+- `discover_tools` 至少要有 `query` 或 `family` 之一；只给 `family` 是合法调用（族名先过 `tool_router.normalize_tool_family`，中文别名如“公告”“群管”也要认），未知族名并入关键词搜索而不是报错。当前不能用的工具放进 `unavailable` 列表并给出原因（`actor_not_admin`、`bot_not_admin`、`not_allowlisted` 等），让模型能如实告诉成员“为什么不能做”；critical 工具无论如何都不出现在任何列表里。
+- 审计 `result` 的成功/跳过/失败/待确认分类只认 `audit_outcome.classify_audit_result`：主动发言的 `wait`/`close` 是跳过，不是失败；`delivery_unknown` 是待确认。WebUI 统计、筛选和前端 `agent-meta.auditOutcome` 必须与它同口径，新增 result 值时三处一起改。
 
 ## 发言清洗与声明核验
 
@@ -94,6 +96,16 @@
 - 短会话是进程内临时状态，不是业务持久化状态。总时长、Bot 发言数、评估数、连续 wait 数和合批硬期限必须保持有界。
 - 明确 @/reply Bot 的消息由普通对话 FIFO 路径处理，不得与短会话自动批次重复消费。
 
+## 人设（v3）
+
+- 人设只有一种形状：`persona.PersonaCard`。WebUI、QQ 命令、人设库、调试草稿都读写它；超长或越界的输入在模型校验里裁剪/夹到 0–4，而不是让整次保存失败。
+- 生效顺序固定为“本群自定义（`persona_enabled=True` 且卡可解析）→ 人设库里的全局人设 → 内置默认”，统一用 `resolve_persona_source` / `effective_persona_card` 取；跟随全局时 `persona_profile` 只是暂存草稿，运行时（含情绪表达强度）不得读它。
+- 全局人设存在 `AgentPersonaTemplate`（`is_global` 最多一行），运行时只读 `persona.global_persona()` 的进程内缓存；人设库每次写入后必须调用 `persona_library.refresh_global_persona`。表还没迁移时一律降级为内置默认，不能影响对话。
+- 存量 v2 `persona_profile` 在读取时由 `parse_persona_card` 惰性转换，不写迁移脚本批量改数据；新写入一律是 `schema_version=3`。
+- 人设文本不得覆盖系统策略：所有写入口（WebUI、人设库、QQ 命令）都要过 `persona_override_reason`。“自称本喵、叫成员杂鱼”这类角色指令是允许的；“忽略以上规则”、伪造 system/CQ 码、`@全体成员` 一律拒绝。
+- 编译后的人设 JSON 有 `PERSONA_PROMPT_TOKEN_LIMIT` 预算，超出时按示例 → 喜好 → 避开话题 → 口癖 → 长文本的顺序裁剪；默认人设下静态前缀必须保持在 450 tokens 以内（有测试守护）。
+- 行为影响只能收窄运行配置：活跃度决定主动候选系数和自动续聊轮数，接梗决定主动 reaction；开关、概率、冷却和每日上限仍以 `GroupAgentConfig` 为硬边界。
+
 ## 模块边界
 
 - `dialogue.py` 只负责一轮对话编排（`_prepare_turn` → `_run_turn`/`_run_tool_round` → `_finalize_turn_reply`），不再继续吸收历史选择算法；历史筛选放 `context_history.py`，工具发送后的状态推进放 `speech_finalize.py`。
@@ -105,6 +117,7 @@
 ## 质量门槛
 
 - 修改上下文选择后至少运行 `tests/test_agent_prompt_and_persona.py`、`tests/test_agent_memory.py`。
+- 修改人设后至少运行 `tests/test_agent_prompt_and_persona.py`、`tests/test_agent_persona_library.py`、`tests/test_agent_command_sessions.py`、`tests/test_agent_speech.py`，以及前端 `PersonaPanel.test.tsx`。
 - 修改消息发送/能力矩阵后至少运行 `tests/test_agent_outbound.py`、`tests/test_agent_security.py`。
 - 修改 Agent WebUI 后运行相关 Python WebUI 测试、前端 Vitest、TypeScript typecheck 和 build。
 - 合并前 Agent 核心回归必须全绿；新增行为应优先补场景回归，而不是只补单个 helper 的实现细节测试。

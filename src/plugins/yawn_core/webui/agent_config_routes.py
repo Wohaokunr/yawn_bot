@@ -55,16 +55,6 @@ from ..yawn_agent.memory import (
     rebuild_group_memories,
     record_memory_failure,
 )
-from ..yawn_agent.persona import (
-    apply_persona_editor_profile,
-    persona_behavior,
-    persona_behavior_draft,
-    persona_editor_profile,
-    persona_summary,
-    reset_persona,
-    resolve_persona,
-    resolve_persona_draft,
-)
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
 from ..yawn_agent.tools import (

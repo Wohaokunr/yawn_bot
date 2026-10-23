@@ -60,24 +60,29 @@ function DebugModelInspector({ result }: { result: AgentDebugResponse["result"] 
   </Space>;
 }
 
+// 与 PersonaBehavior.as_dict 的字段对齐；source 在标题里单独展示。
 const BEHAVIOR_LABELS: Record<string, string> = {
-  chattiness: "话痨程度",
-  initiative: "主动性",
-  verbosity: "话量",
-  humor: "幽默",
-  expressiveness: "表现力",
+  sociability: "活跃度",
+  followupTendency: "续聊倾向",
+  reactionTendency: "接梗",
+  warmupProbabilityScale: "暖场系数",
+  activeProbabilityScale: "主动候选系数",
+  maxFollowupBotTurns: "最多续聊轮数",
+  allowSpontaneousReaction: "主动 reaction",
+  reactionMode: "reaction 档位",
 };
 
 function PersonaInspector({ persona }: { persona: AgentDebugResponse["persona"] }): React.JSX.Element {
   const persisted = debugRecord(persona.persistedBehavior);
   const applied = debugRecord(persona.appliedBehavior);
-  const keys = [...new Set([...Object.keys(persisted), ...Object.keys(applied)])];
+  const keys = [...new Set([...Object.keys(persisted), ...Object.keys(applied)])].filter((key) => key !== "source");
   const changed = keys.filter((key) => JSON.stringify(persisted[key]) !== JSON.stringify(applied[key]));
   const persistedEmotion = debugRecord(persona.persistedEmotion);
   const appliedEmotion = debugRecord(persona.appliedEmotion);
   return <Card size="small" title={<Space>人设<Tag color={persona.source === "draft" ? "orange" : "default"}>{persona.source === "draft" ? "使用草稿" : "使用已保存人设"}</Tag></Space>}>
     <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-      {persona.persistedSummary && <Paragraph type="secondary" ellipsis={{ rows: 3, expandable: true, symbol: "展开" }} style={{ marginBottom: 0 }}>{persona.persistedSummary}</Paragraph>}
+      {persona.persistedSummary && <Paragraph type="secondary" ellipsis={{ rows: 3, expandable: true, symbol: "展开" }} style={{ marginBottom: 0 }}>{persona.persistedSource ? `${persona.persistedSource} · ` : ""}{persona.persistedSummary}</Paragraph>}
+      {persona.source === "draft" && persona.appliedCard && <Text type="secondary">草稿：{persona.appliedCard.name}{persona.appliedCard.selfName ? `（自称${persona.appliedCard.selfName}）` : ""}</Text>}
       {keys.length > 0 && <div className="dbg-behavior-grid">
         {keys.map((key) => <div key={key} className={`dbg-behavior${changed.includes(key) ? " is-changed" : ""}`}>
           <span className="dbg-kpi-label">{BEHAVIOR_LABELS[key] ?? key}</span>

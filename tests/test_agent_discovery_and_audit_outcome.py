@@ -1,4 +1,4 @@
-# ruff: noqa: PLR2004
+# ruff: noqa: E501
 """回归：工具包发现（群公告找不到）与审计结果分类（主动发言“必定失败”）。"""
 
 from __future__ import annotations
@@ -156,3 +156,14 @@ def test_family_alias_normalization() -> None:
 )
 def test_audit_outcome_classification(result: str, outcome: str) -> None:
     assert audit_outcome.classify_audit_result(result) == outcome
+
+
+def test_discovery_guard_allows_family_only_and_dedupes_aliases() -> None:
+    support = importlib.import_module(f"{_PKG}.dialogue_turn_support")
+    guard = support.DiscoveryRoundGuard(set())
+    # 只传 family 的第一次调用是合法的，不能被当作重复拦下。
+    assert guard.preflight({"family": "notice"}) is None
+    # 中文别名指向同一个工具包，再查一遍才算重复。
+    guarded = guard.preflight({"family": "公告"})
+    assert guarded is not None
+    assert guarded["result"]["mode"] == "guarded"

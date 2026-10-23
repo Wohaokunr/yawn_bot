@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-from ..yawn_agent.persona import PersonaEditorProfileV2  # noqa: TC001
+from ..yawn_agent.persona import PersonaCard  # noqa: TC001
 
 
 class LoginBody(BaseModel):
@@ -187,7 +187,33 @@ class PersonaPatch(BaseModel):
 
     version: str | None = None
     enabled: bool
-    profile: PersonaEditorProfileV2
+    card: PersonaCard
+
+
+class PersonaApplyTemplateBody(BaseModel):
+    """把人设库里的一张卡复制到本群并切换为本群自定义。"""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    version: str | None = None
+    template_id: int = Field(alias="templateId", ge=1)
+
+
+class PersonaTemplateCreateBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    name: str = Field(min_length=1, max_length=32)
+    card: PersonaCard
+    is_global: bool = Field(default=False, alias="isGlobal")
+
+
+class PersonaTemplatePatchBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    version: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=32)
+    card: PersonaCard | None = None
+    is_global: bool | None = Field(default=None, alias="isGlobal")
 
 
 class AgentDebugRunBody(BaseModel):
@@ -202,7 +228,7 @@ class AgentDebugRunBody(BaseModel):
         default=None, alias="actorUserId"
     )
     run_model: bool = Field(default=False, alias="runModel")
-    persona_draft: PersonaEditorProfileV2 | None = Field(
+    persona_draft: PersonaCard | None = Field(
         default=None, alias="personaDraft"
     )
 

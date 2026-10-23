@@ -179,6 +179,7 @@ export interface AgentToolUsage {
 
 export interface AgentDiagnostics {
   groupId: string;
+  persona?: { source: string; sourceLabel: string; summary: string };
   tools?: AgentToolQuota;
   pipeline?: AgentPipelineConstants;
   effective: {
@@ -273,49 +274,67 @@ export interface PersonaEmotion {
   eventCount: number;
 }
 
+export type PersonaSource = "group" | "global" | "builtin" | "draft";
+
 export interface Persona {
   groupId: string;
   enabled: boolean;
   schemaVersion: number;
-  profile: PersonaProfile;
+  /** 本群卡：跟随全局时是暂存草稿，切回自定义可以继续编辑。 */
+  card: PersonaCard;
+  /** 实际参与群聊的卡（本群 → 全局人设库 → 内置默认）。 */
+  effectiveCard: PersonaCard;
+  source: PersonaSource;
+  sourceLabel: string;
+  globalCard: PersonaCard;
+  globalLabel: string;
+  globalSummary: string;
   presets: PersonaPreset[];
   summary: string;
   behavior: PersonaBehavior;
   emotion: PersonaEmotion;
-  resolved: Record<string, string>;
+  compiled: string;
+  promptTokens: number;
+  promptTokenLimit: number;
+  trimmed: boolean;
   version: string | null;
 }
 
-export interface PersonaProfile {
+export interface PersonaCard {
   presetId: string;
   name: string;
+  selfName: string;
+  userTitle: string;
   identity: string;
-  groupRole: string;
+  personality: string;
+  speakingStyle: string;
+  catchphrases: string[];
+  likes: string[];
+  avoidTopics: string[];
+  examples: string[];
   warmth: number;
   humor: number;
-  directness: number;
   verbosity: number;
   expressiveness: number;
   sociability: number;
-  followupTendency: number;
   reactionTendency: number;
-  customNotes: string;
 }
 
 export interface PersonaPreset {
   id: string;
   label: string;
   description: string;
-  identity: string;
-  groupRole: string;
-  warmth: number;
-  humor: number;
-  directness: number;
-  verbosity: number;
-  expressiveness: number;
-  sociability: number;
-  followupTendency: number;
-  reactionTendency: number;
+  card: PersonaCard;
+}
+
+export interface PersonaTemplate {
+  id: string;
+  name: string;
+  isGlobal: boolean;
+  card: PersonaCard;
+  summary: string;
+  version: string;
+  updatedAt: string | null;
 }
 
 export interface MemoryItem {
@@ -550,8 +569,9 @@ export interface AgentDebugResponse {
   persona: {
     source: "draft" | "persisted";
     persistedSummary: string;
-    persistedProfile: PersonaProfile;
-    appliedProfile: PersonaProfile;
+    persistedSource: string;
+    persistedCard: PersonaCard;
+    appliedCard: PersonaCard;
     persistedBehavior: PersonaBehavior;
     appliedBehavior: PersonaBehavior;
     persistedEmotion: PersonaEmotion;

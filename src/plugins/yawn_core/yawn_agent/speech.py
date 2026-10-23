@@ -64,7 +64,6 @@ class SpeechStyle:
 
     warmth: int = 2
     humor: int = 1
-    directness: int = 2
     verbosity: int = 1
     expressiveness: int = 1
     soft_target_chars: int | None = None
@@ -75,7 +74,6 @@ class SpeechStyle:
         return {
             "warmth": self.warmth,
             "humor": self.humor,
-            "directness": self.directness,
             "verbosity": self.verbosity,
             "expressiveness": self.expressiveness,
             "softTargetChars": self.soft_target_chars,

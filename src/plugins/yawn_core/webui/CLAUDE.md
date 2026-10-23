@@ -21,7 +21,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `hub.py` | 单进程 WebSocket 状态广播（`/stream`），前端 `api.ts` 订阅 |
 | `overview_routes.py` | 概览与插件摘要（含子插件加载报告） |
 | `groups.py` / `users.py` | 群、群成员、全局用户管理 |
-| `agent.py` + `agent_*_routes.py` | 群聊 Agent：配置、人设、记忆、隐私、关系、消息、调试/dry-run；共用过滤在 `agent_route_helpers.py` |
+| `agent.py` + `agent_*_routes.py` | 群聊 Agent：配置、人设与人设库、记忆、隐私、关系、消息、调试/dry-run；共用过滤在 `agent_route_helpers.py` |
 | `audits.py` | Agent 工具审计与 WebUI 操作审计（`web_admin_audit`） |
 | `games.py` | 狼人杀/跑团对局列表、详情、事件日志与回放 |
 | `rpg_modules.py` | 跑团模组库只读投影 |

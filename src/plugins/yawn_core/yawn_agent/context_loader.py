@@ -32,7 +32,7 @@ from .memory import (
 )
 from .memory_access import record_access
 from .memory_hygiene import contains_pii, looks_like_instruction
-from .persona import persona_editor_profile
+from .persona import effective_persona_card
 
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 _MEMORY_CONTEXT_LIMIT = 24
@@ -582,7 +582,8 @@ async def load_context(
         emotion_state=emotion_context_state(
             config.emotion_state if isinstance(config.emotion_state, dict) else {},
             now=context_now,
-            expressiveness=persona_editor_profile(config).expressiveness,
+            # 跟随全局时要用全局人设的表现力，而不是本群暂存的草稿。
+            expressiveness=effective_persona_card(config).expressiveness,
         ),
         reference_at=context_now,
     )

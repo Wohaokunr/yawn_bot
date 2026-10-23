@@ -24,12 +24,8 @@ def _load_agent_modules() -> None:
         nonebot.load_from_toml("pyproject.toml")
 
 
-def _persona(style_traits: str, social_style: str = "自然反应") -> dict[str, str]:
-    return {
-        "name": "Yawn",
-        "style_traits": style_traits,
-        "social_style": social_style,
-    }
+def _persona(**levels: int) -> dict[str, object]:
+    return {"name": "Yawn", "levels": levels}
 
 
 def test_speech_scene_resolves_direct_reply_reply_thread_and_conversation() -> None:
@@ -60,8 +56,7 @@ def test_quiet_persona_never_turns_explicit_reply_into_low_information_answer() 
     )
 
     quiet = _persona(
-        "自然；偶尔轻幽默；直接度适中；极简短；情绪表达很淡",
-        "很少参与；不主动续聊；少量反应",
+        warmth=2, humor=1, verbosity=0, expressiveness=0, sociability=0, reaction_tendency=1
     )
     style = resolve_speech_style(quiet, scene="direct_reply")
     instruction = build_speech_instruction(quiet, {"trigger": "mention"})
@@ -77,14 +72,12 @@ def test_lively_persona_compiles_voice_traits_into_scene_style() -> None:
     from src.plugins.yawn_core.yawn_agent.speech_policy import resolve_speech_style
 
     lively = _persona(
-        "温和；很会接梗；比较直接；简洁；表现力很强",
-        "很活跃；较愿意延展；很爱接反应",
+        warmth=3, humor=4, verbosity=1, expressiveness=4, sociability=4, reaction_tendency=4
     )
     style = resolve_speech_style(lively, scene="active_interject")
 
     assert style.warmth == 3
     assert style.humor == 4
-    assert style.directness == 3
     assert style.verbosity == 1
     assert style.expressiveness == 4
     assert style.allow_spontaneous_reaction is True
@@ -193,7 +186,7 @@ def test_prompt_injects_scene_policy_in_volatile_tail_without_changing_static_pr
     _load_agent_modules()
     from src.plugins.yawn_core.yawn_agent.prompt import build_messages
 
-    persona = _persona("自然；偶尔轻幽默；直接度适中；简洁；表达克制")
+    persona = _persona(warmth=2, humor=1, verbosity=1, expressiveness=1)
     direct, direct_hash = build_messages(
         persona=persona,
         tools=[],

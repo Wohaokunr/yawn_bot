@@ -1,4 +1,4 @@
-import { Button, Card, Empty, List, Segmented, Space, Spin, Tag, Typography } from "antd";
+import { Button, Card, Empty, List, Progress, Segmented, Space, Spin, Tag, Typography } from "antd";
 import { useState } from "react";
 import { toolDisplayName } from "../agent-debug/debug-utils";
 import { AUDIT_OUTCOME_META, MEMORY_TYPE_META, auditOutcome, auditOutcomeLabel, memoryTypeLabel } from "../agent-meta";
@@ -41,6 +41,7 @@ export function diagnosticsReport(groupLabel: string, data: AgentDiagnostics): s
   if (data.tools) {
     lines.push(`特权工具：${data.tools.adminToday}/${data.tools.adminLimit} · 高风险：${data.tools.criticalToday}/${data.tools.criticalLimit} · 已开放 ${data.tools.allowlist.length} 项`);
   }
+  if (data.persona) lines.push(`人设：${data.persona.sourceLabel} · ${data.persona.summary}`);
   lines.push(`记忆：共 ${data.memory.total} 条，待整理 ${data.memory.pendingMessages} 条，连续失败 ${data.memory.consecutiveFailures} 次${data.memory.rebuildRequired ? "，需要重建" : ""}`);
   lines.push(`LLM 路由：${data.llm.routes.map((route) => `${route.task}=${route.configured ? route.model || "?" : "不可用"}`).join("，") || "—"}`);
   lines.push(data.blockers.length
@@ -184,7 +185,7 @@ export function PersonaMoodCard({ groupId, onNavigate }: { groupId: string; onNa
           <div className="agent-mood-body">
             <Space size={6} wrap>
               <Tag color="magenta">{persona.emotion.displayLabel}</Tag>
-              <Tag>{persona.enabled ? "本群专属人设" : "跟随全局人设"}</Tag>
+              <Tag>{persona.sourceLabel}</Tag>
               <Text type="secondary">{persona.emotion.updatedAt ? `${relativeTime(persona.emotion.updatedAt)}更新` : "尚无情绪事件"}</Text>
             </Space>
             <Progress percent={Math.round(persona.emotion.expressionIntensity * 100)} size="small" strokeColor="#e4558a" format={(value) => `表达 ${value}%`} />

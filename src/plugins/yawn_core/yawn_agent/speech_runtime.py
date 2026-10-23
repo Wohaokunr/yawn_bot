@@ -160,7 +160,7 @@ def build_runtime_speech_plan(
     *,
     text: object = "",
     segments: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
-    persona: dict[str, str] | None,
+    persona: dict[str, Any] | None,
     current_turn: Any = None,
     context: dict[str, Any] | None = None,
     source: str | None = None,

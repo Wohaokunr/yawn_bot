@@ -386,7 +386,7 @@ async def _discover_tools_for_actor(
             if definition.name not in matched_names
         ]
         if blocked:
-            reasons = dict((definition.name, reason) for definition, reason in hidden)
+            reasons = {definition.name: reason for definition, reason in hidden}
             payload["unavailable"] = [
                 {
                     "name": definition.name,

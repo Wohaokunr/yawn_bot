@@ -14,7 +14,7 @@ from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 from .tool_router import suggest_tool_families
 
-PROMPT_VERSION = "yawn-agent-v15"
+PROMPT_VERSION = "yawn-agent-v16"
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
@@ -242,7 +242,7 @@ def reconstruct_effective_current_turn(
     )
 
 
-def build_static_prefix(persona: dict[str, str], tools: list[dict[str, Any]]) -> str:
+def build_static_prefix(persona: dict[str, Any], tools: list[dict[str, Any]]) -> str:
     """Build the tool-independent cache prefix.
 
     ``tools`` remains in the signature for call-site compatibility, but tool
@@ -392,7 +392,7 @@ def _realtime_extras(
 
 def build_messages(  # noqa: PLR0913
     *,
-    persona: dict[str, str],
+    persona: dict[str, Any],
     tools: list[dict[str, Any]],
     context: dict[str, Any],
     user_prompt: str,
@@ -463,7 +463,7 @@ def build_messages(  # noqa: PLR0913
 
 def prompt_cache_key(
     *,
-    persona: dict[str, str],
+    persona: dict[str, Any],
     tools: list[dict[str, Any]],
     model: str,
     persona_version: int = 1,

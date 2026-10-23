@@ -1,4 +1,4 @@
-# ruff: noqa: F401, TC001, TID252
+# ruff: noqa: F401, TC001, TID252, E501
 """Split Agent WebUI route module."""
 
 
@@ -14,7 +14,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, status
 from nonebot import get_bots, logger
 from nonebot_plugin_orm import get_session
 from sqlalchemy import BigInteger, cast, exists, func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.bot_user import BotUser
@@ -57,14 +57,21 @@ from ..yawn_agent.memory import (
     record_memory_failure,
 )
 from ..yawn_agent.persona import (
-    apply_persona_editor_profile,
-    persona_behavior,
-    persona_behavior_draft,
-    persona_editor_profile,
-    persona_summary,
+    PersonaCard,
+    apply_persona_card,
+    persona_override_reason,
     reset_persona,
-    resolve_persona,
-    resolve_persona_draft,
+)
+from ..yawn_agent.persona_library import (
+    PersonaLibraryError,
+    create_template,
+    delete_template,
+    get_template,
+    list_templates,
+    refresh_global_persona,
+    serialize_template,
+    template_card,
+    update_template,
 )
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
@@ -86,7 +93,10 @@ from .route_models import (
     AgentDebugRunBody,
     MemoryCreateBody,
     MemoryPatchBody,
+    PersonaApplyTemplateBody,
     PersonaPatch,
+    PersonaTemplateCreateBody,
+    PersonaTemplatePatchBody,
     PrivacyPatchBody,
     RelationCreateBody,
     RelationPatchBody,
@@ -124,30 +134,35 @@ def _new_config(group_id: int) -> GroupAgentConfig:
     )
 
 
-@router.get("/agent/groups/{group_id}/persona")
-async def get_agent_persona(
-    group_id: int, _session: AdminReadSession
-) -> dict[str, Any]:
-    async with get_session() as db:
-        await require_group(db, group_id)
-        row = await db.get(GroupAgentConfig, group_id)
-        return ok(serialize_persona(row, group_id))
+def _require_safe_card(card: PersonaCard) -> None:
+    reason = persona_override_reason(card)
+    if reason is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"{reason}；人设只描述角色，系统规则不能被人设覆盖",
+        )
 
-@router.put("/agent/groups/{group_id}/persona")
-async def put_agent_persona(
-    group_id: int, body: PersonaPatch, _session: AdminWriteSession
+
+def _library_http_error(exc: PersonaLibraryError) -> HTTPException:
+    return HTTPException(exc.status, str(exc))
+
+
+async def _save_group_card(
+    group_id: int,
+    card: PersonaCard,
+    *,
+    version: str | None,
+    enabled: bool,
 ) -> dict[str, Any]:
     changed = False
     async with optimistic_write_lock, get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
-        check_version(row, body.version, version_of=persona_content_version)
+        check_version(row, version, version_of=persona_content_version)
         if row is None:
             row = _new_config(group_id)
             db.add(row)
-        mutation = apply_persona_editor_profile(
-            row, body.profile, enabled=body.enabled
-        )
+        mutation = apply_persona_card(row, card, enabled=enabled)
         if mutation.semantic_changed:
             row.persona_version = int(row.persona_version or 1) + 1
             changed = True
@@ -157,7 +172,45 @@ async def put_agent_persona(
         result = serialize_persona(row, group_id)
     if changed:
         await hub.notify_change("agent_persona", str(group_id), group_id=group_id)
-    return ok(result)
+    return result
+
+
+@router.get("/agent/groups/{group_id}/persona")
+async def get_agent_persona(
+    group_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
+    async with get_session() as db:
+        await require_group(db, group_id)
+        row = await db.get(GroupAgentConfig, group_id)
+        return ok(serialize_persona(row, group_id))
+
+
+@router.put("/agent/groups/{group_id}/persona")
+async def put_agent_persona(
+    group_id: int, body: PersonaPatch, _session: AdminWriteSession
+) -> dict[str, Any]:
+    _require_safe_card(body.card)
+    return ok(
+        await _save_group_card(
+            group_id, body.card, version=body.version, enabled=body.enabled
+        )
+    )
+
+
+@router.post("/agent/groups/{group_id}/persona/apply-template")
+async def apply_agent_persona_template(
+    group_id: int, body: PersonaApplyTemplateBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """复制人设库里的一张卡到本群，并切换为本群自定义。"""
+
+    async with get_session() as db:
+        try:
+            template = await get_template(db, body.template_id)
+        except PersonaLibraryError as exc:
+            raise _library_http_error(exc) from exc
+        card = template_card(template)
+    return ok(await _save_group_card(group_id, card, version=body.version, enabled=True))
+
 
 @router.delete("/agent/groups/{group_id}/persona")
 async def reset_agent_persona(
@@ -184,3 +237,97 @@ async def reset_agent_persona(
     if changed:
         await hub.notify_change("agent_persona", str(group_id), group_id=group_id)
     return ok(result)
+
+
+# ---------------------------------------------------------------- 人设库
+
+
+async def _library_changed(*, global_changed: bool) -> None:
+    # 人设库不属于某个群；人设页同时监听这个资源，全局人设变化时会自动刷新。
+    await hub.notify_change("agent_persona_library", "global" if global_changed else None)
+
+
+@router.get("/agent/persona-library")
+async def list_persona_library(_session: AdminReadSession) -> dict[str, Any]:
+    async with get_session() as db:
+        try:
+            rows = await list_templates(db)
+        except SQLAlchemyError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "人设库表不可用，请先执行数据库迁移（nb orm upgrade）",
+            ) from exc
+        return ok([serialize_template(row) for row in rows])
+
+
+@router.post("/agent/persona-library")
+async def create_persona_library_item(
+    body: PersonaTemplateCreateBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    _require_safe_card(body.card)
+    async with optimistic_write_lock, get_session() as db:
+        try:
+            row = await create_template(
+                db, name=body.name, card=body.card, is_global=body.is_global
+            )
+        except PersonaLibraryError as exc:
+            raise _library_http_error(exc) from exc
+        except IntegrityError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "人设库里已经有同名人设了") from exc
+        await db.commit()
+        await db.refresh(row)
+        result = serialize_template(row)
+        if body.is_global:
+            await refresh_global_persona(db)
+    await _library_changed(global_changed=body.is_global)
+    return ok(result)
+
+
+@router.patch("/agent/persona-library/{template_id}")
+async def patch_persona_library_item(
+    template_id: int, body: PersonaTemplatePatchBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    if body.card is not None:
+        _require_safe_card(body.card)
+    async with optimistic_write_lock, get_session() as db:
+        try:
+            before = await get_template(db, template_id)
+            was_global = bool(before.is_global)
+            row = await update_template(
+                db,
+                template_id,
+                version=body.version,
+                name=body.name,
+                card=body.card,
+                is_global=body.is_global,
+            )
+        except PersonaLibraryError as exc:
+            raise _library_http_error(exc) from exc
+        except IntegrityError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "人设库里已经有同名人设了") from exc
+        await db.commit()
+        await db.refresh(row)
+        result = serialize_template(row)
+        global_changed = was_global or bool(row.is_global)
+        if global_changed:
+            await refresh_global_persona(db)
+    await _library_changed(global_changed=global_changed)
+    return ok(result)
+
+
+@router.delete("/agent/persona-library/{template_id}")
+async def delete_persona_library_item(
+    template_id: int,
+    _session: AdminWriteSession,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+) -> dict[str, Any]:
+    async with optimistic_write_lock, get_session() as db:
+        try:
+            was_global = await delete_template(db, template_id, version=if_match)
+        except PersonaLibraryError as exc:
+            raise _library_http_error(exc) from exc
+        await db.commit()
+        if was_global:
+            await refresh_global_persona(db)
+    await _library_changed(global_changed=was_global)
+    return ok({"id": str(template_id), "deleted": True, "wasGlobal": was_global})

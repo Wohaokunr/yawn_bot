@@ -111,8 +111,9 @@ function debugResult(text: string, promptExtra = ""): AgentDebugResponse {
     persona: {
       source: "persisted",
       persistedSummary: "傲娇猫娘",
-      persistedProfile: {} as never,
-      appliedProfile: {} as never,
+      persistedSource: "本群自定义",
+      persistedCard: {} as never,
+      appliedCard: {} as never,
       persistedBehavior: { chattiness: 2 } as never,
       appliedBehavior: { chattiness: 2 } as never,
       persistedEmotion: {} as never,
