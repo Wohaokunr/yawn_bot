@@ -38,10 +38,10 @@ def upgrade(name: str = "") -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("name", sa.String(length=32), nullable=False),
         sa.Column("card", sa.JSON(), nullable=False),
-        sa.Column(
-            "is_global", sa.Boolean(), nullable=False, server_default=sa.false()
-        ),
-        sa.Column("revision", sa.Integer(), nullable=False, server_default="1"),
+        # 与模型保持一致：is_global/revision 只有 Python 侧默认值，不加
+        # server_default，否则启动时的 orm check 会判定 schema 漂移。
+        sa.Column("is_global", sa.Boolean(), nullable=False),
+        sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(),
