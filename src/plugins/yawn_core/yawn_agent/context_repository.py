@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 LOCAL_MEMORY_CANDIDATE_LIMIT = 260
 RECENT_MEMORY_DAYS = 21
+SHARED_SUMMARY_MAX_AGE_DAYS = 14
 MIN_MENTION_RELATION_EVIDENCE = 2
 
 
@@ -197,7 +198,12 @@ class AgentContextRepository:
                         AgentMemory.memory_key.startswith("public_daily:"),
                         AgentMemory.expires_at.is_not(None),
                         AgentMemory.expires_at >= now,
+                        # 只共享近期话题：两周前别的群聊过什么对当前对话几乎没有帮助。
+                        AgentMemory.updated_at
+                        >= now - timedelta(days=SHARED_SUMMARY_MAX_AGE_DAYS),
                         GroupAgentConfig.cross_group_visibility == "public_summary",
+                        # 来源群关掉 Agent 总开关后，它的摘要也不再外流。
+                        GroupAgentConfig.enabled.is_(True),
                     )
                     .order_by(AgentMemory.updated_at.desc())
                     .limit(20)

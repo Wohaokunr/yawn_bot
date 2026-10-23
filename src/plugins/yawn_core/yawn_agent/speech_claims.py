@@ -46,6 +46,12 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,12}}(?:发|传|上传)[^。！？!?\n]{{0,6}}(?:群文件|文件)|文件(?:已经|已)?(?:发|传|上传)(?:好|完)?(?:了|成功)"),
         frozenset({"send_file"}),
     ),
+    # 只核验"忘掉/删除记忆"：声称删了隐私数据却没删是隐私问题。"记住了"
+    # 不核验，被动整理任务本来就会从聊天里沉淀事实。
+    "forget": (
+        re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:忘掉|忘记|删掉|清除)[^。！？!?\n]{{0,8}}(?:记忆|资料|画像)|(?:忘掉|删掉|清除)(?:了|啦)[^。！？!?\n]{{0,6}}(?:记忆|资料)"),
+        frozenset({"forget_about_me"}),
+    ),
     "kick": (
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,12}}(?:踢出|踢了|移出群)"),
         frozenset({"kick_member"}),

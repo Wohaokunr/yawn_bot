@@ -336,6 +336,9 @@ export interface MemoryItem {
   createdAt?: string | null;
   updatedAt: string;
   expiresAt?: string | null;
+  /** 被注入 Prompt 或被工具检索命中的次数；访客投影不含此字段。 */
+  accessCount?: number;
+  lastAccessedAt?: string | null;
   /** 乐观锁版本（不透明字符串）；访客投影不含此字段。 */
   version?: string | null;
 }
@@ -357,6 +360,13 @@ export interface AgentMemoryStatus {
   lastError: string | null;
   consecutiveFailures: number;
   inFlight: boolean;
+  /** 以下为记忆召回/来源统计，旧后端可能缺省。 */
+  countsBySource?: Record<string, number>;
+  accessTotal?: number;
+  accessedMemories?: number;
+  expiringWithin7Days?: number;
+  weeklySummaries?: number;
+  pendingAccessFlush?: number;
 }
 
 // 有画像沉淀的成员概览（口径见后端 app.py get_memory_subjects）

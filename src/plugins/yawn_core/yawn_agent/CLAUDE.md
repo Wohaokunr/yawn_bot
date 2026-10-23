@@ -32,7 +32,7 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 发言 | `speech_format.py`（QQ 纯文本清洗）、`speech_claims.py`（完成声明核验）、`speech.py`、`speech_act.py`、`speech_policy.py`、`speech_native.py`、`speech_quality.py`、`speech_scorecard.py`、`speech_runtime.py`、`speech_finalize.py` |
 | 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限）、`safe_download.py`（出站下载白名单与重定向校验） |
 | 主动与短会话 | `proactive.py`、`proactive_policy.py`、`conversation.py` |
-| 记忆 | `memory.py` |
+| 记忆 | `memory.py`（整理、排序、治理）、`memory_hygiene.py`（脱敏/注入/敏感类别/近似去重）、`memory_retrieval.py`（工具检索）、`memory_access.py`（召回计数缓冲）、`memory_consolidation.py`（周摘要）、`memory_self.py`（成员自助记住/忘掉） |
 | 媒体 | `media.py`、`media_context.py`、`media_provider.py`、`media_store.py`、`media_caption.py` |
 | 诊断 | `execution_trace.py` |
 | 本地测试 | `tests/test_context_and_parser.py`（大部分 Agent 测试在仓库根 `tests/test_agent_*.py`） |

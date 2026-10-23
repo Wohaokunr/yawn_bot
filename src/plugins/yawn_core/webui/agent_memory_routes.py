@@ -47,7 +47,7 @@ from ..yawn_agent.execution_trace import (
     trace_event,
 )
 from ..yawn_agent.memory import (
-    compact_group_memory,
+    compact_group_memory_backlog,
     delete_group_memories,
     delete_member_memories,
     is_memory_compacting,
@@ -55,6 +55,7 @@ from ..yawn_agent.memory import (
     rebuild_group_memories,
     record_memory_failure,
 )
+from ..yawn_agent.memory_hygiene import looks_like_instruction
 from ..yawn_agent.persona import (
     apply_persona_editor_profile,
     persona_behavior,
@@ -111,6 +112,17 @@ from .service import (
 
 router = APIRouter(prefix=API_PATH)
 _compact_inflight: set[int] = set()
+_REBUILD_MAX_BATCHES = 20
+
+
+def _reject_instruction_content(content: str) -> None:
+    """记忆会进入 Agent Prompt；像指令的内容应写进人设而不是记忆。"""
+
+    if looks_like_instruction(content):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "记忆内容看起来是给机器人的指令，请改到人设配置中",
+        )
 _bg_tasks: set[asyncio.Task[Any]] = set()
 
 
@@ -347,7 +359,7 @@ async def get_memory_status(
 async def _run_manual_compact(group_id: int) -> None:
     try:
         async with get_session() as db:
-            await compact_group_memory(db, group_id)
+            await compact_group_memory_backlog(db, group_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("WebUI 手动记忆整理失败: %s", group_id)
         try:
@@ -367,7 +379,10 @@ async def _run_manual_rebuild(group_id: int) -> None:
         async with get_session() as db:
             await rebuild_group_memories(db, group_id)
         async with get_session() as db:
-            await compact_group_memory(db, group_id)
+            # 重建会把全部存量原文重新入队，手动触发时多推进一些批次。
+            await compact_group_memory_backlog(
+                db, group_id, max_batches=_REBUILD_MAX_BATCHES
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("WebUI 手动记忆重建失败: %s", group_id)
         try:
@@ -416,6 +431,7 @@ async def trigger_memory_rebuild(
 async def create_memory(
     group_id: int, body: MemoryCreateBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
+    _reject_instruction_content(body.content)
     async with get_session() as db:
         await require_group(db, group_id)
         now = now_beijing()
@@ -477,7 +493,13 @@ async def update_memory(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "记忆不存在")
         check_version(row, body.version, version_of=memory_version)
         if "content" in updates:
-            row.content = str(updates["content"]).strip()
+            _reject_instruction_content(str(updates["content"]))
+            new_content = str(updates["content"]).strip()
+            if new_content != str(row.content or "") and row.source_kind != "manual":
+                # 管理员改过的自动/自述条目转为手工维护，否则下一次自动整理
+                # 会把人工更正悄悄覆盖回去。
+                row.source_kind = "manual"
+            row.content = new_content
         if "salience" in updates:
             row.salience = float(updates["salience"])
         if "confidence" in updates:

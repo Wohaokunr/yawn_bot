@@ -14,6 +14,12 @@ import { MemoryEditDrawer, type MemoryFormValues } from "./MemoryEditDrawer";
 
 const { Text, Paragraph } = Typography;
 
+function memorySourceLabel(kind: string): string {
+  if (kind === "manual") return "手工";
+  if (kind === "agent") return "本人自述";
+  return "自动";
+}
+
 export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; readOnly?: boolean }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -167,6 +173,7 @@ export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; 
         <Col xs={24} md={12}><Card size="small"><div className="ag-stat-line">
           <Space wrap size={[8, 8]}>{Object.entries(status?.countsByType ?? {}).map(([type, count]) => <Tag key={type} color={MEMORY_TYPE_META[type]?.color}>{memoryTypeLabel(type)} × {count}</Tag>)}{status && Object.keys(status.countsByType).length === 0 && <Text type="secondary">暂无记忆</Text>}</Space>
           <Text type="secondary">最后成功：{status?.lastSuccessAt ? formatTime(status.lastSuccessAt) : "尚未整理"}</Text>
+          {status?.accessTotal !== undefined && <Text type="secondary">累计召回 {status.accessTotal} 次 · 被用到过 {status.accessedMemories ?? 0} 条 · 周摘要 {status.weeklySummaries ?? 0} 条 · 7 天内到期 {status.expiringWithin7Days ?? 0} 条</Text>}
         </div></Card></Col>
       </Row>
       {status && !status.runtimeEnabled && <Alert type="info" showIcon message="Agent 总开关已关闭，自动记忆已暂停" description="新群消息不会进入 Agent 记忆采集，定时整理也不会运行；已有记忆仍可查看、导出或手工维护。" className="section-alert" />}
@@ -194,7 +201,8 @@ export function MemoriesPanel({ groupId, readOnly = false }: { groupId: string; 
             { title: "置信度", width: 150, render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" /> },
             { title: "更新时间", dataIndex: "updatedAt", width: 180, render: formatTime },
           ] : [
-            { title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {row.sourceKind === "manual" ? "手工" : "自动"}</Text></> },
+            { title: "记忆", render: (_, row: MemoryItem) => <><Text strong>{row.key}</Text><br /><Tag color={MEMORY_TYPE_META[row.type]?.color}>{memoryTypeLabel(row.type)}</Tag><Text type="secondary"> · {row.visibility} · {memorySourceLabel(row.sourceKind)}</Text></> },
+            { title: "召回", width: 110, render: (_, row: MemoryItem) => <Text type="secondary" title={row.lastAccessedAt ? `最后召回 ${formatTime(row.lastAccessedAt)}` : "尚未被召回"}>{row.accessCount ?? 0} 次</Text> },
             { title: "成员", dataIndex: "subjectUserId", render: (value?: string) => value ? <Button type="link" size="small" style={{ padding: 0 }} disabled={query.stale} onClick={() => openProfile(value)}>{value}</Button> : "群级" },
             { title: "权重", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.salience * 100)} size="small" /> },
             { title: "置信度", render: (_, row: MemoryItem) => <Progress percent={Math.round(row.confidence * 100)} size="small" strokeColor="var(--ant-color-success)" /> },

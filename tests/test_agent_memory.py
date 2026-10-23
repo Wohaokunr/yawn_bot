@@ -1568,9 +1568,12 @@ async def test_search_group_memory_reranks_substring_candidates() -> None:
                     visibility="group",
                     expires_at=NOW + timedelta(days=30),
                 ),
+                # 证据 id 是库内行 id（整理任务写入的口径），与 OneBot
+                # message_id 不同；工具必须按行 id 回填图片。
                 message_models.GroupAgentMessage(
+                    id=555,
                     bot_id=9,
-                    message_id=555,
+                    message_id=9001,
                     group_id=100,
                     user_id=12345,
                     sender_name="测试用户",
@@ -1637,7 +1640,7 @@ async def test_search_group_memory_reranks_substring_candidates() -> None:
         assert result[0]["content"] == "刚整理的爬山计划"
         assert result[0]["media_types"] == ["image"]
         assert result[0]["_agent_media_refs"][0]["asset_id"] == 77
-        assert result[0]["_agent_media_refs"][0]["source_message_id"] == 555
+        assert result[0]["_agent_media_refs"][0]["source_message_id"] == 9001
     await engine.dispose()
 
 

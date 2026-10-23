@@ -18,8 +18,10 @@ export const PROFILE_KEY_META: Record<string, string> = {
   preferred_address: "偏好称呼",
   hobby: "爱好",
   preference: "偏好",
+  dislike: "不喜欢",
   skill: "技能",
   recurring_topic: "常聊话题",
+  current_status: "近期状态",
 };
 
 export function profileKeyLabel(key: string): string {

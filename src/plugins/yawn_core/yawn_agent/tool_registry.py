@@ -214,7 +214,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "search_group_memory",
-        "搜索当前群已沉淀的记忆（默认6条，最多10条）",
+        "按关键词或自然语言问题搜索当前群已沉淀的记忆，结果按相关性排序并去重（默认6条，最多10条）",
         {
             "query": {"type": "string", "minLength": 1, "maxLength": 120},
             "limit": {"type": "integer", "minimum": 1, "maximum": 10},
@@ -267,6 +267,53 @@ TOOL_DEFINITIONS = (
         permission_level=TOOL_PERMISSION_STATE_WRITE,
         family="profile",
         keywords=("记录关系", "记住关系", "我们是", "是我朋友", "是我对象", "是我同事", "是我同学", "是我搭子", "是我死党", "是我伴侣"),
+    ),
+    ToolDefinition(
+        "remember_about_me",
+        "按调用者本人的明确要求记住关于他自己的一条事实（只能写调用者自己的资料）；敏感信息和联系方式会被拒绝",
+        {
+            "key": {
+                "type": "string",
+                "enum": [
+                    "display_name",
+                    "preferred_address",
+                    "hobby",
+                    "preference",
+                    "dislike",
+                    "skill",
+                    "current_status",
+                ],
+                "description": "display_name昵称/preferred_address希望的称呼/hobby爱好/preference喜好/dislike讨厌的/skill技能/current_status近期状态（两周后遗忘）",
+            },
+            "content": {"type": "string", "minLength": 1, "maxLength": 100},
+        },
+        required=("key", "content"),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="memory",
+        keywords=("记住我", "记一下我", "帮我记", "别忘了我", "以后叫我", "以后喊我", "我的爱好是", "我最近在"),
+    ),
+    ToolDefinition(
+        "forget_about_me",
+        "按调用者本人的要求忘掉关于他自己的记忆；可按类别或关键词只删一部分，不提供则清除全部自身画像",
+        {
+            "key": {
+                "type": "string",
+                "enum": [
+                    "display_name",
+                    "preferred_address",
+                    "hobby",
+                    "preference",
+                    "dislike",
+                    "skill",
+                    "recurring_topic",
+                    "current_status",
+                ],
+            },
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 40},
+        },
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="memory",
+        keywords=("忘掉我", "忘了我", "别记", "不要记", "删掉我的", "删除我的记忆"),
     ),
     ToolDefinition(
         "search_reactions",

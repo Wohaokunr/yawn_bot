@@ -45,12 +45,14 @@ from .execution_trace import (
 )
 from .log import dbg, dbg_exc
 from .memory import (
-    compact_group_memory,
+    compact_group_memory_backlog,
     decay_stale_relations,
     memory_retry_due,
     record_memory_failure,
 )
 from .media import cleanup_media_cache
+from .memory_access import flush_access
+from .memory_consolidation import consolidate_weekly_summaries
 from .persona import persona_behavior, resolve_persona
 from .speech import SpeechPlan, speech_plan_from_segments, speech_plan_from_text
 from .speech_finalize import apply_speech_topic
@@ -1122,7 +1124,8 @@ async def _compact_one(group_id: int, now: datetime) -> None:
             ):
                 dbg(f"群 {group_id} 记忆整理跳过: Agent 总开关已关闭")
                 return
-            await compact_group_memory(session, group_id, now=now)
+            # 重建或离线后积压较多时，一次调度内连续推进多个批次。
+            await compact_group_memory_backlog(session, group_id, now=now)
     except Exception as exc:  # noqa: BLE001
         logger.exception("群 %s Agent 记忆整理失败", group_id)
         dbg_exc(f"群 {group_id} 定时记忆整理异常")
@@ -1143,6 +1146,15 @@ async def _compact_one(group_id: int, now: datetime) -> None:
 async def _compact_tick(*, force: bool = False, cleanup: bool = False) -> None:
     """按数量或最老消息年龄触发近实时整理；每日任务强制扫尾。"""
 
+    try:
+        async with get_session() as session:
+            flushed = await flush_access(session, now=now_beijing())
+            if flushed:
+                await session.commit()
+                dbg(f"记忆召回计数落库: {flushed} 条")
+    except Exception:  # noqa: BLE001
+        # 召回计数只是排序/续期信号，失败不能阻断整理。
+        logger.exception("Agent 记忆召回计数落库失败")
     async with get_session() as session:
         group_ids = await list_agent_group_ids(session)
     due: list[int] = []
@@ -1154,6 +1166,21 @@ async def _compact_tick(*, force: bool = False, cleanup: bool = False) -> None:
     if due:
         await asyncio.gather(*(_compact_one(group_id, now_beijing()) for group_id in due))
     if cleanup:
+        for group_id in group_ids:
+            try:
+                async with get_session() as session:
+                    config = await session.get(GroupAgentConfig, group_id)
+                    if config is None or not await agent_runtime_enabled(
+                        session, group_id, config=config
+                    ):
+                        continue
+                    merged = await consolidate_weekly_summaries(
+                        session, group_id, now=now_beijing()
+                    )
+                    if merged:
+                        dbg(f"群 {group_id} 周摘要合并: {merged} 周")
+            except Exception:  # noqa: BLE001
+                logger.exception("群 %s Agent 周摘要合并失败", group_id)
         try:
             async with get_session() as session:
                 # 每日一次把沉寂超过 90 天的自动关系边置信度衰减落库，
