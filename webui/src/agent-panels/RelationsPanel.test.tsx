@@ -81,7 +81,7 @@ describe("RelationsPanel drawer focus", () => {
     );
 
     expect(await screen.findByText("常聊天")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "新增关系边" }));
+    fireEvent.click(screen.getByRole("button", { name: /新增关系边/ }));
 
     await waitFor(() => {
       const firstInput = document.querySelector<HTMLElement>(".relations-create-drawer input");

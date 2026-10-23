@@ -282,6 +282,12 @@ class RelationCreateBody(BaseModel):
     confidence: float = Field(default=0.9, ge=0, le=1)
 
 
+class RelationBatchDeleteBody(BaseModel):
+    """批量删除关系边，单次最多 200 条，防止误操作清空整群。"""
+
+    ids: list[Annotated[int, Field(gt=0)]] = Field(min_length=1, max_length=200)
+
+
 class RelationPatchBody(BaseModel):
     """只允许改备注与置信度；类型/两端属于边身份，改动请删除后重建。"""
 
