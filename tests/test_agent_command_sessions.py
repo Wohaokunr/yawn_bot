@@ -242,10 +242,10 @@ async def test_agent_persona_session_previews_before_commit(
     monkeypatch.setattr(commands.agent_persona, "finish", fake_finish)
     monkeypatch.setattr(commands, "_commit", fake_commit)
 
-    await commands.handle_agent_persona_input(event, matcher, object(), "微调说话风格")
-    assert matcher.state["agent_persona_step"] == "style_trait"
+    await commands.handle_agent_persona_input(event, matcher, object(), "调档位")
+    assert matcher.state["agent_persona_step"] == "trait"
 
-    await commands.handle_agent_persona_input(event, matcher, object(), "温和程度")
+    await commands.handle_agent_persona_input(event, matcher, object(), "温度")
     assert matcher.state["agent_persona_step"] == "trait_value"
 
     await commands.handle_agent_persona_input(event, matcher, object(), "4")
@@ -256,8 +256,8 @@ async def test_agent_persona_session_previews_before_commit(
     assert "修改后：4/4（很温暖）" in str(prompts[-1][1])
 
     await commands.handle_agent_persona_input(event, matcher, object(), "确认保存")
-    assert config.persona_profile["voice"]["warmth"] == 4  # noqa: PLR2004
-    assert config.persona_profile["preset_id"] == "natural"
+    assert config.persona_profile["warmth"] == 4  # noqa: PLR2004
+    assert config.persona_profile["schema_version"] == 3  # noqa: PLR2004
     assert commits == 1
     assert finishes and "已保存" in str(finishes[-1][0])
 

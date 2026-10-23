@@ -2,6 +2,7 @@ import {
   Alert, App as AntApp, Button, Card, Col, Descriptions, Form, Input, Popconfirm,
   Progress, Row, Segmented, Select, Space, Spin, Switch, Tag, Typography,
 } from "antd";
+import { MinusCircleOutlined, PlusOutlined } from "@ant-design/icons";
 import { useRef, useState } from "react";
 import { TraceCompareView } from "../agent-debug/ResultDiff";
 import { api, ApiError } from "../api";
@@ -12,25 +13,30 @@ import {
   ServerDraftUpdateAlert,
   useApiQuery,
   useDraftSafeServerData,
+  useEntityRefresh,
   useUnsavedChanges,
 } from "../shared";
-import type { AgentDebugResponse, Persona, PersonaProfile } from "../types";
+import type { AgentDebugResponse, Persona, PersonaCard } from "../types";
 import {
+  PERSONA_LIMITS,
   PERSONA_SOCIAL_TRAITS,
-  PERSONA_STYLE_TRAITS,
   PERSONA_TRAIT_META,
   PERSONA_TRIAL_SCENARIOS,
+  PERSONA_VOICE_TRAITS,
+  cleanPersonaCard,
   mergePersonaPreset,
   personaBehaviorPreview,
   personaDraftSummary,
   personaEmotionExpressionPreview,
+  personaTraitLabel,
 } from "../agent-meta";
 import type { PersonaFormValues, PersonaTraitKey } from "../agent-meta";
+import { PersonaLibrary } from "./PersonaLibrary";
 
 const { Text, Paragraph } = Typography;
 
 export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const [form] = Form.useForm<PersonaFormValues>();
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -46,18 +52,20 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const [trialBaseline, setTrialBaseline] = useState<AgentDebugResponse | null>(null);
   const [trialError, setTrialError] = useState<string | null>(null);
   const watchedMode = Form.useWatch("mode", form) as PersonaFormValues["mode"] | undefined;
-  const watchedProfile = Form.useWatch("profile", form) as PersonaProfile | undefined;
+  const watchedCard = Form.useWatch("card", form) as PersonaCard | undefined;
   const query = useApiQuery({
     queryKey: ["agent-persona", groupId],
     fetcher: (signal) => api<Persona>(`/agent/groups/${groupId}/persona`, { signal }).then((r) => r.data),
     invalidation: { resources: ["agent_persona"], scope: { groupId } },
   });
+  // 全局人设在人设库里变化时，跟随全局的群实际生效的人设也随之变化。
+  useEntityRefresh(query.reload, ["agent_persona_library"]);
   useUnsavedChanges(dirty);
 
   const serverState = useDraftSafeServerData(query.data, dirty, (value) => {
     form.setFieldsValue({
       mode: value.enabled ? "custom" : "inherit",
-      profile: value.profile,
+      card: value.card,
     });
     baseVersion.current = value.version ?? undefined;
     setDirty(false);
@@ -68,20 +76,34 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;
 
-  const profile = watchedProfile ?? data.profile;
+  const card = { ...data.card, ...watchedCard };
   const mode = watchedMode ?? (data.enabled ? "custom" : "inherit");
-  const draftSummary = personaDraftSummary(profile, data.presets);
-  const draftBehavior = personaBehaviorPreview(profile);
-  const draftEmotionExpression = personaEmotionExpressionPreview(data.emotion, profile.expressiveness);
-  const selectedPreset = data.presets.find((item) => item.id === profile.presetId) ?? data.presets[0];
+  const draftSummary = personaDraftSummary(card, data.presets);
+  const draftBehavior = personaBehaviorPreview(card);
+  const draftEmotionExpression = personaEmotionExpressionPreview(data.emotion, card.expressiveness);
+  const selectedPreset = data.presets.find((item) => item.id === card.presetId);
+  const draftCard = (): PersonaCard => cleanPersonaCard({ ...data.card, ...(form.getFieldValue("card") as PersonaCard) });
 
   const applyPreset = (presetId: string) => {
     const preset = data.presets.find((item) => item.id === presetId);
     if (!preset) return;
-    const current = form.getFieldValue("profile") as PersonaProfile;
-    form.setFieldsValue({ profile: mergePersonaPreset(current, preset) });
-    setDirty(true);
-    setTrialResult(null);
+    const apply = () => {
+      form.setFieldsValue({ card: mergePersonaPreset(draftCard(), preset) });
+      setDirty(true);
+      setTrialResult(null);
+    };
+    // 模板会替换性格、口癖和档位；已有未保存修改时先确认，避免一下点没了。
+    if (!dirty) {
+      apply();
+      return;
+    }
+    modal.confirm({
+      title: `套用「${preset.label}」？`,
+      content: "会替换当前草稿里的性格、说话方式、口癖和档位（名字保留）。",
+      okText: "套用",
+      cancelText: "取消",
+      onOk: apply,
+    });
   };
 
   const save = async (values: PersonaFormValues) => {
@@ -92,7 +114,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
         body: JSON.stringify({
           version: baseVersion.current ?? null,
           enabled: values.mode === "custom",
-          profile: values.profile,
+          card: cleanPersonaCard({ ...data.card, ...values.card }),
         }),
       });
       serverState.acceptServerData(result.data);
@@ -140,7 +162,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
       message.warning("请输入试演消息");
       return;
     }
-    const draft = form.getFieldValue("profile") as PersonaProfile;
+    const draft = draftCard();
     setTrialRunning(true);
     setTrialError(null);
     try {
@@ -165,7 +187,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
 
   const renderTrait = (key: PersonaTraitKey) => {
     const meta = PERSONA_TRAIT_META[key];
-    const value = Number(profile[key] ?? 0);
+    const value = Number(card[key] ?? 0);
     return (
       <div className="persona-trait-card" key={key}>
         <div className="persona-trait-head">
@@ -173,12 +195,12 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
             <strong>{meta.label}</strong>
             <span>{meta.help}</span>
           </div>
-          <Tag>{value}/4 · {meta.levels[value]}</Tag>
+          <Tag>{value}/4 · {personaTraitLabel(key, value)}</Tag>
         </div>
-        <Form.Item name={["profile", key]} noStyle>
+        <Form.Item name={["card", key]} noStyle>
           <Segmented
             block
-            options={meta.levels.map((label, level) => ({ value: level, label: `${level} ${label}` }))}
+            options={meta.levels.map((label, level) => ({ value: level, label: <span title={label}>{level}</span> }))}
           />
         </Form.Item>
       </div>
@@ -205,7 +227,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
           open={diffOpen}
           draft={{
             enabled: form.getFieldValue("mode") === "custom",
-            profile: form.getFieldValue("profile"),
+            card: form.getFieldValue("card"),
           }}
           server={serverState.remoteUpdate}
           onClose={() => setDiffOpen(false)}
@@ -213,18 +235,18 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
 
         <section className="persona-config-hero agent-studio-hero liquid-glass agent-config-floating">
           <div className="persona-config-hero-copy">
-            <div className="persona-config-eyebrow">PERSONA STUDIO · V2</div>
+            <div className="persona-config-eyebrow">PERSONA STUDIO · V3</div>
             <div className="persona-config-title-row">
               <div>
                 <h2>当前群人设</h2>
-                <p>先选一个角色模板，再用少量可理解的特征微调。事实、隐私、权限与工具安全不属于人设，始终由系统策略强制执行。</p>
+                <p>选一个模板或从人设库套用，再改名字、自称、口癖和几个档位。事实、隐私、权限与工具安全不属于人设，始终由系统策略强制执行。</p>
               </div>
               <SaveStatus dirty={dirty} saving={saving} />
             </div>
             <div className="persona-config-metrics">
-              <div className="persona-config-metric"><span>当前模板</span><strong>{selectedPreset?.label ?? "自然群友"}</strong></div>
-              <div className="persona-config-metric"><span>说话风格</span><strong>{PERSONA_TRAIT_META.warmth.levels[profile.warmth]}</strong></div>
-              <div className="persona-config-metric"><span>社交倾向</span><strong>{PERSONA_TRAIT_META.sociability.levels[profile.sociability]}</strong></div>
+              <div className="persona-config-metric"><span>草稿模板</span><strong>{selectedPreset?.label ?? "自定义"}</strong></div>
+              <div className="persona-config-metric"><span>正在生效</span><strong>{data.sourceLabel}</strong></div>
+              <div className="persona-config-metric"><span>人设 Prompt</span><strong>{data.promptTokens}/{data.promptTokenLimit} tokens</strong></div>
               <div className="persona-config-metric persona-config-metric-wide"><span>模式</span><strong>{mode === "custom" ? "当前群自定义" : "跟随全局"}</strong></div>
             </div>
           </div>
@@ -246,8 +268,8 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
             className="section-alert"
             type="info"
             showIcon
-            message="当前 Agent 正在跟随全局人设"
-            description="你仍然可以编辑和试演下面的草稿；只有切换到“当前群自定义”并保存后，草稿才会参与真实群聊。"
+            message={`当前群正在使用：${data.globalLabel}（${data.globalSummary}）`}
+            description="你仍然可以编辑和试演下面的草稿；只有切换到“当前群自定义”并保存后，草稿才会参与真实群聊。全局人设在下方人设库里设置。"
           />
         )}
 
@@ -255,7 +277,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
           <div className="persona-config-main">
             <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
-                <div><div className="persona-config-section-kicker">PRESET</div><h3>角色模板</h3><p>模板给出一套完整起点，选择后仍可继续微调；不会改变系统安全规则。</p></div>
+                <div><div className="persona-config-section-kicker">PRESET</div><h3>角色模板</h3><p>模板给出一套完整起点（性格、说话方式、口癖和档位），套用后保留名字，其余都能继续改。</p></div>
                 <Tag>{data.presets.length} 个模板</Tag>
               </div>
               <div className="persona-preset-grid">
@@ -263,7 +285,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                   <button
                     type="button"
                     key={preset.id}
-                    className={`persona-preset-card${profile.presetId === preset.id ? " is-selected" : ""}`}
+                    className={`persona-preset-card${card.presetId === preset.id ? " is-selected" : ""}`}
                     onClick={() => applyPreset(preset.id)}
                   >
                     <strong>{preset.label}</strong>
@@ -275,38 +297,73 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
 
             <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
-                <div><div className="persona-config-section-kicker">IDENTITY</div><h3>它是谁</h3><p>这里只保留真正需要文字表达的身份信息，不要求你写 Prompt。</p></div>
+                <div><div className="persona-config-section-kicker">IDENTITY</div><h3>它是谁</h3><p>名字、自称和对群友的称呼会直接进入人设；留空就用自然说法。</p></div>
               </div>
               {/* presetId 由预设卡片写入；必须注册字段，否则 onFinish 会丢弃它。 */}
-              <Form.Item name={["profile", "presetId"]} hidden><Input /></Form.Item>
+              <Form.Item name={["card", "presetId"]} hidden><Input /></Form.Item>
               <Row gutter={[16, 0]}>
-                <Col xs={24} md={8}><Form.Item name={["profile", "name"]} label="名字" rules={[{ required: true, message: "请输入名字" }]}><Input maxLength={64} showCount /></Form.Item></Col>
-                <Col xs={24} md={16}><Form.Item name={["profile", "groupRole"]} label="群内角色"><Input maxLength={240} showCount placeholder="例如：普通群友" /></Form.Item></Col>
+                <Col xs={24} md={8}><Form.Item name={["card", "name"]} label="名字" rules={[{ required: true, whitespace: true, message: "请输入名字" }]}><Input maxLength={PERSONA_LIMITS.name} showCount /></Form.Item></Col>
+                <Col xs={12} md={8}><Form.Item name={["card", "selfName"]} label="自称" tooltip="例如“本喵”；留空则正常用“我”"><Input maxLength={PERSONA_LIMITS.alias} showCount placeholder="我" /></Form.Item></Col>
+                <Col xs={12} md={8}><Form.Item name={["card", "userTitle"]} label="称呼群友" tooltip="例如“杂鱼”；留空则叫群名片"><Input maxLength={PERSONA_LIMITS.alias} showCount placeholder="群名片" /></Form.Item></Col>
               </Row>
-              <Form.Item name={["profile", "identity"]} label="身份定位"><Input.TextArea maxLength={240} showCount autoSize={{ minRows: 2, maxRows: 5 }} placeholder="例如：熟悉群聊节奏、自然简洁的普通群友" /></Form.Item>
+              <Form.Item name={["card", "identity"]} label="一句话身份"><Input maxLength={PERSONA_LIMITS.identity} showCount placeholder="例如：嘴硬心软、很护食的猫娘群友" /></Form.Item>
+              <Form.Item name={["card", "personality"]} label="性格"><Input.TextArea maxLength={PERSONA_LIMITS.longText} showCount autoSize={{ minRows: 2, maxRows: 6 }} placeholder="例如：表面嫌弃，其实很在意大家；被夸会害羞" /></Form.Item>
+              <Form.Item name={["card", "speakingStyle"]} label="说话方式"><Input.TextArea maxLength={PERSONA_LIMITS.longText} showCount autoSize={{ minRows: 2, maxRows: 6 }} placeholder="例如：短句口语，偶尔句尾带“喵”，不用列表" /></Form.Item>
             </section>
 
             <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
-                <div><div className="persona-config-section-kicker">VOICE</div><h3>怎么说话</h3><p>用 0–4 档位微调常见表达特征，避免自由文本互相打架。</p></div>
+                <div><div className="persona-config-section-kicker">FLAVOR</div><h3>口癖与话题</h3><p>回车添加一条。口癖会被提示“偶尔用”，不会每句都带。</p></div>
               </div>
-              <div className="persona-trait-grid">{PERSONA_STYLE_TRAITS.map(renderTrait)}</div>
+              <Row gutter={[16, 0]}>
+                <Col xs={24} md={8}><Form.Item name={["card", "catchphrases"]} label={`口癖（最多 ${PERSONA_LIMITS.catchphrases} 条）`}><Select mode="tags" open={false} maxCount={PERSONA_LIMITS.catchphrases} tokenSeparators={["，", ",", "、"]} placeholder="喵、哼" /></Form.Item></Col>
+                <Col xs={24} md={8}><Form.Item name={["card", "likes"]} label={`喜欢的话题（最多 ${PERSONA_LIMITS.topics} 条）`}><Select mode="tags" open={false} maxCount={PERSONA_LIMITS.topics} tokenSeparators={["，", ",", "、"]} placeholder="小鱼干、游戏" /></Form.Item></Col>
+                <Col xs={24} md={8}><Form.Item name={["card", "avoidTopics"]} label={`避开的话题（最多 ${PERSONA_LIMITS.topics} 条）`}><Select mode="tags" open={false} maxCount={PERSONA_LIMITS.topics} tokenSeparators={["，", ",", "、"]} placeholder="政治" /></Form.Item></Col>
+              </Row>
+              <Form.List name={["card", "examples"]}>
+                {(fields, { add, remove }) => (
+                  <div className="persona-example-list">
+                    <Text strong>示例台词</Text>
+                    <Text type="secondary"> · 给模型看语气用，不会被原样复读</Text>
+                    {fields.map((field) => (
+                      <div className="persona-example-row" key={field.key}>
+                        <Form.Item name={field.name} noStyle><Input maxLength={PERSONA_LIMITS.exampleLength} placeholder="哼，本喵才不是特意等你的" /></Form.Item>
+                        <Button type="text" aria-label="删除这句" icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+                      </div>
+                    ))}
+                    {fields.length < PERSONA_LIMITS.examples && (
+                      <Button type="dashed" icon={<PlusOutlined />} onClick={() => add("")} block>添加示例台词</Button>
+                    )}
+                  </div>
+                )}
+              </Form.List>
             </section>
 
             <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
-                <div><div className="persona-config-section-kicker">SOCIAL</div><h3>怎么参与群聊</h3><p>这些倾向会直接参与主动候选、短会话续聊和主动 reaction 决策；“运行设置”的开关、概率、冷却和每日上限始终是硬边界。</p></div>
+                <div><div className="persona-config-section-kicker">VOICE</div><h3>怎么说话</h3><p>用 0–4 档位微调常见表达特征。</p></div>
+              </div>
+              <div className="persona-trait-grid">{PERSONA_VOICE_TRAITS.map(renderTrait)}</div>
+            </section>
+
+            <section className="persona-config-section liquid-glass agent-config-floating">
+              <div className="persona-config-section-head">
+                <div><div className="persona-config-section-kicker">SOCIAL</div><h3>怎么参与群聊</h3><p>活跃度同时决定主动候选和自动续聊次数；“运行设置”的开关、概率、冷却和每日上限始终是硬边界。</p></div>
               </div>
               <div className="persona-trait-grid">{PERSONA_SOCIAL_TRAITS.map(renderTrait)}</div>
             </section>
 
             <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
-                <div><div className="persona-config-section-kicker">NOTES</div><h3>自定义补充</h3><p>只写模板和档位无法表达的角色细节。不要在这里重复隐私、知识或工具安全规则。</p></div>
+                <div><div className="persona-config-section-kicker">LIBRARY</div><h3>人设库</h3><p>把调好的人设存起来给其它群一键套用；设为全局的那张会被所有“跟随全局”的群使用。</p></div>
               </div>
-              <Form.Item name={["profile", "customNotes"]}>
-                <Input.TextArea maxLength={240} showCount autoSize={{ minRows: 3, maxRows: 6 }} placeholder="例如：喜欢偶尔用“好困”自嘲，但不要每条消息都提。" />
-              </Form.Item>
+              <PersonaLibrary
+                groupId={groupId}
+                draft={draftCard}
+                version={() => baseVersion.current}
+                dirty={dirty}
+                onApplied={(persona) => { serverState.acceptServerData(persona); query.reload(); }}
+              />
             </section>
 
             <section className="persona-config-section persona-trial-section liquid-glass agent-config-floating">
@@ -345,8 +402,8 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                     {trialBaseline && <Button size="small" onClick={() => setTrialBaseline(null)}>清除基准</Button>}
                   </Space>}>
                   <Descriptions size="small" column={{ xs: 1, md: 2 }} items={[
-                    { key: "saved", label: "当前已保存", children: trialResult.persona.persistedSummary },
-                    { key: "draft", label: "本次草稿", children: personaDraftSummary(trialResult.persona.appliedProfile, data.presets) },
+                    { key: "saved", label: "当前生效", children: `${trialResult.persona.persistedSource ? `${trialResult.persona.persistedSource} · ` : ""}${trialResult.persona.persistedSummary}` },
+                    { key: "draft", label: "本次草稿", children: personaDraftSummary(trialResult.persona.appliedCard, data.presets) },
                     { key: "behavior", label: "本次行为", children: `主动候选 ×${trialResult.persona.appliedBehavior.activeProbabilityScale.toFixed(2)} · 自动续聊 ${Math.max(0, trialResult.persona.appliedBehavior.maxFollowupBotTurns - 1)} 次 · 主动 reaction ${trialResult.persona.appliedBehavior.allowSpontaneousReaction ? "允许" : "关闭"}` },
                     { key: "emotion", label: "动态情绪", children: `${trialResult.persona.appliedEmotion.displayLabel} · 状态强度 ${Math.round(trialResult.persona.appliedEmotion.intensity * 100)}% · 表达 ${Math.round(trialResult.persona.appliedEmotion.expressionIntensity * 100)}%` },
                     { key: "prompt", label: "Prompt", children: `${trialResult.promptVersion} · ${trialResult.promptMessages.length} 条消息` },
@@ -365,12 +422,11 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
             <div className="persona-note-card liquid-glass agent-config-floating">
               <div className="persona-note-title">当前草稿</div>
               <strong className="persona-draft-summary">{draftSummary}</strong>
-              <p>{profile.identity}</p>
+              {card.identity && <p>{card.identity}</p>}
               <div className="persona-summary-tags">
-                <Tag>{PERSONA_TRAIT_META.directness.levels[profile.directness]}</Tag>
-                <Tag>{PERSONA_TRAIT_META.expressiveness.levels[profile.expressiveness]}</Tag>
-                <Tag>{PERSONA_TRAIT_META.followupTendency.levels[profile.followupTendency]}</Tag>
-                <Tag>{PERSONA_TRAIT_META.reactionTendency.levels[profile.reactionTendency]}</Tag>
+                <Tag>{personaTraitLabel("expressiveness", card.expressiveness)}</Tag>
+                <Tag>{personaTraitLabel("reactionTendency", card.reactionTendency)}</Tag>
+                {(card.catchphrases ?? []).filter(Boolean).slice(0, 3).map((item) => <Tag key={item} color="pink">{item}</Tag>)}
               </div>
             </div>
             <div className="persona-note-card persona-behavior-card liquid-glass agent-config-floating">
@@ -393,9 +449,14 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
               )}
             </div>
             <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
-              <div className="persona-note-title">已保存版本</div>
+              <div className="persona-note-title">正在生效 · {data.sourceLabel}</div>
               <p>{data.summary}</p>
               {dirty && <Tag color="orange">草稿尚未保存</Tag>}
+              {data.trimmed && <Tag color="gold">内容过长，已自动精简</Tag>}
+              <details className="persona-compiled-preview">
+                <summary>查看模型实际看到的人设（{data.promptTokens} tokens）</summary>
+                <pre>{data.compiled}</pre>
+              </details>
             </div>
             <div className="persona-note-card persona-note-soft liquid-glass agent-config-floating">
               <div className="persona-note-title">系统策略不可覆盖</div>
@@ -412,7 +473,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
           <Space>
             <Popconfirm
               title="恢复全局人设？"
-              description="会真正清空当前群 Persona v2 自定义资料并恢复全局默认。"
+              description="会真正清空当前群的自定义人设，改为跟随全局人设。"
               okText="恢复默认"
               cancelText="取消"
               onConfirm={reset}

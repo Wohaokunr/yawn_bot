@@ -1,7 +1,7 @@
 import { Button, Card, Empty, List, Progress, Segmented, Space, Spin, Tag, Typography } from "antd";
 import { useState } from "react";
 import { toolDisplayName } from "../agent-debug/debug-utils";
-import { MEMORY_TYPE_META, memoryTypeLabel } from "../agent-meta";
+import { AUDIT_OUTCOME_META, MEMORY_TYPE_META, auditOutcome, auditOutcomeLabel, memoryTypeLabel } from "../agent-meta";
 import { api } from "../api";
 import { QueryErrorAlert, useApiQuery } from "../shared";
 import type { AgentAudit, AgentDiagnostics, AgentToolUsage, Persona } from "../types";
@@ -41,6 +41,7 @@ export function diagnosticsReport(groupLabel: string, data: AgentDiagnostics): s
   if (data.tools) {
     lines.push(`特权工具：${data.tools.adminToday}/${data.tools.adminLimit} · 高风险：${data.tools.criticalToday}/${data.tools.criticalLimit} · 已开放 ${data.tools.allowlist.length} 项`);
   }
+  if (data.persona) lines.push(`人设：${data.persona.sourceLabel} · ${data.persona.summary}`);
   lines.push(`记忆：共 ${data.memory.total} 条，待整理 ${data.memory.pendingMessages} 条，连续失败 ${data.memory.consecutiveFailures} 次${data.memory.rebuildRequired ? "，需要重建" : ""}`);
   lines.push(`LLM 路由：${data.llm.routes.map((route) => `${route.task}=${route.configured ? route.model || "?" : "不可用"}`).join("，") || "—"}`);
   lines.push(data.blockers.length
@@ -62,7 +63,8 @@ export function ToolUsageCard({ groupId, onNavigate }: { groupId: string; onNavi
   });
   const data = usage.data;
   const maxTotal = Math.max(1, ...(data?.tools ?? []).map((tool) => tool.total));
-  const maxDaily = Math.max(1, ...(data?.daily ?? []).map((day) => day.success + day.failed));
+  const dayTotal = (day: AgentToolUsage["daily"][number]) => day.success + (day.skipped ?? 0) + day.failed + (day.unknown ?? 0);
+  const maxDaily = Math.max(1, ...(data?.daily ?? []).map(dayTotal));
   return (
     <Card
       className="agent-cockpit-card"
@@ -74,9 +76,9 @@ export function ToolUsageCard({ groupId, onNavigate }: { groupId: string; onNavi
         : <>
           <div className="agent-tool-daily" role="img" aria-label={`最近 ${data.days} 天共调用 ${data.total} 次，失败 ${data.failed} 次`}>
             {data.daily.map((day) => {
-              const total = day.success + day.failed;
+              const total = dayTotal(day);
               return (
-                <div key={day.day} className="agent-tool-daily-col" title={`${day.day} · 成功 ${day.success} · 失败 ${day.failed}`}>
+                <div key={day.day} className="agent-tool-daily-col" title={`${day.day} · 成功 ${day.success} · 跳过 ${day.skipped ?? 0} · 失败 ${day.failed}${day.unknown ? ` · 待确认 ${day.unknown}` : ""}`}>
                   <div className="agent-tool-daily-bar" style={{ height: `${(total / maxDaily) * 100}%` }}>
                     {day.failed > 0 && <span className="is-failed" style={{ height: `${(day.failed / Math.max(total, 1)) * 100}%` }} />}
                   </div>
@@ -86,7 +88,9 @@ export function ToolUsageCard({ groupId, onNavigate }: { groupId: string; onNavi
           </div>
           <Space size={12} className="agent-tool-summary">
             <Text>共 <strong>{data.total}</strong> 次</Text>
+            {(data.skipped ?? 0) > 0 && <Text type="secondary">跳过 {data.skipped} 次</Text>}
             <Text type={data.failed ? "danger" : "secondary"}>失败 {data.failed} 次</Text>
+            {(data.unknown ?? 0) > 0 && <Text type="warning">待确认 {data.unknown} 次</Text>}
           </Space>
           {data.tools.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这段时间没有调用特权工具" />
@@ -94,14 +98,16 @@ export function ToolUsageCard({ groupId, onNavigate }: { groupId: string; onNavi
               {data.tools.slice(0, 6).map((tool) => (
                 <div key={tool.toolName} className="agent-tool-rank-row">
                   <span className="agent-tool-rank-name">{toolDisplayName(tool.toolName)}</span>
-                  <Progress
-                    percent={(tool.total / maxTotal) * 100}
-                    success={{ percent: (tool.success / maxTotal) * 100 }}
-                    showInfo={false}
-                    size="small"
-                    strokeColor="#f0a2bf"
-                  />
-                  <span className="agent-tool-rank-count">{tool.total}{tool.failed ? <em> · 失败 {tool.failed}</em> : null}</span>
+                  <div className="agent-tool-rank-bar" aria-hidden>
+                    {(["success", "skipped", "unknown", "failed"] as const).map((bucket) => (tool[bucket] ?? 0) > 0 && (
+                      <span key={bucket} className={`is-${bucket}`} style={{ width: `${((tool[bucket] ?? 0) / maxTotal) * 100}%` }} />
+                    ))}
+                  </div>
+                  <span className="agent-tool-rank-count">
+                    {tool.total}
+                    {tool.skipped ? <span className="agent-tool-rank-skipped"> · 跳过 {tool.skipped}</span> : null}
+                    {tool.failed ? <em> · 失败 {tool.failed}</em> : null}
+                  </span>
                 </div>
               ))}
             </div>}
@@ -121,7 +127,7 @@ export function ToolUsageCard({ groupId, onNavigate }: { groupId: string; onNavi
             onClick={row.traceId ? () => onNavigate("debug", { "debug.trace": row.traceId ?? "" }) : undefined}
           >
             <div className="agent-feed-row">
-              <Tag color={row.result === "success" ? "green" : "red"}>{row.result === "success" ? "成功" : "失败"}</Tag>
+              <Tag color={AUDIT_OUTCOME_META[auditOutcome(row)].color}>{auditOutcomeLabel(row)}</Tag>
               <span className="agent-feed-main">{toolDisplayName(row.toolName)}</span>
               <span className="agent-feed-time">{relativeTime(row.createdAt)}</span>
             </div>
@@ -179,7 +185,7 @@ export function PersonaMoodCard({ groupId, onNavigate }: { groupId: string; onNa
           <div className="agent-mood-body">
             <Space size={6} wrap>
               <Tag color="magenta">{persona.emotion.displayLabel}</Tag>
-              <Tag>{persona.enabled ? "本群专属人设" : "跟随全局人设"}</Tag>
+              <Tag>{persona.sourceLabel}</Tag>
               <Text type="secondary">{persona.emotion.updatedAt ? `${relativeTime(persona.emotion.updatedAt)}更新` : "尚无情绪事件"}</Text>
             </Space>
             <Progress percent={Math.round(persona.emotion.expressionIntensity * 100)} size="small" strokeColor="#e4558a" format={(value) => `表达 ${value}%`} />

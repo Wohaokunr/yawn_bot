@@ -15,6 +15,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -406,6 +407,19 @@ async def _completion_slot(timeout: float) -> AsyncIterator[float]:
         _COMPLETION_CONCURRENCY.release()
 
 
+# 最近一次 ``complete()`` 的结果分类（success/timeout/empty/not_configured/error）；
+# 按 asyncio 任务隔离，供只拿到 None 的调用方写出可诊断的失败原因。
+_LAST_COMPLETION_OUTCOME: ContextVar[str] = ContextVar(
+    "yawn_llm_last_completion_outcome", default=""
+)
+
+
+def last_completion_outcome() -> str:
+    """返回当前任务里最近一次非流式补全的结果分类；从未调用时为空串。"""
+
+    return _LAST_COMPLETION_OUTCOME.get()
+
+
 async def complete(  # noqa: PLR0911
     messages: list[ChatCompletionMessageParam],
     *,
@@ -510,6 +524,7 @@ async def complete(  # noqa: PLR0911
         return None
     finally:
         _record_ai_metric(task, outcome, started)
+        _LAST_COMPLETION_OUTCOME.set(outcome)
     return result
 
 

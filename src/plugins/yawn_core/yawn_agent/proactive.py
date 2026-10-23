@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
-from ..llm import ai_config, complete, resolve_llm_request
+from ..llm import ai_config, complete, last_completion_outcome, resolve_llm_request
 from .context import ActivitySnapshot, now_beijing
 from .collector import group_lock
 from .config_store import agent_runtime_enabled, list_agent_group_ids
@@ -96,6 +96,21 @@ async def _generate_proactive_reply(messages: list[Any]) -> str | None:
         max_tokens=max(_PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)),
         timeout=_PROACTIVE_TIMEOUT_SECONDS,
     )
+
+
+_LLM_FAILURE_REASONS = {
+    "timeout": "LLM 请求超时",
+    "not_configured": "LLM 未配置密钥",
+    "empty": "LLM 返回空内容（可能被 max_tokens 截断）",
+    "error": "LLM 接口报错",
+}
+
+
+def _llm_failure_reason() -> tuple[str, str]:
+    """主动/续聊生成拿到 None 时，给审计写一个可区分的原因与原因码。"""
+
+    code = last_completion_outcome() or "empty"
+    return _LLM_FAILURE_REASONS.get(code, "LLM 返回空内容"), code
 
 
 def _add_participation_audit(
@@ -426,18 +441,19 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
             raw = await _generate_proactive_reply(prompt)
             now = now_beijing()
             if raw is None:
+                failure_reason, failure_code = _llm_failure_reason()
                 trace_event(
                     "llm",
                     "主动发言决策",
                     status="failed",
-                    output={"response": "none"},
-                    detail="LLM 返回空内容",
+                    output={"response": "none", "error_code": failure_code},
+                    detail=failure_reason,
                     duration_ms=(time.monotonic() - llm_started) * 1000,
                 )
                 # 持续失败只留 warning 会被淹没；同时推进 last_agent_at
                 # 退避一个冷却期，避免每分钟反复抽卡反复失败。
                 logger.warning(
-                    "群 %s 主动发言生成失败: LLM 返回空内容,退避至下个冷却期", group_id
+                    "群 %s 主动发言生成失败: %s,退避至下个冷却期", group_id, failure_reason
                 )
                 await _apply_result(
                     session,
@@ -448,7 +464,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     day_count=candidate["day_count"],
                     bot_id=primary_self_id,
                     scene=scene,
-                    reason="LLM 返回空内容",
+                    reason=failure_reason,
                     session_turn=1,
                 )
                 _add_participation_audit(
@@ -457,7 +473,8 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     scene=scene,
                     action="error",
                     session_turn=1,
-                    reason="LLM 返回空内容",
+                    reason=failure_reason,
+                    error_code=failure_code,
                 )
                 await session.commit()
                 return "error"
@@ -834,15 +851,15 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             llm_started = time.monotonic()
             raw = await _generate_proactive_reply(prompt)
             if raw is None:
+                reason, failure_code = _llm_failure_reason()
                 trace_event(
                     "llm",
                     "短会话决策",
                     status="failed",
-                    output={"response": "none"},
-                    detail="LLM 返回空内容",
+                    output={"response": "none", "error_code": failure_code},
+                    detail=reason,
                     duration_ms=(time.monotonic() - llm_started) * 1000,
                 )
-                reason = "LLM 返回空内容"
                 _add_participation_audit(
                     session,
                     group_id,
@@ -851,6 +868,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                     session_turn=batch.bot_turns + 1,
                     reason=reason,
                     session_id=batch.session_id,
+                    error_code=failure_code,
                 )
                 await session.commit()
                 finish_followup_evaluation(batch, "error")

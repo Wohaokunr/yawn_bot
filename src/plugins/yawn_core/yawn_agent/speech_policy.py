@@ -18,7 +18,7 @@ from .context_history import (
     EffectiveTurn,
     effective_turn_from_context,
 )
-from .persona import persona_trait_label
+from .persona import persona_style_levels
 from .speech import (
     SPEECH_SCENE_ACTIVE_INTERJECT,
     SPEECH_SCENE_CONVERSATION,
@@ -210,21 +210,6 @@ def resolve_speech_scene(
     return SPEECH_SCENE_CONVERSATION
 
 
-def _persona_level(persona: dict[str, str], field: str, fallback: int) -> int:
-    haystack = "；".join(
-        str(persona.get(key) or "")
-        for key in ("style_traits", "social_style")
-    )
-    for value in range(5):
-        try:
-            label = persona_trait_label(field, value)
-        except ValueError:
-            return fallback
-        if label and label in haystack:
-            return value
-    return fallback
-
-
 def classify_response_complexity(  # noqa: C901
     current_turn: CurrentTurn | dict[str, Any] | None,
     *,
@@ -290,24 +275,22 @@ def _soft_target_chars(
 
 
 def resolve_speech_style(
-    persona: dict[str, str] | None,
+    persona: dict[str, Any] | None,
     *,
     scene: str,
     act: str = "continue",
     complexity: str = RESPONSE_COMPLEXITY_NORMAL,
 ) -> SpeechStyle:
-    resolved = persona or {}
+    levels = persona_style_levels(persona)
     normalized_scene = normalize_speech_scene(scene)
-    warmth = _persona_level(resolved, "warmth", 2)
-    humor = _persona_level(resolved, "humor", 1)
-    directness = _persona_level(resolved, "directness", 2)
-    verbosity = _persona_level(resolved, "verbosity", 1)
-    expressiveness = _persona_level(resolved, "expressiveness", 1)
-    reaction = _persona_level(resolved, "reaction_tendency", 2)
+    warmth = levels.get("warmth", 2)
+    humor = levels.get("humor", 1)
+    verbosity = levels.get("verbosity", 1)
+    expressiveness = levels.get("expressiveness", 1)
+    reaction = levels.get("reaction_tendency", 2)
     return SpeechStyle(
         warmth=warmth,
         humor=humor,
-        directness=directness,
         verbosity=verbosity,
         expressiveness=expressiveness,
         soft_target_chars=_soft_target_chars(
@@ -337,7 +320,7 @@ def _interaction_instruction(effective: EffectiveTurn) -> str:
 
 
 def build_speech_instruction(
-    persona: dict[str, str] | None,
+    persona: dict[str, Any] | None,
     current_turn: CurrentTurn | dict[str, Any] | None = None,
     *,
     source: str | None = None,
@@ -364,7 +347,7 @@ def build_speech_instruction(
     )
     style_rule = (
         f"角色表达参数：温暖度 {style.warmth}/4、幽默 {style.humor}/4、"
-        f"直接度 {style.directness}/4、详略 {style.verbosity}/4、"
+        f"详略 {style.verbosity}/4、"
         f"表现力 {style.expressiveness}/4；响应复杂度={complexity}。{target}"
     )
     quality_rule = (

@@ -235,6 +235,11 @@ async def test_agent_tool_usage_groups_by_tool_and_day() -> None:
                 audit("set_essence_message", "success", NOW - timedelta(days=2)),
                 audit("mute_member", "success", NOW - timedelta(days=10)),
                 audit("mute_member", "success", NOW, group_id=200),
+                # 主动发言从不写字面量 success：speak 是成功，wait/close 是跳过。
+                audit("proactive_reply", "speak", NOW - timedelta(hours=2)),
+                audit("proactive_reply", "wait", NOW - timedelta(hours=3)),
+                audit("proactive_reply", "close", NOW - timedelta(hours=3)),
+                audit("proactive_reply", "delivery_unknown", NOW - timedelta(hours=4)),
             ]
         )
         await session.commit()
@@ -242,16 +247,34 @@ async def test_agent_tool_usage_groups_by_tool_and_day() -> None:
     async with factory() as session:
         result = await service.agent_tool_usage(session, 100, now=NOW, days=7)
 
-    assert result["total"] == 3
+    assert result["total"] == 7
     assert result["failed"] == 1
+    assert result["skipped"] == 2
+    assert result["unknown"] == 1
     assert result["tools"][0] == {
+        "toolName": "proactive_reply",
+        "success": 1,
+        "skipped": 2,
+        "failed": 0,
+        "unknown": 1,
+        "total": 4,
+    }
+    assert result["tools"][1] == {
         "toolName": "mute_member",
         "success": 1,
+        "skipped": 0,
         "failed": 1,
+        "unknown": 0,
         "total": 2,
     }
     assert [day["day"] for day in result["daily"]][-1] == "2026-10-22"
-    assert result["daily"][-1] == {"day": "2026-10-22", "success": 1, "failed": 0}
+    assert result["daily"][-1] == {
+        "day": "2026-10-22",
+        "success": 2,
+        "skipped": 2,
+        "failed": 0,
+        "unknown": 1,
+    }
     assert result["daily"][-2]["failed"] == 1
 
     await engine.dispose()

@@ -249,7 +249,7 @@ def build_context(
     memories: list[dict[str, Any]],
     relations: list[str],
     activity: ActivitySnapshot,
-    persona: dict[str, str] | str | None = None,
+    persona: dict[str, Any] | str | None = None,
     active_topic: str | None = None,
     emotion_state: dict[str, Any] | None = None,
     reference_at: datetime | None = None,

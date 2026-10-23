@@ -11,20 +11,15 @@ from sqlalchemy import func, select
 
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.web_admin_audit import WebAdminAudit
+from ..yawn_agent.audit_outcome import AUDIT_FAILURE_RESULTS, audit_results_for
 from .config import API_PATH
 from .deps import AdminReadSession, ok, page_params
 from .service import page_meta, serialize_agent_audit, serialize_web_audit
 
 router = APIRouter(prefix=API_PATH)
 
-# 工具执行异常记 error；出站消息失败记 send_failed / validation_failed /
-# unsupported_segment（见 yawn_agent.tools._audit 与 outbound._audit_outbound）。
-AGENT_AUDIT_FAILURE_RESULTS = (
-    "error",
-    "send_failed",
-    "validation_failed",
-    "unsupported_segment",
-)
+# 失败/跳过/成功等分类口径统一放在 yawn_agent.audit_outcome；这里保留旧名供兼容。
+AGENT_AUDIT_FAILURE_RESULTS = tuple(sorted(AUDIT_FAILURE_RESULTS))
 
 
 @router.get("/agent/audits")
@@ -39,9 +34,9 @@ async def get_agent_audits(
     clauses = []
     if group_id is not None:
         clauses.append(AgentAudit.group_id == group_id)
-    if result == "failed":
-        # Agent 审计没有字面量 failed；“失败”筛选映射到所有失败类结果。
-        clauses.append(AgentAudit.result.in_(AGENT_AUDIT_FAILURE_RESULTS))
+    if result in {"success", "failed", "skipped", "unknown"}:
+        # 分类筛选映射到该类全部字面量结果（主动发言没有字面量 success/failed）。
+        clauses.append(AgentAudit.result.in_(sorted(audit_results_for(result))))
     elif result:
         clauses.append(AgentAudit.result == result)
     async with get_session() as db:

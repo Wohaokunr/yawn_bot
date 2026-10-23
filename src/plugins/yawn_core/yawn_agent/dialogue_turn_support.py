@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .tool_router import normalize_tool_family
+
 if TYPE_CHECKING:
     from .message_parser import NormalizedMessage
 
@@ -172,7 +174,10 @@ class DiscoveryRoundGuard:
         fingerprint = json.dumps(
             {
                 "query": str(args.get("query") or "").strip().casefold(),
-                "family": str(args.get("family") or "").strip().casefold(),
+                # “公告”和“notice”是同一个工具包：按归一后的族名判重，
+                # 只传 family 的首次调用照常执行。
+                "family": normalize_tool_family(args.get("family"))
+                or str(args.get("family") or "").strip().casefold(),
             },
             ensure_ascii=False,
             sort_keys=True,

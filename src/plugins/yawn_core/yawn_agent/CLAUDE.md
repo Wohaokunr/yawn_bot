@@ -27,7 +27,8 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 入站与回合 | `message_parser.py`、`turn_intake.py`、`collector.py`、`turn_taking.py`、`turn_fallbacks.py`、`activity.py` |
 | 对话编排 | `dialogue.py`、`dialogue_support.py`、`dialogue_turn_support.py`、`dialogue_runtime_support.py` |
 | 上下文 | `context.py`、`context_loader.py`、`context_repository.py`、`context_history.py`、`context_budget.py`、`topic_state.py`、`emotion.py` |
-| 提示词与人设 | `prompt.py`、`persona.py`、`reactions.py` |
+| 提示词与人设 | `prompt.py`、`persona.py`（PersonaCard、模板、解析/编译/行为推导）、`persona_library.py`（人设库与全局人设缓存）、`reactions.py` |
+| 审计 | `audit_outcome.py`（审计 result → 成功/跳过/失败/待确认） |
 | 工具 | `tool_registry.py`（schema/权限/白名单别名）、`tool_router.py`（选择/发现打分/意图提示）、`tools.py`（执行与二次校验）、`tool_args.py`（参数校验、错误分类、回合账本）、`tool_execution.py`、`tool_support.py`、`tool_result_speech.py`、`tool_handlers/`（按族：`admin`、`files`、`history`、`member`、`memory`、`message`、`notice`） |
 | 发言 | `speech_format.py`（QQ 纯文本清洗）、`speech_claims.py`（完成声明核验）、`speech.py`、`speech_act.py`、`speech_policy.py`、`speech_native.py`、`speech_quality.py`、`speech_scorecard.py`、`speech_runtime.py`、`speech_finalize.py` |
 | 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限）、`safe_download.py`（出站下载白名单与重定向校验） |
@@ -39,7 +40,7 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 
 ## 关联位置（跨目录）
 
-- **数据表**：Agent 的模型不在本目录，而在 [../data_models/](../data_models/CLAUDE.md)（`group_agent_config`、`group_agent_message`、`agent_memory`、`agent_audit`、`agent_media_*`）。改表要走迁移，见 [data/CLAUDE.md](../../../../data/CLAUDE.md)。
+- **数据表**：Agent 的模型不在本目录，而在 [../data_models/](../data_models/CLAUDE.md)（`group_agent_config`、`group_agent_message`、`agent_memory`、`agent_audit`、`agent_media_*`、`agent_persona_template`）。改表要走迁移，见 [data/CLAUDE.md](../../../../data/CLAUDE.md)。
 - **LLM 客户端**：[../llm.py](../CLAUDE.md)（模型路由、并发上限）。
 - **WebUI**：后端 [../webui/agent*.py](../webui/CLAUDE.md)；前端 [webui/src/agent-*](../../../../webui/CLAUDE.md)（cockpit、配置面板、调试轨迹）。
 - **测试**：[tests/test_agent_*.py](../../../../tests/CLAUDE.md)、`tests/test_group_agent.py`；各改动该跑哪些见 AGENTS.md「质量门槛」。

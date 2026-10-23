@@ -72,7 +72,7 @@ COMMAND_DEFINITIONS = (
     ),
     CommandDefinition(
         name="Agent人设",
-        description="查看或设置群级人设",
+        description="查看或设置群级人设：模板、自称/称呼/口癖、档位与人设库",
         feature="group_agent",
         scope="group",
         permission="group_admin",

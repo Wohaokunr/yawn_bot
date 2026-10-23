@@ -34,18 +34,26 @@ from ..metrics import ai_health_snapshot, snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent import conversation as _conversation_runtime
 from ..yawn_agent import turn_intake as _turn_intake
+from ..yawn_agent.audit_outcome import classify_audit_result
 from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
 from ..yawn_agent.emotion import emotion_public_state
 from ..yawn_agent.memory import compacting_group_count, is_memory_compacting
 from ..yawn_agent.memory_access import pending_access_count
 from ..yawn_agent.persona import (
+    PERSONA_PROMPT_TOKEN_LIMIT,
     PERSONA_SCHEMA_VERSION,
+    global_persona,
+    group_persona_card,
     persona_behavior,
-    persona_editor_profile,
+    persona_card_summary,
     persona_preset_payloads,
+    persona_prompt_tokens,
+    persona_source_label,
     persona_summary,
+    prompt_persona,
     resolve_persona,
+    resolve_persona_source,
 )
 
 # 全库约定 naive datetime 为北京时间（UTC+8），序列化时必须按此时区标注，
@@ -946,20 +954,35 @@ def serialize_agent_config(
 
 
 def serialize_persona(row: GroupAgentConfig | None, group_id: int) -> dict[str, Any]:
-    editor = persona_editor_profile(row)
+    """人设页数据：本群卡（可继续编辑的草稿）+ 实际生效的卡与来源。"""
+
+    card = group_persona_card(row)
+    effective = resolve_persona_source(row)
+    resolved = resolve_persona(row)
+    global_resolved = global_persona()
     return {
         "groupId": str(group_id),
         "enabled": row.persona_enabled if row else False,
         "schemaVersion": PERSONA_SCHEMA_VERSION,
-        "profile": editor.model_dump(by_alias=True),
+        "card": card.api_dict(),
+        "effectiveCard": effective.card.api_dict(),
+        "source": effective.source,
+        "sourceLabel": persona_source_label(effective),
+        "globalCard": global_resolved.card.api_dict(),
+        "globalLabel": persona_source_label(global_resolved),
+        "globalSummary": persona_card_summary(global_resolved.card),
         "presets": persona_preset_payloads(),
         "summary": persona_summary(row),
         "behavior": persona_behavior(row).as_dict(),
+        # 情绪表达强度跟随实际生效的人设，跟随全局时不读本群暂存草稿。
         "emotion": emotion_public_state(
             row.emotion_state if row and isinstance(row.emotion_state, dict) else {},
-            expressiveness=editor.expressiveness,
+            expressiveness=effective.card.expressiveness,
         ),
-        "resolved": resolve_persona(row),
+        "compiled": prompt_persona(resolved),
+        "promptTokens": persona_prompt_tokens(resolved),
+        "promptTokenLimit": PERSONA_PROMPT_TOKEN_LIMIT,
+        "trimmed": bool(resolved.get("trimmed")),
         "version": persona_content_version(row),
     }
 
@@ -1505,8 +1528,20 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
         },
         "memory": memory,
         "llm": llm,
+        "persona": _diagnostic_persona(config),
         "blockers": blockers,
         "generatedAt": datetime.now(BEIJING_TZ).isoformat(),
+    }
+
+
+def _diagnostic_persona(config: GroupAgentConfig | None) -> dict[str, Any]:
+    """诊断报告里的人设来源：本群自定义 / 人设库全局人设（带名字）/ 内置默认。"""
+
+    resolved = resolve_persona_source(config)
+    return {
+        "source": resolved.source,
+        "sourceLabel": persona_source_label(resolved),
+        "summary": persona_card_summary(resolved.card),
     }
 
 
@@ -1590,7 +1625,11 @@ async def agent_activity(
 async def agent_tool_usage(
     session: AsyncSession, group_id: int, *, now: datetime, days: int = 7
 ) -> dict[str, Any]:
-    """最近 N 天特权工具调用按工具与结果聚合，外加逐日成功/失败趋势。"""
+    """最近 N 天 Agent 审计按工具与结果分类聚合，外加逐日趋势。
+
+    结果先经 ``classify_audit_result`` 归为 成功 / 跳过 / 失败 / 待确认；主动
+    发言的 ``wait/close`` 是正常的“不说话”决策，不能计入失败。
+    """
 
     start = (now - timedelta(days=days - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -1605,26 +1644,26 @@ async def agent_tool_usage(
             )
         )
     ).all()
+    buckets = ("success", "skipped", "failed", "unknown")
     by_tool: dict[str, dict[str, int]] = {}
     daily = [
         {
             "day": (start + timedelta(days=index)).strftime("%Y-%m-%d"),
-            "success": 0,
-            "failed": 0,
+            **dict.fromkeys(buckets, 0),
         }
         for index in range(days)
     ]
     for tool_name, result, created_at in rows:
-        ok_result = result == "success"
-        entry = by_tool.setdefault(str(tool_name), {"success": 0, "failed": 0})
-        entry["success" if ok_result else "failed"] += 1
+        outcome = classify_audit_result(result)
+        entry = by_tool.setdefault(str(tool_name), dict.fromkeys(buckets, 0))
+        entry[outcome] += 1
         if created_at is not None:
             index = (created_at.date() - start.date()).days
             if 0 <= index < days:
-                daily[index]["success" if ok_result else "failed"] += 1
+                daily[index][outcome] += 1
     tools = sorted(
         (
-            {"toolName": name, **counts, "total": counts["success"] + counts["failed"]}
+            {"toolName": name, **counts, "total": sum(counts.values())}
             for name, counts in by_tool.items()
         ),
         key=lambda item: (-item["total"], item["toolName"]),
@@ -1633,7 +1672,10 @@ async def agent_tool_usage(
         "groupId": str(group_id),
         "days": days,
         "total": sum(item["total"] for item in tools),
-        "failed": sum(item["failed"] for item in tools),
+        **{
+            bucket: sum(item[bucket] for item in tools)
+            for bucket in ("success", "skipped", "failed", "unknown")
+        },
         "tools": tools,
         "daily": daily,
     }
@@ -1652,6 +1694,7 @@ def serialize_agent_audit(row: AgentAudit) -> dict[str, Any]:
         "arguments": arguments,
         "traceId": str(trace_id) if trace_id else None,
         "result": row.result,
+        "outcome": classify_audit_result(row.result),
         "detail": row.detail,
         "createdAt": iso(row.created_at),
     }

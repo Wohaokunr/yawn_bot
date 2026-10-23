@@ -8,7 +8,9 @@ import type { AgentAudit } from "../types";
 const RESULT_OPTIONS = [
   { value: "", label: "全部结果" },
   { value: "success", label: "成功" },
+  { value: "skipped", label: "跳过" },
   { value: "failed", label: "失败" },
+  { value: "unknown", label: "待确认" },
 ];
 
 export function AgentAuditsPanel({ groupId }: { groupId: string }): React.JSX.Element {

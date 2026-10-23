@@ -78,6 +78,41 @@ _FAMILY_HINT_WORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+# 模型常把工具包写成中文名、英文复数或 OneBot 风格的叫法；这里统一归一到注册表里
+# 的 family 标识。未知名字返回 None，由调用方退回按任务搜索，而不是过滤成空结果。
+_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
+    "notice": ("公告", "群公告", "announcement", "announcements", "notices", "group_notice", "group_notices", "bulletin"),
+    "file": ("文件", "群文件", "files", "group_file", "group_files", "upload"),
+    "moderation": ("管理", "群管", "禁言", "撤回", "admin", "mute", "recall", "moderate"),
+    "member": ("成员", "群成员", "members", "group_member", "group_members", "card", "title"),
+    "essence": ("精华", "精华消息", "essences", "essence_message"),
+    "history": ("历史", "聊天记录", "历史消息", "message_history", "messages"),
+    "memory": ("记忆", "memories", "remember"),
+    "profile": ("画像", "人物画像", "关系", "profiles", "relation", "relations"),
+    "reaction": ("表情", "表情包", "reactions", "sticker", "stickers", "emoji"),
+    "group": ("群", "群资料", "群信息", "group_info", "honor"),
+    "message": ("消息", "发消息", "转发", "send", "forward"),
+}
+_FAMILY_LOOKUP: dict[str, str] = {
+    alias.casefold(): family
+    for family, aliases in _FAMILY_ALIASES.items()
+    for alias in (family, *aliases)
+}
+
+
+def normalize_tool_family(value: str | None) -> str | None:
+    """把模型给出的工具包名字归一到注册表 family；无法识别时返回 None。"""
+
+    folded = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    if not folded:
+        return None
+    if folded in _FAMILY_LOOKUP:
+        return _FAMILY_LOOKUP[folded]
+    if folded.endswith("s") and folded[:-1] in _FAMILY_LOOKUP:
+        return _FAMILY_LOOKUP[folded[:-1]]
+    return None
+
+
 def suggest_tool_families(text: str | None, *, limit: int = 3) -> tuple[str, ...]:
     """零成本按当前消息意图给出建议发现的工具包（最多 ``limit`` 个）。"""
 
@@ -153,7 +188,12 @@ def rank_discoverable_tools(
 
     normalized = str(query or "").strip().casefold()
     compact_normalized = _compact_tool_intent(normalized)
-    family_filter = str(family or "").strip().casefold()
+    raw_family = str(family or "").strip().casefold()
+    family_filter = (
+        raw_family
+        if raw_family in {"message_read", "message-read"}
+        else normalize_tool_family(raw_family) or raw_family
+    )
     scored: list[tuple[int, str, ToolDefinition]] = []
     for definition in candidates:
         if (
@@ -279,6 +319,7 @@ __all__ = [
     "MAX_TOOL_ROUNDS",
     "dialogue_tool_round_limit",
     "has_explicit_critical_intent",
+    "normalize_tool_family",
     "rank_discoverable_tools",
     "select_critical_tool_names",
     "select_dialogue_message_segment_types",

@@ -1,5 +1,6 @@
 import { Table, Tag } from "antd";
 import { Link } from "react-router-dom";
+import { AUDIT_OUTCOME_META, auditOutcome, auditOutcomeLabel } from "./agent-meta";
 import { formatTime } from "./shared";
 import type { AgentAudit } from "./types";
 
@@ -17,8 +18,8 @@ export function AgentAuditTable({ data }: { data: AgentAudit[] }): React.JSX.Ele
         {
           title: "结果",
           dataIndex: "result",
-          render: (value: string) => (
-            <Tag color={value === "success" ? "green" : "red"}>{value}</Tag>
+          render: (value: string, row: AgentAudit) => (
+            <Tag color={AUDIT_OUTCOME_META[auditOutcome(row)].color} title={value}>{auditOutcomeLabel(row)}</Tag>
           ),
         },
         { title: "详情", dataIndex: "detail", ellipsis: true },

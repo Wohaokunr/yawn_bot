@@ -696,19 +696,25 @@ def test_agent_config_and_persona_validation() -> None:
         {
             "version": None,
             "enabled": True,
-            "profile": {
+            "card": {
                 "presetId": "quiet_observer",
                 "name": "Yawn",
+                "selfName": "本喵",
+                "userTitle": "杂鱼",
                 "identity": "安静群友",
-                "groupRole": "潜水观察者",
                 "sociability": 0,
-                "followupTendency": 0,
                 "reactionTendency": 1,
             },
         }
     )
-    assert persona_patch.profile.preset_id == "quiet_observer"
-    assert persona_patch.profile.sociability == 0
+    assert persona_patch.card.preset_id == "quiet_observer"
+    assert persona_patch.card.self_name == "本喵"
+    assert persona_patch.card.sociability == 0
+    # v2 的 profile 字段已移除，旧前端提交会被明确拒绝而不是被静默吞掉。
+    with pytest.raises(ValidationError):
+        route_models.PersonaPatch.model_validate(
+            {"version": None, "enabled": True, "profile": {"name": "Yawn"}}
+        )
 
     history = route_models.AgentDebugRunBody.model_validate(
         {"mode": "dialogue", "messageId": 42, "runModel": False}
@@ -734,27 +740,16 @@ def test_agent_config_and_persona_validation() -> None:
     )
     assert persona_trial.persona_draft is not None
     assert persona_trial.persona_draft.preset_id == "quiet_observer"
-    with pytest.raises(ValidationError):
-        route_models.AgentDebugRunBody.model_validate(
-            {
-                "mode": "dialogue",
-                "text": "试试看",
-                "actorUserId": 123,
-                "personaDraft": {"presetId": "unknown", "name": "Yawn"},
-            }
-        )
-    with pytest.raises(ValidationError):
-        route_models.PersonaPatch.model_validate(
-            {
-                "version": None,
-                "enabled": True,
-                "profile": {
-                    "presetId": "natural",
-                    "name": "Yawn",
-                    "sociability": 5,
-                },
-            }
-        )
+    # 越界档位被夹到 0-4，未知模板视为自定义，不再让整次保存失败。
+    clamped = route_models.PersonaPatch.model_validate(
+        {
+            "version": None,
+            "enabled": True,
+            "card": {"presetId": "unknown", "name": "Yawn", "sociability": 5},
+        }
+    )
+    assert clamped.card.sociability == 4  # noqa: PLR2004
+    assert clamped.card.preset_id == "unknown"
     for invalid in (
         {},
         {"text": "少了成员"},
@@ -806,6 +801,7 @@ async def test_group_feature_supports_three_state_override() -> None:
 def test_persona_serializer_exposes_effective_runtime_behavior() -> None:
     row = service.GroupAgentConfig(group_id=123)
     row.persona_enabled = True
+    # 存量 v2 行在读取时惰性转换为 v3 卡。
     row.persona_profile = {
         "schema_version": 2,
         "preset_id": "quiet_observer",
@@ -824,11 +820,15 @@ def test_persona_serializer_exposes_effective_runtime_behavior() -> None:
     }
 
     payload = service.serialize_persona(row, 123)
-    assert payload["behavior"]["source"] == "persona_v2"
+    assert payload["source"] == "group"
+    assert payload["card"]["presetId"] == "quiet_observer"
+    assert payload["card"]["sociability"] == 0
+    assert payload["promptTokens"] <= payload["promptTokenLimit"]
+    assert payload["behavior"]["source"] == "group"
     assert payload["behavior"]["activeProbabilityScale"] == pytest.approx(0.15)
     assert payload["behavior"]["maxFollowupBotTurns"] == 1
     assert payload["behavior"]["allowSpontaneousReaction"] is False
-    assert payload["schemaVersion"] == 2  # noqa: PLR2004
+    assert payload["schemaVersion"] == 3  # noqa: PLR2004
     assert payload["emotion"]["label"] == "neutral"
     assert payload["emotion"]["updatedAt"] is None
     assert "overrides" not in payload
@@ -1408,16 +1408,13 @@ async def test_agent_debug_persona_draft_changes_prompt_without_persisting(
                     "presetId": "lively_sidekick",
                     "name": "草稿Yawn",
                     "identity": "活跃但不抢话的群友",
-                    "groupRole": "捧哏",
                     "warmth": 3,
                     "humor": 4,
-                    "directness": 3,
                     "verbosity": 1,
                     "expressiveness": 4,
                     "sociability": 4,
-                    "followupTendency": 3,
                     "reactionTendency": 4,
-                    "customNotes": "偶尔用好困自嘲",
+                    "catchphrases": ["好困"],
                 },
             }
         ),
@@ -1426,7 +1423,7 @@ async def test_agent_debug_persona_draft_changes_prompt_without_persisting(
 
     data = response["data"]
     assert data["persona"]["source"] == "draft"
-    assert data["persona"]["appliedProfile"]["name"] == "草稿Yawn"
+    assert data["persona"]["appliedCard"]["name"] == "草稿Yawn"
     assert data["persona"]["appliedBehavior"]["source"] == "draft"
     assert data["persona"]["appliedBehavior"]["activeProbabilityScale"] == 1.0
     assert data["persona"]["appliedBehavior"]["maxFollowupBotTurns"] == 4  # noqa: PLR2004
@@ -1441,7 +1438,7 @@ async def test_agent_debug_persona_draft_changes_prompt_without_persisting(
     assert "草稿Yawn" in system_prompt
     assert "很会接梗" in system_prompt
     assert "很活跃" in system_prompt
-    assert "偶尔用好困自嘲" in system_prompt
+    assert "好困" in system_prompt
     assert session.config.persona_profile == original_profile
     assert session.config.emotion_state == original_emotion
     assert session.config.persona_version == original_version

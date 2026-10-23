@@ -1,4 +1,4 @@
-import type { PersonaBehavior, PersonaEmotion, PersonaProfile, PersonaPreset } from "./types";
+import type { AgentAudit, AuditOutcome, PersonaBehavior, PersonaCard, PersonaEmotion, PersonaPreset } from "./types";
 
 export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> = {
   summary: { label: "群摘要", color: "geekblue" },
@@ -28,34 +28,45 @@ export function profileKeyLabel(key: string): string {
   return PROFILE_KEY_META[key] ?? key;
 }
 
+// 人设 v3 的六个档位；标签与后端 yawn_agent/persona.py 的 _TRAIT_TEXT 同一口径。
 export type PersonaTraitKey =
   | "warmth"
   | "humor"
-  | "directness"
   | "verbosity"
   | "expressiveness"
   | "sociability"
-  | "followupTendency"
   | "reactionTendency";
 
 export interface PersonaFormValues {
   mode: "inherit" | "custom";
-  profile: PersonaProfile;
+  card: PersonaCard;
 }
 
 export const PERSONA_TRAIT_META: Record<PersonaTraitKey, { label: string; help: string; levels: string[] }> = {
-  warmth: { label: "温和程度", help: "控制措辞的温度，不改变事实与安全边界。", levels: ["偏冷淡", "较克制", "自然", "温和", "很温暖"] },
-  humor: { label: "幽默程度", help: "控制玩梗与轻松表达的频率。", levels: ["不玩梗", "偶尔", "适度", "会接梗", "很会接梗"] },
-  directness: { label: "直接程度", help: "控制结论是委婉表达还是直接说明。", levels: ["很委婉", "偏委婉", "适中", "较直接", "很直接"] },
-  verbosity: { label: "回复详略", help: "控制通常回复的展开程度；复杂问题仍可按需说明。", levels: ["极简", "简洁", "适中", "较详细", "很详细"] },
-  expressiveness: { label: "表现力", help: "控制感叹、语气变化与情绪表现的明显程度。", levels: ["很淡", "克制", "自然", "明显", "很强"] },
-  sociability: { label: "社交活跃度", help: "描述角色愿不愿意参与群聊；不会突破运行配置的主动发言上限。", levels: ["很少参与", "偏安静", "平衡", "较主动", "很活跃"] },
-  followupTendency: { label: "续聊倾向", help: "控制回答后是否倾向自然延展话题。", levels: ["不续聊", "很少", "适度", "较愿意", "很愿意"] },
-  reactionTendency: { label: "接梗 / 反应", help: "控制对群友玩笑、表情和气氛变化的回应倾向。", levels: ["几乎不接", "较少", "自然", "较常", "很爱接"] },
+  warmth: { label: "温度", help: "措辞是冷淡还是温暖，不改变事实与安全边界。", levels: ["偏冷淡", "较克制", "自然", "温和", "很温暖"] },
+  humor: { label: "幽默", help: "玩梗与轻松表达的频率。", levels: ["不主动玩梗", "偶尔轻幽默", "适度幽默", "比较会接梗", "很会接梗"] },
+  verbosity: { label: "详略", help: "平时回复的长短；复杂问题仍会按需说明白。", levels: ["极简短", "简洁", "适中", "较详细", "很详细"] },
+  expressiveness: { label: "表现力", help: "语气、感叹和情绪表现有多明显。", levels: ["情绪表达很淡", "表达克制", "自然表达", "较有表现力", "表现力很强"] },
+  sociability: { label: "活跃度", help: "愿不愿意主动参与和续聊；不会突破运行设置的主动发言上限。", levels: ["很少参与", "偏安静", "社交平衡", "比较主动", "很活跃"] },
+  reactionTendency: { label: "接梗", help: "对群友玩笑、表情和气氛变化的回应倾向。", levels: ["几乎不接反应", "少量反应", "自然反应", "较常接反应", "很爱接反应"] },
 };
 
-export const PERSONA_STYLE_TRAITS: PersonaTraitKey[] = ["warmth", "humor", "directness", "verbosity", "expressiveness"];
-export const PERSONA_SOCIAL_TRAITS: PersonaTraitKey[] = ["sociability", "followupTendency", "reactionTendency"];
+export const PERSONA_VOICE_TRAITS: PersonaTraitKey[] = ["warmth", "humor", "verbosity", "expressiveness"];
+export const PERSONA_SOCIAL_TRAITS: PersonaTraitKey[] = ["sociability", "reactionTendency"];
+
+// 输入上限与后端 PersonaCard 的裁剪上限一致；超出会被后端截断，这里提前提示。
+export const PERSONA_LIMITS = {
+  name: 32,
+  alias: 16,
+  identity: 160,
+  longText: 400,
+  catchphrases: 6,
+  catchphraseLength: 20,
+  topics: 8,
+  topicLength: 24,
+  examples: 4,
+  exampleLength: 80,
+} as const;
 
 export const PERSONA_TRIAL_SCENARIOS = [
   { value: "ordinary", label: "普通问题", mode: "dialogue", text: "今天适合做什么？" },
@@ -66,53 +77,71 @@ export const PERSONA_TRIAL_SCENARIOS = [
   { value: "custom", label: "自定义", mode: "dialogue", text: "" },
 ] as const;
 
-export function personaDraftSummary(profile: PersonaProfile, presets: PersonaPreset[]): string {
-  const preset = presets.find((item) => item.id === profile.presetId);
-  const meta = PERSONA_TRAIT_META;
+function clampLevel(value: number | undefined): number {
+  const level = Math.round(Number(value ?? 0));
+  if (!Number.isFinite(level)) return 0;
+  return Math.max(0, Math.min(4, level));
+}
+
+export function personaTraitLabel(key: PersonaTraitKey, value: number | undefined): string {
+  return PERSONA_TRAIT_META[key].levels[clampLevel(value)];
+}
+
+/** 与后端 persona_card_summary 同口径：名字 · 自称 · 模板 · 温度/幽默/详略/活跃度。 */
+export function personaDraftSummary(card: PersonaCard, presets: PersonaPreset[]): string {
+  const preset = presets.find((item) => item.id === card.presetId);
   return [
-    profile.name,
-    preset?.label ?? profile.presetId,
-    meta.warmth.levels[profile.warmth],
-    meta.humor.levels[profile.humor],
-    meta.verbosity.levels[profile.verbosity],
-    meta.sociability.levels[profile.sociability],
+    card.name,
+    card.selfName ? `自称${card.selfName}` : "",
+    preset?.label ?? "自定义",
+    personaTraitLabel("warmth", card.warmth),
+    personaTraitLabel("humor", card.humor),
+    personaTraitLabel("verbosity", card.verbosity),
+    personaTraitLabel("sociability", card.sociability),
   ].filter(Boolean).join(" · ");
 }
 
-export function mergePersonaPreset(profile: PersonaProfile, preset: PersonaPreset): PersonaProfile {
-  return {
-    ...profile,
-    presetId: preset.id,
-    identity: preset.identity,
-    groupRole: preset.groupRole,
-    warmth: preset.warmth,
-    humor: preset.humor,
-    directness: preset.directness,
-    verbosity: preset.verbosity,
-    expressiveness: preset.expressiveness,
-    sociability: preset.sociability,
-    followupTendency: preset.followupTendency,
-    reactionTendency: preset.reactionTendency,
-  };
+/** 套用模板：替换角色内容与档位，保留名字（与后端 persona_apply_preset 一致）。 */
+export function mergePersonaPreset(card: PersonaCard, preset: PersonaPreset): PersonaCard {
+  return { ...preset.card, name: card.name };
 }
 
-export function personaBehaviorPreview(profile: PersonaProfile): PersonaBehavior {
+/** 续聊轮数由活跃度推导（v3 不再单独设续聊倾向），与后端 persona_behavior_from_card 一致。 */
+export function personaBehaviorPreview(card: Pick<PersonaCard, "sociability" | "reactionTendency">): PersonaBehavior {
   const probabilityScales = [0.15, 0.45, 0.75, 0.9, 1] as const;
   const maxTurns = [1, 2, 3, 4, 4] as const;
+  const followupTendency = [0, 1, 2, 3, 3] as const;
   const reactionModes = ["off", "restrained", "normal", "expressive", "high"] as const;
-  const sociability = Math.max(0, Math.min(4, profile.sociability));
-  const followup = Math.max(0, Math.min(4, profile.followupTendency));
-  const reaction = Math.max(0, Math.min(4, profile.reactionTendency));
+  const sociability = clampLevel(card.sociability);
+  const reaction = clampLevel(card.reactionTendency);
   return {
     source: "draft",
     sociability,
-    followupTendency: followup,
+    followupTendency: followupTendency[sociability],
     reactionTendency: reaction,
     warmupProbabilityScale: probabilityScales[sociability],
     activeProbabilityScale: probabilityScales[sociability],
-    maxFollowupBotTurns: maxTurns[followup],
+    maxFollowupBotTurns: maxTurns[sociability],
     allowSpontaneousReaction: reaction >= 2,
     reactionMode: reactionModes[reaction],
+  };
+}
+
+/** 后端会丢掉空白条目；保存前在前端做同样的整理，避免“看起来改了”的假脏状态。 */
+export function cleanPersonaCard(card: PersonaCard): PersonaCard {
+  const list = (items: string[] | undefined) => (items ?? []).map((item) => String(item ?? "").trim()).filter(Boolean);
+  return {
+    ...card,
+    name: (card.name ?? "").trim() || "Yawn",
+    selfName: (card.selfName ?? "").trim(),
+    userTitle: (card.userTitle ?? "").trim(),
+    identity: (card.identity ?? "").trim(),
+    personality: (card.personality ?? "").trim(),
+    speakingStyle: (card.speakingStyle ?? "").trim(),
+    catchphrases: list(card.catchphrases),
+    likes: list(card.likes),
+    avoidTopics: list(card.avoidTopics),
+    examples: list(card.examples),
   };
 }
 
@@ -149,3 +178,35 @@ export const MEMORY_ROLE_OPTIONS = [
   { value: "owner", label: "群主" },
   { value: "bot", label: "Bot" },
 ];
+
+// 审计结果分类与后端 yawn_agent/audit_outcome.py 同一口径：主动发言的 wait/close
+// 是“这会儿不说话”的正常决策，属于跳过而不是失败。
+const AUDIT_SUCCESS_RESULTS = new Set(["success", "speak", "degraded_to_text"]);
+const AUDIT_SKIPPED_RESULTS = new Set(["wait", "close"]);
+const AUDIT_UNKNOWN_RESULTS = new Set(["delivery_unknown"]);
+
+export const AUDIT_OUTCOME_META: Record<AuditOutcome, { label: string; color: string }> = {
+  success: { label: "成功", color: "green" },
+  skipped: { label: "跳过", color: "default" },
+  failed: { label: "失败", color: "red" },
+  unknown: { label: "待确认", color: "orange" },
+};
+
+export function auditOutcome(row: Pick<AgentAudit, "result" | "outcome">): AuditOutcome {
+  if (row.outcome) return row.outcome;
+  const value = String(row.result ?? "").trim().toLowerCase();
+  if (AUDIT_SUCCESS_RESULTS.has(value)) return "success";
+  if (AUDIT_SKIPPED_RESULTS.has(value)) return "skipped";
+  if (AUDIT_UNKNOWN_RESULTS.has(value)) return "unknown";
+  return "failed";
+}
+
+// 主动发言审计的 result 是参与决策；标签用更贴切的说法。
+export function auditOutcomeLabel(row: Pick<AgentAudit, "result" | "outcome" | "toolName">): string {
+  const outcome = auditOutcome(row);
+  if (row.toolName === "proactive_reply") {
+    if (outcome === "success") return "发言";
+    if (outcome === "skipped") return "不说话";
+  }
+  return AUDIT_OUTCOME_META[outcome].label;
+}

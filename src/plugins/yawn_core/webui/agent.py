@@ -49,12 +49,14 @@ from ..yawn_agent.execution_trace import (
     trace_event,
 )
 from ..yawn_agent.persona import (
+    effective_persona_card,
     persona_behavior,
     persona_behavior_draft,
-    persona_editor_profile,
+    persona_source_label,
     persona_summary,
     resolve_persona,
     resolve_persona_draft,
+    resolve_persona_source,
 )
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
@@ -832,7 +834,8 @@ async def run_agent_debug(
                 trace=debug_trace,
             )
 
-        persisted_editor = persona_editor_profile(config)
+        # 已保存 = 本群实际生效的人设（跟随全局时就是全局卡），不是暂存草稿。
+        persisted_editor = effective_persona_card(config)
         applied_behavior = (
             persona_behavior_draft(config, body.persona_draft)
             if body.persona_draft is not None
@@ -1039,15 +1042,16 @@ async def run_agent_debug(
             "persona": {
                 "source": "draft" if body.persona_draft is not None else "persisted",
                 "persistedSummary": persona_summary(config),
-                "persistedProfile": persisted_editor.model_dump(by_alias=True),
+                "persistedSource": persona_source_label(resolve_persona_source(config)),
+                "persistedCard": persisted_editor.api_dict(),
                 "persistedBehavior": persona_behavior(config).as_dict(),
                 "appliedBehavior": applied_behavior.as_dict(),
                 "persistedEmotion": persisted_emotion,
                 "appliedEmotion": applied_emotion,
-                "appliedProfile": (
-                    body.persona_draft.model_dump(by_alias=True)
+                "appliedCard": (
+                    body.persona_draft.api_dict()
                     if body.persona_draft is not None
-                    else persisted_editor.model_dump(by_alias=True)
+                    else persisted_editor.api_dict()
                 ),
             },
             "currentTurn": current_turn.as_dict(),
