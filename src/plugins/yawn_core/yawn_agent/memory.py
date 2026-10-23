@@ -31,6 +31,7 @@ from .log import dbg, dbg_exc
 from .media import delete_remote_media_files, unlink_cache_file
 from .memory_access import access_half_life_factor
 from .memory_hygiene import (
+    contains_pii,
     is_near_duplicate,
     looks_like_instruction,
     normalize_list_fact,
@@ -60,6 +61,11 @@ RELATION_TYPE_CHOICES: tuple[str, ...] = (
     "同学",
     "搭子",
     "对立",
+)
+# 无方向的关系：A 是 B 的好友等价于 B 是 A 的好友。写入时复用反向边、
+# 读取时按无序对去重，避免同一段关系以两条边双倍占用注入名额。
+SYMMETRIC_RELATION_TYPES = frozenset(
+    {"好友", "死党", "情侣", "伴侣", "亲属", "同事", "同学", "搭子", "对立"}
 )
 # @提及正则的保留类型，LLM 与人工输入的同义说法都归并到这里。
 RELATION_MENTION_TYPE = "mentions"
@@ -222,11 +228,52 @@ class _RelationCandidate(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
 
 
+# "叫我干嘛""叫我一声"这类句子形式上满足"叫我X"，X 却不是名字。
+_DISPLAY_NAME_BLOCKLIST = frozenset(
+    {
+        "干嘛",
+        "干啥",
+        "什么",
+        "啥",
+        "一声",
+        "一下",
+        "起床",
+        "吃饭",
+        "过去",
+        "过来",
+        "出去",
+        "回家",
+        "你",
+        "我",
+        "他",
+        "她",
+        "它",
+        "谁",
+        "大家",
+        "宝贝",
+        "主人",
+        "爸爸",
+        "妈妈",
+        "爹",
+        "哥哥",
+        "姐姐",
+    }
+)
+_DISPLAY_NAME_BAD_SUFFIXES = ("吗", "呢", "吧", "啊", "呀", "了", "嘛", "么")
+
+
 def _match_display_name(text: str) -> tuple[str, float] | None:
     """仅从有完整边界的明确自称提取昵称。"""
 
     match = _DISPLAY_NAME_STRONG_RE.search(text)
-    return (match.group(1), 0.9) if match else None
+    if not match:
+        return None
+    name = match.group(1)
+    if name in _DISPLAY_NAME_BLOCKLIST or name.endswith(_DISPLAY_NAME_BAD_SUFFIXES):
+        return None
+    if looks_like_instruction(text):
+        return None
+    return name, 0.9
 
 
 def _compaction_lock(group_id: int) -> asyncio.Lock:
@@ -257,12 +304,22 @@ def memory_retry_due(config: GroupAgentConfig, now: datetime) -> bool:
     return now - attempted >= timedelta(minutes=delay_minutes)
 
 
-def score_topic(messages: list[str]) -> float:
-    """简单、可测试的热点显著度评分。"""
+def score_topic(messages: list[str], *, speakers: int | None = None) -> float:
+    """简单、可测试的热点显著度评分。
+
+    传入 ``speakers`` 时多人参与的话题额外加分、单人刷屏打折：一个人连发
+    30 条和五个人各聊几句，后者才更像全群热点。
+    """
 
     count = len([item for item in messages if item.strip()])
     unique = len({item.strip() for item in messages if item.strip()})
-    return min(1.0, count / 12 + unique / 40)
+    score = count / 12 + unique / 40
+    if speakers is not None:
+        if speakers <= 1:
+            score *= 0.7
+        else:
+            score += min(0.3, (speakers - 1) * 0.08)
+    return min(1.0, score)
 
 
 def _bounded_float(value: object, default: float) -> float:
@@ -448,6 +505,45 @@ def normalize_relation_type(raw: object) -> str:
     if text in RELATION_TYPE_CHOICES or text == RELATION_MENTION_TYPE:
         return text
     return RELATION_TYPE_ALIASES.get(text.lower(), text)[:32]
+
+
+def relation_pair_key(
+    subject_user_id: int, object_user_id: int, relation_type: str
+) -> tuple[int, int, str]:
+    """关系去重键：无方向关系用有序化的无序对，有方向关系保持原向。"""
+
+    subject, target = int(subject_user_id), int(object_user_id)
+    if relation_type in SYMMETRIC_RELATION_TYPES and subject > target:
+        subject, target = target, subject
+    return subject, target, relation_type
+
+
+def dedupe_symmetric_relations(rows: list[AgentRelation]) -> list[AgentRelation]:
+    """按 relation_pair_key 保留首个（调用方应先按优先级排序）。"""
+
+    seen: set[tuple[int, int, str]] = set()
+    kept: list[AgentRelation] = []
+    for row in rows:
+        key = relation_pair_key(
+            int(row.subject_user_id), int(row.object_user_id), str(row.relation_type)
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(row)
+    return kept
+
+
+def find_relation_edge(
+    edges: dict[tuple[int, int, str], AgentRelation],
+    subject: int,
+    target: int,
+    relation_type: str,
+) -> AgentRelation | None:
+    edge = edges.get((subject, target, relation_type))
+    if edge is None and relation_type in SYMMETRIC_RELATION_TYPES:
+        edge = edges.get((target, subject, relation_type))
+    return edge
 
 
 def effective_relation_confidence(
@@ -915,7 +1011,7 @@ def _store_model_relations(
         # 主体必须在本批真实发言，客体可为本群沉默成员（例如明确 @ 对方）。
         if subject not in valid_user_ids or target not in valid_member_ids:
             continue
-        edge = edges.get((subject, target, relation_type))
+        edge = find_relation_edge(edges, subject, target, relation_type)
         if edge is None:
             row = AgentRelation(
                 group_id=group_id,
@@ -977,6 +1073,16 @@ async def _purge_expired(
             AgentMemory.expires_at < now,
         )
     )
+    config = await session.get(GroupAgentConfig, group_id)
+    if config is not None and config.cross_group_visibility != "public_summary":
+        # 群改回"隔离"后，此前生成的公开摘要不应继续躺在库里等待被重新共享。
+        await session.execute(
+            delete(AgentMemory).where(
+                AgentMemory.group_id == group_id,
+                AgentMemory.memory_key.startswith("public_daily:"),
+                AgentMemory.source_kind == "auto",
+            )
+        )
     await session.execute(
         delete(AgentAudit).where(
             AgentAudit.group_id == group_id,
@@ -1005,13 +1111,27 @@ async def _purge_expired(
     return int(deleted.rowcount or 0)
 
 
+# 只有占位符（[图片]/[表情] 等）的消息对摘要没有文字信息，不送模型；
+# 它们仍计入批次、推进游标。
+_PLACEHOLDER_ONLY_RE = re.compile(r"^(?:\s*\[[^\[\]]{1,12}\]\s*)+$")
+# Bot 自己的发言只作上下文，截得更短，避免长回复挤占成员内容的预算。
+_BOT_PAYLOAD_CHAR_LIMIT = 300
+
+
+def _is_placeholder_only(text: str) -> bool:
+    return bool(_PLACEHOLDER_ONLY_RE.match(str(text or "")))
+
+
 def _message_payload(row: GroupAgentMessage) -> dict[str, Any]:
+    limit = (
+        _BOT_PAYLOAD_CHAR_LIMIT if row.role == "bot" else _COMPACT_MESSAGE_CHAR_LIMIT
+    )
     return {
         "id": row.id,
         "user_id": row.user_id,
         "name": row.sender_name,
         "role": row.role,
-        "text": str(row.normalized_text or "")[:_COMPACT_MESSAGE_CHAR_LIMIT],
+        "text": str(row.normalized_text or "")[:limit],
     }
 
 
@@ -1036,11 +1156,24 @@ def _batch_rows(rows: list[GroupAgentMessage]) -> list[GroupAgentMessage]:
     return picked
 
 
-def _public_summary_safe(text: str, rows: list[GroupAgentMessage]) -> bool:
+# 公开摘要太短通常只是"闲聊"之类，没有跨群分享价值。
+_PUBLIC_SUMMARY_MIN_CHARS = 8
+
+
+def _public_summary_safe(
+    text: str,
+    rows: list[GroupAgentMessage],
+    *,
+    member_names: set[str] | None = None,
+) -> bool:
     candidate = text.strip()
-    if not candidate:
+    if len(candidate) < _PUBLIC_SUMMARY_MIN_CHARS:
+        return False
+    if contains_pii(candidate) or looks_like_instruction(candidate):
         return False
     forbidden = {str(row.user_id) for row in rows}
+    # 本批没发言、但被别人提到的成员名同样不能带到其他群。
+    forbidden.update(name for name in member_names or set() if len(name) >= 2)
     forbidden.update(
         str(row.sender_name).strip()
         for row in rows
@@ -1231,12 +1364,14 @@ async def _compact_group_memory_locked(
 
     generated: dict[str, Any] | None = None
     if fresh_rows:
-        signal_chars = sum(
-            len(str(row.normalized_text or "").strip()) for row in fresh_rows
-        )
-        longest_chars = max(
-            len(str(row.normalized_text or "").strip()) for row in fresh_rows
-        )
+        # 低信号判定只看带文字的消息：一大串 [图片] 占位符不算内容。
+        text_lengths = [
+            len(str(row.normalized_text or "").strip())
+            for row in fresh_rows
+            if not _is_placeholder_only(str(row.normalized_text or ""))
+        ]
+        signal_chars = sum(text_lengths)
+        longest_chars = max(text_lengths, default=0)
         if (
             signal_chars < _LOW_SIGNAL_BATCH_CHARS
             and longest_chars < _LOW_SIGNAL_MAX_MESSAGE_CHARS
@@ -1248,7 +1383,11 @@ async def _compact_group_memory_locked(
                 f"最长 {longest_chars} 字,跳过模型调用仅跑确定性提取"
             )
         else:
-            payload = [_message_payload(row) for row in fresh_rows]
+            payload = [
+                _message_payload(row)
+                for row in fresh_rows
+                if not _is_placeholder_only(str(row.normalized_text or ""))
+            ]
             known_facts = await _known_facts_for(
                 session, group_id, {int(row.user_id) for row in member_rows}
             )
@@ -1286,7 +1425,8 @@ async def _compact_group_memory_locked(
             evidence_ids = [row.id for row in fresh_rows]
             related_ids = sorted({int(row.user_id) for row in member_rows})
             salience = score_topic(
-                [str(row.normalized_text or "") for row in fresh_rows]
+                [str(row.normalized_text or "") for row in fresh_rows],
+                speakers=len({int(row.user_id) for row in member_rows}),
             )
             _apply_summary(
                 session,
@@ -1304,7 +1444,11 @@ async def _compact_group_memory_locked(
             if (
                 member_rows
                 and config.cross_group_visibility == "public_summary"
-                and _public_summary_safe(public_text, fresh_rows)
+                and _public_summary_safe(
+                    public_text,
+                    fresh_rows,
+                    member_names=await _group_member_names(session, group_id),
+                )
             ):
                 _apply_summary(
                     session,
@@ -1470,6 +1614,20 @@ async def _opted_out_names(
         if nickname
     )
     return {name for name in names if name}
+
+
+async def _group_member_names(session: Any, group_id: int) -> set[str]:
+    return {
+        str(name).strip()
+        for name in (
+            await session.execute(
+                select(UserGroup.group_nickname).where(UserGroup.group_id == group_id)
+            )
+        )
+        .scalars()
+        .all()
+        if name and str(name).strip()
+    }
 
 
 def drop_instruction_sentences(text: str) -> str:
@@ -1868,17 +2026,20 @@ def _extract_structured_memories(
 __all__ = [
     "RELATION_MENTION_TYPE",
     "RELATION_TYPE_CHOICES",
+    "SYMMETRIC_RELATION_TYPES",
     "build_summary",
     "compact_group_memory",
     "compact_group_memory_backlog",
     "compacting_group_count",
     "decay_stale_relations",
+    "dedupe_symmetric_relations",
     "delete_group_memories",
     "delete_member_memories",
     "diversify_ranked",
     "drop_instruction_sentences",
     "effective_relation_confidence",
     "extract_bigrams",
+    "find_relation_edge",
     "is_memory_compacting",
     "list_memories",
     "memory_retry_due",
@@ -1891,6 +2052,7 @@ __all__ = [
     "rank_memories",
     "rebuild_group_memories",
     "record_memory_failure",
+    "relation_pair_key",
     "score_memories",
     "score_topic",
 ]

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,12 +25,52 @@ from .context_history import select_context_messages
 from .context_repository import AgentContextRepository
 from .emotion import emotion_context_state
 from .log import dbg
-from .memory import effective_relation_confidence, rank_memories
+from .memory import (
+    dedupe_symmetric_relations,
+    effective_relation_confidence,
+    rank_memories,
+)
 from .memory_access import record_access
+from .memory_hygiene import contains_pii, looks_like_instruction
 from .persona import persona_editor_profile
 
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 _MEMORY_CONTEXT_LIMIT = 24
+_SHARED_SUMMARY_LIMIT = 4
+_SHARED_SUMMARY_CHARS = 300
+_SHARED_DIGITS_RE = re.compile(r"(?<!\d)\d{5,12}(?!\d)")
+
+
+def select_shared_summaries(rows: list[AgentMemory]) -> list[AgentMemory]:
+    """跨群共享摘要的确定性筛选。
+
+    - 每个来源群只取最新一条，避免一个话痨群占满全部名额；
+    - 读取时复检：旧版本生成、未经卫生检查的公开摘要若含联系方式、
+      号码或指令句式，直接跳过；
+    - 按 updated_at 确定性取前 N：若按话题相关性重排，选择会随每条新消息
+      翻转，击穿稳定层前缀缓存。
+    """
+
+    picked: list[AgentMemory] = []
+    seen_groups: set[int] = set()
+    for row in rows:
+        source_group = int(row.group_id or 0)
+        content = str(row.content or "")
+        if source_group in seen_groups:
+            continue
+        if (
+            contains_pii(content)
+            or looks_like_instruction(content)
+            or _SHARED_DIGITS_RE.search(content)
+        ):
+            continue
+        seen_groups.add(source_group)
+        picked.append(row)
+        if len(picked) >= _SHARED_SUMMARY_LIMIT:
+            break
+    return picked
+
+
 # 话题记忆的最低相关性：与近期消息和活跃话题毫无交集的记忆不作为话题记忆注入。
 TOPIC_MEMORY_MIN_RELEVANCE = 0.05
 
@@ -339,9 +380,7 @@ async def load_context(
                 for user_id in row.related_user_ids or []
             )
         ]
-        # 跨群共享摘要按 updated_at 确定性取前 4：候选超过 4 条时若按
-        # 话题相关性重排，选择会随每条新消息翻转，击穿稳定层前缀缓存。
-        shared_rows = shared_rows[:4]
+        shared_rows = select_shared_summaries(shared_rows)
 
     ordered: list[tuple[AgentMemory, str]] = []
     seen_memory_ids: set[int] = set()
@@ -383,6 +422,9 @@ async def load_context(
     memory_chars = 2
     for row, source in ordered:
         content = str(row.content or "").strip()
+        if source == "shared_public":
+            # 单条跨群摘要截短，不让别的群的长摘要吃掉本群记忆预算。
+            content = content[:_SHARED_SUMMARY_CHARS]
         if not content:
             continue
         if len(memories) >= _MEMORY_CONTEXT_LIMIT:
@@ -394,8 +436,9 @@ async def load_context(
             "subject_name": name_by_id.get(subject_id) if subject_id else None,
             "key": row.memory_key,
             "content": "",
-            "salience": row.salience,
-            "confidence": row.confidence,
+            # 两位小数足够模型判断强弱，长浮点只是浪费 token 并让稳定层抖动。
+            "salience": round(float(row.salience or 0.0), 2),
+            "confidence": round(float(row.confidence or 0.0), 2),
             "source": row.source_kind,
             "evidence_count": len(row.evidence_message_ids or []),
             "first_observed_date": (row.created_at or now).date().isoformat(),
@@ -442,7 +485,17 @@ async def load_context(
 
     # 生效置信度按"最后见到"分段降权：沉寂数月的老边让位给近期仍在互动的新边。
     ranked_relations = sorted(
-        relation_rows,
+        dedupe_symmetric_relations(
+            sorted(
+                relation_rows,
+                key=lambda row: (
+                    -effective_relation_confidence(
+                        float(row.confidence or 0.0), row.last_seen_at, context_now
+                    ),
+                    int(row.id or 0),
+                ),
+            )
+        ),
         key=lambda row: (
             -effective_relation_confidence(
                 float(row.confidence or 0.0), row.last_seen_at, context_now

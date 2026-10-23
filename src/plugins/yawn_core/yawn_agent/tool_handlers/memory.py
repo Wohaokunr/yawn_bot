@@ -10,6 +10,8 @@ from ...data_models.user_group import UserGroup
 from ..context import now_beijing
 from ..log import dbg
 from ..memory import (
+    SYMMETRIC_RELATION_TYPES,
+    dedupe_symmetric_relations,
     effective_relation_confidence,
     normalize_relation_type,
 )
@@ -222,7 +224,9 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
                 or item[1].source_kind == "manual"
             ]
             scored.sort(key=lambda item: (-item[0], -int(item[1].id or 0)))
-            rows = [row for _score, row in scored[:limit]]
+            rows = dedupe_symmetric_relations([row for _score, row in scored])[
+                :limit
+            ]
         result = [
             {
                 "subject_user_id": int(row.subject_user_id),
@@ -277,13 +281,25 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
         opted_out = await opted_out_user_ids(session, group_id)
         if subject in opted_out or target in opted_out:
             raise PermissionError("关系一方已隐私退出，不得记录")
+        # 无方向关系（好友、同学等）复用已存在的反向边，不再造镜像重复边。
+        directions = [(subject, target)]
+        if relation_type in SYMMETRIC_RELATION_TYPES:
+            directions.append((target, subject))
         edge = await session.scalar(
-            select(AgentRelation).where(
+            select(AgentRelation)
+            .where(
                 AgentRelation.group_id == group_id,
-                AgentRelation.subject_user_id == subject,
-                AgentRelation.object_user_id == target,
                 AgentRelation.relation_type == relation_type,
+                or_(
+                    *(
+                        (AgentRelation.subject_user_id == left)
+                        & (AgentRelation.object_user_id == right)
+                        for left, right in directions
+                    )
+                ),
             )
+            .order_by(AgentRelation.id)
+            .limit(1)
         )
         if edge is not None and edge.source_kind == "manual":
             raise PermissionError("该关系由管理员维护，Agent 不能修改")

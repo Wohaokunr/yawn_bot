@@ -55,6 +55,7 @@ from ..yawn_agent.memory import (
     rebuild_group_memories,
     record_memory_failure,
 )
+from ..yawn_agent.memory_hygiene import looks_like_instruction
 from ..yawn_agent.persona import (
     apply_persona_editor_profile,
     persona_behavior,
@@ -112,6 +113,16 @@ from .service import (
 router = APIRouter(prefix=API_PATH)
 _compact_inflight: set[int] = set()
 _REBUILD_MAX_BATCHES = 20
+
+
+def _reject_instruction_content(content: str) -> None:
+    """记忆会进入 Agent Prompt；像指令的内容应写进人设而不是记忆。"""
+
+    if looks_like_instruction(content):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "记忆内容看起来是给机器人的指令，请改到人设配置中",
+        )
 _bg_tasks: set[asyncio.Task[Any]] = set()
 
 
@@ -420,6 +431,7 @@ async def trigger_memory_rebuild(
 async def create_memory(
     group_id: int, body: MemoryCreateBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
+    _reject_instruction_content(body.content)
     async with get_session() as db:
         await require_group(db, group_id)
         now = now_beijing()
@@ -481,7 +493,13 @@ async def update_memory(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "记忆不存在")
         check_version(row, body.version, version_of=memory_version)
         if "content" in updates:
-            row.content = str(updates["content"]).strip()
+            _reject_instruction_content(str(updates["content"]))
+            new_content = str(updates["content"]).strip()
+            if new_content != str(row.content or "") and row.source_kind != "manual":
+                # 管理员改过的自动/自述条目转为手工维护，否则下一次自动整理
+                # 会把人工更正悄悄覆盖回去。
+                row.source_kind = "manual"
+            row.content = new_content
         if "salience" in updates:
             row.salience = float(updates["salience"])
         if "confidence" in updates:

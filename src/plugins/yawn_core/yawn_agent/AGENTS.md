@@ -43,6 +43,9 @@
 - 成员自助工具 `remember_about_me` / `forget_about_me` 只能读写**调用者本人**的画像，不提供 user_id 参数；声称"已经忘掉"必须有本轮成功的 `forget_about_me`（见 `speech_claims.py`）。
 - 召回计数只在读路径写进程内有界缓冲（`memory_access.record_access`），由整理 tick 批量落库；禁止在上下文加载或只读工具里直接 UPDATE 记忆行。
 - 核心记忆（core）不过期；本人更正核心事实时降级回 profile 并重置证据，必须重新积累才能再晋升。
+- 跨群共享摘要只取 Agent 总开关开启、允许公开摘要、近 14 天内的来源群，每个来源群最多 1 条，读取时再做一次 PII/号码/指令复检（`context_loader.select_shared_summaries`）；群改回隔离后，整理任务会删掉它的 `public_daily:` 行。
+- 无方向关系（`SYMMETRIC_RELATION_TYPES`：好友、同学等）写入时复用反向边，读取时按无序对去重；师徒、mentions 保持方向。
+- WebUI 管理员编辑 auto/agent 记忆的内容后，该行转为 `manual`；像指令的记忆内容一律拒绝（应写进人设）。
 - 话题记忆注入必须满足最低相关性（`TOPIC_MEMORY_MIN_RELEVANCE`），并用 MMR 去冗余；不要把与当前对话无关的高显著旧记忆塞进 Prompt。
 
 ## 消息发送与 OneBot
