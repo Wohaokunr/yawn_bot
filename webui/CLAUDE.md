@@ -34,7 +34,7 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 |---|---|---|
 | `/overview` | `overview.tsx` | `overview_routes.py` |
 | `/groups`、`/groups/:id`、`/users` | `access-pages.tsx`、`group-workspace.tsx` | `groups.py`、`users.py` |
-| `/agent/:groupId` | `agent.tsx` + `agent-workspace/`（cockpit、状态栏、配置导入导出）+ `agent-panels/`（配置、人设、记忆、关系、隐私、消息、审计）+ `agent-debug/`（执行轨迹、Prompt/上下文/工具检查、模拟工作台）；`agent-meta.ts`、`relation-meta.ts`、`relation-graph.tsx`（d3-force） | `agent*.py`、`audits.py` |
+| `/agent/:groupId` | `agent.tsx` + `agent-workspace/`（cockpit、状态栏、配置导入导出）+ `agent-panels/`（配置、人设、记忆、关系、隐私、消息、审计）+ `agent-debug/`（执行轨迹、Prompt/上下文/工具检查、模拟工作台）；`agent-meta.ts`、`relation-meta.ts`、`relation-graph.tsx`（d3-force）、`relations/`（关系面板 2.0：列表/成员/矩阵/洞察视图、编辑与详情抽屉、`relation-analysis.ts` 纯图算法；状态在 URL `relations.*`） | `agent*.py`、`audits.py` |
 | `/games` | `games.tsx` | `games.py` |
 | `/modules` | `modules.tsx` | `rpg_modules.py` |
 | `/fanqie` | `fanqie.tsx` | `fanqie.py` |

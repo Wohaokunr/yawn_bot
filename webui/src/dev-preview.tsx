@@ -6,6 +6,7 @@ import { ConfigProvider, theme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import "@fontsource/zcool-kuaile/400.css";
 import "./styles.css";
+import "./relations/relations.css";
 import { RelationGraphView } from "./relation-graph";
 import type { AgentRelationGraph, AgentRelationGraphNode, AgentRelationItem } from "./types";
 
@@ -110,8 +111,8 @@ function PreviewApp(): React.JSX.Element {
       <RelationGraphView
         graph={mockGraph}
         typeFilter=""
-        onEditRelation={() => undefined}
-        onDeleteRelation={() => undefined}
+        onOpenEdge={() => undefined}
+        onOpenMember={() => undefined}
       />
     </div>
   );

@@ -402,6 +402,27 @@ export interface AgentRelationGraphNode {
   degree: number;
 }
 
+// 列表接口在关系边基础上补的展示字段；mutual 表示存在同类型反向边。
+export interface AgentRelationListItem extends AgentRelationItem {
+  subjectName?: string;
+  objectName?: string;
+  mutual?: boolean;
+}
+
+// 关系摘要：新增字段旧后端可能缺省，前端一律按可选处理。
+export interface AgentRelationSummary {
+  edgeCount: number;
+  linkedMemberCount: number;
+  typeCounts: Array<{ type: string; count: number }>;
+  lastSeenAt: string | null;
+  avgConfidence?: number | null;
+  mutualEdgeCount?: number;
+  freshEdgeCount?: number;
+  staleEdgeCount?: number;
+  lowConfidenceCount?: number;
+  sourceCounts?: Array<{ source: string; count: number }>;
+}
+
 export interface AgentRelationGraph {
   nodes: AgentRelationGraphNode[];
   edges: AgentRelationItem[];

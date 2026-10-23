@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildExportSvg,
+  centerTransform,
+  circularLayout,
+  communityCenters,
   createRelationSimulation,
   edgePath,
   edgeWidth,
@@ -12,6 +16,7 @@ import {
   nodeRadius,
   relationTypeColor,
   runRelationLayout,
+  smartLabelIds,
   wheelZoom,
   type LayoutPosition,
   type RelationLayoutLink,
@@ -331,5 +336,72 @@ describe("createRelationSimulation", () => {
   it("实时模拟阈值常量为正整数", () => {
     expect(Number.isInteger(LIVE_SIM_MAX_NODES)).toBe(true);
     expect(LIVE_SIM_MAX_NODES).toBeGreaterThan(0);
+  });
+});
+
+describe("图谱 2.0 辅助函数", () => {
+  it("图例关掉的类型从边中剔除，节点随之收敛", () => {
+    const graph = makeGraph(
+      [makeNode({ userId: "111" }), makeNode({ userId: "222" }), makeNode({ userId: "333" })],
+      [
+        makeEdge({ id: "1", subjectUserId: "111", objectUserId: "222", type: "好友" }),
+        makeEdge({ id: "2", subjectUserId: "222", objectUserId: "333", type: "对立" }),
+      ],
+    );
+    const result = filterGraphData(graph, "", false, new Set(["对立"]));
+    expect(result.edges.map((edge) => edge.id)).toEqual(["1"]);
+    expect(result.nodes.map((node) => node.userId)).toEqual(["111", "222"]);
+  });
+
+  it("分簇布局把同圈子成员拉到一起", () => {
+    const ids = ["a", "b", "c", "x", "y", "z"];
+    const communities = new Map([["a", 0], ["b", 0], ["c", 0], ["x", 1], ["y", 1], ["z", 1]]);
+    const centers = communityCenters(ids, communities);
+    expect(centers.get("a")).toEqual(centers.get("b"));
+    expect(centers.get("a")).not.toEqual(centers.get("x"));
+    const layout = runRelationLayout(ids, [], { centers });
+    const dist = (p: string, q: string) => Math.hypot(layout.get(p)!.x - layout.get(q)!.x, layout.get(p)!.y - layout.get(q)!.y);
+    expect(dist("a", "b")).toBeLessThan(dist("a", "x"));
+  });
+
+  it("环形布局确定、等距且同圈子相邻", () => {
+    const communities = new Map([["a", 1], ["b", 0], ["c", 1], ["d", 0]]);
+    const degree = new Map([["a", 1], ["b", 3], ["c", 2], ["d", 1]]);
+    const layout = circularLayout(["a", "b", "c", "d"], communities, degree);
+    expect([...layout.keys()]).toEqual(["b", "d", "c", "a"]);
+    const radii = [...layout.values()].map((p) => Math.hypot(p.x - 450, p.y - 320));
+    for (const radius of radii) expect(radius).toBeCloseTo(radii[0], 5);
+    expect(circularLayout([], communities, degree).size).toBe(0);
+  });
+
+  it("居中变换把目标点放到视口中心", () => {
+    const transform = centerTransform({ x: 100, y: 50 }, 800, 600, 0.5);
+    expect(transform.k).toBeCloseTo(1.15, 5);
+    expect(100 * transform.k + transform.x).toBeCloseTo(400, 5);
+    expect(50 * transform.k + transform.y).toBeCloseTo(300, 5);
+    expect(centerTransform({ x: 0, y: 0 }, 100, 100, 9).k).toBe(4);
+  });
+
+  it("智能标签：小图全显示，大图只显示度数靠前的", () => {
+    const small = [makeNode({ userId: "1" }), makeNode({ userId: "2" })];
+    expect(smartLabelIds(small).size).toBe(2);
+    const big = Array.from({ length: 100 }, (_, index) => makeNode({ userId: String(index), degree: index }));
+    const labels = smartLabelIds(big);
+    expect(labels.size).toBe(25);
+    expect(labels.has("99")).toBe(true);
+    expect(labels.has("0")).toBe(false);
+  });
+
+  it("导出 SVG 自包含且转义名字", () => {
+    const nodes = [makeNode({ userId: "1", nickname: "<甲&>" }), makeNode({ userId: "2", nickname: "乙" })];
+    const edges = [makeEdge({ subjectUserId: "1", objectUserId: "2" })];
+    const positions = new Map([["1", { x: 0, y: 0 }], ["2", { x: 200, y: 100 }]]);
+    const { svg, width, height } = buildExportSvg(nodes, edges, positions, () => "#e4558a", "标题");
+    expect(svg.startsWith("<svg xmlns=\"http://www.w3.org/2000/svg\"")).toBe(true);
+    expect(svg).toContain("&lt;甲&amp;&gt;");
+    expect(svg).not.toContain("<甲");
+    expect(svg).toContain("<path");
+    expect(width).toBeGreaterThan(200);
+    expect(height).toBeGreaterThan(100);
   });
 });
