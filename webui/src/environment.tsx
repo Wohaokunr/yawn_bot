@@ -762,4 +762,3 @@ export function EnvironmentPage(): React.JSX.Element {
     </div>
   );
 }
-
