@@ -144,8 +144,16 @@ WW_AI_ENABLED=false
 YAWNBOT_AUTO_MIGRATE=false
 EOF
 fi
-chown "$DEPLOY_USER:$DEPLOY_USER" "$YAWNBOT_ROOT/.env"
-chmod 0600 "$YAWNBOT_ROOT/.env"
+# deploy-release 会把根 .env 迁入 config/.env 并留下符号链接；迁移后容器经
+# group_add 以部署用户组读写它，所以那时文件必须保持组可读写。
+if [[ -L "$YAWNBOT_ROOT/.env" ]]; then
+  install -d -m 2770 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$YAWNBOT_ROOT/config"
+  chown "$DEPLOY_USER:$DEPLOY_USER" "$YAWNBOT_ROOT/config/.env"
+  chmod 0660 "$YAWNBOT_ROOT/config/.env"
+else
+  chown "$DEPLOY_USER:$DEPLOY_USER" "$YAWNBOT_ROOT/.env"
+  chmod 0600 "$YAWNBOT_ROOT/.env"
+fi
 
 # Keep the OneBot credential in a dedicated env file so YawnBot and NapCat can
 # share exactly one source of truth without exposing unrelated AI/WebUI secrets

@@ -67,6 +67,7 @@ COPY --chown=10001:10001 src ./src
 COPY --chown=10001:10001 data/nonebot_plugin_orm/migrations /opt/yawnbot/migrations
 COPY --chown=10001:10001 --from=webui-builder /build/webui/dist ./webui/dist
 COPY --chmod=755 deploy/docker-entrypoint.sh /usr/local/bin/yawnbot-entrypoint
+COPY --chmod=644 deploy/docker-load-env.py /usr/local/bin/yawnbot-load-env
 
 USER yawnbot
 EXPOSE 8080

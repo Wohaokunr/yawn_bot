@@ -111,7 +111,8 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         result, root = self._run_fake_deploy(env_text="ENVIRONMENT=prod\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[deploy:webui] added", result.stdout)
-        env = (root / ".env").read_text(encoding="utf-8")
+        self.assertTrue((root / ".env").is_symlink())
+        env = (root / "config" / ".env").read_text(encoding="utf-8")
         self.assertIn("ENVIRONMENT=prod", env)
         self.assertIn("WEBUI_ENABLED=true", env)
         self.assertIn("WEBUI_COOKIE_SECURE=true", env)
@@ -123,14 +124,89 @@ class ProductionDeploymentControlPlaneTests(unittest.TestCase):
         self.assertEqual(len(token), 1)
         self.assertGreaterEqual(len(token[0]), 32)
         self.assertNotIn(token[0], result.stdout + result.stderr)
-        self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
-        self.assertTrue(list(root.glob(".env.bak-*")))
+        self.assertEqual((root / "config" / ".env").stat().st_mode & 0o777, 0o660)
+        self.assertTrue(list((root / "config").glob(".env.bak-*")))
 
         existing = "WEBUI_ENABLED=false\nWEBUI_COOKIE_SECURE=false\n"
         result, root = self._run_fake_deploy(env_text=existing)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("[deploy:webui] added", result.stdout)
         self.assertEqual((root / ".env").read_text(encoding="utf-8"), existing)
+
+    def test_deploy_release_moves_root_env_into_managed_config_once(self) -> None:
+        result, root = self._run_fake_deploy(env_text="ENVIRONMENT=prod\nAI_MODEL=m\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[deploy:config] created config/.env", result.stdout)
+        config_dir = root / "config"
+        self.assertEqual(config_dir.stat().st_mode & 0o7777, 0o2770)
+        self.assertEqual(str((root / ".env").readlink()), "config/.env")
+        managed = (config_dir / ".env").read_text(encoding="utf-8")
+        self.assertIn("AI_MODEL=m", managed)
+        backups = list(root.glob(".env.pre-config-*"))
+        self.assertEqual(len(backups), 1)
+        image_env = (root / "image.env").read_text(encoding="utf-8")
+        self.assertIn(f"YAWNBOT_CONFIG_GID={config_dir.stat().st_gid}", image_env)
+
+        # 再次部署不重复迁移，面板改过的配置保持不变
+        (config_dir / ".env").write_text("AI_MODEL=panel\n", encoding="utf-8")
+        script_env = os.environ.copy()
+        script_env["PATH"] = f"{root / 'fake-bin'}{os.pathsep}{script_env['PATH']}"
+        script_env["YAWNBOT_ROOT"] = str(root)
+        again = subprocess.run(
+            ["sh", str(DEPLOY_SCRIPT), self._image_ref(), "v1.2.4", "b" * 40],
+            env=script_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertNotIn("[deploy:config]", again.stdout)
+        self.assertIn(
+            "AI_MODEL=panel", (config_dir / ".env").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(list(root.glob(".env.pre-config-*"))), 1)
+
+    def test_production_compose_loads_app_config_from_managed_file(self) -> None:
+        compose = PRODUCTION_COMPOSE.read_text(encoding="utf-8")
+        app_section = compose.split("  yawnbot:\n", 1)[1].split("\n\n", 1)[0]
+        env_files = app_section.split("env_file:\n", 1)[1].split("    group_add", 1)[0]
+        self.assertIn("- onebot.env", env_files)
+        self.assertNotIn("- .env", env_files)
+        self.assertIn("YAWNBOT_ENV_FILE: /app/config/.env", app_section)
+        self.assertIn("- ./config:/app/config", app_section)
+        self.assertIn('"${YAWNBOT_CONFIG_GID:-10001}"', app_section)
+        entrypoint = (REPO_ROOT / "deploy" / "docker-entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("yawnbot-load-env", entrypoint)
+        self.assertIn(
+            "deploy/docker-load-env.py /usr/local/bin/yawnbot-load-env",
+            DOCKERFILE.read_text(encoding="utf-8"),
+        )
+
+    def test_env_loader_keeps_process_values_and_records_file_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("AI_MODEL=file\nHOST=file-host\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.pop("YAWNBOT_DOTENV_KEYS", None)
+            env.pop("AI_MODEL", None)
+            env.update({"YAWNBOT_ENV_FILE": str(env_file), "HOST": "0.0.0.0"})
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "deploy" / "docker-load-env.py"),
+                    sys.executable,
+                    "-c",
+                    "import os; print(os.environ['AI_MODEL'], os.environ['HOST'],"
+                    " os.environ['YAWNBOT_DOTENV_KEYS'])",
+                ],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        self.assertEqual(result.stdout.strip(), "file 0.0.0.0 AI_MODEL")
 
     def test_deploy_release_rejects_short_webui_token(self) -> None:
         result, _ = self._run_fake_deploy(

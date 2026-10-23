@@ -26,6 +26,7 @@ environment_routes = importlib.import_module(
     "src.plugins.yawn_core.webui.environment_routes"
 )
 environment = importlib.import_module("src.plugins.yawn_core.webui.environment")
+GROUP_RW_MODE = 0o660
 
 
 @pytest.fixture
@@ -76,6 +77,7 @@ AGENT_PROACTIVE_THINKING=inherit
     monkeypatch.setattr(environment, "EXAMPLE_PATH", example_path)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("AI_MODEL", raising=False)
+    monkeypatch.delenv("YAWNBOT_DOTENV_KEYS", raising=False)
     return env_path, example_path
 
 
@@ -124,6 +126,38 @@ def test_environment_catalog_is_complete_and_secrets_are_masked(
     model = next(item for item in overridden["entries"] if item["key"] == "AI_MODEL")
     assert model["source"] == "process"
     assert "process-model" not in str(overridden)
+
+    # 入口脚本从受管配置文件注入的键属于面板自己的配置，不算外部覆盖
+    monkeypatch.setenv("YAWNBOT_DOTENV_KEYS", "AI_MODEL,AI_API_KEY")
+    managed = environment.load_environment()
+    model = next(item for item in managed["entries"] if item["key"] == "AI_MODEL")
+    assert model["source"] == "environment"
+    (env_files[0].parent / ".env.prod").unlink(missing_ok=True)
+    managed = environment.load_environment()
+    model = next(item for item in managed["entries"] if item["key"] == "AI_MODEL")
+    assert model["source"] == "env"
+    assert model["overridden"] is False
+
+
+def test_environment_update_through_symlink_keeps_link_and_mode(
+    env_files: tuple[Path, Path],
+) -> None:
+    env_path, _example_path = env_files
+    config_dir = env_path.parent / "config"
+    config_dir.mkdir()
+    managed = config_dir / ".env"
+    managed.write_bytes(env_path.read_bytes())
+    managed.chmod(0o660)
+    env_path.unlink()
+    env_path.symlink_to(Path("config") / ".env")
+
+    version = environment.load_environment()["version"]
+    environment.update_environment(version, [("AI_MODEL", "linked-model")])
+
+    assert env_path.is_symlink()
+    assert managed.stat().st_mode & 0o777 == GROUP_RW_MODE
+    assert 'AI_MODEL="linked-model"' in managed.read_text(encoding="utf-8")
+    assert not list(config_dir.glob(".env.*.tmp"))
 
 
 def test_environment_update_preserves_comments_and_round_trips_values(

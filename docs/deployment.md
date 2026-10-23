@@ -26,7 +26,8 @@ ghcr.io/wohaokunr/yawn_bot@sha256:<release-digest>
 服务器固定目录为：
 
 ```text
-/opt/yawnbot/.env                  运行时配置与密钥，权限 600
+/opt/yawnbot/config/.env           运行时配置与密钥（WebUI 环境配置页读写的就是它），权限 660，目录 2770
+/opt/yawnbot/.env                  指向 config/.env 的符号链接
 /opt/yawnbot/compose.yaml          生产 Compose
 /opt/yawnbot/bin/deploy-release    部署入口
 /opt/yawnbot/data/                 持久数据
@@ -37,7 +38,11 @@ ghcr.io/wohaokunr/yawn_bot@sha256:<release-digest>
 生产 Compose：
 
 - 只运行一个 `yawnbot` 服务；
-- 把 `/opt/yawnbot/data` 挂载到 `/app/data`；
+- 把 `/opt/yawnbot/data` 挂载到 `/app/data`，`/opt/yawnbot/config` 挂载到 `/app/config`；
+- 应用配置不走 `env_file`：入口脚本每次进程启动都从 `YAWNBOT_ENV_FILE=/app/config/.env`
+  重新加载，WebUI 保存后重启容器即生效；compose `environment` 与 `onebot.env`
+  里的键仍优先，并在面板上显示为外部覆盖；
+- 容器经 `group_add` 加入 `config/` 的属组（部署用户组），以便读写配置文件；
 - 只把 `8080` 绑定到宿主机回环地址；
 - 使用 `/healthz` 做 liveness；
 - 容器以非 root 用户运行；
@@ -278,7 +283,7 @@ Actions 下发，`deploy-release` 在健康检查通过后启动它。要公开 
 
 1. 把域名 A 记录解析到服务器公网 IP（Cloudflare 先用灰云 DNS only，证书签发后若开橙云，
    SSL/TLS 模式设为 Full (strict)）；
-2. `deploy-release` 会在服务器本地补齐 `/opt/yawnbot/.env` 里缺失的 WebUI 三项：
+2. `deploy-release` 会在服务器本地补齐 `/opt/yawnbot/config/.env` 里缺失的 WebUI 三项：
    `WEBUI_ENABLED=true`、`WEBUI_COOKIE_SECURE=true`，以及用 `secrets.token_hex(32)`
    生成的 `WEBUI_ADMIN_TOKEN`。已有的键不会被覆盖，改动前备份为 `.env.bak-<时间>`，
    token 只写入服务器文件，不打印、不经过 GitHub。登录 WebUI 时到服务器上查看该值；
@@ -287,6 +292,10 @@ Actions 下发，`deploy-release` 在健康检查通过后启动它。要公开 
 4. 发版部署。证书自动签发并存放在 `/opt/yawnbot/caddy/`。
 
 在服务器 `touch /opt/yawnbot/public-https.disabled` 后再部署即可停掉公网入口。
+
+旧布局的 `/opt/yawnbot/.env` 由 `deploy-release` 首次运行时自动迁入 `config/.env`，
+原文件留作 `.env.pre-config-<时间>`，原位置换成符号链接。迁移后若要回滚到不含
+`yawnbot-load-env` 的旧镜像（v0.1.7 及更早），需同时换回旧版 compose，否则旧镜像读不到配置。
 
 不要直接把管理 Token 写进镜像。优先用 Compose secrets、宿主机环境、受限权限的 `.env` 或其他密钥管理方式注入。
 
