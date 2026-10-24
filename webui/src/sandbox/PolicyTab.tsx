@@ -1,17 +1,19 @@
 import { ClearOutlined, SaveOutlined, UndoOutlined } from "@ant-design/icons";
-import { Alert, App as AntApp, Button, Card, Empty, Input, InputNumber, Popconfirm, Radio, Skeleton, Switch, Table, Tag } from "antd";
+import { Alert, App as AntApp, Button, Card, Checkbox, Empty, Input, InputNumber, Popconfirm, Radio, Skeleton, Switch, Table, Tag } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "../shared";
 import { sandboxApi } from "./sandbox-api";
 import {
   describeAccess,
   formatEpoch,
+  INBOX_MODE_META,
+  INBOX_TYPE_META,
   parseGroupList,
   SETTING_RANGES,
   settingsEqual,
   validateSettings,
 } from "./sandbox-meta";
-import type { SandboxSettings, SandboxStatus, SandboxUsage } from "./types";
+import type { SandboxInboxMode, SandboxInboxType, SandboxSettings, SandboxStatus, SandboxUsage } from "./types";
 
 type NumericKey = keyof typeof SETTING_RANGES;
 
@@ -32,6 +34,114 @@ const LIMIT_SECTIONS: Array<{ title: string; description: string; keys: NumericK
     keys: ["maxOutputChars", "maxShareMb"],
   },
 ];
+
+const INBOX_LIMIT_KEYS: NumericKey[] = ["inboxMaxFileMb", "inboxMaxPerTurn", "inboxHistoryMinutes", "inboxGroupDailyMb"];
+
+function NumericField({
+  field,
+  draft,
+  server,
+  errors,
+  disabled,
+  onChange,
+}: {
+  field: NumericKey;
+  draft: SandboxSettings;
+  server: SandboxSettings;
+  errors: Record<string, string>;
+  disabled?: boolean;
+  onChange: (key: NumericKey, value: number) => void;
+}): React.JSX.Element {
+  const range = SETTING_RANGES[field];
+  const changed = draft[field] !== server[field];
+  return (
+    <label className="sbx-field">
+      <span className="sbx-field-label">
+        {range.label}
+        {changed && <Tag color="gold">原 {server[field]}</Tag>}
+      </span>
+      <InputNumber
+        min={range.min}
+        max={range.max}
+        value={draft[field]}
+        disabled={disabled}
+        status={errors[field] ? "error" : undefined}
+        onChange={(value) => onChange(field, typeof value === "number" ? Math.round(value) : range.min)}
+        addonAfter={range.unit}
+        style={{ width: "100%" }}
+      />
+      {errors[field] && <span className="sbx-field-error">{errors[field]}</span>}
+    </label>
+  );
+}
+
+/** 「群聊附件入箱」：群友发的图片/文件/语音/视频怎样放进内置电脑。 */
+export function InboxPolicyCard({
+  draft,
+  server,
+  errors,
+  runnerUploadMb,
+  onChange,
+}: {
+  draft: SandboxSettings;
+  server: SandboxSettings;
+  errors: Record<string, string>;
+  runnerUploadMb?: number;
+  onChange: <K extends keyof SandboxSettings>(key: K, value: SandboxSettings[K]) => void;
+}): React.JSX.Element {
+  const off = !draft.inboxEnabled;
+  const overRunner = runnerUploadMb != null && draft.inboxMaxFileMb > runnerUploadMb;
+  return (
+    <Card size="small" title="群聊附件入箱" className="sbx-card-wide">
+      <div className="sbx-switch-row">
+        <Switch checked={draft.inboxEnabled} onChange={(value) => onChange("inboxEnabled", value)} aria-label="群聊附件入箱" />
+        <div>
+          <strong>把群里发的附件放进内置电脑</strong>
+          <span className="sbx-muted">
+            图片、文件、语音、视频会放进对应群工作区的 inbox/，Agent 用 Python 或命令行直接处理。只放沙箱开放的群，退出记忆的成员的附件不会被放入。
+          </span>
+        </div>
+      </div>
+      <div className="sbx-field">
+        <span className="sbx-field-label">什么时候自动放</span>
+        <Radio.Group
+          value={draft.inboxAutoImport}
+          disabled={off}
+          onChange={(event) => onChange("inboxAutoImport", event.target.value as SandboxInboxMode)}
+          optionType="button"
+          options={(Object.keys(INBOX_MODE_META) as SandboxInboxMode[]).map((value) => ({ value, label: INBOX_MODE_META[value].label }))}
+        />
+        <span className="sbx-muted">{INBOX_MODE_META[draft.inboxAutoImport].hint}</span>
+      </div>
+      <div className="sbx-field">
+        <span className="sbx-field-label">允许的附件类型</span>
+        <Checkbox.Group
+          value={draft.inboxTypes}
+          disabled={off}
+          onChange={(values) => onChange("inboxTypes", (Object.keys(INBOX_TYPE_META) as SandboxInboxType[]).filter((type) => values.includes(type)))}
+          options={(Object.keys(INBOX_TYPE_META) as SandboxInboxType[]).map((value) => ({ value, label: `${INBOX_TYPE_META[value].emoji} ${INBOX_TYPE_META[value].label}` }))}
+        />
+        {errors.inboxTypes && <span className="sbx-field-error">{errors.inboxTypes}</span>}
+      </div>
+      <div className="sbx-field-grid sbx-field-grid-4">
+        {INBOX_LIMIT_KEYS.map((key) => (
+          <NumericField key={key} field={key} draft={draft} server={server} errors={errors} disabled={off} onChange={(field, value) => onChange(field, value)} />
+        ))}
+      </div>
+      {overRunner && (
+        <Alert
+          type="warning"
+          showIcon
+          message={`沙箱 runner 单个上传上限是 ${runnerUploadMb}MB，超过它的附件仍会被拒绝`}
+          description="调大 runner 的 SANDBOX_MAX_UPLOAD_MB，或者把这里改小。"
+        />
+      )}
+      {draft.inboxHistoryMinutes === 0 && !off && (
+        <p className="sbx-muted">回溯时间为 0：只处理本条消息和它引用的消息里的附件。</p>
+      )}
+    </Card>
+  );
+}
 
 function GroupListField({
   label,
@@ -223,31 +333,14 @@ export function PolicyTab({ status }: { status: SandboxStatus }): React.JSX.Elem
           </div>
         </Card>
 
+        <InboxPolicyCard draft={draft} server={server} errors={errors} runnerUploadMb={status.health?.maxUploadMb} onChange={update} />
+
         {LIMIT_SECTIONS.map((section) => (
           <Card size="small" title={section.title} key={section.title}>
             <p className="sbx-muted">{section.description}</p>
-            {section.keys.map((key) => {
-              const range = SETTING_RANGES[key];
-              const changed = draft[key] !== server[key];
-              return (
-                <label className="sbx-field" key={key}>
-                  <span className="sbx-field-label">
-                    {range.label}
-                    {changed && <Tag color="gold">原 {server[key]}</Tag>}
-                  </span>
-                  <InputNumber
-                    min={range.min}
-                    max={range.max}
-                    value={draft[key]}
-                    status={errors[key] ? "error" : undefined}
-                    onChange={(value) => update(key, typeof value === "number" ? Math.round(value) : range.min)}
-                    addonAfter={range.unit}
-                    style={{ width: "100%" }}
-                  />
-                  {errors[key] && <span className="sbx-field-error">{errors[key]}</span>}
-                </label>
-              );
-            })}
+            {section.keys.map((key) => (
+              <NumericField key={key} field={key} draft={draft} server={server} errors={errors} onChange={(field, value) => update(field, value)} />
+            ))}
           </Card>
         ))}
 

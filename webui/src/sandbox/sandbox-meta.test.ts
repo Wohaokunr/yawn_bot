@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  breadcrumbs,
   canPreviewText,
+  childDirs,
+  filesInDir,
+  inboxStatusMeta,
+  inboxViaLabel,
+  isInboxPath,
+  joinPath,
+  kindCounts,
+  nextFreeName,
+  parseCsvPreview,
+  prettyJson,
+  readSnippet,
+  supportsFeature,
+  validateRelativePath,
   describeAccess,
   formatBytes,
   formatDuration,
@@ -31,6 +45,13 @@ const defaults: SandboxSettings = {
   maxOutputChars: 3000,
   maxShareMb: 20,
   allowUnisolated: false,
+  inboxEnabled: true,
+  inboxAutoImport: "sandbox_turns",
+  inboxTypes: ["image", "file", "record", "video"],
+  inboxMaxFileMb: 20,
+  inboxMaxPerTurn: 6,
+  inboxHistoryMinutes: 180,
+  inboxGroupDailyMb: 500,
 };
 
 describe("格式化", () => {
@@ -136,5 +157,67 @@ describe("策略校验", () => {
     expect(describeAccess({ ...defaults, adminOnly: true, groupMode: "allowlist", allowedGroups: ["123456"] })).toBe(
       "1 个白名单群的群主/管理员可用，每人每天 20 次",
     );
+  });
+});
+
+describe("文件浏览与附件辅助函数", () => {
+  const files = [
+    { path: "inbox/a.png", size: 10, mtime: 1, kind: "image" as const, mime: "image/png" },
+    { path: "inbox/sub/b.mp3", size: 20, mtime: 2, kind: "audio" as const, mime: "audio/mpeg" },
+    { path: "c.csv", size: 5, mtime: 3, kind: "table" as const, mime: "text/csv" },
+  ];
+
+  it("在旧 runner 上从文件路径推导子目录", () => {
+    expect(childDirs("", undefined, files)).toEqual([{ path: "inbox", files: 2, bytes: 30 }]);
+    expect(childDirs("inbox", undefined, files)).toEqual([{ path: "inbox/sub", files: 1, bytes: 20 }]);
+    expect(childDirs("", [{ path: "inbox", files: 9, bytes: 1 }, { path: "inbox/sub", files: 1, bytes: 1 }], files)).toEqual([{ path: "inbox", files: 9, bytes: 1 }]);
+    expect(filesInDir(files, "").map((item) => item.path)).toEqual(["c.csv"]);
+    expect(filesInDir(files, "inbox").map((item) => item.path)).toEqual(["inbox/a.png"]);
+  });
+
+  it("路径拼接、面包屑和同名改名", () => {
+    expect(joinPath("uploads", "../evil\\x.txt")).toBe("uploads/evil/x.txt");
+    expect(breadcrumbs("a/b").map((item) => item.path)).toEqual(["", "a", "a/b"]);
+    expect(nextFreeName("data/报表.xlsx", new Set(["data/报表.xlsx", "data/报表 (2).xlsx"]))).toBe("data/报表 (3).xlsx");
+    expect(nextFreeName("README", new Set(["README"]))).toBe("README (2)");
+    expect(isInboxPath("inbox/a.png")).toBe(true);
+    expect(isInboxPath("inboxes/a.png")).toBe(false);
+  });
+
+  it("校验相对路径", () => {
+    expect(validateRelativePath("")).toBeTruthy();
+    expect(validateRelativePath("/etc/passwd")).toBeTruthy();
+    expect(validateRelativePath("a/../b")).toBeTruthy();
+    expect(validateRelativePath("a\u0001b")).toBeTruthy();
+    expect(validateRelativePath("data/结果.csv")).toBeNull();
+  });
+
+  it("按类型给读取代码", () => {
+    expect(readSnippet("inbox/a.png", "image")).toContain('Image.open("inbox/a.png")');
+    expect(readSnippet("x.tsv", "table")).toContain("sep='\\t'");
+    expect(readSnippet("x.xlsx", "table")).toContain("read_excel");
+    expect(readSnippet("v.wav", "audio")).toContain("soundfile");
+    expect(readSnippet("z.zip", "archive")).toContain("zipfile");
+  });
+
+  it("CSV 预览支持引号与转义", () => {
+    expect(parseCsvPreview('a,b\n"x, y","he said ""hi"""\r\n1,2')).toEqual([["a", "b"], ["x, y", 'he said "hi"'], ["1", "2"]]);
+    expect(parseCsvPreview("a\tb\n1\t2", 10, "\t")).toEqual([["a", "b"], ["1", "2"]]);
+    expect(parseCsvPreview("a\n1\n2\n3", 2)).toHaveLength(2);
+  });
+
+  it("入箱途径、状态和设置校验", () => {
+    expect(inboxViaLabel("get_record:base64")).toBe("语音接口 · base64");
+    expect(inboxViaLabel("group_file:url")).toBe("群文件链接 · 下载");
+    expect(inboxStatusMeta("nope").label).toBe("nope");
+    expect(prettyJson('{"a":1}')).toBe('{\n  "a": 1\n}');
+    expect(prettyJson("not json")).toBe("not json");
+    expect(kindCounts(files)[0]).toEqual({ kind: "image", count: 1 });
+    expect(supportsFeature(["rename"], "rename")).toBe(true);
+    expect(supportsFeature(undefined, "rename")).toBe(false);
+    expect(validateSettings({ ...defaults, inboxTypes: [] }).inboxTypes).toBeTruthy();
+    expect(validateSettings({ ...defaults, inboxEnabled: false, inboxTypes: [] }).inboxTypes).toBeUndefined();
+    expect(validateSettings({ ...defaults, inboxMaxFileMb: 64, inboxGroupDailyMb: 10 }).inboxMaxFileMb).toBeTruthy();
+    expect(validateSettings({ ...defaults, inboxHistoryMinutes: 99999 }).inboxHistoryMinutes).toBeTruthy();
   });
 });

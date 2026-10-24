@@ -12,7 +12,9 @@ snake_case 结果转成前端约定的 camelCase。runner 离线时只读接口�
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 from typing import Any, Literal
 from urllib.parse import quote
@@ -24,6 +26,7 @@ from pydantic.alias_generators import to_camel
 from sqlalchemy import select
 
 from ..data_models.bot_group import BotGroup
+from ..yawn_agent import sandbox_inbox_store as inbox_store
 from ..yawn_agent.sandbox_client import (
     ADMIN_WORKSPACE,
     SandboxClient,
@@ -31,7 +34,9 @@ from ..yawn_agent.sandbox_client import (
     cached_health,
     sandbox_endpoint,
 )
+from ..yawn_agent.sandbox_inbox import FAILURE_HINTS, host_patterns
 from ..yawn_agent.sandbox_policy import (
+    INBOX_MEDIA_TYPES,
     SandboxSettings,
     load_settings,
     save_settings,
@@ -47,7 +52,9 @@ _WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 _GROUP_WORKSPACE_RE = re.compile(r"^g(\d{4,12})$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 # 这些字段的值是“数据字典”（键是状态名/工作区名），不做驼峰转换。
-_OPAQUE_KEYS = frozenset({"by_status", "by_workspace", "all"})
+_OPAQUE_KEYS = frozenset(
+    {"by_status", "by_workspace", "all", "by_reason", "by_type", "by_via", "by_group"}
+)
 # 只有这些类型允许在浏览器里内联预览；其余一律作为附件下载。
 _INLINE_MIME = frozenset(
     {
@@ -222,8 +229,23 @@ async def sandbox_status(
             "health": camelize(health) if health is not None else None,
             "settings": _settings_payload(settings),
             "usage": _usage_payload(settings),
+            "inbox": _inbox_overview(settings),
         }
     )
+
+
+def _inbox_overview(settings: SandboxSettings) -> dict[str, Any]:
+    """状态条/概览用的入箱摘要；读坏文件也只会得到空统计。"""
+
+    try:
+        summary = inbox_store.summary()
+    except Exception:  # noqa: BLE001
+        summary = {"total": 0, "imported": 0, "reused": 0, "failed": 0, "bytes": 0}
+    return {
+        "enabled": settings.inbox_enabled,
+        "autoImport": settings.inbox_auto_import,
+        "today": camelize(summary),
+    }
 
 
 @router.get("/stats")
@@ -322,10 +344,11 @@ async def sandbox_files(
     _session: AdminReadSession,
     prefix: str = Query(default="", max_length=512),
     limit: int = Query(default=500, ge=1, le=1000),
+    dirs: bool = Query(default=False),
 ) -> dict[str, Any]:
     try:
         listing = await SandboxClient().list_files(
-            _workspace_id(workspace), prefix=prefix, limit=limit
+            _workspace_id(workspace), prefix=prefix, limit=limit, dirs=dirs
         )
     except SandboxError as exc:
         raise _http_error(exc) from exc
@@ -385,8 +408,12 @@ async def sandbox_upload(
     request: Request,
     _session: AdminWriteSession,
     path: str = Query(min_length=1, max_length=512),
+    overwrite: bool = Query(default=True),
 ) -> dict[str, Any]:
-    """原始请求体上传（不依赖 multipart）：把数据文件放进工作区供代码读取。"""
+    """原始请求体上传（不依赖 multipart）：把数据文件放进工作区供代码读取。
+
+    ``overwrite=false`` 时同名文件返回 409，前端据此询问是否覆盖。
+    """
 
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > _MAX_UPLOAD_BYTES:
@@ -397,7 +424,9 @@ async def sandbox_upload(
         if len(body) > _MAX_UPLOAD_BYTES:
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "上传文件不能超过 20MB")
     try:
-        result = await SandboxClient().write_file(_workspace_id(workspace), path, bytes(body))
+        result = await SandboxClient().write_file(
+            _workspace_id(workspace), path, bytes(body), overwrite=overwrite
+        )
     except SandboxError as exc:
         raise _http_error(exc) from exc
     await hub.notify_change("sandbox")
@@ -412,6 +441,89 @@ async def sandbox_delete_file(
 ) -> dict[str, Any]:
     try:
         result = await SandboxClient().delete_file(_workspace_id(workspace), path)
+    except SandboxError as exc:
+        raise _http_error(exc) from exc
+    _forget_paths(workspace, {path})
+    await hub.notify_change("sandbox")
+    return ok(camelize(result))
+
+
+def _forget_paths(workspace: str, paths: set[str]) -> None:
+    group_id = workspace_group_id(workspace)
+    if group_id is None:
+        return
+    # 记录只是提示用，失败不影响删除结果。
+    with contextlib.suppress(Exception):
+        inbox_store.forget_paths(int(group_id), paths)
+
+
+class DeleteManyBody(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=200)
+
+
+@router.post("/workspaces/{workspace}/delete")
+async def sandbox_delete_many(
+    workspace: str, body: DeleteManyBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """批量删除：逐个删，单个失败不影响其余，返回每项结果。"""
+
+    workspace = _workspace_id(workspace)
+    client = SandboxClient()
+    removed = 0
+    failed: list[dict[str, str]] = []
+    done: set[str] = set()
+    for raw in dict.fromkeys(body.paths):
+        path = str(raw).strip()
+        if not path or len(path) > 512:  # noqa: PLR2004
+            failed.append({"path": path[:80], "error": "路径不合法"})
+            continue
+        try:
+            result = await client.delete_file(workspace, path)
+        except SandboxError as exc:
+            if exc.code in {"disabled", "offline", "timeout", "misconfigured"}:
+                raise _http_error(exc) from exc
+            failed.append({"path": path, "error": str(exc)})
+            continue
+        removed += int(result.get("removed") or 0)
+        done.add(path)
+    _forget_paths(workspace, done)
+    await hub.notify_change("sandbox")
+    return ok({"removed": removed, "deleted": sorted(done), "failed": failed})
+
+
+class RenameBody(BaseModel):
+    source: str = Field(min_length=1, max_length=512, alias="from")
+    target: str = Field(min_length=1, max_length=512, alias="to")
+    overwrite: bool = False
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+@router.post("/workspaces/{workspace}/rename")
+async def sandbox_rename(
+    workspace: str, body: RenameBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    try:
+        result = await SandboxClient().rename_file(
+            _workspace_id(workspace), body.source, body.target, overwrite=body.overwrite
+        )
+    except SandboxError as exc:
+        raise _http_error(exc) from exc
+    _forget_paths(workspace, {body.source})
+    await hub.notify_change("sandbox")
+    return ok(camelize(result))
+
+
+class MkdirBody(BaseModel):
+    path: str = Field(min_length=1, max_length=512)
+
+
+@router.post("/workspaces/{workspace}/mkdir")
+async def sandbox_mkdir(
+    workspace: str, body: MkdirBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    try:
+        result = await SandboxClient().make_dir(_workspace_id(workspace), body.path)
     except SandboxError as exc:
         raise _http_error(exc) from exc
     await hub.notify_change("sandbox")
@@ -430,6 +542,9 @@ async def sandbox_reset_workspace(
         )
     except SandboxError as exc:
         raise _http_error(exc) from exc
+    group_id = workspace_group_id(workspace)
+    if group_id is not None:
+        inbox_store.forget_group_files(int(group_id))
     await hub.notify_change("sandbox")
     return ok(camelize(result))
 
@@ -493,6 +608,16 @@ class SettingsBody(BaseModel):
     max_output_chars: int
     max_share_mb: int
     allow_unisolated: bool
+    # 入箱设置有默认值：旧页面不带这些字段时保持原值语义（默认值）。
+    inbox_enabled: bool = True
+    inbox_auto_import: Literal["always", "sandbox_turns", "off"] = "sandbox_turns"
+    inbox_types: list[Literal["image", "file", "record", "video"]] = Field(
+        default_factory=lambda: list(INBOX_MEDIA_TYPES), max_length=4
+    )
+    inbox_max_file_mb: int = 20
+    inbox_max_per_turn: int = 6
+    inbox_history_minutes: int = 180
+    inbox_group_daily_mb: int = 500
 
 
 def _group_list(values: list[str], field: str) -> list[int]:
@@ -549,6 +674,63 @@ async def sandbox_usage(_session: AdminReadSession) -> dict[str, Any]:
         {**row, "groupName": names.get(row["groupId"])} for row in payload["members"]
     ]
     return ok(payload)
+
+
+# ── 群聊附件入箱 ────────────────────────────────────────────────────────────
+
+
+@router.get("/inbox")
+async def sandbox_inbox(
+    _session: AdminReadSession,
+    group: str | None = Query(default=None, pattern=r"^\d{4,12}$"),
+    inbox_status: str | None = Query(
+        default=None, alias="status", pattern="^(?:imported|reused|failed|skipped|removed)$"
+    ),
+    media_type: str | None = Query(default=None, alias="type", pattern="^(?:image|file|record|video)$"),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """附件收件箱：最近的入箱记录、今日统计、失败原因说明和当前取文件配置。"""
+
+    settings = load_settings()
+    items = inbox_store.recent_events(
+        group_id=int(group) if group else None,
+        status=inbox_status,
+        media_type=media_type,
+        limit=limit,
+    )
+    rows = camelize(items)
+    for row in rows:
+        row["workspace"] = f"g{row.get('groupId')}" if row.get("groupId") else None
+        row["groupId"] = str(row["groupId"]) if row.get("groupId") is not None else None
+        for key in ("userId", "senderId", "messageId"):
+            if row.get(key) is not None:
+                row[key] = str(row[key])
+    await _label_workspaces(rows)
+    summary = camelize(inbox_store.summary())
+    return ok(
+        {
+            "items": rows,
+            "summary": summary,
+            "reasons": {
+                code: {"message": message, "hint": hint} for code, (message, hint) in FAILURE_HINTS.items()
+            },
+            "hosts": list(host_patterns()),
+            "localRoots": bool(_local_roots_configured()),
+            "settings": {
+                "enabled": settings.inbox_enabled,
+                "autoImport": settings.inbox_auto_import,
+                "types": list(settings.inbox_types),
+                "maxFileMb": settings.inbox_max_file_mb,
+                "maxPerTurn": settings.inbox_max_per_turn,
+                "historyMinutes": settings.inbox_history_minutes,
+                "groupDailyMb": settings.inbox_group_daily_mb,
+            },
+        }
+    )
+
+
+def _local_roots_configured() -> bool:
+    return bool(os.environ.get("AGENT_SANDBOX_INBOX_LOCAL_ROOTS", "").strip())
 
 
 @router.post("/maintenance/prune")

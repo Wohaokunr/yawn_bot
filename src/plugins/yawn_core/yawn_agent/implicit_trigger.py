@@ -115,6 +115,7 @@ async def resolve_implicit_trigger(
             has_reply=bool(normalized.reply_chain),
             has_media=bool(normalized.media_refs),
             mentions_others=False,
+            media_refs=normalized.media_refs,
         ),
     )
     if not plan.planned or not plan.request:

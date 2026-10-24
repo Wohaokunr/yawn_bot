@@ -1,6 +1,7 @@
 import { CaretRightOutlined, ClearOutlined } from "@ant-design/icons";
 import { Alert, App as AntApp, Button, Empty, Input, InputNumber, Select, Tag, Tooltip } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useApiQuery } from "../shared";
 import { OutputBlock, RunFiles } from "./RunsTab";
 import { sandboxApi } from "./sandbox-api";
@@ -8,10 +9,13 @@ import {
   CONSOLE_SNIPPETS,
   formatBytes,
   formatDuration,
+  isInboxPath,
+  readSnippet,
   runStatusMeta,
+  updateSearchParams,
   workspaceLabel,
 } from "./sandbox-meta";
-import type { SandboxRunResult, SandboxStatus, SandboxWorkspace } from "./types";
+import type { SandboxFileListing, SandboxRunResult, SandboxStatus, SandboxWorkspace } from "./types";
 
 // 本机便利：记住上次写的代码（不同浏览器互不影响；存储不可用时静默降级）。
 const DRAFT_KEY = "yawnbot.sandbox.console";
@@ -34,8 +38,16 @@ function saveDraft(value: string): void {
 
 export function ConsoleTab({ status }: { status: SandboxStatus }): React.JSX.Element {
   const { message } = AntApp.useApp();
-  const [code, setCode] = useState(loadDraft);
-  const [workspace, setWorkspace] = useState("admin");
+  const [searchParams, setSearchParams] = useSearchParams();
+  // 从文件页“在控制台打开”跳过来时，带着工作区和要读取的文件。
+  const opened = useRef({
+    workspace: searchParams.get("sandbox.consoleWs"),
+    path: searchParams.get("sandbox.open"),
+    kind: searchParams.get("sandbox.openKind") ?? "other",
+  });
+  const [code, setCode] = useState(() => (opened.current.path ? readSnippet(opened.current.path, opened.current.kind) : loadDraft()));
+  const [workspace, setWorkspace] = useState(() => opened.current.workspace ?? "admin");
+  const editor = useRef<HTMLTextAreaElement | null>(null);
   const [timeout, setTimeoutSeconds] = useState<number | null>(null);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<SandboxRunResult | null>(null);
@@ -45,6 +57,35 @@ export function ConsoleTab({ status }: { status: SandboxStatus }): React.JSX.Ele
     const timer = window.setTimeout(() => saveDraft(code), 400);
     return () => window.clearTimeout(timer);
   }, [code]);
+
+  useEffect(() => {
+    if (!opened.current.path && !opened.current.workspace) return;
+    setSearchParams(updateSearchParams(searchParams, { "sandbox.consoleWs": null, "sandbox.open": null, "sandbox.openKind": null }), { replace: true });
+  }, []);
+
+  const filesQuery = useApiQuery<SandboxFileListing | null>({
+    queryKey: ["sandbox-console-files", workspace, status.online],
+    fetcher: (signal) => (status.online ? sandboxApi.files(workspace, "", signal) : Promise.resolve(null)),
+  });
+  const pathOptions = (filesQuery.data?.items ?? [])
+    .slice()
+    .sort((a, b) => Number(isInboxPath(b.path)) - Number(isInboxPath(a.path)) || b.mtime - a.mtime)
+    .slice(0, 200)
+    .map((item) => ({ value: item.path, label: `${isInboxPath(item.path) ? "💬 " : ""}${item.path}`, kind: item.kind }));
+
+  const insertAtCursor = (text: string) => {
+    const target = editor.current;
+    if (!target) {
+      setCode(`${code}${code.endsWith("\n") || !code ? "" : "\n"}${text}`);
+      return;
+    }
+    const { selectionStart, selectionEnd } = target;
+    setCode(`${code.slice(0, selectionStart)}${text}${code.slice(selectionEnd)}`);
+    window.requestAnimationFrame(() => {
+      target.focus();
+      target.setSelectionRange(selectionStart + text.length, selectionStart + text.length);
+    });
+  };
 
   const workspacesQuery = useApiQuery<SandboxWorkspace[]>({
     queryKey: ["sandbox-workspaces", status.online],
@@ -100,6 +141,20 @@ export function ConsoleTab({ status }: { status: SandboxStatus }): React.JSX.Ele
             options={CONSOLE_SNIPPETS.map((item) => ({ value: item.key, label: item.label }))}
             style={{ width: 130 }}
           />
+          <Tooltip title="把工作区里的文件路径插到光标处；💬 是群聊放进来的附件">
+            <Select
+              placeholder="插入文件路径"
+              value={null}
+              showSearch
+              optionFilterProp="label"
+              disabled={!pathOptions.length}
+              onChange={(path: string) => insertAtCursor(JSON.stringify(path))}
+              options={pathOptions}
+              style={{ width: 150 }}
+              popupMatchSelectWidth={320}
+              notFoundContent="没有文件"
+            />
+          </Tooltip>
           <Button icon={<ClearOutlined />} onClick={() => setCode("")}>清空</Button>
           <Button type="primary" icon={<CaretRightOutlined />} loading={running} disabled={!canRun} onClick={() => void run()}>
             运行
@@ -115,6 +170,9 @@ export function ConsoleTab({ status }: { status: SandboxStatus }): React.JSX.Ele
           />
         )}
         <Input.TextArea
+          ref={(instance) => {
+            editor.current = instance?.resizableTextArea?.textArea ?? null;
+          }}
           className="sbx-code"
           value={code}
           onChange={(event) => setCode(event.target.value)}
@@ -137,7 +195,7 @@ export function ConsoleTab({ status }: { status: SandboxStatus }): React.JSX.Ele
           autoSize={{ minRows: 14, maxRows: 32 }}
           aria-label="Python 代码"
         />
-        <p className="sbx-muted sbx-hint">Ctrl/⌘ + Enter 运行 · 最后一行表达式会自动显示 · plt.show() 会把图存成 PNG · 没有网络，不能 pip install</p>
+        <p className="sbx-muted sbx-hint">Ctrl/⌘ + Enter 运行 · 最后一行表达式会自动显示 · plt.show() 会把图存成 PNG · 没有网络，不能 pip install · 群聊附件在 inbox/ 里</p>
       </div>
       <div className="sbx-console-result" aria-live="polite">
         {error && <Alert type="error" showIcon message="执行失败" description={error} />}

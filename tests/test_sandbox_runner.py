@@ -117,6 +117,18 @@ def test_file_kinds_cover_common_outputs() -> None:
     assert file_kind("x.unknown") == "other"
 
 
+def test_file_kinds_cover_chat_attachments() -> None:
+    # 群聊附件入箱会带来 QQ 语音原始编码、Office 文档、常见视频与压缩包。
+    assert file_kind("语音_ab.silk") == "audio"
+    assert file_kind("v.amr") == "audio"
+    assert file_kind("a.docx") == "document"
+    assert file_kind("a.pptx") == "document"
+    assert file_kind("clip.mkv") == "video"
+    assert file_kind("pack.rar") == "archive"
+    assert file_kind("photo.heic") == "image"
+    assert file_kind("subs.srt") == "text"
+
+
 # ── 执行 ──────────────────────────────────────────────────────────────────
 
 
@@ -263,6 +275,54 @@ def test_file_api_round_trip_and_symlinks_are_refused(service: sandbox_server.Ru
         service.read_file("g1001", {"path": "uploads/data.csv"})
 
 
+def test_upload_overwrite_guard_rename_and_mkdir(service: sandbox_server.RunnerService) -> None:
+    service.write_file("g1001", {"path": "inbox/a.csv"}, b"a\n")
+    with pytest.raises(WorkspaceError) as excinfo:
+        service.write_file("g1001", {"path": "inbox/a.csv", "overwrite": "0"}, b"b\n")
+    assert excinfo.value.code == "exists"
+    service.write_file("g1001", {"path": "inbox/a.csv"}, b"c\n")
+    assert service.read_file("g1001", {"path": "inbox/a.csv"})[0] == b"c\n"
+
+    moved = service.rename_file("g1001", {"from": "inbox/a.csv", "to": "data/表.csv"})
+    assert moved["file"]["path"] == "data/表.csv"
+    with pytest.raises(WorkspaceError):
+        service.read_file("g1001", {"path": "inbox/a.csv"})
+    service.write_file("g1001", {"path": "data/b.csv"}, b"b\n")
+    with pytest.raises(WorkspaceError) as excinfo:
+        service.rename_file("g1001", {"from": "data/b.csv", "to": "data/表.csv"})
+    assert excinfo.value.code == "exists"
+    service.rename_file("g1001", {"from": "data/b.csv", "to": "data/表.csv", "overwrite": True})
+    assert service.read_file("g1001", {"path": "data/表.csv"})[0] == b"b\n"
+    with pytest.raises(WorkspaceError):
+        service.rename_file("g1001", {"from": "data/表.csv", "to": "../escape.csv"})
+
+    assert service.make_dir("g1001", {"path": "out/charts"})["path"] == "out/charts"
+    _run(service, "import os\nassert os.path.isdir('out/charts')")
+    listing = service.workspace_files("g1001", {"dirs": "1"})
+    dirs = {row["path"]: row for row in listing["dirs"]}
+    assert dirs["data"]["files"] == 1
+
+
+def test_rename_refuses_symlinks(service: sandbox_server.RunnerService, tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("x", encoding="utf-8")
+    _run(service, f"import os\nos.symlink({str(secret)!r}, 'link.txt')")
+    with pytest.raises(WorkspaceError):
+        service.rename_file("g1001", {"from": "link.txt", "to": "copy.txt"})
+
+
+def test_upload_respects_file_count_limit(tmp_path: Path) -> None:
+    service = sandbox_server.RunnerService(
+        _config(tmp_path, ceilings=Ceilings(timeout_seconds=20, memory_mb=1024, output_bytes=64 * 1024, disk_quota_mb=5, max_files=50)),
+        drop_privileges=False,
+    )
+    for index in range(50):
+        service.write_file("g1001", {"path": f"f{index}.txt"}, b"x")
+    with pytest.raises(sandbox_server.ApiError) as excinfo:
+        service.write_file("g1001", {"path": "one-more.txt"}, b"x")
+    assert excinfo.value.code == "quota_exceeded"
+
+
 def test_upload_respects_size_and_quota(service: sandbox_server.RunnerService) -> None:
     with pytest.raises(sandbox_server.ApiError) as excinfo:
         service.write_file("g1001", {"path": "big.bin"}, b"0" * (2 * 1024 * 1024))
@@ -303,6 +363,7 @@ def test_health_reports_isolation_and_packages(service: sandbox_server.RunnerSer
     assert health["isolation"]["checks"]["privilege_drop"] is False
     assert health["python"]
     assert health["concurrency"] == 2
+    assert {"shell", "rename", "upload_guard"} <= set(health["features"])
 
 
 # ── HTTP over Unix socket ─────────────────────────────────────────────────

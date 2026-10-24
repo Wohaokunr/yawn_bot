@@ -181,11 +181,13 @@ class SandboxClient:
     async def workspaces(self) -> dict[str, Any]:
         return await self._request("GET", "/workspaces", timeout=20.0)
 
-    async def list_files(self, workspace: str, *, prefix: str = "", limit: int = 200) -> dict[str, Any]:
+    async def list_files(
+        self, workspace: str, *, prefix: str = "", limit: int = 200, dirs: bool = False
+    ) -> dict[str, Any]:
         return await self._request(
             "GET",
             f"/workspaces/{quote(workspace, safe='')}/files",
-            params={"prefix": prefix or None, "limit": limit},
+            params={"prefix": prefix or None, "limit": limit, "dirs": "1" if dirs else None},
         )
 
     async def read_file(self, workspace: str, path: str, *, max_bytes: int | None = None) -> tuple[bytes, str, str]:
@@ -202,13 +204,32 @@ class SandboxClient:
             response.headers.get("X-File-Kind", "other"),
         )
 
-    async def write_file(self, workspace: str, path: str, data: bytes) -> dict[str, Any]:
+    async def write_file(
+        self, workspace: str, path: str, data: bytes, *, overwrite: bool = True
+    ) -> dict[str, Any]:
+        # 旧 runner 不认识 overwrite 参数（总是覆盖）；只在需要保护时才带上。
         return await self._request(
             "PUT",
             f"/workspaces/{quote(workspace, safe='')}/file",
-            params={"path": path},
+            params={"path": path, "overwrite": None if overwrite else "0"},
             content=data,
             timeout=60.0,
+        )
+
+    async def rename_file(
+        self, workspace: str, source: str, target: str, *, overwrite: bool = False
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/workspaces/{quote(workspace, safe='')}/rename",
+            json_body={"from": source, "to": target, "overwrite": overwrite},
+        )
+
+    async def make_dir(self, workspace: str, path: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/workspaces/{quote(workspace, safe='')}/mkdir",
+            json_body={"path": path},
         )
 
     async def delete_file(self, workspace: str, path: str) -> dict[str, Any]:
@@ -279,6 +300,13 @@ def supports_language(health: dict[str, Any] | None, language: str) -> bool:
     return isinstance(languages, list) and language in languages
 
 
+def supports_feature(health: dict[str, Any] | None, feature: str) -> bool:
+    """runner 是否声明了某个可选能力（重命名、上传防覆盖……）；旧 runner 一律没有。"""
+
+    features = (health or {}).get("features")
+    return isinstance(features, list) and feature in features
+
+
 def reset_health_cache() -> None:
     _health_cache.remember(None, None)
     _health_cache.checked_at = 0.0
@@ -301,6 +329,7 @@ __all__ = [
     "peek_health",
     "reset_health_cache",
     "sandbox_endpoint",
+    "supports_feature",
     "supports_language",
     "workspace_for_group",
 ]

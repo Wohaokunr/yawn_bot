@@ -7,7 +7,9 @@ uid 在 rlimit 约束下运行，结束后整组进程连同该 uid 的残留进
 
 from __future__ import annotations
 
-RUNNER_VERSION = "1.0.0"
+RUNNER_VERSION = "1.1.0"
 API_VERSION = 1
+# health 里报出的可选能力；Bot/WebUI 据此决定显示哪些操作（旧 runner 没有）。
+FEATURES = ("shell", "upload_guard", "rename", "mkdir", "dir_summary")
 
-__all__ = ["API_VERSION", "RUNNER_VERSION"]
+__all__ = ["API_VERSION", "FEATURES", "RUNNER_VERSION"]

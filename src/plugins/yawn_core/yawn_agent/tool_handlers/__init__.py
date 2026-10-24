@@ -6,12 +6,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from ..tool_execution import ToolExecutionContext, ToolHandlerResult
-from . import admin, files, history, member, memory, message, notice, sandbox
+from . import admin, files, history, inbox, member, memory, message, notice, sandbox
 
 Handler = Callable[[str, dict, ToolExecutionContext], Awaitable[ToolHandlerResult]]
 
 _HANDLERS: dict[str, Handler] = {}
-for module in (history, member, memory, message, notice, files, admin, sandbox):
+for module in (history, member, memory, message, notice, files, admin, sandbox, inbox):
     for tool_name in module.NAMES:
         _HANDLERS[tool_name] = module.handle
 

@@ -25,6 +25,19 @@ bot 容器 ──HTTP over Unix socket──▶ sandbox 容器（network: none�
 - 数据层：环境变量全部清空重建，Bot 的 `.env`、Token 和数据库都不在容器里；runner socket 0660 只给 bot 组。
 - `GET /health` 返回隔离自检（`network_disabled`、`privilege_drop`、`readonly_root`、`no_new_privileges`、`child_reaper`）。自检不通过时 Bot 默认拒绝运行（WebUI 策略里的“允许未隔离运行”只用于本地开发）。
 
+## 文件 API（runner 1.1.0）
+
+`GET /v1/health` 的 `features` 列出可选能力：`shell`、`upload_guard`、`rename`、`mkdir`、`dir_summary`。Bot 和 WebUI 按它决定显示哪些操作，旧 runner 自动降级。
+
+| 接口 | 说明 |
+|---|---|
+| `PUT /v1/workspaces/{id}/file?path=…&overwrite=0` | 上传；`overwrite=0` 时同名文件返回 409 `exists`（群聊附件入箱和 WebUI 上传都用它防覆盖）；超过文件数上限会拒绝 |
+| `POST /v1/workspaces/{id}/rename` | `{"from","to","overwrite"}`，只在同一工作区内移动，逐级 `O_NOFOLLOW`，拒绝符号链接 |
+| `POST /v1/workspaces/{id}/mkdir` | `{"path"}`，建多级目录 |
+| `GET /v1/workspaces/{id}/files?dirs=1` | 额外返回每个子目录的文件数和字节数（WebUI 文件夹视图用） |
+
+群聊附件由 Bot 写进 `inbox/`，文件类型识别覆盖 heic/tiff、opus/amr/silk、mkv/avi/flv、docx/pptx/epub、rar/xz 等常见格式。沙箱里没有 ffmpeg 和 PDF 库，模型会如实说明做不到的转换。
+
 ## 开发
 
 ```bash

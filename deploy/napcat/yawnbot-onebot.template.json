@@ -21,6 +21,6 @@
     "plugins": []
   },
   "musicSignUrl": "",
-  "enableLocalFile2Url": false,
+  "enableLocalFile2Url": true,
   "parseMultMsg": false
 }

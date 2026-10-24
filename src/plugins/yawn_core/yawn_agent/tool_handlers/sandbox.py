@@ -104,6 +104,8 @@ def _file_row(item: dict[str, Any]) -> dict[str, Any]:
     }
     if item.get("created") is not None:
         row["new"] = bool(item.get("created"))
+    if path.startswith("inbox/"):
+        row["from_chat"] = True
     return row
 
 
@@ -263,6 +265,11 @@ async def _execute(
             )
     purpose = str(args.get("purpose") or "").strip()[:80]
     ledger = context.ledger
+    # 本轮附件还没进电脑（路由没预装沙箱、模型中途才发现）时先放进去，
+    # 这样“帮我处理这张图”不会因为文件不在工作区而白跑一次。
+    from .inbox import auto_import_for_run
+
+    attachments_note = await auto_import_for_run(context)
     try:
         reservation = await reserve_run(
             context.group_id,
@@ -320,6 +327,8 @@ async def _execute(
         code=code,
         time_limit=limits.get("timeout_seconds"),
     )
+    if attachments_note:
+        payload["attachments"] = attachments_note
     if reservation.waited_seconds:
         payload["waited_for_cooldown"] = f"{reservation.waited_seconds:.1f}s"
     quota = quota_status(context.group_id, context.actor_user_id)
@@ -412,6 +421,10 @@ async def _delete_file(args: dict[str, Any], context: ToolExecutionContext) -> T
     except SandboxError as exc:
         raise _sandbox_error(exc) from exc
     removed = int(result.get("removed") or 0)
+    if removed:
+        from ..sandbox_inbox_store import forget_paths
+
+        forget_paths(context.group_id, {path})
     return ToolHandlerResult(
         {"deleted": f"{SANDBOX_REF_PREFIX}{path}", "files_removed": removed},
         refund_quota=removed == 0,
@@ -432,6 +445,7 @@ async def _info(context: ToolExecutionContext) -> dict[str, Any]:
         "quota": quota_status(context.group_id, context.actor_user_id),
         "tips": [
             "工作区是本群专用的持久目录，相对路径读写即可，文件下次还在",
+            "群成员发的图片/文件/语音会放进 inbox/（自动或用 import_attachments），代码里直接读 inbox/文件名",
             "matplotlib 已配好中文字体；plt.show() 会自动存成 PNG 并在 files 里返回",
             "最后一行写表达式会像 notebook 一样显示结果",
             "run_shell 能用 ls/cat/head/grep/find/wc/sort/jq/unzip 等命令查看和整理工作区；每次运行都从工作区根目录开始",

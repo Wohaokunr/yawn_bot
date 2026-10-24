@@ -151,6 +151,8 @@ Agent 可以在一个独立、无网络的 Python 容器里运行代码：数据
 |---|---|---|
 | `AGENT_SANDBOX_URL` | `unix:///run/yawnbot-sandbox/runner.sock` | runner 地址；Compose 已经把 socket 卷共享给 bot。置空即关闭沙箱 |
 | `AGENT_SANDBOX_TOKEN` | 空 | 只有把 runner 暴露成 TCP 时才需要；Unix socket 部署留空 |
+| `AGENT_SANDBOX_INBOX_HOSTS` | 内置 QQ 域名 | 群聊附件入箱时允许下载的域名，逗号分隔，`*.qq.com` 匹配子域名；重定向逐跳重新校验 |
+| `AGENT_SANDBOX_INBOX_LOCAL_ROOTS` | 空 | NapCat 只回本机路径时允许读取的共享目录，逗号分隔；只在 NapCat 与 Bot 挂载同一目录时配置 |
 
 - 开放范围、仅管理员、成员/群每日次数、冷却、超时、内存、工作区配额、输出长度都在 WebUI「代码沙箱 → 策略与限额」里改，存在 `data/agent_sandbox/settings.json`，不需要数据库迁移、也不需要重启。
 - 工具族 `sandbox`（`run_python`、`run_shell`、`list_sandbox_files`、`read_sandbox_file`、`delete_sandbox_file`、`sandbox_info`）通过工具路由预装或 `discover_tools` 装载；沙箱离线、隔离自检失败或本群未开放时整族隐藏，模型会如实说明。
@@ -159,6 +161,18 @@ Agent 可以在一个独立、无网络的 Python 容器里运行代码：数据
 - 运行失败时模型拿到的是精简过的 traceback 和一条 `error` 摘要（哪一行、什么错、怎么修），输出按行截断。默认输出上限调到 6000 字。
 - 每个群一个持久工作区。生成的图片/音频用 `sandbox:文件名` 引用，由 `send_message` 的 image/record 段发送；其他文件用 `send_file` 上传群文件。
 - 运行历史默认保留 14 天，WebUI 可以手动清理；运行记录里有完整代码，Agent 审计只记代码长度。
+
+### 群聊附件进内置电脑
+
+群友在群里发图片、文件、语音、视频，再让 Agent“用电脑处理一下”，附件会被放进这个群工作区的 `inbox/` 目录，`run_python` / `run_shell` 直接读。
+
+- 取文件内容的顺序：消息段里的 base64 → OneBot 接口（`get_record` 转 mp3、`get_group_file_url`、`get_image`、`get_file`）→ 白名单 QQ 域名下载 → `AGENT_SANDBOX_INBOX_LOCAL_ROOTS` 里的共享目录。NapCat 和 Bot 不共享文件系统，所以 **NapCat 需要打开 `enableLocalFile2Url`**（仓库自带的 NapCat 模板已经打开；老部署要重新渲染一次 `deploy/napcat/render-yawnbot-config.py` 并重启 NapCat）。
+- 文件名按内容哈希命名（如 `inbox/图片_3f2a9c1b04.png`），同一个附件不会重复放；可执行文件会被改成 `.txt` 后缀，模型看不到原始 URL 或 OneBot 文件标识。
+- 自动放入的时机在 WebUI「代码沙箱 → 策略与限额 → 群聊附件入箱」里选：`用到内置电脑时`（默认，工具路由判断这轮要用沙箱时）、`每次都放`、`只在 Agent 要时`。决定只看结构化事实（消息里有没有附件、沙箱工具是否可用），不做关键词匹配。
+- 新工具：`import_attachments`（把本条、引用或之前的附件放进去）、`list_chat_attachments`（列出最近可放入的附件和已放入的位置）、`import_group_file`（按群文件 id 放入群文件）。运行代码前如果这轮的附件还没放进去，会自动补放一次。
+- 限额：单个附件大小、每轮最多几个、可回溯多久的历史附件、每群每天总量，都在同一张卡片里改；超限会如实告诉成员原因。
+- 隐私：只给开放沙箱的群放附件；退出 Agent 记忆的成员发的附件不会被放入，删除成员记忆时也会抹掉他的入箱记录。
+- 入箱记录在 `data/agent_sandbox/inbox_log.jsonl`（最多 1000 条，不含 URL 和本机路径），WebUI「代码沙箱 → 附件收件箱」展示今日统计、失败原因（谁来修）、取文件链路自检和每条记录。
 
 ## Agent 群管理工具
 

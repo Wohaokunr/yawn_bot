@@ -3,6 +3,7 @@ import {
   DashboardOutlined,
   FolderOpenOutlined,
   HistoryOutlined,
+  InboxOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
@@ -12,11 +13,12 @@ import { useSearchParams } from "react-router-dom";
 import { QueryErrorAlert, useApiQuery } from "../shared";
 import { ConsoleTab } from "./ConsoleTab";
 import { FilesTab } from "./FilesTab";
+import { InboxTab } from "./InboxTab";
 import { OverviewTab } from "./OverviewTab";
 import { PolicyTab } from "./PolicyTab";
 import { RunsTab } from "./RunsTab";
 import { sandboxApi } from "./sandbox-api";
-import { describeAccess, parseSandboxTab, SANDBOX_STATE_META, updateSearchParams } from "./sandbox-meta";
+import { describeAccess, formatBytes, INBOX_MODE_META, parseSandboxTab, SANDBOX_STATE_META, updateSearchParams } from "./sandbox-meta";
 import type { SandboxTab } from "./sandbox-meta";
 import type { SandboxStatus } from "./types";
 
@@ -27,12 +29,15 @@ export function SandboxStatusBar({
   checking,
   onRecheck,
   onOpenConsole,
+  onOpenInbox,
 }: {
   status: SandboxStatus;
   checking: boolean;
   onRecheck: () => void;
   onOpenConsole: () => void;
+  onOpenInbox?: () => void;
 }): React.JSX.Element {
+  const inbox = status.inbox;
   const meta = SANDBOX_STATE_META[status.state];
   const health = status.health;
   const checks = health?.isolation.checks;
@@ -65,6 +70,19 @@ export function SandboxStatusBar({
           </>
         ) : (
           <Tag>{status.transport === "disabled" ? "未配置地址" : status.transport === "unix" ? "Unix socket" : "TCP"}</Tag>
+        )}
+        {inbox && (
+          <Tooltip title={inbox.enabled ? `群聊附件入箱：${INBOX_MODE_META[inbox.autoImport]?.hint ?? ""}` : "群聊附件入箱已关闭"}>
+            <Tag
+              color={!inbox.enabled ? undefined : inbox.today.failed ? "orange" : "magenta"}
+              className={onOpenInbox ? "sbx-clickable" : undefined}
+              onClick={onOpenInbox}
+            >
+              {inbox.enabled
+                ? `附件 今日 ${inbox.today.imported ?? 0} 个${inbox.today.bytes ? ` · ${formatBytes(inbox.today.bytes)}` : ""}${inbox.today.failed ? ` · ${inbox.today.failed} 失败` : ""}`
+                : "附件入箱关闭"}
+            </Tag>
+          </Tooltip>
         )}
       </div>
       <div className="sbx-status-actions">
@@ -121,7 +139,7 @@ export function SandboxPage(): React.JSX.Element {
       <div className="sbx-heading">
         <div>
           <h2 className="sbx-title">代码沙箱</h2>
-          <p>Agent 的 Python 虚拟机：数据分析、画图、生成文件与音乐都在隔离容器里完成</p>
+          <p>Agent 的内置电脑：群里发的图片、文件、语音会放进来，数据分析、画图、生成文件与音乐都在隔离容器里完成</p>
         </div>
       </div>
       <SandboxStatusBar
@@ -132,6 +150,7 @@ export function SandboxPage(): React.JSX.Element {
           reload();
         }}
         onOpenConsole={() => setTab("console")}
+        onOpenInbox={() => setTab("inbox")}
       />
       {status.state === "disabled" && (
         <Alert
@@ -157,7 +176,12 @@ export function SandboxPage(): React.JSX.Element {
         onChange={(key) => setTab(key as SandboxTab)}
         destroyOnHidden
         items={[
-          { key: "overview", label: <span><DashboardOutlined /> 概览</span>, children: <OverviewTab status={status} onOpenRuns={(extra) => setTab("runs", extra)} /> },
+          { key: "overview", label: <span><DashboardOutlined /> 概览</span>, children: <OverviewTab status={status} onOpenRuns={(extra) => setTab("runs", extra)} onOpenInbox={(extra) => setTab("inbox", extra)} /> },
+          {
+            key: "inbox",
+            label: <span><InboxOutlined /> 附件收件箱</span>,
+            children: <InboxTab status={status} onOpenFile={(ws, dir, path) => setTab("files", { "sandbox.ws": ws, "sandbox.dir": dir || null, "sandbox.file": path })} />,
+          },
           { key: "runs", label: <span><HistoryOutlined /> 运行历史</span>, children: <RunsTab online={status.online} /> },
           { key: "files", label: <span><FolderOpenOutlined /> 工作区文件</span>, children: <FilesTab status={status} /> },
           { key: "console", label: <span><CodeOutlined /> 控制台</span>, children: <ConsoleTab status={status} /> },
