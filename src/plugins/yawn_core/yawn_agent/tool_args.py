@@ -290,6 +290,8 @@ class ToolCallLedger:
 
     successes: dict[str, dict[str, Any]] = field(default_factory=dict)
     controlled_calls: int = 0
+    # 本回合已经真正跑过几次沙箱；同一回合里的“改错再跑”不再吃冷却。
+    sandbox_runs: int = 0
 
     def duplicate_of(self, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
         previous = self.successes.get(_ledger_key(name, args))

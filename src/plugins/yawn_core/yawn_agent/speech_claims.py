@@ -76,7 +76,7 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
             r"|(?:跑|运行)出来(?:的)?结果"
             r"|(?:图表|折线图|柱状图|饼图|散点图|词云|曲子|旋律|音乐)(?:已经|已)?(?:画|生成|做|写)(?:好|完|出来)(?:了|啦)"
         ),
-        frozenset({"run_python"}),
+        frozenset({"run_python", "run_shell"}),
     ),
 }
 

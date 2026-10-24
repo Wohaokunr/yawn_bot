@@ -68,6 +68,7 @@ class RunHistory:
                 {key: item.get(key) for key in ("path", "size", "kind", "created")}
                 for item in (result.get("files") or [])[:20]
             ],
+            "language": result.get("language") or "python",
             "code": code[:MAX_CODE_IN_HISTORY],
             "code_truncated": len(code) > MAX_CODE_IN_HISTORY,
             "code_lines": code.count("\n") + 1,

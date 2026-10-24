@@ -18,7 +18,7 @@ from nonebot import logger
 from sqlalchemy import select
 
 from ..data_models.agent_memory import AgentMemory
-from ..llm import complete, get_client, resolve_llm_request
+from ..llm import NO_OUTPUT_LIMIT, complete, get_client, resolve_llm_request
 from .log import dbg
 from .memory import _compaction_lock, parse_json_reply
 from .memory_hygiene import sanitize_summary
@@ -92,8 +92,8 @@ async def _model_weekly_summary(dailies: list[AgentMemory]) -> str | None:
             messages,  # pyright: ignore[reportArgumentType]
             task="agent_memory",
             response_format={"type": "json_object"},
-            max_tokens=800,
-            timeout=30,
+            max_tokens=NO_OUTPUT_LIMIT,
+            timeout=90,
         )
     except Exception:  # noqa: BLE001
         logger.exception("Agent 周摘要模型调用失败")

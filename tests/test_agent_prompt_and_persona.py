@@ -1849,6 +1849,7 @@ async def test_proactive_generation_uses_light_task_and_safe_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _load_agent_modules()
+    from src.plugins.yawn_core.llm import NO_OUTPUT_LIMIT
     from src.plugins.yawn_core.yawn_agent import proactive
 
     calls: list[dict[str, object]] = []
@@ -1865,9 +1866,10 @@ async def test_proactive_generation_uses_light_task_and_safe_budget(
     monkeypatch.setattr(proactive.ai_config, "ai_max_tokens", 4096)
     assert await proactive._generate_proactive_reply([]) == "ok"
 
-    assert [call["max_tokens"] for call in calls] == [2048, 4096]
+    # 不再用 max_tokens 截输出：交给推理等级，且不随全局 ai_max_tokens 变化。
+    assert [call["max_tokens"] for call in calls] == [NO_OUTPUT_LIMIT, NO_OUTPUT_LIMIT]
     assert {call["task"] for call in calls} == {"agent_proactive"}
-    assert {call["timeout"] for call in calls} == {25.0}
+    assert {call["timeout"] for call in calls} == {proactive._PROACTIVE_TIMEOUT_SECONDS}
 
 
 @pytest.mark.asyncio

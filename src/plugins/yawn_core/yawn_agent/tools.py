@@ -68,6 +68,12 @@ from .tool_router import (
     select_dialogue_tool_names,
 )
 
+# 这些工具族只写调用者自己的东西（本群沙箱工作区），不需要 UserGroup 里已有
+# 这位成员：新入群、还没同步过成员表的人也能跑代码。真实 actor 仍然必需。
+_ACTOR_SCOPED_FAMILIES = frozenset({"sandbox"})
+# 同参数也可能有不同结果（随机数、读到更新后的文件），不做同回合去重。
+_NON_IDEMPOTENT_TOOLS = frozenset({"run_python", "run_shell"})
+
 # 发现阶段可以向模型说明的“存在但当前不可用”原因；其余原因（权限等级上限）
 # 属于内部策略，不回报。
 _BLOCKED_TOOL_REASONS: dict[str, str] = {
@@ -92,6 +98,13 @@ async def _sandbox_exposure(group_id: int, *, actor_is_admin: bool) -> str | Non
     return exposure_reason(
         group_id, actor_is_admin=actor_is_admin, health=health, health_error=error
     )
+
+
+def _sandbox_has_shell() -> bool:
+    from .sandbox_client import peek_health, supports_language
+
+    health, _error, _fresh = peek_health()
+    return health is None or supports_language(health, "shell")
 
 
 def _max_tool_permission_level(
@@ -324,6 +337,9 @@ async def _discover_tools_for_actor(
         )
         if exposed and definition.family == "sandbox" and sandbox_reason is not None:
             exposed, reason = False, sandbox_reason
+        if exposed and definition.name == "run_shell" and not _sandbox_has_shell():
+            # 旧 runner 不支持终端：直接不暴露，模型会改用 run_python。
+            continue
         if exposed:
             candidates.append(definition)
             continue
@@ -518,7 +534,9 @@ async def _check_tool_policy(
     ):
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 状态写入缺少真实调用者")
         raise PermissionError("状态写入工具需要明确的群成员调用者")
-    if definition.permission_level == TOOL_PERMISSION_STATE_WRITE:
+    if definition.permission_level == TOOL_PERMISSION_STATE_WRITE and (
+        definition.family not in _ACTOR_SCOPED_FAMILIES
+    ):
         if session is None:
             raise PermissionError("状态写入工具需要数据库会话")
         if actor_user_id is None:
@@ -716,7 +734,10 @@ async def _dispatch_authorized(
                 "query 和 family 至少提供一个",
                 hint="用 query 描述任务，或用 family 加载 toolpacks 里的工具包",
             )
-        limit = _tool_result_limit(args, default=5, maximum=8)
+        # 按工具包整包加载时默认给满 8 个，免得包里排在后面的工具被截掉。
+        limit = _tool_result_limit(
+            args, default=8 if family and not query else 5, maximum=8
+        )
         result = await _discover_tools_for_actor(
             query=query,
             family=family,
@@ -783,6 +804,7 @@ async def execute_tool_with_meta(
             _TOOL_PERMISSION_RANK[definition.permission_level]
             >= _TOOL_PERMISSION_RANK[TOOL_PERMISSION_STATE_WRITE]
             and name not in _MESSAGE_SEND_TOOLS
+            and name not in _NON_IDEMPOTENT_TOOLS
         )
         if writes_state:
             duplicate = context.ledger.duplicate_of(name, args)
@@ -810,20 +832,34 @@ async def execute_tool_with_meta(
             reserved = False
         if turn_reserved and handled.refund_quota:
             context.ledger.release_controlled()
+        # 代码跑了但报错/超限：handler 返回 result.ok=False。外层也必须是失败，
+        # 否则“图画好了”这类声明核验会把一次报错的运行当成成功。
+        inner_failed = (
+            isinstance(handled.result, dict) and handled.result.get("ok") is False
+        )
         await _audit(
             session,
             context.group_id,
             context.actor_user_id,
             name,
             args,
-            "success",
+            "error" if inner_failed else "success",
+            str(handled.result.get("note") or "") if inner_failed else "",
             duration_ms=(time.monotonic() - started) * 1000,
+            error_code=(
+                str(handled.result.get("status") or "run_failed")
+                if inner_failed
+                else None
+            ),
         )
-        dbg(f"群 {context.group_id} 工具 {name} 执行成功")
-        payload: dict[str, Any] = {"ok": True, "result": handled.result}
+        dbg(
+            f"群 {context.group_id} 工具 {name} "
+            f"{'执行完成但结果失败' if inner_failed else '执行成功'}"
+        )
+        payload: dict[str, Any] = {"ok": not inner_failed, "result": handled.result}
         if name in _MESSAGE_SEND_TOOLS:
             payload["sent"] = handled.ends_turn
-        if writes_state:
+        if writes_state and not inner_failed:
             context.ledger.record_success(name, args, payload)
 
         # 有 DB 会话时审计本身也是一次待提交写入；state_write 同样只标记

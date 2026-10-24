@@ -82,6 +82,12 @@ AI_DEFAULT_THINKING=auto
 AI_LIGHT_THINKING=disabled
 # 识图档位全局推理策略
 AI_VISION_THINKING=disabled
+# 默认档位推理等级（auto 不发送；none/minimal/low/medium/high/xhigh 作为 reasoning_effort 发送）
+AI_DEFAULT_REASONING_EFFORT=auto
+# 轻量档位推理等级
+AI_LIGHT_REASONING_EFFORT=auto
+# 识图档位推理等级
+AI_VISION_REASONING_EFFORT=auto
 # 默认模型图片能力
 AI_DEFAULT_MULTIMODAL=auto
 # 轻量模型图片能力
@@ -106,18 +112,34 @@ WEBUI_COOKIE_SECURE=false
 AGENT_DIALOGUE_LLM_PROFILE=default
 # Agent 普通对话推理覆盖
 AGENT_DIALOGUE_THINKING=inherit
+# Agent 普通对话推理等级覆盖（Agent 请求不限制输出长度，靠它控制推理深浅）
+AGENT_DIALOGUE_REASONING_EFFORT=inherit
 # Agent 主动发言使用的模型档位
 AGENT_PROACTIVE_LLM_PROFILE=light
 # Agent 主动发言推理覆盖
 AGENT_PROACTIVE_THINKING=inherit
+# Agent 主动发言推理等级覆盖（Agent 请求不限制输出长度，靠它控制推理深浅）
+AGENT_PROACTIVE_REASONING_EFFORT=inherit
 # Agent 记忆整理使用的模型档位
 AGENT_MEMORY_LLM_PROFILE=light
 # Agent 记忆整理推理覆盖
 AGENT_MEMORY_THINKING=inherit
+# Agent 记忆整理推理等级覆盖（Agent 请求不限制输出长度，靠它控制推理深浅）
+AGENT_MEMORY_REASONING_EFFORT=inherit
 # Agent 图片描述使用的模型档位
 AGENT_IMAGE_LLM_PROFILE=vision
 # Agent 图片描述推理覆盖
 AGENT_IMAGE_THINKING=inherit
+# Agent 图片描述推理等级覆盖（Agent 请求不限制输出长度，靠它控制推理深浅）
+AGENT_IMAGE_REASONING_EFFORT=inherit
+# Agent 工具路由开关（关闭后只靠 discover_tools 渐进发现，也不再有不 @ 的隐式触发）
+AGENT_ROUTER_ENABLED=true
+# Agent 工具路由使用的模型档位（只看当前消息，决定预先开放哪些工具包）
+AGENT_ROUTER_LLM_PROFILE=light
+# Agent 工具路由推理覆盖
+AGENT_ROUTER_THINKING=inherit
+# Agent 工具路由推理等级覆盖
+AGENT_ROUTER_REASONING_EFFORT=inherit
 # RPG KP 叙事 / 工具使用的模型档位
 RPG_KP_LLM_PROFILE=default
 # RPG KP 推理覆盖

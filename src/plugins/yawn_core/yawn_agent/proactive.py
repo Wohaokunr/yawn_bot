@@ -17,7 +17,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
-from ..llm import ai_config, complete, last_completion_outcome, resolve_llm_request
+from ..llm import (
+    NO_OUTPUT_LIMIT,
+    ai_config,
+    complete,
+    last_completion_outcome,
+    resolve_llm_request,
+)
 from .context import ActivitySnapshot, now_beijing
 from .collector import group_lock
 from .config_store import agent_runtime_enabled, list_agent_group_ids
@@ -90,7 +96,9 @@ from .proactive_policy import (
 )
 
 _PROACTIVE_MIN_MAX_TOKENS = 2048
-_PROACTIVE_TIMEOUT_SECONDS = 25.0
+# 不再用 max_tokens 卡输出（推理模型常把预算耗在思考上导致空回复），
+# 推理深浅由 AGENT_PROACTIVE_REASONING_EFFORT 控制，超时相应放宽。
+_PROACTIVE_TIMEOUT_SECONDS = 45.0
 _PROACTIVE_CONCURRENCY = 3
 
 
@@ -100,7 +108,7 @@ async def _generate_proactive_reply(messages: list[Any]) -> str | None:
     return await complete(  # pyright: ignore[reportArgumentType]
         messages,  # pyright: ignore[reportArgumentType]
         task="agent_proactive",
-        max_tokens=max(_PROACTIVE_MIN_MAX_TOKENS, int(ai_config.ai_max_tokens)),
+        max_tokens=NO_OUTPUT_LIMIT,
         timeout=_PROACTIVE_TIMEOUT_SECONDS,
     )
 
@@ -108,7 +116,7 @@ async def _generate_proactive_reply(messages: list[Any]) -> str | None:
 _LLM_FAILURE_REASONS = {
     "timeout": "LLM 请求超时",
     "not_configured": "LLM 未配置密钥",
-    "empty": "LLM 返回空内容（可能被 max_tokens 截断）",
+    "empty": "LLM 返回空内容",
     "error": "LLM 接口报错",
 }
 

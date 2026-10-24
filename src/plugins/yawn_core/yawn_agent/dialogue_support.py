@@ -7,11 +7,11 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..data_models.group_agent_message import GroupAgentMessage
 from .context import now_beijing
-from .log import dbg
+from .log import dbg, dbg_exc
 from .message_parser import NormalizedMessage
 
 
@@ -118,9 +118,54 @@ async def persist_bot_reply(
     dbg(f"群 {group_id} bot 发言 {message_id} 已加入自言落库(role=bot)")
 
 
+
+async def quote_target(
+    session: Any,
+    *,
+    group_id: int,
+    bot_id: int,
+    actor_user_id: int,
+    message_id: int | None,
+    normalized: NormalizedMessage,
+) -> int | None:
+    """群里在触发之后有人插话（或本轮合并了多条消息）时，引用触发消息。
+
+    一对一的连续对话不引用，读起来更自然；多人同时说话时不引用就分不清
+    Bot 在回谁。查询失败只是不引用，不影响发送。
+    """
+
+    if message_id is None or int(message_id) == 0:
+        return None
+    if normalized.merged_message_ids:
+        return int(message_id)
+    try:
+        trigger_row_id = await session.scalar(
+            select(GroupAgentMessage.id).where(
+                GroupAgentMessage.bot_id == bot_id,
+                GroupAgentMessage.group_id == group_id,
+                GroupAgentMessage.message_id == int(message_id),
+            )
+        )
+        if trigger_row_id is None:
+            return None
+        interleaved = await session.scalar(
+            select(func.count(GroupAgentMessage.id)).where(
+                GroupAgentMessage.bot_id == bot_id,
+                GroupAgentMessage.group_id == group_id,
+                GroupAgentMessage.id > int(trigger_row_id),
+                GroupAgentMessage.user_id != actor_user_id,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {group_id} 判断是否需要引用触发消息失败(按不引用处理)")
+        return None
+    return int(message_id) if int(interleaved or 0) > 0 else None
+
+
 __all__ = [
     "contains_word",
     "current_turn_focus_ids",
     "is_recent_duplicate",
     "persist_bot_reply",
+    "quote_target",
 ]

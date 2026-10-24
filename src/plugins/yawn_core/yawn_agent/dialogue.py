@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import (
+    NO_OUTPUT_LIMIT,
     LLMMultimodalUnsupportedError,
     complete_with_tools_result,
     resolve_llm_request,
@@ -58,6 +59,7 @@ from .conversation import mark_bot_reply
 from .context_loader import load_context as _load_context_impl
 from .dialogue_support import (
     contains_word,
+    quote_target as _quote_target,
     current_turn_focus_ids as _current_turn_focus_ids,
     is_recent_duplicate as _is_recent_duplicate,
     persist_bot_reply,
@@ -107,7 +109,7 @@ from .outbound import (
     SendResult,
     send_prepared_outbound,
 )
-from .persona import persona_behavior, resolve_persona
+from .persona import persona_behavior, persona_self_name, resolve_persona
 from .speech import SpeechPlan
 from .speech_finalize import (
     apply_speech_topic,
@@ -123,7 +125,6 @@ from .prompt import (
     stable_context_key,
 )
 from .tools import (
-    MAX_TOOL_ROUNDS,
     build_tool_schemas,
     dialogue_tool_round_limit,
     discovery_segment_types,
@@ -131,6 +132,10 @@ from .tools import (
     select_dialogue_message_segment_types,
 )
 from .tool_execution import ToolExecutionContext
+from . import turn_budget
+from .progress_notice import begin_progress, clean_preamble, current_progress
+from .tool_preload import resolve_tool_plan, start_tool_plan
+from .tool_registry import TOOL_BY_NAME
 from .turn_fallbacks import (
     FALLBACK_CURSOR_LIMIT as _FALLBACK_CURSOR_LIMIT,
     FALLBACK_NOTICES as _FALLBACK_NOTICES,
@@ -375,49 +380,6 @@ async def _finalize_reply(
     )
 
 
-async def _quote_target(
-    session: Any,
-    *,
-    group_id: int,
-    bot_id: int,
-    actor_user_id: int,
-    message_id: int | None,
-    normalized: NormalizedMessage,
-) -> int | None:
-    """群里在触发之后有人插话（或本轮合并了多条消息）时，引用触发消息。
-
-    一对一的连续对话不引用，读起来更自然；多人同时说话时不引用就分不清
-    Bot 在回谁。查询失败只是不引用，不影响发送。
-    """
-
-    if message_id is None or int(message_id) == 0:
-        return None
-    if normalized.merged_message_ids:
-        return int(message_id)
-    try:
-        trigger_row_id = await session.scalar(
-            select(GroupAgentMessage.id).where(
-                GroupAgentMessage.bot_id == bot_id,
-                GroupAgentMessage.group_id == group_id,
-                GroupAgentMessage.message_id == int(message_id),
-            )
-        )
-        if trigger_row_id is None:
-            return None
-        interleaved = await session.scalar(
-            select(func.count(GroupAgentMessage.id)).where(
-                GroupAgentMessage.bot_id == bot_id,
-                GroupAgentMessage.group_id == group_id,
-                GroupAgentMessage.id > int(trigger_row_id),
-                GroupAgentMessage.user_id != actor_user_id,
-            )
-        )
-    except Exception:  # noqa: BLE001
-        dbg_exc(f"群 {group_id} 判断是否需要引用触发消息失败(按不引用处理)")
-        return None
-    return int(message_id) if int(interleaved or 0) > 0 else None
-
-
 @dataclass(slots=True)
 class _DialogueTurn:
     """一轮明确触发的可变运行状态；只在本轮内存在。"""
@@ -456,6 +418,8 @@ class _DialogueTurn:
     had_tool_results: bool = False
     fallback_attempted: bool = False
     deadline: float = 0.0
+    last_finish_reason: str | None = None
+    suggested_toolpacks: tuple[str, ...] = ()
     # 本轮真实成功的工具；最终发言据此核验“已完成”声明。
     succeeded_tools: set[str] = field(default_factory=set)
 
@@ -488,6 +452,7 @@ class _DialogueTurn:
             if resolve_llm_request("agent_dialogue").multimodal != "unsupported"
             else None,
             bot_role=cached_bot_role(self.bot, self.group_id),
+            suggested_toolpacks=self.suggested_toolpacks,
         )
         return fingerprint
 
@@ -574,21 +539,36 @@ async def _prepare_turn(
         if item is not None
     ]
 
-    context_started = time.monotonic()
-    context = await _load_context(
-        session,
-        group_id,
-        config,
-        bot_id,
-        focus_user_ids=focus_ids,
-        query_text=query_text,
-        exclude_message_id=(
-            excluded_ids[0] if len(excluded_ids) == 1 else (excluded_ids or None)
-        ),
-        context_model=model,
-        completion_reserve=_COMPLETION_RESERVE,
-        context_token_limit=_CONTEXT_TOKEN_LIMIT,
+    has_target_mentions = any(int(uid) != int(bot_id) for uid in normalized.mentions)
+    tool_intent_text = normalized.intent_text()
+    has_reply_context = bool(normalized.reply_chain)
+    has_media_context = bool(normalized.media_refs)
+    # 工具路由只看这一条消息，和上下文加载并发。
+    plan_task = start_tool_plan(
+        tool_intent_text,
+        has_reply=has_reply_context,
+        has_media=has_media_context,
+        mentions_others=has_target_mentions,
     )
+    context_started = time.monotonic()
+    try:
+        context = await _load_context(
+            session,
+            group_id,
+            config,
+            bot_id,
+            focus_user_ids=focus_ids,
+            query_text=query_text,
+            exclude_message_id=(
+                excluded_ids[0] if len(excluded_ids) == 1 else (excluded_ids or None)
+            ),
+            context_model=model,
+            completion_reserve=_COMPLETION_RESERVE,
+            context_token_limit=_CONTEXT_TOKEN_LIMIT,
+        )
+    except BaseException:
+        plan_task.cancel()
+        raise
     trace_event(
         "context",
         "上下文选择与装箱",
@@ -611,12 +591,6 @@ async def _prepare_turn(
     )
 
     capability_started = time.monotonic()
-    has_target_mentions = any(
-        int(user_id) != int(bot_id) for user_id in normalized.mentions
-    )
-    tool_intent_text = normalized.intent_text()
-    has_reply_context = bool(normalized.reply_chain)
-    has_media_context = bool(normalized.media_refs)
     (
         capabilities,
         allow_admin_tools,
@@ -631,11 +605,24 @@ async def _prepare_turn(
         has_mentions=has_target_mentions,
         has_media=has_media_context,
     )
+    tool_plan, preload, capabilities = await resolve_tool_plan(
+        plan_task,
+        bot=bot,
+        group_id=group_id,
+        actor_user_id=actor_user_id,
+        session=session,
+        capabilities=capabilities,
+        actor_can_manage=allow_admin_tools,
+        privileged_allowlist=frozenset(config.tool_allowlist or []),
+    )
+    if preload.names:
+        selected_tool_names = frozenset(selected_tool_names | preload.names)
+        capability_source = f"{capability_source}+tool_router"
     message_segment_types = select_dialogue_message_segment_types(
-        tool_intent_text,
         has_target_mentions=has_target_mentions,
         has_reply=has_reply_context,
         has_media=has_media_context,
+        planned=preload.segments,
     )
 
     media_started = time.monotonic()
@@ -736,6 +723,7 @@ async def _prepare_turn(
         user_prompt=user_prompt,
         current_turn=current_turn,
     )
+    turn.suggested_toolpacks = preload.suggested
     turn.rebuild_tools()
     tool_schema_chars = len(
         json.dumps(turn.tools, ensure_ascii=False, separators=(",", ":"))
@@ -760,6 +748,7 @@ async def _prepare_turn(
             "tool_names": _tool_names(turn.tools),
             "tool_schema_chars": tool_schema_chars,
             "tool_count": len(turn.tools),
+            "tool_plan": {**tool_plan.trace_dict(), **preload.trace_dict()},
         },
         duration_ms=(time.monotonic() - capability_started) * 1000,
     )
@@ -785,7 +774,7 @@ async def _prepare_turn(
         current_intent_text=tool_intent_text,
     )
     turn.discovery_guard = DiscoveryRoundGuard(set(selected_tool_names))
-    turn.deadline = time.monotonic() + _MAX_TURN_SECONDS
+    turn.deadline = time.monotonic() + turn_budget.turn_seconds(turn.tools)
     return turn
 
 
@@ -857,8 +846,8 @@ async def _request_completion(turn: _DialogueTurn) -> Any:
             turn.messages,  # pyright: ignore[reportArgumentType]
             turn.tools,  # pyright: ignore[reportArgumentType]
             task="agent_dialogue",
-            max_tokens=_COMPLETION_RESERVE,
-            timeout=30,
+            max_tokens=NO_OUTPUT_LIMIT,
+            timeout=turn_budget.completion_timeout(turn.tools),
             multimodal=bool(turn.media_blocks),
             raise_on_unsupported=bool(turn.media_blocks)
             and not turn.fallback_attempted,
@@ -903,6 +892,12 @@ async def _run_turn(turn: _DialogueTurn) -> None:
             )
             await turn.send_notice(_TURN_END_NOTICE, label="收尾")
             return
+        if turn.had_tool_results and turn_budget.is_final_round(
+            turn.rounds, turn.round_limit
+        ):
+            turn.messages.append(
+                {"role": "system", "content": turn_budget.FINAL_ROUND_NOTE}
+            )
         llm_started = time.monotonic()
         completion = await _request_completion(turn)
         if completion is _REBUILT:
@@ -937,6 +932,7 @@ async def _run_turn(turn: _DialogueTurn) -> None:
             return
         content = (response.content or "").strip()
         tool_calls = response.tool_calls or []
+        turn.last_finish_reason = completion.finish_reason
         trace_event(
             "llm",
             "模型调用",
@@ -1047,7 +1043,9 @@ async def _execute_tool_call(
             raise ValueError("工具参数必须是对象")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         dbg(f"群 {turn.group_id} 工具参数解析失败: {exc}")
-        return {}, {"ok": False, "error": str(exc)}
+        return {}, turn_budget.argument_error_payload(
+            raw_args, exc, finish_reason=turn.last_finish_reason
+        )
     if (
         tool_name in _VISIBLE_SEND_TOOLS
         and turn.enqueued_at is not None
@@ -1234,7 +1232,9 @@ async def _apply_discovery(turn: _DialogueTurn, state: _RoundState) -> None:
     loaded = sorted(name for name in state.discovered_names if name in loaded_names)
     if loaded:
         record_agent_tool_discovery("used", len(loaded))
-    turn.round_limit = max(turn.round_limit, min(MAX_TOOL_ROUNDS, turn.rounds + 2))
+    names = turn.selected_tool_names
+    turn.round_limit = turn_budget.discovery_round_limit(turn.round_limit, turn.rounds, names)
+    turn.deadline = turn_budget.discovery_deadline(turn.deadline, time.monotonic(), names)
     trace_event(
         "capability",
         "动态工具发现",
@@ -1261,6 +1261,9 @@ async def _run_tool_round(
     }
     turn.messages.append(assistant)
     state = _RoundState()
+    progress = current_progress()
+    if progress is not None and content:
+        progress.preamble = clean_preamble(content) or progress.preamble
     for call in tool_calls:
         function = getattr(call, "function", None)
         if function is None:
@@ -1274,7 +1277,16 @@ async def _run_tool_round(
         dbg(
             f"群 {turn.group_id} 第 {turn.rounds} 轮工具调用: name={tool_name!r} args={raw_args}"
         )
-        args, result = await _execute_tool_call(turn, state, tool_name, raw_args)
+        definition = TOOL_BY_NAME.get(tool_name)
+        if progress is not None:
+            progress.enter_tool(
+                tool_name, family=definition.family if definition else None
+            )
+        try:
+            args, result = await _execute_tool_call(turn, state, tool_name, raw_args)
+        finally:
+            if progress is not None:
+                progress.leave_tool()
         turn.had_tool_results = True
         if result.get("ok"):
             turn.succeeded_tools.add(tool_name)
@@ -1390,9 +1402,13 @@ async def _process_group_message(
                     f"{'配置缺失' if config is None else '已关闭'}"
                 )
                 return
-            _start_wait_notice(bot, group_id, enqueued_at, message_id)
+            # 排队时效只管“等太久的触发别回了”；开始处理后不再计时，
+            # 否则跑一次代码超过 120 秒，算好的结果会在发送前被当成过期丢掉。
+            # 处理本身由回合时限兜底。
+            begin_progress(self_name=persona_self_name(config))
+            _start_wait_notice(bot, group_id, None, message_id)
             turn = await _prepare_turn(
-                bot, event, normalized, session, config, enqueued_at=enqueued_at
+                bot, event, normalized, session, config, enqueued_at=None
             )
             await _run_turn(turn)
 

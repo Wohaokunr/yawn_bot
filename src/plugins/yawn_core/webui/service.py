@@ -146,7 +146,13 @@ _live_state_modules: dict[str, Any] = {}
 def _llm_runtime_status() -> dict[str, Any]:
     """返回 WebUI 可展示的 LLM 路由状态；绝不暴露 API Key。"""
 
-    tasks = ("agent_dialogue", "agent_proactive", "agent_memory", "agent_image")
+    tasks = (
+        "agent_dialogue",
+        "agent_proactive",
+        "agent_memory",
+        "agent_image",
+        "agent_router",
+    )
     routes: list[dict[str, Any]] = []
     missing: set[str] = set()
     for task in tasks:
@@ -162,6 +168,7 @@ def _llm_runtime_status() -> dict[str, Any]:
                 "provider": request.provider,
                 "model": request.model,
                 "thinking": request.thinking,
+                "reasoningEffort": request.reasoning_effort,
                 "multimodal": request.multimodal,
                 "configured": configured,
             }

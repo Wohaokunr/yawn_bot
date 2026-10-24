@@ -577,6 +577,7 @@ export function EnvironmentPage(): React.JSX.Element {
                 compactEditor(model.providerKey, "提供商"),
                 compactEditor(model.modelKey, "模型 ID"),
                 compactEditor(model.thinkingKey, "推理"),
+                compactEditor(model.effortKey, "推理等级"),
                 ...(model.multimodalKey ? [compactEditor(model.multimodalKey, "图片能力")] : []),
               ]}
               resolvedRoute={`${resolved.providerId} / ${resolved.model || "未配置"}`}

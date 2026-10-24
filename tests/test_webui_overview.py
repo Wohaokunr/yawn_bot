@@ -285,6 +285,7 @@ async def test_overview_payload_keeps_legacy_fields_and_adds_stats(
         "agent_proactive",
         "agent_memory",
         "agent_image",
+        "agent_router",
     }
     assert all("apiKey" not in route for route in stats["llm"]["routes"])
     assert stats["activity"]["messages24h"] == 0

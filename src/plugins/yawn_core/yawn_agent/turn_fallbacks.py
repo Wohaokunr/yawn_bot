@@ -1,15 +1,18 @@
-# ruff: noqa: E501, PLR0911, PLR0913, RUF001, TC003
-"""Agent 回合的纯本地 fallback 与等待提示辅助逻辑。"""
+# ruff: noqa: E501, PLR0911, RUF001, TC003
+"""Agent 回合的纯本地 fallback；等待提示的实现见 ``progress_notice.py``。"""
 
 from __future__ import annotations
 
-import asyncio
-import os
 import re
-from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
 from datetime import datetime
-from typing import Any
+
+from .progress_notice import (
+    WAIT_NOTICE_DEFAULT_DELAY,
+    WAIT_NOTICE_TASK,
+    cancel_wait_notice,
+    start_wait_notice,
+    wait_notice_delay,
+)
 
 GREETING_WORDS = ("你好", "嗨", "hello", "hi", "早上好", "晚上好", "在吗", "在不在")
 FALLBACK_NOTICES = (
@@ -19,11 +22,8 @@ FALLBACK_NOTICES = (
 )
 FALLBACK_CURSOR_LIMIT = 256
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
-WAIT_NOTICE = "收到啦，我正在想，稍等一下～"
-WAIT_NOTICE_DEFAULT_DELAY = 6.0
-WAIT_NOTICE_TASK: ContextVar[asyncio.Task[None] | None] = ContextVar(
-    "agent_dialogue_wait_notice", default=None
-)
+# 慢回合反馈已移到 progress_notice.py（先贴表情、按进度说话）；这里保留旧名字。
+WAIT_NOTICE = "稍等，我想想"
 _FALLBACK_CURSOR: dict[int, int] = {}
 
 
@@ -64,62 +64,6 @@ def fallback_notice(group_id: int) -> str:
         _FALLBACK_CURSOR.clear()
     _FALLBACK_CURSOR[group_id] = index
     return FALLBACK_NOTICES[index % len(FALLBACK_NOTICES)]
-
-
-def wait_notice_delay() -> float:
-    raw = os.environ.get("AGENT_AI_WAIT_NOTICE_DELAY", "").strip()
-    if not raw:
-        return WAIT_NOTICE_DEFAULT_DELAY
-    try:
-        return float(raw)
-    except ValueError:
-        return WAIT_NOTICE_DEFAULT_DELAY
-
-
-def cancel_wait_notice() -> None:
-    task = WAIT_NOTICE_TASK.get()
-    if task is None:
-        return
-    WAIT_NOTICE_TASK.set(None)
-    if not task.done():
-        task.cancel()
-
-
-def start_wait_notice(
-    bot: Any,
-    group_id: int,
-    enqueued_at: float | None,
-    message_id: Any,
-    *,
-    send_unless_expired: Callable[..., Awaitable[Any]],
-    debug: Callable[[str], None],
-    debug_exception: Callable[[str], None],
-) -> None:
-    """超过阈值后补一次界面等待提示；副作用通过回调注入。"""
-
-    delay = wait_notice_delay()
-    if delay <= 0:
-        return
-
-    async def _notice() -> None:
-        try:
-            await asyncio.sleep(delay)
-            await send_unless_expired(
-                bot,
-                group_id,
-                WAIT_NOTICE,
-                enqueued_at,
-                label="等待提示",
-                message_id=message_id,
-                cancel_wait_notice=False,
-            )
-            debug(f"群 {group_id} 处理超过 {delay:.1f}s,已发送一次等待提示")
-        except asyncio.CancelledError:
-            return
-        except Exception:  # noqa: BLE001
-            debug_exception(f"群 {group_id} 等待提示发送失败(忽略)")
-
-    WAIT_NOTICE_TASK.set(asyncio.create_task(_notice()))
 
 
 __all__ = [

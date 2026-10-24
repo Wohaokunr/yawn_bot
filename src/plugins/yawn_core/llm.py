@@ -33,12 +33,20 @@ LLMProfile = Literal["default", "light", "vision"]
 ThinkingMode = Literal["auto", "enabled", "disabled"]
 TaskThinkingMode = Literal["inherit", "auto", "enabled", "disabled"]
 MultimodalMode = Literal["auto", "supported", "unsupported"]
+# 推理等级：auto 不发送参数（由服务商决定）；其余原样作为 reasoning_effort 发送。
+ReasoningEffort = Literal["auto", "none", "minimal", "low", "medium", "high", "xhigh"]
+TaskReasoningEffort = Literal[
+    "inherit", "auto", "none", "minimal", "low", "medium", "high", "xhigh"
+]
+# 传给 max_tokens 表示“不限制输出长度”：请求里不带 max_tokens，交给推理等级控制。
+NO_OUTPUT_LIMIT = -1
 LLMTask = Literal[
     "core_chat",
     "agent_dialogue",
     "agent_proactive",
     "agent_memory",
     "agent_image",
+    "agent_router",
     "rpg_kp",
     "rpg_npc_router",
     "rpg_npc",
@@ -81,17 +89,29 @@ class LLMRoutingConfig(BaseModel):
     ai_default_thinking: ThinkingMode = "auto"
     ai_light_thinking: ThinkingMode = "disabled"
     ai_vision_thinking: ThinkingMode = "disabled"
+    ai_default_reasoning_effort: ReasoningEffort = "auto"
+    ai_light_reasoning_effort: ReasoningEffort = "auto"
+    ai_vision_reasoning_effort: ReasoningEffort = "auto"
     ai_default_multimodal: MultimodalMode = "auto"
     ai_light_multimodal: MultimodalMode = "auto"
 
     agent_dialogue_llm_profile: LLMProfile = "default"
     agent_dialogue_thinking: TaskThinkingMode = "inherit"
+    agent_dialogue_reasoning_effort: TaskReasoningEffort = "inherit"
     agent_proactive_llm_profile: LLMProfile = "light"
     agent_proactive_thinking: TaskThinkingMode = "inherit"
+    agent_proactive_reasoning_effort: TaskReasoningEffort = "inherit"
     agent_memory_llm_profile: LLMProfile = "light"
     agent_memory_thinking: TaskThinkingMode = "inherit"
+    agent_memory_reasoning_effort: TaskReasoningEffort = "inherit"
     agent_image_llm_profile: LLMProfile = "vision"
     agent_image_thinking: TaskThinkingMode = "inherit"
+    agent_image_reasoning_effort: TaskReasoningEffort = "inherit"
+    # 工具路由：只看当前这条消息、不带群上下文，决定本轮预先开放哪些工具包。
+    agent_router_enabled: bool = True
+    agent_router_llm_profile: LLMProfile = "light"
+    agent_router_thinking: TaskThinkingMode = "inherit"
+    agent_router_reasoning_effort: TaskReasoningEffort = "inherit"
 
     rpg_kp_llm_profile: LLMProfile = "default"
     rpg_kp_thinking: TaskThinkingMode = "inherit"
@@ -258,12 +278,31 @@ class LLMRequestConfig:
     model: str
     thinking: ThinkingMode
     multimodal: MultimodalMode
+    reasoning_effort: ReasoningEffort = "auto"
 
     @property
     def extra_body(self) -> dict[str, Any] | None:
         if self.thinking == "auto":
             return None
         return {"thinking": {"type": self.thinking}}
+
+    @property
+    def reasoning_kwargs(self) -> dict[str, Any]:
+        """``reasoning_effort`` 请求参数；auto 时不发送，兼容不认识它的端点。"""
+
+        if self.reasoning_effort == "auto":
+            return {}
+        return {"reasoning_effort": self.reasoning_effort}
+
+
+def _max_tokens_kwargs(max_tokens: Optional[int]) -> dict[str, Any]:
+    """None 用全局 AI_MAX_TOKENS；NO_OUTPUT_LIMIT 不发送 max_tokens。"""
+
+    if max_tokens == NO_OUTPUT_LIMIT:
+        return {}
+    return {
+        "max_tokens": max_tokens if max_tokens is not None else ai_config.ai_max_tokens
+    }
 
 
 def _configured_text(field_name: str) -> str:
@@ -273,12 +312,14 @@ def _configured_text(field_name: str) -> str:
 def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
     """按任务解析模型档位、推理策略和多模态能力。"""
 
+    task_effort: TaskReasoningEffort = "inherit"
     if task == "core_chat":
         profile: LLMProfile = "default"
         task_thinking: TaskThinkingMode = "inherit"
     else:
         profile = getattr(ai_config, f"{task}_llm_profile")
         task_thinking = getattr(ai_config, f"{task}_thinking")
+        task_effort = getattr(ai_config, f"{task}_reasoning_effort", "inherit")
 
     if profile == "light":
         configured_model = _configured_text("ai_light_model")
@@ -289,6 +330,7 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
             else ai_config.ai_default_provider
         )
         global_thinking = ai_config.ai_light_thinking
+        global_effort: ReasoningEffort = ai_config.ai_light_reasoning_effort
         multimodal = ai_config.ai_light_multimodal
     elif profile == "vision":
         configured_model = _configured_text("ai_vision_model")
@@ -299,11 +341,13 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
             else ai_config.ai_default_provider
         )
         global_thinking = ai_config.ai_vision_thinking
+        global_effort = ai_config.ai_vision_reasoning_effort
         multimodal = "supported"
     else:
         model = ai_config.ai_model
         provider = ai_config.ai_default_provider
         global_thinking = ai_config.ai_default_thinking
+        global_effort = ai_config.ai_default_reasoning_effort
         multimodal = ai_config.ai_default_multimodal
 
     thinking = global_thinking if task_thinking == "inherit" else task_thinking
@@ -314,6 +358,7 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
         model=model,
         thinking=thinking,
         multimodal=multimodal,
+        reasoning_effort=global_effort if task_effort == "inherit" else task_effort,
     )
 
 
@@ -456,11 +501,8 @@ async def complete(  # noqa: PLR0911
                         model=request.model,
                         messages=messages,
                         stream=False,
-                        max_tokens=(
-                            max_tokens
-                            if max_tokens is not None
-                            else ai_config.ai_max_tokens
-                        ),
+                        **_max_tokens_kwargs(max_tokens),
+                        **request.reasoning_kwargs,
                         **(
                             {"response_format": response_format}
                             if response_format
@@ -612,11 +654,8 @@ async def complete_with_tools_result(  # noqa: C901,PLR0911
                         # 无工具场景（如主动发言）不传该参数。
                         **({"tools": tools} if tools else {}),
                         stream=False,
-                        max_tokens=(
-                            max_tokens
-                            if max_tokens is not None
-                            else ai_config.ai_max_tokens
-                        ),
+                        **_max_tokens_kwargs(max_tokens),
+                        **request.reasoning_kwargs,
                         **(
                             {"response_format": response_format}
                             if response_format

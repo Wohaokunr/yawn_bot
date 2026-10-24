@@ -137,6 +137,38 @@ def test_workspace_persists_between_runs(service: sandbox_server.RunnerService) 
     assert result["files"] == []
 
 
+def test_shell_runs_in_the_same_workspace(service: sandbox_server.RunnerService) -> None:
+    _run(service, "open('notes.txt', 'w').write('apple\\nbanana\\ncherry\\n')")
+    result = service.run(
+        {
+            "workspace": "g1001",
+            "code": "mkdir -p sub && cd sub && echo hi > a.txt && cd .. && grep -c an notes.txt && cat sub/a.txt",
+            "language": "shell",
+            "limits": {},
+            "meta": {"source": "test"},
+        }
+    )
+    assert result["status"] == "ok", result
+    assert result["language"] == "shell"
+    assert result["stdout"].split() == ["1", "hi"]
+    assert "sub/a.txt" in [item["path"] for item in result["files"]]
+
+
+def test_shell_failures_report_exit_code_and_pipefail(service: sandbox_server.RunnerService) -> None:
+    result = service.run(
+        {"workspace": "g1001", "code": "cat missing.txt | wc -l", "language": "shell", "limits": {}, "meta": {}}
+    )
+    assert result["status"] == "error"
+    assert result["exit_code"] not in (None, 0)
+    assert "missing.txt" in result["stderr"]
+
+
+def test_unknown_language_is_rejected(service: sandbox_server.RunnerService) -> None:
+    with pytest.raises(sandbox_server.ApiError):
+        service.run({"workspace": "g1001", "code": "x", "language": "ruby", "limits": {}, "meta": {}})
+    assert "shell" in service.health()["languages"]
+
+
 def test_user_errors_show_only_user_frames(service: sandbox_server.RunnerService) -> None:
     result = _run(service, "def boom():\n    raise ValueError('bad input')\nboom()")
     assert result["status"] == "error"

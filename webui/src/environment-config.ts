@@ -7,6 +7,7 @@ export const MODEL_CONFIGS = [
     modelKey: "AI_MODEL",
     providerKey: "AI_DEFAULT_PROVIDER",
     thinkingKey: "AI_DEFAULT_THINKING",
+    effortKey: "AI_DEFAULT_REASONING_EFFORT",
     multimodalKey: "AI_DEFAULT_MULTIMODAL",
   },
   {
@@ -15,6 +16,7 @@ export const MODEL_CONFIGS = [
     modelKey: "AI_LIGHT_MODEL",
     providerKey: "AI_LIGHT_PROVIDER",
     thinkingKey: "AI_LIGHT_THINKING",
+    effortKey: "AI_LIGHT_REASONING_EFFORT",
     multimodalKey: "AI_LIGHT_MULTIMODAL",
   },
   {
@@ -23,6 +25,7 @@ export const MODEL_CONFIGS = [
     modelKey: "AI_VISION_MODEL",
     providerKey: "AI_VISION_PROVIDER",
     thinkingKey: "AI_VISION_THINKING",
+    effortKey: "AI_VISION_REASONING_EFFORT",
     multimodalKey: undefined,
   },
 ] as const;
@@ -41,6 +44,7 @@ export const TASK_CONFIGS = [
       ["主动发言", "AGENT_PROACTIVE_LLM_PROFILE", "AGENT_PROACTIVE_THINKING"],
       ["记忆整理", "AGENT_MEMORY_LLM_PROFILE", "AGENT_MEMORY_THINKING"],
       ["图片描述", "AGENT_IMAGE_LLM_PROFILE", "AGENT_IMAGE_THINKING"],
+      ["工具路由", "AGENT_ROUTER_LLM_PROFILE", "AGENT_ROUTER_THINKING"],
     ],
   },
   {
@@ -70,6 +74,7 @@ export const MODEL_PANEL_KEYS = MODEL_CONFIGS.flatMap((item) => [
   item.modelKey,
   item.providerKey,
   item.thinkingKey,
+  item.effortKey,
   ...(item.multimodalKey ? [item.multimodalKey] : []),
 ]);
 
@@ -101,6 +106,12 @@ const ENUM_LABELS: Record<string, string> = {
   inherit: "继承模型档位",
   auto: "自动",
   enabled: "开启推理",
+  none: "不推理",
+  minimal: "最少推理",
+  low: "低推理等级",
+  medium: "中推理等级",
+  high: "高推理等级",
+  xhigh: "最高推理等级",
   disabled: "关闭推理",
   supported: "支持图片",
   unsupported: "不支持图片",

@@ -1067,6 +1067,7 @@ async def run_agent_debug(
                 "provider": route.provider,
                 "model": route.model,
                 "thinking": route.thinking,
+                "reasoningEffort": route.reasoning_effort,
                 "multimodal": route.multimodal,
                 "configured": bool(
                     base_url.strip() and api_key and route.model.strip()

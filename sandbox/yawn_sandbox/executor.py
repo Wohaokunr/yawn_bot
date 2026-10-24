@@ -36,6 +36,10 @@ if TYPE_CHECKING:
     from .config import RunnerConfig
 
 MAX_CODE_CHARS = 64 * 1024
+# python：经 bootstrap 运行（notebook 式回显、自动存图）；shell：bash 脚本，
+# 用来 ls/cat/grep/sed/find/zip 这类终端操作。两者共用同一个工作区、uid 与限额。
+LANGUAGES = ("python", "shell")
+_BASH = "/bin/bash"
 MAX_REPORTED_FILES = 50
 _POLL_SECONDS = 0.05
 _QUOTA_CHECK_SECONDS = 1.0
@@ -101,6 +105,7 @@ class RunRequest:
     limits: RunLimits
     meta: dict[str, Any] = field(default_factory=dict)
     run_id: str = field(default_factory=lambda: secrets.token_hex(8))
+    language: str = "python"
 
 
 @dataclass(slots=True)
@@ -125,6 +130,7 @@ class RunResult:
     limits: dict[str, int] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=dict)
+    language: str = "python"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +154,7 @@ class RunResult:
             "limits": self.limits,
             "meta": self.meta,
             "usage": self.usage,
+            "language": self.language,
         }
 
 
@@ -306,6 +313,7 @@ class Executor:
             started_at=submitted,
             limits=request.limits.to_dict(),
             meta=request.meta,
+            language=request.language,
         )
         if not request.code.strip():
             result.status = STATUS_REJECTED
@@ -318,6 +326,10 @@ class Executor:
         if "\x00" in request.code:
             result.status = STATUS_REJECTED
             result.message = "代码包含 NUL 字符"
+            return result
+        if request.language not in LANGUAGES:
+            result.status = STATUS_REJECTED
+            result.message = f"不支持的语言：{request.language}"
             return result
 
         with self._state_lock:
@@ -363,6 +375,9 @@ class Executor:
 
     def _child_env(self, workspace: Workspace, job_dir: Path) -> dict[str, str]:
         env = dict(_BASE_CHILD_ENV)
+        # 终端里敲 python/pip list 时用的是沙箱 venv，而不是系统 Python。
+        venv_bin = str(Path(self.config.python).parent)
+        env["PATH"] = f"{venv_bin}:{env['PATH']}"
         env.update(
             {
                 "HOME": str(workspace.path),
@@ -379,7 +394,8 @@ class Executor:
         job_dir.mkdir(mode=0o700)
         (job_dir / "tmp").mkdir(mode=0o700)
         (job_dir / "mpl").mkdir(mode=0o700)
-        (job_dir / "main.py").write_text(request.code, encoding="utf-8")
+        script = "main.sh" if request.language == "shell" else "main.py"
+        (job_dir / script).write_text(request.code, encoding="utf-8")
         (job_dir / "mpl" / "matplotlibrc").write_text(_MATPLOTLIBRC, encoding="utf-8")
         cache = self.config.lib_dir.parent / "mplcache"
         if cache.is_dir():
@@ -406,15 +422,27 @@ class Executor:
             return result
         before = self.store.snapshot(workspace, limit=limits.max_files + 100)
         job_dir = self._prepare_job_dir(workspace, request)
-        command = [
-            self.config.python,
-            "-I",
-            "-X",
-            "utf8",
-            str(_BOOTSTRAP),
-            str(job_dir / "main.py"),
-            request.run_id[:8],
-        ]
+        if request.language == "shell":
+            # 不读 profile/rc，环境只有 _child_env 给的那些；pipefail 让管道里
+            # 前面的命令失败也能如实报错。
+            command = [
+                _BASH,
+                "--noprofile",
+                "--norc",
+                "-o",
+                "pipefail",
+                str(job_dir / "main.sh"),
+            ]
+        else:
+            command = [
+                self.config.python,
+                "-I",
+                "-X",
+                "utf8",
+                str(_BOOTSTRAP),
+                str(job_dir / "main.py"),
+                request.run_id[:8],
+            ]
         popen_kwargs: dict[str, Any] = {}
         if self.drop_privileges:
             popen_kwargs.update(
@@ -578,6 +606,7 @@ _STATUS_MESSAGES = {
 
 
 __all__ = [
+    "LANGUAGES",
     "MAX_CODE_CHARS",
     "RUN_STATUSES",
     "ActiveRun",

@@ -7,10 +7,15 @@
 一次 ``run_python`` 的授权顺序：总开关 → 群开放范围 → 仅管理员 → 沙箱在线
 与隔离自检 → 成员冷却 → 成员/群每日次数。次数在执行前预扣，执行没有真正
 发生（沙箱繁忙、离线）时退还，和特权工具的配额语义一致。
+
+冷却只用来防刷，不该让一次正常的“报错 → 改代码 → 重跑”失败：同一回合里的
+重跑不受冷却限制；跨回合撞上冷却时，剩余时间在 ``MAX_COOLDOWN_WAIT`` 秒以内
+就等一会儿再跑，而不是把“运行得太频繁了”甩给模型。
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import threading
@@ -27,6 +32,8 @@ from .sandbox_client import SandboxError, cached_health
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 STATE_DIR = PROJECT_ROOT / "data" / "agent_sandbox"
 _COOLDOWN_MEMORY = 2048
+# 撞上冷却时最多替模型等多久；更长的冷却（管理员调大了）才报错。
+MAX_COOLDOWN_WAIT = 10.0
 
 
 class SandboxSettings(BaseModel):
@@ -45,7 +52,7 @@ class SandboxSettings(BaseModel):
     timeout_seconds: int = Field(default=30, ge=5, le=90)
     memory_mb: int = Field(default=1024, ge=128, le=4096)
     disk_quota_mb: int = Field(default=200, ge=10, le=4096)
-    max_output_chars: int = Field(default=3000, ge=500, le=12000)
+    max_output_chars: int = Field(default=6000, ge=500, le=12000)
     max_share_mb: int = Field(default=20, ge=1, le=32)
     allow_unisolated: bool = False
 
@@ -155,10 +162,20 @@ class _Store:
             return 0.0
         return max(seconds - (time.monotonic() - last), 0.0)
 
-    def mark_run(self, key: str) -> None:
+    def mark_run(self, key: str) -> float | None:
+        """记录一次运行；返回之前的时间戳，退还时用来恢复。"""
+
+        previous = self._last_run.get(key)
         if len(self._last_run) >= _COOLDOWN_MEMORY:
             self._last_run.clear()
         self._last_run[key] = time.monotonic()
+        return previous
+
+    def restore_run(self, key: str, previous: float | None) -> None:
+        if previous is None:
+            self._last_run.pop(key, None)
+        else:
+            self._last_run[key] = previous
 
 
 _store = _Store()
@@ -224,18 +241,33 @@ class RunReservation:
     user_id: int | None
     settings: SandboxSettings
     refunded: bool = False
+    previous_run: float | None = None
+    waited_seconds: float = 0.0
 
     def refund(self) -> None:
+        """代码根本没跑：退还次数，冷却也恢复成这次之前的状态。"""
+
         if self.refunded:
             return
         self.refunded = True
         _store.adjust(self.group_id, self.user_id, -1)
+        if self.user_id is not None:
+            _store.restore_run(f"{self.group_id}:{self.user_id}", self.previous_run)
 
 
 async def reserve_run(  # noqa: C901
-    group_id: int, user_id: int | None, *, actor_is_admin: bool
+    group_id: int,
+    user_id: int | None,
+    *,
+    actor_is_admin: bool,
+    skip_cooldown: bool = False,
+    wait_cooldown: bool = True,
 ) -> RunReservation:
-    """检查策略并预扣一次执行；任何不满足都抛 ``SandboxPolicyError``。"""
+    """检查策略并预扣一次执行；任何不满足都抛 ``SandboxPolicyError``。
+
+    ``skip_cooldown``：同一回合里的重跑（调用方据回合账本判断）。
+    ``wait_cooldown``：剩余冷却不超过 ``MAX_COOLDOWN_WAIT`` 时等它结束。
+    """
 
     settings = load_settings()
     if not settings.enabled:
@@ -258,7 +290,16 @@ async def reserve_run(  # noqa: C901
     if not health.get("accepting_runs", True):
         raise SandboxPolicyError("sandbox_unsafe", "代码沙箱当前拒绝执行，请联系管理员")
     cooldown_key = f"{group_id}:{user_id}"
-    remaining = _store.cooldown_remaining(cooldown_key, settings.member_cooldown_seconds)
+    waited = 0.0
+    remaining = (
+        0.0
+        if skip_cooldown
+        else _store.cooldown_remaining(cooldown_key, settings.member_cooldown_seconds)
+    )
+    if remaining > 0 and wait_cooldown and remaining <= MAX_COOLDOWN_WAIT:
+        await asyncio.sleep(remaining)
+        waited = remaining
+        remaining = 0.0
     if remaining > 0:
         raise SandboxPolicyError(
             "cooldown", f"运行得太频繁了，请 {remaining:.0f} 秒后再试（配额冷却）"
@@ -277,8 +318,10 @@ async def reserve_run(  # noqa: C901
             f"本群今天的代码沙箱次数已用完（配额 {settings.group_daily_runs} 次）",
         )
     _store.adjust(group_id, user_id, 1)
-    _store.mark_run(cooldown_key)
-    return RunReservation(group_id, user_id, settings)
+    previous = _store.mark_run(cooldown_key)
+    return RunReservation(
+        group_id, user_id, settings, previous_run=previous, waited_seconds=waited
+    )
 
 
 def quota_status(group_id: int, user_id: int | None) -> dict[str, Any]:
@@ -305,6 +348,7 @@ def reset_state_for_tests() -> None:
 
 
 __all__ = [
+    "MAX_COOLDOWN_WAIT",
     "STATE_DIR",
     "RunReservation",
     "SandboxPolicyError",

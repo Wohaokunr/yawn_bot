@@ -198,6 +198,8 @@ export const TRACE_TRIGGER_SOURCE_LABELS: Record<string, string> = {
   mention: "@ 明确呼叫",
   reply: "回复 Agent",
   wake_word: "叫名 / 唤醒词",
+  name_call: "不 @ 叫名字",
+  conversation_intent: "接着提需求",
   explicit_call: "明确呼叫",
   proactive_warmup: "主动参与 · 冷场暖场",
   proactive_interject: "主动参与 · 加入话题",

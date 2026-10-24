@@ -28,9 +28,14 @@ AI_LIGHT_THINKING=disabled
 AI_VISION_THINKING=disabled
 AI_DEFAULT_MULTIMODAL=auto
 AI_LIGHT_MULTIMODAL=auto
+AI_DEFAULT_REASONING_EFFORT=auto
+AI_LIGHT_REASONING_EFFORT=auto
+AI_VISION_REASONING_EFFORT=auto
 ```
 
-`*_THINKING` 可用 `auto / enabled / disabled`。多模态可用 `auto / supported / unsupported`。light 模型留空时继承 default；vision 留空表示没有独立视觉降级档位。
+`*_THINKING` 可用 `auto / enabled / disabled`。`*_REASONING_EFFORT`（推理等级）可用 `auto / none / minimal / low / medium / high / xhigh`：`auto` 不发送参数，其余作为 `reasoning_effort` 发送给服务商，端点不认识该参数时请保持 `auto`。多模态可用 `auto / supported / unsupported`。light 模型留空时继承 default；vision 留空表示没有独立视觉降级档位。
+
+Agent 的所有模型请求（对话、主动发言、记忆整理、图片描述）都不再传 `max_tokens` 限制输出长度：推理模型常把输出预算耗在思考上，导致空回复或工具参数（例如沙箱代码）被截断。需要控制推理深浅和成本时调整推理等级；`inherit` 沿用所选档位的设置。`AI_MAX_TOKENS` 只影响私聊对话等其他功能。
 
 ## 多 Provider
 
@@ -53,6 +58,14 @@ AGENT_MEMORY_LLM_PROFILE=light
 AGENT_MEMORY_THINKING=inherit
 AGENT_IMAGE_LLM_PROFILE=vision
 AGENT_IMAGE_THINKING=inherit
+AGENT_DIALOGUE_REASONING_EFFORT=inherit
+AGENT_PROACTIVE_REASONING_EFFORT=inherit
+AGENT_MEMORY_REASONING_EFFORT=inherit
+AGENT_IMAGE_REASONING_EFFORT=inherit
+AGENT_ROUTER_ENABLED=true
+AGENT_ROUTER_LLM_PROFILE=light
+AGENT_ROUTER_THINKING=inherit
+AGENT_ROUTER_REASONING_EFFORT=inherit
 
 RPG_KP_LLM_PROFILE=default
 RPG_KP_THINKING=inherit
@@ -68,6 +81,23 @@ WW_SPEECH_THINKING=inherit
 ```
 
 Profile 可用 `default / light / vision`；任务级 thinking 可用 `inherit / auto / enabled / disabled`。
+
+### 工具路由与不 @ 触发
+
+`agent_router` 是一个很便宜的判断：每个对话回合把**只有当前这条消息**（外加“是不是回复、带没带图、有没有 @ 别人”三个布尔值）交给轻量模型，让它说出这条消息要不要 Bot 做事、第一步需要哪些工具包。它看不到群聊历史、成员资料和记忆。结论只决定第一轮先装哪些工具（最多两包，第三包作为提示），权限、白名单和沙箱开放范围照常逐一校验；路由失败时退回 `discover_tools` 渐进发现，不会按关键词去猜。
+
+同一个判断也用于不 @ 的触发（需要群里开着「唤醒词」）：
+
+- 消息里直接叫了人设名或 Bot 昵称，并且路由认为是在请 Bot 做事；
+- 3 分钟内刚明确找过 Bot 的成员，没有 @ 别人、没有回复别人，接着提了一个需要工具的请求。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AGENT_ROUTER_ENABLED` | `true` | 关闭后只靠 `discover_tools`，也没有不 @ 的隐式触发 |
+| `AGENT_IMPLICIT_TRIGGER` | 开 | 设为 `off` 只关掉隐式触发，保留工具预装 |
+| `AGENT_AI_WAIT_NOTICE_MODE` | `reaction` | 回合较慢时先给触发消息贴 👀；`text` 改为发一句话，`off` 关闭 |
+| `AGENT_AI_WAIT_NOTICE_DELAY` | `6` | 多少秒后给出第一次反馈 |
+| `AGENT_AI_WAIT_NOTICE_LONG_DELAY` | `25` | 已经贴过表情、沙箱还在跑时，多少秒后补一句进度 |
 
 ## Agent 媒体与文件
 
@@ -123,7 +153,10 @@ Agent 可以在一个独立、无网络的 Python 容器里运行代码：数据
 | `AGENT_SANDBOX_TOKEN` | 空 | 只有把 runner 暴露成 TCP 时才需要；Unix socket 部署留空 |
 
 - 开放范围、仅管理员、成员/群每日次数、冷却、超时、内存、工作区配额、输出长度都在 WebUI「代码沙箱 → 策略与限额」里改，存在 `data/agent_sandbox/settings.json`，不需要数据库迁移、也不需要重启。
-- 工具族 `sandbox`（`run_python`、`list_sandbox_files`、`read_sandbox_file`、`delete_sandbox_file`、`sandbox_info`）通过 `discover_tools` 装载；沙箱离线、隔离自检失败或本群未开放时整族隐藏，模型会如实说明。
+- 工具族 `sandbox`（`run_python`、`run_shell`、`list_sandbox_files`、`read_sandbox_file`、`delete_sandbox_file`、`sandbox_info`）通过工具路由预装或 `discover_tools` 装载；沙箱离线、隔离自检失败或本群未开放时整族隐藏，模型会如实说明。
+- `run_shell` 是同一个群工作区里的 bash 终端（ls/cat/grep/find/wc/jq/unzip 等），需要更新后的 runner 镜像；旧 runner 不报告 `shell` 能力时这个工具自动隐藏。
+- 同一回合里“报错 → 修正 → 再跑”不再被冷却挡住（仍计入每日次数）；剩余冷却很短时会等一下而不是报错；runner 忙或刚重启时自动重试一次。
+- 运行失败时模型拿到的是精简过的 traceback 和一条 `error` 摘要（哪一行、什么错、怎么修），输出按行截断。默认输出上限调到 6000 字。
 - 每个群一个持久工作区。生成的图片/音频用 `sandbox:文件名` 引用，由 `send_message` 的 image/record 段发送；其他文件用 `send_file` 上传群文件。
 - 运行历史默认保留 14 天，WebUI 可以手动清理；运行记录里有完整代码，Agent 审计只记代码长度。
 

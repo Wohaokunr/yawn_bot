@@ -124,6 +124,7 @@ export interface LLMRouteStatus {
   provider: string;
   model: string;
   thinking: string;
+  reasoningEffort?: string;
   multimodal: string;
   configured: boolean;
 }
@@ -649,6 +650,7 @@ export interface AgentDebugResponse {
     provider: string;
     model: string;
     thinking: string;
+    reasoningEffort?: string;
     multimodal: string;
     configured: boolean;
   };

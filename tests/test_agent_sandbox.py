@@ -476,3 +476,197 @@ def test_sandbox_claim_requires_run_python(text: str) -> None:
 
 def test_sandbox_claim_ignores_plans() -> None:
     assert not claims.check_action_claims("我可以帮你画个折线图。", set()).changed
+
+
+# ---- 可靠性：冷却、重试、失败上报、终端 -----------------------------------------
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handler, "_BUSY_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(handler, "_OFFLINE_RETRY_SECONDS", 0.0)
+
+
+@pytest.mark.asyncio
+async def test_short_cooldown_is_waited_out_instead_of_failing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _save(member_cooldown_seconds=2)
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(policy.asyncio, "sleep", fake_sleep)
+    await policy.reserve_run(GROUP, USER, actor_is_admin=False)
+    second = await policy.reserve_run(GROUP, USER, actor_is_admin=False)
+    assert slept and 0 < slept[0] <= 2
+    assert second.waited_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_skip_cooldown_and_refund_restores_previous_timestamp() -> None:
+    _save(member_cooldown_seconds=60)
+    await policy.reserve_run(GROUP, USER, actor_is_admin=False)
+    # 同一回合的修正重跑不吃冷却。
+    retry = await policy.reserve_run(GROUP, USER, actor_is_admin=False, skip_cooldown=True)
+    retry.refund()
+    with pytest.raises(policy.SandboxPolicyError) as exc:
+        await policy.reserve_run(GROUP, USER, actor_is_admin=False)
+    assert exc.value.reason == "cooldown"
+
+
+@pytest.mark.asyncio
+async def test_refund_clears_cooldown_when_code_never_ran() -> None:
+    _save(member_cooldown_seconds=60)
+    first = await policy.reserve_run(GROUP, USER, actor_is_admin=False)
+    first.refund()
+    await policy.reserve_run(GROUP, USER, actor_is_admin=False)
+
+
+@pytest.mark.asyncio
+async def test_second_run_in_same_turn_skips_cooldown(fake_client: type[FakeClient]) -> None:
+    _save(member_cooldown_seconds=60)
+    context = _context()
+    await handler.handle("run_python", {"code": "1/0"}, context)
+    result = await handler.handle("run_python", {"code": "print(1)"}, context)
+    assert result.result["ok"] is True
+    assert context.ledger.sandbox_runs == 2
+    with pytest.raises(tool_args.ToolError) as exc:
+        await handler.handle("run_python", {"code": "1"}, _context())
+    assert exc.value.code == tool_args.ERROR_QUOTA
+
+
+@pytest.mark.asyncio
+async def test_busy_runner_is_retried_once(
+    fake_client: type[FakeClient], no_retry_wait: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = [{"status": "busy", "message": "满了"}, {"status": "ok", "stdout": "2", "files": []}]
+
+    async def run(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        FakeClient.calls.append(("run", args, kwargs))
+        return results.pop(0)
+
+    monkeypatch.setattr(fake_client, "run", run)
+    result = await handler.handle("run_python", {"code": "1+1"}, _context())
+    assert result.result["stdout"] == "2"
+    assert len(fake_client.calls) == 2
+    assert policy.member_usage(GROUP, USER) == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_runner_is_retried_after_health_refresh(
+    fake_client: type[FakeClient], no_retry_wait: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refreshed: list[bool] = []
+
+    async def fake_health(*, refresh: bool = False) -> tuple[Any, Any]:
+        refreshed.append(refresh)
+        return HEALTHY, None
+
+    monkeypatch.setattr(handler, "cached_health", fake_health)
+    outcomes: list[Any] = [client_mod.SandboxError("offline", "断了"), {"status": "ok", "stdout": "ok", "files": []}]
+
+    async def run(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        item = outcomes.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(fake_client, "run", run)
+    result = await handler.handle("run_python", {"code": "1"}, _context())
+    assert result.result["ok"] is True
+    assert True in refreshed
+
+
+def test_failed_run_gets_error_summary_with_user_line() -> None:
+    stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "/tmp/yawnbot-sandbox-jobs/abcdef01/main.py", line 2, in <module>\n'
+        "    import requests\n"
+        "ModuleNotFoundError: No module named 'requests'\n"
+    )
+    payload = handler.project_run_result(
+        {"status": "error", "stderr": stderr, "exit_code": 1, "duration_ms": 300},
+        max_chars=3000,
+        code="x = 1\nimport requests\n",
+        time_limit=30,
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["line"] == 2
+    assert payload["error"]["code"] == "import requests"
+    assert "pip" in payload["error"]["fix"]
+    assert payload["duration"] == "0.3s/30s"
+    assert "/tmp/yawnbot" not in payload["stderr"]
+
+
+def test_successful_run_drops_font_warnings() -> None:
+    stderr = "UserWarning: Glyph 20013 (\\N{CJK}) missing from current font.\n  fig.savefig(x)\nreal message"
+    payload = handler.project_run_result({"status": "ok", "stdout": "1", "stderr": stderr}, max_chars=3000)
+    assert payload["stderr"] == "real message"
+
+
+def test_status_hints_cover_resource_limits() -> None:
+    payload = handler.project_run_result({"status": "memory_limit"}, max_chars=3000)
+    assert "分块" in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_sends_shell_language(fake_client: type[FakeClient], monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_health(monkeypatch, {**HEALTHY, "languages": ["python", "shell"]})
+    fake_client.run_result = {"status": "ok", "stdout": "3 notes.txt", "files": [], "language": "shell"}
+    result = await handler.handle("run_shell", {"command": "wc -l notes.txt"}, _context())
+    assert result.result["stdout"] == "3 notes.txt"
+    _name, args, kwargs = fake_client.calls[-1]
+    assert args[1] == "wc -l notes.txt"
+    assert kwargs["language"] == "shell"
+
+
+@pytest.mark.asyncio
+async def test_run_shell_refused_by_old_runner(fake_client: type[FakeClient]) -> None:
+    with pytest.raises(tool_args.ToolError) as exc:
+        await handler.handle("run_shell", {"command": "ls"}, _context())
+    assert exc.value.code == tool_args.ERROR_UNSUPPORTED
+    assert "run_python" in (exc.value.hint or "")
+    assert not fake_client.calls
+
+
+def test_supports_language_and_client_body() -> None:
+    assert client_mod.supports_language(None, "python")
+    assert not client_mod.supports_language(HEALTHY, "shell")
+    assert client_mod.supports_language({"languages": ["python", "shell"]}, "shell")
+
+
+@pytest.mark.asyncio
+async def test_client_only_sends_language_for_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    async def fake_request(self: Any, method: str, path: str, *, json_body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        bodies.append(json_body)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(client_mod.SandboxClient, "_request", fake_request)
+    sandbox = client_mod.SandboxClient()
+    await sandbox.run("g1", "print(1)")
+    await sandbox.run("g1", "ls", language="shell")
+    assert "language" not in bodies[0]
+    assert bodies[1]["language"] == "shell"
+
+
+@pytest.mark.asyncio
+async def test_discovery_hides_run_shell_on_old_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_mod, "peek_health", lambda: (HEALTHY, None, True))
+    result = await _discover({"family": "sandbox"})
+    names = {item["name"] for item in result["tools"]}
+    assert "run_python" in names and "run_shell" not in names
+    monkeypatch.setattr(client_mod, "peek_health", lambda: ({**HEALTHY, "languages": ["python", "shell"]}, None, True))
+    result = await _discover({"family": "sandbox"})
+    assert "run_shell" in {item["name"] for item in result["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_failed_run_is_not_cached_by_ledger(fake_client: type[FakeClient]) -> None:
+    fake_client.run_result = {"status": "error", "stderr": "NameError: name 'x' is not defined", "files": []}
+    context = _context()
+    first = await tools.execute_tool_with_meta("run_python", {"code": "x"}, context=context)
+    second = await tools.execute_tool_with_meta("run_python", {"code": "x"}, context=context)
+    assert len([call for call in fake_client.calls if call[0] == "run"]) == 2
+    assert first.payload["ok"] is False and not second.payload.get("duplicate")
