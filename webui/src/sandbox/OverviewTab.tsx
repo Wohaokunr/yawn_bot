@@ -9,13 +9,14 @@ import {
   formatDuration,
   formatEpoch,
   formatUptime,
+  INBOX_MODE_META,
   runSourceLabel,
   runStatusMeta,
   workspaceLabel,
 } from "./sandbox-meta";
 import type { SandboxActiveRun, SandboxPackages, SandboxStats, SandboxStatus } from "./types";
 
-function Metric({ label, value, hint }: { label: string; value: React.ReactNode; hint?: React.ReactNode }): React.JSX.Element {
+export function Metric({ label, value, hint }: { label: string; value: React.ReactNode; hint?: React.ReactNode }): React.JSX.Element {
   return (
     <div className="sbx-metric">
       <span className="sbx-metric-label">{label}</span>
@@ -50,7 +51,7 @@ export function HourlyRunsChart({ hourly, errors }: { hourly: number[]; errors: 
   );
 }
 
-function CheckRow({ ok, label, detail }: { ok: boolean | null | undefined; label: string; detail: string }): React.JSX.Element {
+export function CheckRow({ ok, label, detail }: { ok: boolean | null | undefined; label: string; detail: string }): React.JSX.Element {
   const icon = ok == null ? <MinusCircleFilled className="sbx-check-na" /> : ok ? <CheckCircleFilled className="sbx-check-ok" /> : <CloseCircleFilled className="sbx-check-bad" />;
   return (
     <li className="sbx-check">
@@ -125,9 +126,11 @@ export function ActiveRunsTable({ runs, onCancelled }: { runs: SandboxActiveRun[
 export function OverviewTab({
   status,
   onOpenRuns,
+  onOpenInbox,
 }: {
   status: SandboxStatus;
   onOpenRuns: (extra: Record<string, string | null>) => void;
+  onOpenInbox?: (extra?: Record<string, string | null>) => void;
 }): React.JSX.Element {
   const [packagesOpen, setPackagesOpen] = useState(false);
   const statsQuery = useApiQuery<SandboxStats | null>({
@@ -214,6 +217,31 @@ export function OverviewTab({
               </div>
             </div>
           ) : <Skeleton active paragraph={{ rows: 3 }} loading={statsQuery.initialLoading}><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="沙箱离线" /></Skeleton>}
+        </Card>
+
+        <Card
+          size="small"
+          title="群聊附件（今天）"
+          extra={onOpenInbox && <Button size="small" type="link" onClick={() => onOpenInbox()}>收件箱</Button>}
+        >
+          {status.inbox ? (
+            <div className="sbx-resources">
+              <div>
+                <span>入箱</span>
+                <small>{status.inbox.enabled ? INBOX_MODE_META[status.inbox.autoImport]?.label ?? status.inbox.autoImport : "已关闭"}</small>
+              </div>
+              <div>
+                <span>放进电脑</span>
+                <small>{status.inbox.today.imported ?? 0} 个 · {formatBytes(status.inbox.today.bytes ?? 0)}{status.inbox.today.reused ? ` · 复用 ${status.inbox.today.reused} 次` : ""}</small>
+              </div>
+              <div>
+                <span>失败</span>
+                {status.inbox.today.failed && onOpenInbox ? (
+                  <Button size="small" type="link" danger onClick={() => onOpenInbox({ "sandbox.inbox.status": "failed" })}>{status.inbox.today.failed} 次，看原因</Button>
+                ) : <small>{status.inbox.today.failed ?? 0} 次</small>}
+              </div>
+            </div>
+          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />}
         </Card>
 
         <Card size="small" title="最活跃的工作区">

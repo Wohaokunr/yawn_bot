@@ -58,6 +58,8 @@ export interface SandboxHealth {
   waiting: number;
   retentionDays: number;
   maxUploadMb: number;
+  /** runner 声明的可选能力（1.1.0 起）：rename、mkdir、upload_guard…；旧 runner 没有。 */
+  features?: string[];
 }
 
 export interface SandboxSettings {
@@ -75,6 +77,71 @@ export interface SandboxSettings {
   maxOutputChars: number;
   maxShareMb: number;
   allowUnisolated: boolean;
+  inboxEnabled: boolean;
+  inboxAutoImport: SandboxInboxMode;
+  inboxTypes: SandboxInboxType[];
+  inboxMaxFileMb: number;
+  inboxMaxPerTurn: number;
+  inboxHistoryMinutes: number;
+  inboxGroupDailyMb: number;
+}
+
+export type SandboxInboxMode = "always" | "sandbox_turns" | "off";
+export type SandboxInboxType = "image" | "file" | "record" | "video";
+export type SandboxInboxStatus = "imported" | "reused" | "failed" | "skipped" | "removed";
+
+export interface SandboxInboxSummary {
+  day: string;
+  total: number;
+  imported: number;
+  reused: number;
+  failed: number;
+  skipped: number;
+  bytes: number;
+  byReason: Record<string, number>;
+  byType: Record<string, number>;
+  byVia: Record<string, number>;
+  byGroup: Record<string, number>;
+}
+
+export interface SandboxInboxEvent {
+  at: number;
+  day?: string;
+  groupId: string | null;
+  groupName?: string | null;
+  workspace: string | null;
+  userId?: string;
+  senderId?: string;
+  messageId?: string;
+  index?: number;
+  mediaType: SandboxInboxType;
+  source?: string;
+  name?: string;
+  size?: number;
+  status: SandboxInboxStatus;
+  reason?: string;
+  via?: string;
+  path?: string;
+  kind?: string;
+  durationMs?: number;
+  trigger?: string;
+}
+
+export interface SandboxInboxPage {
+  items: SandboxInboxEvent[];
+  summary: SandboxInboxSummary;
+  reasons: Record<string, { message: string; hint: string }>;
+  hosts: string[];
+  localRoots: boolean;
+  settings: {
+    enabled: boolean;
+    autoImport: SandboxInboxMode;
+    types: SandboxInboxType[];
+    maxFileMb: number;
+    maxPerTurn: number;
+    historyMinutes: number;
+    groupDailyMb: number;
+  };
 }
 
 export interface SandboxUsageRow {
@@ -102,6 +169,8 @@ export interface SandboxStatus {
   health: SandboxHealth | null;
   settings: SandboxSettings;
   usage: SandboxUsage;
+  /** 旧后端没有这个字段。 */
+  inbox?: { enabled: boolean; autoImport: SandboxInboxMode; today: Partial<SandboxInboxSummary> };
 }
 
 export interface SandboxRunMeta {
@@ -232,10 +301,18 @@ export interface SandboxFileEntry {
   mime: string;
 }
 
+export interface SandboxDirSummary {
+  path: string;
+  files: number;
+  bytes: number;
+}
+
 export interface SandboxFileListing {
   items: SandboxFileEntry[];
   total: number;
   usage: { bytes: number; files: number };
+  /** 带 dirs=1 请求且 runner ≥1.1.0 时才有。 */
+  dirs?: SandboxDirSummary[];
 }
 
 export interface SandboxPackages {

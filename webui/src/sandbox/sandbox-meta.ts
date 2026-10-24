@@ -1,6 +1,11 @@
 // 代码沙箱页的纯逻辑：状态文案、格式化、URL 参数与设置校验。不依赖 React，便于单测。
 import type {
+  SandboxDirSummary,
+  SandboxFileEntry,
   SandboxFileKind,
+  SandboxInboxMode,
+  SandboxInboxStatus,
+  SandboxInboxType,
   SandboxRunStatus,
   SandboxSettings,
   SandboxState,
@@ -133,7 +138,7 @@ export function runSourceLabel(source?: string): string {
 
 // ── URL 状态：统一 sandbox.* 前缀，刷新或分享链接时保持上下文 ─────────────
 
-export const SANDBOX_TABS = ["overview", "runs", "files", "console", "policy"] as const;
+export const SANDBOX_TABS = ["overview", "inbox", "runs", "files", "console", "policy"] as const;
 export type SandboxTab = (typeof SANDBOX_TABS)[number];
 
 export function parseSandboxTab(value: string | null): SandboxTab {
@@ -154,10 +159,21 @@ export function updateSearchParams(
 
 // ── 设置校验：与后端 SandboxSettings 的范围一致 ───────────────────────────
 
-export const SETTING_RANGES: Record<
-  "memberDailyRuns" | "groupDailyRuns" | "memberCooldownSeconds" | "timeoutSeconds" | "memoryMb" | "diskQuotaMb" | "maxOutputChars" | "maxShareMb",
-  { min: number; max: number; unit: string; label: string }
-> = {
+export type NumericSettingKey =
+  | "memberDailyRuns"
+  | "groupDailyRuns"
+  | "memberCooldownSeconds"
+  | "timeoutSeconds"
+  | "memoryMb"
+  | "diskQuotaMb"
+  | "maxOutputChars"
+  | "maxShareMb"
+  | "inboxMaxFileMb"
+  | "inboxMaxPerTurn"
+  | "inboxHistoryMinutes"
+  | "inboxGroupDailyMb";
+
+export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: number; unit: string; label: string }> = {
   memberDailyRuns: { min: 0, max: 1000, unit: "次/天", label: "每位成员每日次数" },
   groupDailyRuns: { min: 0, max: 10000, unit: "次/天", label: "每个群每日次数" },
   memberCooldownSeconds: { min: 0, max: 600, unit: "秒", label: "成员冷却" },
@@ -166,6 +182,10 @@ export const SETTING_RANGES: Record<
   diskQuotaMb: { min: 10, max: 4096, unit: "MB", label: "每群工作区空间" },
   maxOutputChars: { min: 500, max: 12000, unit: "字", label: "回给模型的输出" },
   maxShareMb: { min: 1, max: 32, unit: "MB", label: "单个产物发送上限" },
+  inboxMaxFileMb: { min: 1, max: 64, unit: "MB", label: "单个附件上限" },
+  inboxMaxPerTurn: { min: 1, max: 20, unit: "个/轮", label: "每轮最多入箱" },
+  inboxHistoryMinutes: { min: 0, max: 2880, unit: "分钟", label: "可回溯的历史附件" },
+  inboxGroupDailyMb: { min: 0, max: 20000, unit: "MB/天", label: "每群每日入箱总量" },
 };
 
 const GROUP_ID_RE = /^\d{4,12}$/;
@@ -195,6 +215,12 @@ export function validateSettings(settings: SandboxSettings): Record<string, stri
   }
   if (settings.groupDailyRuns > 0 && settings.memberDailyRuns > settings.groupDailyRuns) {
     errors.memberDailyRuns = "成员每日次数不应超过群每日次数";
+  }
+  if (settings.inboxEnabled && settings.inboxTypes.length === 0) {
+    errors.inboxTypes = "至少勾选一种附件类型，或者直接关闭附件入箱";
+  }
+  if (settings.inboxGroupDailyMb > 0 && settings.inboxMaxFileMb > settings.inboxGroupDailyMb) {
+    errors.inboxMaxFileMb = "单个附件上限不应超过每群每日总量";
   }
   for (const key of ["allowedGroups", "blockedGroups"] as const) {
     const bad = settings[key].filter((item) => !GROUP_ID_RE.test(item));
@@ -274,6 +300,43 @@ export const CONSOLE_SNIPPETS: Array<{ key: string; label: string; code: string 
       "song.save_midi('demo.mid')",
     ].join("\n"),
   },
+  {
+    key: "inbox",
+    label: "看群里发来的附件",
+    code: [
+      "from pathlib import Path",
+      "",
+      "# 群聊里发的图片/文件/语音会放在 inbox/ 里",
+      "for p in sorted(Path('inbox').glob('*')):",
+      "    print(f'{p.stat().st_size:>10,}  {p.name}')",
+    ].join("\n"),
+  },
+  {
+    key: "inbox-image",
+    label: "处理群里的图片",
+    code: [
+      "from pathlib import Path",
+      "from PIL import Image, ImageOps",
+      "",
+      "images = sorted(Path('inbox').glob('图片_*'), key=lambda p: p.stat().st_mtime)",
+      "img = Image.open(images[-1])  # 最近一张",
+      "print(img.size, img.mode)",
+      "ImageOps.grayscale(img).save('灰度.png')",
+      "img",
+    ].join("\n"),
+  },
+  {
+    key: "inbox-audio",
+    label: "分析群里的语音",
+    code: [
+      "from pathlib import Path",
+      "import numpy as np, soundfile as sf",
+      "",
+      "voice = sorted(Path('inbox').glob('*.wav')) + sorted(Path('inbox').glob('*.flac'))",
+      "data, rate = sf.read(voice[-1])",
+      "print('时长', round(len(data) / rate, 2), '秒，峰值', float(np.abs(data).max()))",
+    ].join("\n"),
+  },
 ];
 
 // ── 限额展示 ──────────────────────────────────────────────────────────────
@@ -292,4 +355,241 @@ const LIMIT_LABELS: Record<string, (value: number) => string> = {
 
 export function formatLimit(key: string, value: number): string {
   return LIMIT_LABELS[key]?.(value) ?? `${key} ${value}`;
+}
+
+
+// ── 群聊附件入箱 ──────────────────────────────────────────────────────────
+
+export const INBOX_DIR = "inbox";
+
+export const INBOX_MODE_META: Record<SandboxInboxMode, { label: string; hint: string }> = {
+  sandbox_turns: { label: "用到内置电脑时", hint: "工具路由判断这轮要用沙箱时，先把本条消息的附件放进 inbox/（推荐）" },
+  always: { label: "每次都放", hint: "沙箱开放的群里，只要有人 @ Agent 并带附件就先放进去，之后随时能处理" },
+  off: { label: "只在 Agent 要时", hint: "不自动放；Agent 调用 import_attachments 时才放进去" },
+};
+
+export const INBOX_TYPE_META: Record<SandboxInboxType, { label: string; emoji: string }> = {
+  image: { label: "图片", emoji: "🖼️" },
+  file: { label: "文件", emoji: "📎" },
+  record: { label: "语音", emoji: "🎤" },
+  video: { label: "视频", emoji: "🎬" },
+};
+
+export const INBOX_STATUS_META: Record<SandboxInboxStatus, { label: string; color: string }> = {
+  imported: { label: "已放入", color: "green" },
+  reused: { label: "已在电脑里", color: "cyan" },
+  failed: { label: "失败", color: "red" },
+  skipped: { label: "跳过", color: "default" },
+  removed: { label: "已删除", color: "default" },
+};
+
+export function inboxStatusMeta(status: string): { label: string; color: string } {
+  return INBOX_STATUS_META[status as SandboxInboxStatus] ?? { label: status || "未知", color: "default" };
+}
+
+const INBOX_SOURCE_LABELS: Record<string, string> = {
+  current: "本条消息",
+  reply: "引用的消息",
+  forward: "合并转发",
+  history: "之前的消息",
+  group_files: "群文件",
+};
+
+export function inboxSourceLabel(source?: string): string {
+  return INBOX_SOURCE_LABELS[source ?? ""] ?? (source || "—");
+}
+
+const INBOX_TRIGGER_LABELS: Record<string, string> = {
+  auto: "自动",
+  tool: "Agent 导入",
+  run: "运行前补放",
+  group_file: "群文件导入",
+};
+
+export function inboxTriggerLabel(trigger?: string): string {
+  return INBOX_TRIGGER_LABELS[trigger ?? ""] ?? (trigger || "—");
+}
+
+/** 取文件的途径（get_record:base64 → “语音接口 · base64”），帮管理员判断 NapCat 配置。 */
+export function inboxViaLabel(via?: string): string {
+  if (!via) return "—";
+  const [source, transport] = via.split(":");
+  const sources: Record<string, string> = {
+    segment: "消息段",
+    get_record: "语音接口",
+    get_image: "图片接口",
+    get_file: "文件接口",
+    group_file: "群文件链接",
+    cache: "工作区已有",
+    record: "之前入过箱",
+  };
+  const transports: Record<string, string> = { base64: "base64", url: "下载", shared_dir: "共享目录" };
+  const head = sources[source] ?? source;
+  return transport ? `${head} · ${transports[transport] ?? transport}` : head;
+}
+
+/** 失败原因里哪些需要管理员动手（而不是让成员重发）。 */
+export const ADMIN_FIXABLE_REASONS = new Set(["unavailable", "host_blocked", "quota", "daily_limit", "type_disabled", "disabled", "offline"]);
+
+// ── 文件浏览：目录、筛选与读取代码片段 ────────────────────────────────────
+
+export function isInboxPath(path: string): boolean {
+  return path === INBOX_DIR || path.startsWith(`${INBOX_DIR}/`);
+}
+
+/** 当前目录下一层的子目录（来自 runner 的目录汇总，或在旧 runner 上从文件路径推导）。 */
+export function childDirs(dir: string, dirs: SandboxDirSummary[] | undefined, files: SandboxFileEntry[]): SandboxDirSummary[] {
+  const prefix = dir ? `${dir}/` : "";
+  const depth = dir ? dir.split("/").length + 1 : 1;
+  if (dirs?.length) {
+    return dirs.filter((item) => item.path.startsWith(prefix) && item.path.split("/").length === depth);
+  }
+  const derived = new Map<string, SandboxDirSummary>();
+  for (const file of files) {
+    if (!file.path.startsWith(prefix)) continue;
+    const rest = file.path.slice(prefix.length).split("/");
+    if (rest.length < 2) continue;
+    const path = `${prefix}${rest[0]}`;
+    const row = derived.get(path) ?? { path, files: 0, bytes: 0 };
+    row.files += 1;
+    row.bytes += file.size;
+    derived.set(path, row);
+  }
+  return [...derived.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/** 只看当前目录这一层的文件（搜索时看全部）。 */
+export function filesInDir(files: SandboxFileEntry[], dir: string): SandboxFileEntry[] {
+  const prefix = dir ? `${dir}/` : "";
+  return files.filter((item) => item.path.startsWith(prefix) && !item.path.slice(prefix.length).includes("/"));
+}
+
+export function breadcrumbs(dir: string): Array<{ label: string; path: string }> {
+  const parts = dir ? dir.split("/") : [];
+  return [{ label: "工作区", path: "" }, ...parts.map((part, index) => ({ label: part, path: parts.slice(0, index + 1).join("/") }))];
+}
+
+export function joinPath(dir: string, name: string): string {
+  const clean = name.replace(/\\/g, "/").split("/").filter((part) => part && part !== "." && part !== "..").join("/");
+  return dir ? `${dir}/${clean}` : clean;
+}
+
+export function baseName(path: string): string {
+  return path.split("/").pop() || path;
+}
+
+export function dirName(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index > 0 ? path.slice(0, index) : "";
+}
+
+/** 同名冲突时“保留两个”用的新名字：报表.xlsx → 报表 (2).xlsx。 */
+export function nextFreeName(path: string, taken: Set<string>): string {
+  if (!taken.has(path)) return path;
+  const dir = dirName(path);
+  const name = baseName(path);
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = joinPath(dir, `${stem} (${index})${ext}`);
+    if (!taken.has(candidate)) return candidate;
+  }
+  return joinPath(dir, `${stem}-${Date.now()}${ext}`);
+}
+
+/** 校验管理员输入的新路径：相对、不含 .. 和控制字符。 */
+export function validateRelativePath(value: string): string | null {
+  const text = value.trim().replace(/\\/g, "/");
+  if (!text) return "路径不能为空";
+  if (text.startsWith("/")) return "只能用工作区里的相对路径";
+  if (text.length > 512) return "路径太长";
+  const parts = text.split("/").filter(Boolean);
+  if (parts.some((part) => part === "..")) return "路径不能包含 ..";
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(text)) return "路径不能包含控制字符";
+  return null;
+}
+
+export function kindCounts(files: SandboxFileEntry[]): Array<{ kind: SandboxFileKind; count: number }> {
+  const counts = new Map<SandboxFileKind, number>();
+  for (const file of files) counts.set(file.kind, (counts.get(file.kind) ?? 0) + 1);
+  return [...counts.entries()].map(([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count);
+}
+
+/** 在控制台里读取这个文件的 Python 片段（按类型给最常用的读法）。 */
+export function readSnippet(path: string, kind: string): string {
+  const quoted = JSON.stringify(path);
+  const lower = path.toLowerCase();
+  if (kind === "image") {
+    return ["from PIL import Image", "", `img = Image.open(${quoted})`, "print(img.format, img.size, img.mode)", "img"].join("\n");
+  }
+  if (/\.(csv|tsv)$/.test(lower)) {
+    return ["import pandas as pd", "", `df = pd.read_csv(${quoted}${lower.endsWith(".tsv") ? ", sep='\\t'" : ""})`, "print(df.shape)", "df.head(20)"].join("\n");
+  }
+  if (/\.(xlsx|xlsm|xls|ods)$/.test(lower)) {
+    return ["import pandas as pd", "", `sheets = pd.read_excel(${quoted}, sheet_name=None)`, "for name, df in sheets.items():", "    print(name, df.shape)", "next(iter(sheets.values())).head(20)"].join("\n");
+  }
+  if (kind === "audio" && /\.(wav|flac|ogg|mp3)$/.test(lower)) {
+    return ["import soundfile as sf", "", `data, rate = sf.read(${quoted})`, "print('采样率', rate, '时长', round(len(data) / rate, 2), '秒')"].join("\n");
+  }
+  if (kind === "archive" && lower.endsWith(".zip")) {
+    return ["import zipfile", "", `with zipfile.ZipFile(${quoted}) as z:`, "    for info in z.infolist()[:50]:", "        print(info.filename, info.file_size)"].join("\n");
+  }
+  if (["text", "table", "vector"].includes(kind)) {
+    return [`with open(${quoted}, encoding="utf-8", errors="replace") as f:`, "    text = f.read()", "print(len(text), '字')", "print(text[:2000])"].join("\n");
+  }
+  return ["import os", "", `print(os.path.getsize(${quoted}), '字节')`].join("\n");
+}
+
+/** 很小的 CSV 解析（只用于预览前几百行；支持引号和转义引号）。 */
+export function parseCsvPreview(text: string, maxRows = 200, delimiter = ","): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"' && text[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+    if (char === '"' && cell === "") quoted = true;
+    else if (char === delimiter) {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\r" && text[index + 1] === "\n") index += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      if (rows.length >= maxRows) return rows;
+    } else cell += char;
+  }
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** JSON 文本美化；不是合法 JSON 时原样返回。 */
+export function prettyJson(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+export function supportsFeature(features: string[] | undefined, feature: string): boolean {
+  return Array.isArray(features) && features.includes(feature);
 }

@@ -37,6 +37,13 @@ const settings: SandboxSettings = {
   maxOutputChars: 3000,
   maxShareMb: 20,
   allowUnisolated: false,
+  inboxEnabled: true,
+  inboxAutoImport: "sandbox_turns",
+  inboxTypes: ["image", "file", "record", "video"],
+  inboxMaxFileMb: 20,
+  inboxMaxPerTurn: 6,
+  inboxHistoryMinutes: 180,
+  inboxGroupDailyMb: 500,
 };
 
 function status(overrides: Partial<SandboxStatus> = {}): SandboxStatus {
@@ -169,6 +176,7 @@ describe("SandboxPage", () => {
     state.api.mockImplementation((path: string, init?: RequestInit) => {
       if (path.startsWith("/sandbox/status")) return Promise.resolve({ data: status(), meta: {} });
       if (path === "/sandbox/workspaces") return Promise.resolve({ data: { items: [] }, meta: {} });
+      if (path.startsWith("/sandbox/workspaces/admin/files")) return Promise.resolve({ data: { items: [], total: 0, usage: { bytes: 0, files: 0 } }, meta: {} });
       if (path === "/sandbox/console/run") {
         const body = JSON.parse(String(init?.body)) as { code: string; workspace: string };
         expect(body.workspace).toBe("admin");
@@ -249,5 +257,104 @@ describe("SandboxPage", () => {
     fireEvent.click(await screen.findByText("运行历史"));
     await waitFor(() => expect(screen.getByTestId("location").textContent).toContain("sandbox.tab=runs"));
     expect(await screen.findByText("还没有人运行过代码")).toBeTruthy();
+  });
+
+  it("附件收件箱展示今日统计、失败原因和记录，并能按原因筛选", async () => {
+    const inboxPage = {
+      items: [
+        { at: Date.now() / 1000, groupId: "123456", groupName: "摸鱼群", workspace: "g123456", mediaType: "image", name: "图片_ab12.png", size: 2048, status: "imported", via: "get_image:base64", path: "inbox/图片_ab12.png", source: "current", trigger: "auto" },
+        { at: Date.now() / 1000 - 60, groupId: "123456", groupName: "摸鱼群", workspace: "g123456", mediaType: "file", name: "报表.xlsx", status: "failed", reason: "unavailable", source: "current", trigger: "tool" },
+      ],
+      summary: { day: "2026-10-24", total: 2, imported: 1, reused: 0, failed: 1, skipped: 0, bytes: 2048, byReason: { unavailable: 1 }, byType: { image: 1, file: 1 }, byVia: { "get_image:base64": 1 }, byGroup: { "123456": 2 } },
+      reasons: { unavailable: { message: "拿不到文件内容", hint: "在 NapCat 打开 enableLocalFile2Url" } },
+      hosts: ["gchat.qpic.cn", "*.qq.com"],
+      localRoots: false,
+      settings: { enabled: true, autoImport: "sandbox_turns", types: ["image", "file", "record", "video"], maxFileMb: 20, maxPerTurn: 6, historyMinutes: 180, groupDailyMb: 500 },
+    };
+    state.api.mockImplementation((path: string) => {
+      if (path.startsWith("/sandbox/status")) {
+        return Promise.resolve({ data: status({ inbox: { enabled: true, autoImport: "sandbox_turns", today: { imported: 1, failed: 1, bytes: 2048 } } }), meta: {} });
+      }
+      if (path.startsWith("/sandbox/inbox")) return Promise.resolve({ data: inboxPage, meta: {} });
+      return Promise.reject(new Error(`unexpected API: ${path}`));
+    });
+    renderPage("?sandbox.tab=inbox");
+    expect(await screen.findByText("报表.xlsx")).toBeTruthy();
+    expect(screen.getByText(/附件 今日 1 个/)).toBeTruthy();
+    expect(screen.getByText("50%")).toBeTruthy();
+    expect(screen.getByText("需要管理员")).toBeTruthy();
+    expect(screen.getAllByText(/enableLocalFile2Url/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByText("拿不到文件内容")[0]);
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toContain("sandbox.inbox.reason=unavailable"));
+    await waitFor(() => expect(screen.queryByText("图片_ab12.png")).toBeNull());
+  });
+
+  it("文件页按文件夹浏览，群聊附件有快捷入口和标记", async () => {
+    const listing = {
+      items: [
+        { path: "inbox/图片_ab12.png", size: 2048, mtime: 1_700_000_000, kind: "image", mime: "image/png" },
+        { path: "inbox/语音_cd34.mp3", size: 4096, mtime: 1_700_000_100, kind: "audio", mime: "audio/mpeg" },
+        { path: "结果.csv", size: 12, mtime: 1_700_000_200, kind: "table", mime: "text/csv" },
+      ],
+      total: 3,
+      usage: { bytes: 6156, files: 3 },
+      dirs: [{ path: "inbox", files: 2, bytes: 6144 }],
+    };
+    state.api.mockImplementation((path: string) => {
+      if (path.startsWith("/sandbox/status")) return Promise.resolve({ data: status(), meta: {} });
+      if (path === "/sandbox/workspaces") {
+        return Promise.resolve({ data: { items: [{ id: "g123456", groupId: "123456", groupName: "摸鱼群", bytes: 6156, files: 3, lastModified: 1_700_000_200, running: false }] }, meta: {} });
+      }
+      if (path.startsWith("/sandbox/workspaces/g123456/files")) {
+        expect(path).toContain("dirs=1");
+        return Promise.resolve({ data: listing, meta: {} });
+      }
+      return Promise.reject(new Error(`unexpected API: ${path}`));
+    });
+    renderPage("?sandbox.tab=files");
+    expect(await screen.findByText(/结果\.csv/)).toBeTruthy();
+    expect(screen.queryByText(/语音_cd34/)).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /群聊附件 2/ }));
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toContain("sandbox.dir=inbox"));
+    expect(await screen.findByText(/语音_cd34/)).toBeTruthy();
+    expect(screen.getAllByText("来自群聊").length).toBe(2);
+  });
+
+  it("策略页能设置群聊附件入箱", async () => {
+    let saved: SandboxSettings | null = null;
+    state.api.mockImplementation((path: string, init?: RequestInit) => {
+      if (path.startsWith("/sandbox/status")) return Promise.resolve({ data: status(), meta: {} });
+      if (path === "/sandbox/settings" && init?.method === "PUT") {
+        saved = JSON.parse(String(init.body)) as SandboxSettings;
+        return Promise.resolve({ data: { settings: saved }, meta: {} });
+      }
+      if (path === "/sandbox/settings") return Promise.resolve({ data: { settings, defaults: settings }, meta: {} });
+      if (path === "/sandbox/usage") return Promise.resolve({ data: status().usage, meta: {} });
+      return Promise.reject(new Error(`unexpected API: ${path}`));
+    });
+    renderPage("?sandbox.tab=policy");
+    expect(await screen.findByText("群聊附件入箱")).toBeTruthy();
+    fireEvent.click(screen.getByText("每次都放"));
+    fireEvent.click(screen.getByRole("checkbox", { name: /视频/ }));
+    const saveButton = screen.getByRole("button", { name: /保\s*存/ });
+    await waitFor(() => expect((saveButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(saved).not.toBeNull());
+    expect(saved!.inboxAutoImport).toBe("always");
+    expect(saved!.inboxTypes).toEqual(["image", "file", "record"]);
+  });
+
+  it("从文件页跳到控制台时预填读取代码和工作区", async () => {
+    state.api.mockImplementation((path: string) => {
+      if (path.startsWith("/sandbox/status")) return Promise.resolve({ data: status(), meta: {} });
+      if (path === "/sandbox/workspaces") return Promise.resolve({ data: { items: [] }, meta: {} });
+      if (path.includes("/files")) return Promise.resolve({ data: { items: [], total: 0, usage: { bytes: 0, files: 0 } }, meta: {} });
+      return Promise.reject(new Error(`unexpected API: ${path}`));
+    });
+    renderPage("?sandbox.tab=console&sandbox.consoleWs=g123456&sandbox.open=inbox%2F%E5%9B%BE%E7%89%87_ab12.png&sandbox.openKind=image");
+    const editor = (await screen.findByLabelText("Python 代码")) as HTMLTextAreaElement;
+    expect(editor.value).toContain('Image.open("inbox/图片_ab12.png")');
+    expect(await screen.findByText("你正在群工作区里运行")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("location").textContent).not.toContain("sandbox.open="));
   });
 });
