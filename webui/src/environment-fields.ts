@@ -18,7 +18,7 @@ export const ENV_CATEGORIES: EnvironmentCategory[] = [
   { key: MODELS_CATEGORY, label: "模型与提供商", icon: "🧠", hint: "提供商、模型档位与各插件的任务路由", sections: ["OpenAI-compatible 服务", "子插件 LLM 任务路由"] },
   { key: "runtime", label: "运行与连接", icon: "📡", hint: "NoneBot、OneBot 连接、数据库与错误上报", sections: ["NoneBot 运行时", "OneBot V11 连接", "本地数据与 SQLite/ORM", "Sentry 可选错误上报"] },
   { key: "webui", label: "管理后台与安全", icon: "🛡️", hint: "WebUI 开关、运维 Token 与会话", sections: ["Core / Agent 管理 WebUI"] },
-  { key: "agent", label: "Agent", icon: "🌸", hint: "默认人设、媒体与文件工具", sections: ["Agent 全局默认人设", "Agent 媒体与文件工具"] },
+  { key: "agent", label: "Agent", icon: "🌸", hint: "默认人设、媒体与文件工具、代码沙箱", sections: ["Agent 全局默认人设", "Agent 媒体与文件工具", "Agent 代码沙箱"] },
   { key: "games", label: "游戏", icon: "🎲", hint: "跑团 RPG 与狼人杀", sections: ["游戏 AI 开关", "Core/Agent AI 开关", "跑团 RPG", "狼人杀", "游戏插件常用覆盖"] },
   { key: "fanqie", label: "番茄小说", icon: "📚", hint: "可选的小说下载插件", sections: ["番茄小说插件（可选）"] },
   { key: OTHER_CATEGORY, label: "其他与自定义", icon: "✨", hint: "目录外的自定义配置", sections: [] },

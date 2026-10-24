@@ -24,6 +24,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      - sandbox-run:/run/yawnbot-sandbox
     networks:
       - yawnbot-internal
     healthcheck:
@@ -35,6 +36,50 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 30s
+      retries: 3
+
+  # Agent 代码沙箱：同一个镜像，单独跑 runner。没有网络、只读根文件系统、
+  # 丢掉几乎所有 capability；只挂载自己的工作区和与 Bot 共享的 socket 目录，
+  # 拿不到 Bot 的 .env、数据库和 OneBot 凭据。以 root 启动是为了给每个群
+  # 降权到独立 uid（runner 自检不通过时会拒绝执行）。
+  sandbox:
+    image: "${YAWNBOT_IMAGE:?YAWNBOT_IMAGE must be an immutable digest reference}"
+    restart: unless-stopped
+    user: "0:0"
+    # tini 回收用户代码留下的孤儿/僵尸进程，否则它们会占满该群的进程配额。
+    init: true
+    entrypoint: ["python3", "-s", "-m", "yawn_sandbox"]
+    command: ["serve"]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1536m
+    cpus: 1.5
+    pids_limit: 256
+    environment:
+      PYTHONPATH: /opt/yawnbot-sandbox/runner
+      SANDBOX_SOCKET_GID: "10001"
+      SANDBOX_REQUIRE_ISOLATION: "true"
+    volumes:
+      - ./sandbox:/var/lib/yawnbot-sandbox
+      - sandbox-run:/run/yawnbot-sandbox
+    healthcheck:
+      test: ["CMD", "python3", "-s", "-m", "yawn_sandbox", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
       retries: 3
 
   playwright:
@@ -71,6 +116,9 @@ services:
       - ./caddy/config:/config
     networks:
       - yawnbot-internal
+
+volumes:
+  sandbox-run:
 
 networks:
   yawnbot-internal:

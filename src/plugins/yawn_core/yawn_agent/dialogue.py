@@ -126,6 +126,7 @@ from .tools import (
     MAX_TOOL_ROUNDS,
     build_tool_schemas,
     dialogue_tool_round_limit,
+    discovery_segment_types,
     execute_tool_with_meta,
     select_dialogue_message_segment_types,
 )
@@ -1227,6 +1228,7 @@ async def _apply_discovery(turn: _DialogueTurn, state: _RoundState) -> None:
     turn.selected_tool_names = frozenset(
         set(turn.selected_tool_names) | state.discovered_names
     )
+    turn.message_segment_types |= discovery_segment_types(state.discovered_names)
     turn.rebuild_tools()
     loaded_names = set(_tool_names(turn.tools))
     loaded = sorted(name for name in state.discovered_names if name in loaded_names)

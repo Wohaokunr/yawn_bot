@@ -121,3 +121,12 @@
 - 修改消息发送/能力矩阵后至少运行 `tests/test_agent_outbound.py`、`tests/test_agent_security.py`。
 - 修改 Agent WebUI 后运行相关 Python WebUI 测试、前端 Vitest、TypeScript typecheck 和 build。
 - 合并前 Agent 核心回归必须全绿；新增行为应优先补场景回归，而不是只补单个 helper 的实现细节测试。
+
+## 代码沙箱
+
+- `run_python` 等 sandbox 工具族只能经 `discover_tools` 装载，发现阶段用 `sandbox_policy.exposure_reason` 门控：沙箱关闭、群未开放、仅管理员、离线、隔离自检未通过时整族隐藏并给出原因，模型据此如实说明。
+- 代码只在独立的无网络 runner 容器里执行（`sandbox/`），Bot 进程**绝不** `exec`/`eval` 模型代码；runner 地址只认 `AGENT_SANDBOX_URL`，Token 与任何 Bot 密钥都不得传入沙箱环境。
+- 每个群一个工作区 `g<群号>`，工具只能访问当前群的工作区；产物以 `sandbox:<相对路径>` 引用交给 `send_message`（image/record）/`send_file`，由 `sandbox_refs.materialize` 取回到 `AGENT_FILE_ROOT/.sandbox_exports/` 并以 base64 发送，发送后删除；直接引用导出目录一律拒绝。
+- 次数先预扣后执行；runner 繁忙/拒绝/离线（代码根本没跑）必须退还。审计参数不记代码正文，只记 `code_chars`。
+- 没有本轮成功的 `run_python` 不得声称“代码跑完了/图画好了/曲子生成了”（`speech_claims.py` 的 `sandbox_run` 族）。
+- 新增 sandbox 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_sandbox.py`。

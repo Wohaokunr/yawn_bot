@@ -96,7 +96,7 @@ jobs:
               tools/rpg_playtest/*)
                 rpg_playtest=true
                 ;;
-              src/*|tests/*|data/nonebot_plugin_orm/migrations/*|.env.example|*.py)
+              src/*|sandbox/*|tests/*|data/nonebot_plugin_orm/migrations/*|.env.example|*.py)
                 python_fast=true
                 ;;
             esac
@@ -153,12 +153,12 @@ jobs:
       - name: Ruff
         run: >-
           uv run --python 3.10 ruff check
-          src tests tools/rpg_module_editor tools/rpg_playtest
+          src sandbox tests tools/rpg_module_editor tools/rpg_playtest
           tools/repo_guard.py tools/repository_content_test.py
       - name: Compile Python sources
         run: >-
           uv run --python 3.10 python -m compileall -q
-          src tools/rpg_module_editor tools/rpg_playtest
+          src sandbox tools/rpg_module_editor tools/rpg_playtest
           tools/repo_guard.py tools/repository_content_test.py
 
   python-typecheck:
@@ -182,7 +182,7 @@ jobs:
       - name: Pyright
         run: >-
           uv run --python 3.10 pyright
-          src tools/rpg_module_editor tools/rpg_playtest
+          src sandbox/yawn_sandbox tools/rpg_module_editor tools/rpg_playtest
           tools/repo_guard.py tools/repository_content_test.py
 
   python-fast:

@@ -41,6 +41,8 @@ from .log import dbg
 from .media import validate_outbound_image_path
 from .reactions import resolve_reaction
 from .safe_download import stream_download
+from .sandbox_refs import EXPORT_DIR_NAME, is_export_path, is_sandbox_ref
+from .sandbox_refs import materialize as materialize_sandbox_ref
 from .speech import (
     SpeechPlan,
     SpeechStyle,
@@ -366,6 +368,14 @@ async def _resolve_media(
         raise ValueError("媒体 file 不能为空")
     if ref.startswith(("http://", "https://")):
         return await _download_allowed_media(ref, media_type), True
+    if is_sandbox_ref(ref):
+        # 代码沙箱产物：取回当前群工作区的文件，发送后作为临时文件删除。
+        path = await materialize_sandbox_ref(
+            ref, group_id, media_type=media_type, max_bytes=MAX_OUTBOUND_FILE_BYTES
+        )
+        return path, True
+    if EXPORT_DIR_NAME in Path(ref).parts or is_export_path(Path(ref)):
+        raise PermissionError("沙箱导出目录不能直接引用，请使用 sandbox: 引用")
     if media_type == "image":
         path = await validate_outbound_image_path(
             Path(ref), group_id=group_id, session=session
@@ -781,12 +791,16 @@ async def prepare_outbound_message(
                 )
                 if temporary:
                     temporary_files.append(path)
+                # 沙箱产物以 base64 内联：OneBot 端不一定能读到 Bot 容器的文件。
+                media: str | bytes = (
+                    path.read_bytes() if is_export_path(path) else str(path)
+                )
                 if segment_type == "image":
-                    message += MessageSegment.image(str(path))
+                    message += MessageSegment.image(media)
                 elif segment_type == "record":
-                    message += MessageSegment.record(str(path))
+                    message += MessageSegment.record(media)
                 else:
-                    message += MessageSegment.video(str(path))
+                    message += MessageSegment.video(media)
                 records.append(_segment_record(segment_type, {"file": "[redacted]"}))
                 media_refs.append({"type": segment_type, "file": "[redacted]"})
                 continue

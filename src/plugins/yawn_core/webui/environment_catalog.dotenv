@@ -168,6 +168,13 @@ AGENT_RECEIVED_MEDIA_REUSE=deny
 # Agent 海量调试日志，会包含完整群消息与 LLM 回复，仅供本地短时排障
 AGENT_DEBUG_LOG=false
 
+# ── Agent 代码沙箱 ─────────────────────────────────────────────────────────────
+
+# 代码沙箱 runner 地址；Docker 部署默认走共享卷里的 Unix socket，留空则关闭沙箱
+AGENT_SANDBOX_URL=unix:///run/yawnbot-sandbox/runner.sock
+# runner 用 TCP 暴露时的访问令牌（Unix socket 部署不需要）；不会传进沙箱
+AGENT_SANDBOX_TOKEN=
+
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 
 # RPG 是否启用 AI 叙事/工具流程；false 为确定性模式

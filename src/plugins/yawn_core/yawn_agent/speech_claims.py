@@ -68,6 +68,16 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,12}}(?:设置|改|给)[^。！？!?\n]{{0,6}}头衔"),
         frozenset({"set_special_title"}),
     ),
+    # 代码沙箱：没真正跑过 run_python 就说“跑完了/图画好了/曲子生成了”是编造结果。
+    "sandbox_run": (
+        re.compile(
+            rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:运行|跑|执行)[^。！？!?\n]{{0,6}}(?:代码|程序|脚本)"
+            r"|(?:代码|程序|脚本)(?:已经|已)?(?:跑|运行|执行)(?:完|好)?(?:了|成功)"
+            r"|(?:跑|运行)出来(?:的)?结果"
+            r"|(?:图表|折线图|柱状图|饼图|散点图|词云|曲子|旋律|音乐)(?:已经|已)?(?:画|生成|做|写)(?:好|完|出来)(?:了|啦)"
+        ),
+        frozenset({"run_python"}),
+    ),
 }
 
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]*|\n")

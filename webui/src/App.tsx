@@ -37,6 +37,9 @@ const GuestAccessPage = lazy(() =>
 const WebAuditsPage = lazy(() =>
   import("./audits").then(({ WebAuditsPage: Page }) => ({ default: Page })),
 );
+const SandboxPage = lazy(() =>
+  import("./sandbox/SandboxPage").then(({ SandboxPage: Page }) => ({ default: Page })),
+);
 const GuestGroupsPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupsPage: Page }) => ({ default: Page })),
 );
@@ -108,6 +111,7 @@ function App(): React.JSX.Element {
           <Route path="guest-access" element={<GuestAccessPage />} />
           <Route path="environment" element={<EnvironmentPage />} />
           <Route path="audits" element={<WebAuditsPage />} />
+          <Route path="sandbox" element={<SandboxPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>

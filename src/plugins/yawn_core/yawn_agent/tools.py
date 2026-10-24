@@ -59,6 +59,7 @@ from .tool_support import _compact_onebot_message, _jsonable, _tool_result_limit
 from .tool_router import (
     MAX_TOOL_ROUNDS,
     dialogue_tool_round_limit,
+    discovery_segment_types,
     has_explicit_critical_intent,
     normalize_tool_family,
     rank_discoverable_tools,
@@ -75,7 +76,22 @@ _BLOCKED_TOOL_REASONS: dict[str, str] = {
     "bot_not_admin": "机器人在本群不是管理员",
     "bot_not_owner": "机器人在本群不是群主",
     "onebot_action": "当前 QQ 协议端不支持这个动作",
+    "sandbox_closed": "管理员没有在本群开放代码沙箱",
+    "sandbox_offline": "代码沙箱服务当前离线",
+    "sandbox_unsafe": "代码沙箱隔离自检未通过，已暂停使用",
 }
+
+
+async def _sandbox_exposure(group_id: int, *, actor_is_admin: bool) -> str | None:
+    """沙箱工具族的发现前置检查；健康状态走 15 秒缓存，不会每轮都打 socket。"""
+
+    from .sandbox_client import cached_health
+    from .sandbox_policy import exposure_reason
+
+    health, error = await cached_health()
+    return exposure_reason(
+        group_id, actor_is_admin=actor_is_admin, health=health, health_error=error
+    )
 
 
 def _max_tool_permission_level(
@@ -286,6 +302,12 @@ async def _discover_tools_for_actor(
         requested_family = family_key
     candidates: list[_ToolDefinition] = []
     hidden: list[tuple[_ToolDefinition, str]] = []
+    # 指定了别的工具包时沙箱工具反正会被过滤掉，不必检查沙箱状态。
+    sandbox_reason = (
+        await _sandbox_exposure(group_id, actor_is_admin=allow_admin_tools)
+        if requested_family in {None, "sandbox"}
+        else None
+    )
     for definition in _TOOL_DEFINITIONS:
         if (
             not definition.discoverable
@@ -300,6 +322,8 @@ async def _discover_tools_for_actor(
             max_permission_level=resolved_level,
             privileged_allowlist=allowlist,
         )
+        if exposed and definition.family == "sandbox" and sandbox_reason is not None:
+            exposed, reason = False, sandbox_reason
         if exposed:
             candidates.append(definition)
             continue
@@ -423,8 +447,11 @@ async def _audit(
     safe_arguments = {
         key: audit_safe_value(_jsonable(value))
         for key, value in args.items()
-        if key not in {"file", "url"}
+        if key not in {"file", "url", "code"}
     }
+    if isinstance(args.get("code"), str):
+        # 代码正文可能很长且含成员数据，审计只留长度；完整代码在沙箱运行历史里。
+        safe_arguments["code_chars"] = len(args["code"])
     if trace is not None:
         safe_arguments["_trace_id"] = trace.trace_id
     if duration_ms is not None:
@@ -886,6 +913,7 @@ __all__ = [
     "TOOL_PERMISSION_STATE_WRITE",
     "build_tool_schemas",
     "dialogue_tool_round_limit",
+    "discovery_segment_types",
     "execute_tool",
     "execute_tool_with_meta",
     "select_critical_tool_names",

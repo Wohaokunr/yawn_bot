@@ -22,6 +22,7 @@ uv run --python 3.10 pytest -q tests/test_agent_outbound.py      # 单文件
 | 前缀 | 覆盖 | 被测代码 |
 |---|---|---|
 | `test_agent_*`、`test_group_agent.py` | 群聊 Agent：上下文、记忆、发言、媒体、安全、出站发送、追踪 | [yawn_agent/](../src/plugins/yawn_core/yawn_agent/CLAUDE.md)（必跑项见其 AGENTS.md「质量门槛」） |
+| `test_agent_sandbox.py`、`test_webui_sandbox.py`、`test_sandbox_runner.py` | 代码沙箱：策略/配额/发现门控/产物引用、WebUI 管理接口、runner 隔离（降权用例需 root，否则跳过） | `yawn_agent/sandbox_*.py`、`webui/sandbox.py`、仓库根 `sandbox/` |
 | `test_werewolf_*` | 狼人杀流程、AI、命令体验、泄漏修复、game_log | [yawn_werewolf/](../src/plugins/yawn_core/yawn_werewolf/CLAUDE.md) |
 | `test_rpg_*` | 跑团推理与回归 | [yawn_rpg/](../src/plugins/yawn_core/yawn_rpg/CLAUDE.md)（另有插件内 `yawn_rpg/tests/`） |
 | `test_fanqie_*` | 番茄 App 协议/签名、浏览器 sidecar、投递、回归 | [yawn_fanqie/](../src/plugins/yawn_core/yawn_fanqie/CLAUDE.md) |

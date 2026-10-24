@@ -1,0 +1,17 @@
+# 沙箱 runner 与 yawnkit 跑在独立容器里：runner 大量直接使用 fd/os 调用
+# （openat、fchown、O_NOFOLLOW），yawnkit 面向群成员代码，print 就是它的输出。
+# 在仓库规则上放宽这几类，其余规则照旧。
+extend = "../pyproject.toml"
+
+[lint]
+extend-ignore = [
+    "E501",    # 中文提示与长参数表，行宽交给格式习惯
+    "T201",    # bootstrap/yawnkit 的输出本身就是给用户看的
+    "TRY003",  # 错误消息就是 API 返回给前端/模型的中文说明
+    "PTH",     # 基于 fd 的安全文件访问不能换成 pathlib
+    "C901",
+    "PLR0911",
+    "PLR0913",
+    "PLR0917",
+    "PLR2004",
+]

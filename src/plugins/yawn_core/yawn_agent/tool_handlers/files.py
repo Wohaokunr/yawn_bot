@@ -3,15 +3,20 @@
 
 from __future__ import annotations
 
+import base64
 import mimetypes
 from pathlib import Path
 from typing import Any
 
 from ..log import dbg
+from ..sandbox_refs import EXPORT_DIR_NAME, is_export_path, is_sandbox_ref
+from ..sandbox_refs import discard as discard_sandbox_export
+from ..sandbox_refs import materialize as materialize_sandbox_ref
 from ..tool_args import ERROR_NOT_FOUND, ToolArgumentError, ToolError
 from ..tool_execution import ToolExecutionContext, ToolHandlerResult
 from ..tool_support import (
     BLOCKED_FILE_EXTENSIONS,
+    MAX_FILE_BYTES,
     _check_downloaded_path,
     _compact_group_file,
     _compact_group_folder,
@@ -111,7 +116,12 @@ async def _send_file(args: dict[str, Any], context: ToolExecutionContext) -> dic
     folder_id = str(args.get("folder_id") or "").strip()
     folder = await _require_folder(bot, group_id, folder_id) if folder_id else None
     temporary: Path | None = None
-    if file_ref.startswith(("http://", "https://")):
+    if is_sandbox_ref(file_ref):
+        # 代码沙箱产物：只解析当前群工作区，取回后作为临时文件上传。
+        temporary = await materialize_sandbox_ref(file_ref, group_id, max_bytes=MAX_FILE_BYTES)
+        path = temporary
+        source_name = path.name
+    elif file_ref.startswith(("http://", "https://")):
         temporary, _content_type = await _download_allowed_file(file_ref)
         try:
             path = _check_downloaded_path(temporary)
@@ -120,6 +130,12 @@ async def _send_file(args: dict[str, Any], context: ToolExecutionContext) -> dic
             raise
         source_name = Path(file_ref.split("?", 1)[0]).name or path.name
     else:
+        if EXPORT_DIR_NAME in Path(file_ref).parts or is_export_path(Path(file_ref)):
+            raise ToolError(
+                "沙箱导出目录不能直接引用",
+                code=ERROR_NOT_FOUND,
+                hint="沙箱里的文件请用 sandbox:文件名 发送",
+            )
         try:
             path = resolve_agent_file(file_ref)
         except ValueError as exc:
@@ -134,7 +150,12 @@ async def _send_file(args: dict[str, Any], context: ToolExecutionContext) -> dic
         check_file_extension(source_name, upload_name)
         params: dict[str, Any] = {
             "group_id": group_id,
-            "file": str(path),
+            # 沙箱产物用 base64 交给 OneBot 实现端，不依赖它能读到 Bot 容器的文件。
+            "file": (
+                "base64://" + base64.b64encode(path.read_bytes()).decode("ascii")
+                if is_export_path(path)
+                else str(path)
+            ),
             "name": upload_name,
         }
         if folder_id:
@@ -145,6 +166,8 @@ async def _send_file(args: dict[str, Any], context: ToolExecutionContext) -> dic
     finally:
         if temporary:
             temporary.unlink(missing_ok=True)
+            if is_export_path(temporary):
+                discard_sandbox_export(temporary)
     result: dict[str, Any] = {"uploaded": True, "name": upload_name, "size": readable_size(size)}
     if folder is not None:
         result["folder"] = folder.get("name") or folder_id

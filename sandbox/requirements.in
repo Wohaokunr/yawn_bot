@@ -1,0 +1,17 @@
+# 沙箱 venv 的顶层依赖（纯 wheel，运行时无网络，不能临时安装）。改完重新生成 requirements.txt。
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+sympy
+networkx
+pillow
+openpyxl
+tabulate
+pyyaml
+mido
+soundfile
+jieba
+wordcloud
+qrcode
