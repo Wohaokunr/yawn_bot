@@ -148,3 +148,7 @@
 - 可靠性约定：同一回合第二次起的运行跳过冷却（仍计每日次数）；剩余冷却不超过 `MAX_COOLDOWN_WAIT` 时等待而不是报错；runner 忙/离线各自动重试一次；代码没跑成时退还次数**和冷却**。运行失败（`status != ok`）在审计里记为 error，`ToolCallLedger` 不缓存失败结果，`run_python`/`run_shell` 永不按参数去重。
 - 结果投影走 `sandbox_output.py`：失败给 `error` 摘要（异常、用户代码行号、那行代码、对症修法），traceback 只留用户帧，成功时滤掉字体/弃用警告，按行截断并说明怎么看全量。
 - 新增 sandbox 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_sandbox.py`。
+- 群聊附件入箱（`sandbox_inbox.py`）：是否自动放入只看结构化事实（消息有无附件、沙箱工具是否已暴露、`exposure_reason`、成员是否退出记忆），**不做关键词匹配**；给模型的说明写进 `turn.context["sandbox_inbox"]`（实时易变层），不进稳定前缀。
+- 入箱取字节只走：消息段 base64 → OneBot 接口 → `AGENT_SANDBOX_INBOX_HOSTS` 白名单下载（`safe_download.stream_download(host_check=...)`，逐跳校验）→ `AGENT_SANDBOX_INBOX_LOCAL_ROOTS` 里的本机路径；不得新增绕过白名单的取法，模型永远看不到 URL、OneBot `file` 标识或本机路径。
+- 入箱文件写到 `inbox/`，名字用内容哈希、可执行后缀改成 `.txt`；事件记录 `sandbox_inbox_store` 不记 URL/路径以外的原始标识，`delete_member_memories` 必须同时调 `forget_member`。
+- 没有本轮成功的 `import_attachments`/`import_group_file`/`run_python`/`run_shell` 不得声称“已经放进电脑了”（`speech_claims.py` 的 `sandbox_import` 族）。

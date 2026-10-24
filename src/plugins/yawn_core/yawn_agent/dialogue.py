@@ -134,6 +134,7 @@ from .tools import (
 from .tool_execution import ToolExecutionContext
 from . import turn_budget
 from .progress_notice import begin_progress, clean_preamble, current_progress
+from .sandbox_inbox import prepare_turn_inbox
 from .tool_preload import resolve_tool_plan, start_tool_plan
 from .tool_registry import TOOL_BY_NAME
 from .turn_fallbacks import (
@@ -549,6 +550,7 @@ async def _prepare_turn(
         has_reply=has_reply_context,
         has_media=has_media_context,
         mentions_others=has_target_mentions,
+        media_refs=normalized.media_refs,
     )
     context_started = time.monotonic()
     try:
@@ -630,10 +632,7 @@ async def _prepare_turn(
         bot, session, group_id, normalized, config, context
     )
     media_digests = [item.content_hash for item in media_inputs]
-    dbg(
-        f"群 {group_id} 媒体输入: media_inputs={len(media_inputs)} "
-        f"缓存字幕={len(cached_captions)} digests={media_digests}"
-    )
+    dbg(f"群 {group_id} 媒体输入: {len(media_inputs)} 字幕={len(cached_captions)} digests={media_digests}")
     user_prompt, media_blocks = await _prepare_media_prompt(
         group_id,
         normalized,
@@ -774,6 +773,7 @@ async def _prepare_turn(
         current_intent_text=tool_intent_text,
     )
     turn.discovery_guard = DiscoveryRoundGuard(set(selected_tool_names))
+    await prepare_turn_inbox(turn)  # 本条附件按策略放进内置电脑（见 sandbox_inbox）
     turn.deadline = time.monotonic() + turn_budget.turn_seconds(turn.tools)
     return turn
 

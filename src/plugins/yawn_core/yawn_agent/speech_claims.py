@@ -78,6 +78,14 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         ),
         frozenset({"run_python", "run_shell"}),
     ),
+    # 附件入箱：没有真的放进去就说“已经放进电脑/沙箱了”也是编造。
+    "sandbox_import": (
+        re.compile(
+            r"(?:已经|已)(?:把[^。！？!?\n]{0,12})?(?:放|传|存|导|拷)(?:进|到|入)(?:了)?[^。！？!?\n]{0,4}(?:内置电脑|电脑|沙箱|工作区|inbox)"
+            r"|(?:放|传|存|导|拷)(?:进|到|入)(?:了)?[^。！？!?\n]{0,4}(?:内置电脑|沙箱|工作区)(?:里)?(?:了|啦)"
+        ),
+        frozenset({"import_attachments", "import_group_file", "run_python", "run_shell"}),
+    ),
 }
 
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]*|\n")

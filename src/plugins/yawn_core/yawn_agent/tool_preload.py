@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .capabilities import BotGroupCapabilities, probe_group_capabilities
 from .log import dbg, dbg_exc
 from .tool_planner import FALLBACK_PLAN, ToolPlan, plan_tools
 from .tool_router import discovery_segment_types
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # 第一轮最多直接装两包；路由给的第三包只作为 suggested_toolpacks 提示，
 # 需要时模型再 discover_tools 加载，免得首轮 schema 过大。
@@ -75,7 +78,7 @@ async def preload_planned_tools(
             result = await _discover_tools_for_actor(
                 query="",
                 family=pack,
-                limit=8,
+                limit=12,
                 bot=bot,
                 group_id=group_id,
                 actor_user_id=actor_user_id,
@@ -112,7 +115,12 @@ async def preload_planned_tools(
 
 
 def start_tool_plan(
-    text: str, *, has_reply: bool, has_media: bool, mentions_others: bool
+    text: str,
+    *,
+    has_reply: bool,
+    has_media: bool,
+    mentions_others: bool,
+    media_refs: Sequence[dict[str, Any]] = (),
 ) -> asyncio.Task[ToolPlan]:
     """回合一开始就并发跑路由，和上下文加载重叠，通常不增加延迟。"""
 
@@ -123,6 +131,7 @@ def start_tool_plan(
                 has_reply=has_reply,
                 has_media=has_media,
                 mentions_others=mentions_others,
+                media_refs=media_refs,
             ),
         )
     )
@@ -166,12 +175,33 @@ async def resolve_tool_plan(
     return plan, preload, capabilities
 
 
-def plan_signals(
-    *, has_reply: bool, has_media: bool, mentions_others: bool
-) -> dict[str, bool]:
-    """给路由模型的结构信号：只有布尔值，不含任何内容。"""
+_MEDIA_SIGNALS = {"image": "image", "file": "file", "record": "audio", "video": "video"}
 
-    return {"reply": has_reply, "media": has_media, "mentions_others": mentions_others}
+
+def plan_signals(
+    *,
+    has_reply: bool,
+    has_media: bool,
+    mentions_others: bool,
+    media_refs: Sequence[dict[str, Any]] = (),
+) -> dict[str, bool]:
+    """给路由模型的结构信号：只有布尔值，不含任何内容。
+
+    附件只报“有没有这类附件”（图片/文件/语音/视频），不报文件名或数量，
+    路由模型据此判断是不是要把附件放进内置电脑处理。
+    """
+
+    signals = {
+        "reply": has_reply,
+        "media": has_media,
+        "mentions_others": mentions_others,
+    }
+    for ref in media_refs or ():
+        if isinstance(ref, dict):
+            name = _MEDIA_SIGNALS.get(str(ref.get("type") or ""))
+            if name:
+                signals[name] = True
+    return signals
 
 
 __all__ = [

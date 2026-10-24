@@ -79,7 +79,7 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "reaction": ("表情", "表情包", "reactions", "sticker", "stickers", "emoji"),
     "group": ("群", "群资料", "群信息", "group_info", "honor"),
     "message": ("消息", "发消息", "转发", "send", "forward"),
-    "sandbox": ("沙箱", "代码沙箱", "虚拟机", "代码", "python", "编程", "计算", "画图", "绘图", "图表", "数据分析", "作曲", "code", "run_code", "python_sandbox", "vm"),
+    "sandbox": ("沙箱", "代码沙箱", "虚拟机", "代码", "python", "编程", "计算", "画图", "绘图", "图表", "数据分析", "作曲", "内置电脑", "电脑", "附件", "inbox", "code", "run_code", "python_sandbox", "vm"),
 }
 _FAMILY_LOOKUP: dict[str, str] = {
     alias.casefold(): family

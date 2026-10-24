@@ -71,6 +71,7 @@ from .tool_router import (
 # 这些工具族只写调用者自己的东西（本群沙箱工作区），不需要 UserGroup 里已有
 # 这位成员：新入群、还没同步过成员表的人也能跑代码。真实 actor 仍然必需。
 _ACTOR_SCOPED_FAMILIES = frozenset({"sandbox"})
+FAMILY_LOAD_LIMIT = 12
 # 同参数也可能有不同结果（随机数、读到更新后的文件），不做同回合去重。
 _NON_IDEMPOTENT_TOOLS = frozenset({"run_python", "run_shell"})
 
@@ -734,9 +735,12 @@ async def _dispatch_authorized(
                 "query 和 family 至少提供一个",
                 hint="用 query 描述任务，或用 family 加载 toolpacks 里的工具包",
             )
-        # 按工具包整包加载时默认给满 8 个，免得包里排在后面的工具被截掉。
+        # 按工具包整包加载时默认给满 12 个（沙箱族有 9 个），免得包里排在后面的
+        # 工具被截掉；按关键词搜仍然最多 8 个。
         limit = _tool_result_limit(
-            args, default=8 if family and not query else 5, maximum=8
+            args,
+            default=FAMILY_LOAD_LIMIT if family and not query else 5,
+            maximum=FAMILY_LOAD_LIMIT if family and not query else 8,
         )
         result = await _discover_tools_for_actor(
             query=query,

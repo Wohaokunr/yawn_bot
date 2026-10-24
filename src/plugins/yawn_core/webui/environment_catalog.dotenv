@@ -196,6 +196,10 @@ AGENT_DEBUG_LOG=false
 AGENT_SANDBOX_URL=unix:///run/yawnbot-sandbox/runner.sock
 # runner 用 TCP 暴露时的访问令牌（Unix socket 部署不需要）；不会传进沙箱
 AGENT_SANDBOX_TOKEN=
+# 群聊附件放进内置电脑时允许下载的域名（逗号分隔，*.qq.com 匹配子域名）；留空用内置的 QQ 图床/文件域名
+AGENT_SANDBOX_INBOX_HOSTS=
+# NapCat 只给本机路径时可读取的共享目录（逗号分隔，NapCat 与 Bot 挂载同一目录时才需要）；留空则不读本机文件
+AGENT_SANDBOX_INBOX_LOCAL_ROOTS=
 
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 

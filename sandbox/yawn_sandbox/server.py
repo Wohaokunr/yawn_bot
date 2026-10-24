@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import API_VERSION, RUNNER_VERSION
+from . import API_VERSION, FEATURES, RUNNER_VERSION
 from .config import RunnerConfig, load_config
 from .executor import LANGUAGES, RUN_STATUSES, Executor, RunRequest
 from .history import RunHistory
@@ -50,6 +50,7 @@ _WORKSPACE_ERROR_STATUS = {
     "not_found": HTTPStatus.NOT_FOUND,
     "too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
     "workspace_limit": HTTPStatus.INSUFFICIENT_STORAGE,
+    "exists": HTTPStatus.CONFLICT,
 }
 
 
@@ -109,6 +110,7 @@ class RunnerService:
             "version": RUNNER_VERSION,
             "api": API_VERSION,
             "languages": list(LANGUAGES),
+            "features": list(FEATURES),
             "python": packages["python"],
             "packages": packages["highlights"],
             "package_count": packages["total"],
@@ -260,11 +262,14 @@ class RunnerService:
         items, total = self.store.list_files(
             workspace, prefix=query.get("prefix") or "", limit=limit
         )
-        return {
+        payload: dict[str, Any] = {
             "items": [item.to_dict() for item in items],
             "total": total,
             "usage": self.store.usage(workspace),
         }
+        if query.get("dirs") in {"1", "true"}:
+            payload["dirs"] = self.store.dir_summary(workspace)
+        return payload
 
     def read_file(self, workspace_id: str, query: dict[str, str]) -> tuple[bytes, str, str]:
         workspace = self._workspace(validate_workspace_id(workspace_id))
@@ -284,8 +289,29 @@ class RunnerService:
         quota = self.config.ceilings.disk_quota_mb * 1024 * 1024
         if usage["bytes"] + len(data) > quota:
             raise ApiError(HTTPStatus.INSUFFICIENT_STORAGE, "quota_exceeded", "工作区空间不足")
-        entry = self.store.write_file(workspace, str(query.get("path") or ""), data)
+        if usage["files"] >= self.config.ceilings.max_files:
+            raise ApiError(
+                HTTPStatus.INSUFFICIENT_STORAGE, "quota_exceeded", "工作区文件数已达上限"
+            )
+        overwrite = query.get("overwrite") not in {"0", "false"}
+        entry = self.store.write_file(
+            workspace, str(query.get("path") or ""), data, overwrite=overwrite
+        )
         return {"file": entry.to_dict()}
+
+    def rename_file(self, workspace_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        workspace = self._workspace(validate_workspace_id(workspace_id))
+        entry = self.store.rename(
+            workspace,
+            str(body.get("from") or ""),
+            str(body.get("to") or ""),
+            overwrite=body.get("overwrite") is True,
+        )
+        return {"file": entry.to_dict()}
+
+    def make_dir(self, workspace_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        workspace = self._workspace(validate_workspace_id(workspace_id), create=True)
+        return {"path": self.store.make_dir(workspace, str(body.get("path") or ""))}
 
     def delete_file(self, workspace_id: str, query: dict[str, str]) -> dict[str, Any]:
         workspace = self._workspace(validate_workspace_id(workspace_id))
@@ -371,6 +397,10 @@ def _dispatch(  # noqa: PLR0912
             return service.write_file(workspace_id, query, body)
         case ("DELETE", ["workspaces", workspace_id, "file"]):
             return service.delete_file(workspace_id, query)
+        case ("POST", ["workspaces", workspace_id, "rename"]):
+            return service.rename_file(workspace_id, _json())
+        case ("POST", ["workspaces", workspace_id, "mkdir"]):
+            return service.make_dir(workspace_id, _json())
         case ("POST", ["maintenance", "prune"]):
             return service.prune()
     raise ApiError(HTTPStatus.NOT_FOUND, "not_found", "未知接口")

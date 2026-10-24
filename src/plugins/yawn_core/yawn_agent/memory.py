@@ -1901,7 +1901,15 @@ async def _delete_member_memories_locked(
 
 async def delete_member_memories(session: Any, group_id: int, user_id: int) -> int:
     async with _compaction_lock(group_id):
-        return await _delete_member_memories_locked(session, group_id, user_id)
+        removed = await _delete_member_memories_locked(session, group_id, user_id)
+    # 附件入箱记录里也有他的号码和文件名，同一个删除语义一并抹掉。
+    from .sandbox_inbox_store import forget_member
+
+    try:
+        removed += forget_member(group_id, user_id)
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {group_id} 清除成员 {user_id} 的入箱记录失败(忽略)")
+    return removed
 
 
 async def _rebuild_group_memories_locked(session: Any, group_id: int) -> int:

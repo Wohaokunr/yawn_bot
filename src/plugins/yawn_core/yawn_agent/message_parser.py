@@ -360,12 +360,19 @@ def _media_ref(
 ) -> dict[str, Any] | None:
     if seg_type not in {"image", "file", "record", "video"}:
         return None
-    keys = ("url", "file", "file_id", "name", "size", "path")
-    return {
+    keys = ("url", "file", "file_id", "name", "size", "path", "busid")
+    ref = {
         "type": seg_type,
         "source": source,
         **{key: data[key] for key in keys if key in data},
     }
+    # NapCat 用 file_size 表示大小、文件段把原名放在 file 里；统一成 size/name，
+    # 入箱时才能提前判断超限、给工作区文件起对名字。
+    if "size" not in ref and data.get("file_size") not in (None, ""):
+        ref["size"] = data["file_size"]
+    if seg_type == "file" and "name" not in ref and data.get("file_name"):
+        ref["name"] = data["file_name"]
+    return ref
 
 
 def _append_media_refs(

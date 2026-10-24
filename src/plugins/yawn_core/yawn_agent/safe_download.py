@@ -10,17 +10,27 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 MAX_REDIRECTS = 3
 
 
-def _check_url(url: str, allowed_hosts: frozenset[str], host_error: str) -> None:
+def _check_url(
+    url: str,
+    allowed_hosts: frozenset[str],
+    host_error: str,
+    host_check: Callable[[str], bool] | None = None,
+) -> None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"} or not host or host not in allowed_hosts:
+    allowed = host_check(host) if host_check is not None else host in allowed_hosts
+    if parsed.scheme not in {"http", "https"} or not host or not allowed:
         raise PermissionError(host_error)
 
 
@@ -42,13 +52,18 @@ async def stream_download(
     host_error: str = "远程文件域名不在白名单",
     size_error: str = "文件超过大小限制",
     timeout: float = 15.0,
+    host_check: Callable[[str], bool] | None = None,
 ) -> tuple[Path, str | None]:
-    """下载到临时文件，返回 ``(路径, content-type)``；失败时不留下临时文件。"""
+    """下载到临时文件，返回 ``(路径, content-type)``；失败时不留下临时文件。
+
+    ``host_check`` 给需要后缀匹配的调用方（群附件入箱）用；给了它就不再看
+    ``allowed_hosts``，但每一跳重定向照样逐跳校验。
+    """
 
     current = url
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         for _hop in range(MAX_REDIRECTS + 1):
-            _check_url(current, allowed_hosts, host_error)
+            _check_url(current, allowed_hosts, host_error, host_check)
             async with client.stream("GET", current) as response:
                 if getattr(response, "is_redirect", False) is True:
                     location = response.headers.get("location")

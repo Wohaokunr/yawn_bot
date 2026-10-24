@@ -29,12 +29,34 @@ deps = importlib.import_module("src.plugins.yawn_core.webui.deps")
 config = importlib.import_module("src.plugins.yawn_core.webui.config")
 policy = importlib.import_module("src.plugins.yawn_core.yawn_agent.sandbox_policy")
 client_mod = importlib.import_module("src.plugins.yawn_core.yawn_agent.sandbox_client")
+inbox_store = importlib.import_module("src.plugins.yawn_core.yawn_agent.sandbox_inbox_store")
 
 BASE = f"{config.API_PATH}/sandbox"
 
 
 class FakeClient:
     files: dict[str, tuple[bytes, str, str]] = {}
+    calls: list[tuple[str, Any]] = []
+
+    async def write_file(self, workspace: str, path: str, data: bytes, *, overwrite: bool = True) -> dict[str, Any]:
+        FakeClient.calls.append(("write", (path, overwrite)))
+        if not overwrite and path in FakeClient.files:
+            raise client_mod.SandboxError("exists", "同名文件已存在", status=409)
+        FakeClient.files[path] = (data, "application/octet-stream", "other")
+        return {"file": {"path": path, "size": len(data)}}
+
+    async def delete_file(self, workspace: str, path: str) -> dict[str, Any]:
+        FakeClient.calls.append(("delete", path))
+        return {"removed": 1 if FakeClient.files.pop(path, None) else 0}
+
+    async def rename_file(self, workspace: str, source: str, target: str, *, overwrite: bool = False) -> dict[str, Any]:
+        FakeClient.calls.append(("rename", (source, target, overwrite)))
+        FakeClient.files[target] = FakeClient.files.pop(source)
+        return {"file": {"path": target, "size": 1}}
+
+    async def make_dir(self, workspace: str, path: str) -> dict[str, Any]:
+        FakeClient.calls.append(("mkdir", path))
+        return {"path": path}
 
     async def read_file(self, workspace: str, path: str, *, max_bytes: int | None = None) -> tuple[bytes, str, str]:
         if path not in FakeClient.files:
@@ -58,6 +80,7 @@ def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(routes, "SandboxClient", FakeClient)
     monkeypatch.setattr(routes.hub, "notify_change", notify)
     FakeClient.files = {}
+    FakeClient.calls = []
     app = FastAPI()
     app.include_router(routes.router)
     session = SimpleNamespace(role="admin")
@@ -142,3 +165,58 @@ def test_settings_rejects_invalid(api: TestClient, changes: dict[str, Any]) -> N
     response = api.put(f"{BASE}/settings", json=_settings(**changes))
     assert response.status_code == 422
     assert policy.load_settings() == policy.SandboxSettings()
+
+
+def test_settings_accepts_inbox_fields_and_old_payloads(api: TestClient) -> None:
+    response = api.put(
+        f"{BASE}/settings",
+        json=_settings(inboxAutoImport="always", inboxTypes=["image", "file"], inboxMaxFileMb=10),
+    )
+    assert response.status_code == 200
+    saved = policy.load_settings()
+    assert saved.inbox_auto_import == "always" and saved.inbox_types == ["image", "file"]
+    old = {key: value for key, value in _settings().items() if not key.startswith("inbox")}
+    assert api.put(f"{BASE}/settings", json=old).status_code == 200
+    assert policy.load_settings().inbox_auto_import == "sandbox_turns"
+    assert api.put(f"{BASE}/settings", json=_settings(inboxMaxFileMb=999)).status_code == 422
+    assert api.put(f"{BASE}/settings", json=_settings(inboxTypes=["exe"])).status_code == 422
+
+
+def test_inbox_endpoint_lists_events_and_reasons(api: TestClient) -> None:
+    inbox_store.record_events(
+        [
+            {"group_id": 123456, "user_id": 42, "status": "imported", "media_type": "image", "path": "inbox/图片_1.png", "size": 10, "message_id": 9, "index": 1},
+            {"group_id": 123456, "user_id": 42, "status": "failed", "media_type": "file", "reason": "expired"},
+            {"group_id": 654321, "user_id": 7, "status": "imported", "media_type": "record", "path": "inbox/语音_1.mp3"},
+        ]
+    )
+    data = api.get(f"{BASE}/inbox").json()["data"]
+    assert len(data["items"]) == 3 and data["items"][0]["groupId"] == "654321"
+    assert data["summary"]["imported"] == 2 and data["summary"]["byReason"] == {"expired": 1}
+    assert "expired" in data["reasons"] and data["hosts"]
+    filtered = api.get(f"{BASE}/inbox?group=123456&status=failed").json()["data"]["items"]
+    assert [row["reason"] for row in filtered] == ["expired"]
+    assert api.get(f"{BASE}/inbox?status=bogus").status_code == 422
+    status = api.get(f"{BASE}/status").json()["data"]
+    assert status["inbox"]["today"]["imported"] == 2
+
+
+def test_upload_overwrite_guard_returns_conflict(api: TestClient) -> None:
+    assert api.post(f"{BASE}/workspaces/g123456/upload?path=inbox/a.csv", content=b"a").status_code == 200
+    conflict = api.post(f"{BASE}/workspaces/g123456/upload?path=inbox/a.csv&overwrite=false", content=b"b")
+    assert conflict.status_code == 409
+    assert api.post(f"{BASE}/workspaces/g123456/upload?path=inbox/a.csv&overwrite=true", content=b"b").status_code == 200
+
+
+def test_delete_many_rename_and_mkdir(api: TestClient) -> None:
+    FakeClient.files = {"a.txt": (b"a", "text/plain", "text"), "inbox/b.png": (b"b", "image/png", "image")}
+    inbox_store.record_events([{"group_id": 123456, "status": "imported", "path": "inbox/b.png", "message_id": 1, "index": 1}])
+    result = api.post(f"{BASE}/workspaces/g123456/delete", json={"paths": ["a.txt", "inbox/b.png", "a.txt"]}).json()["data"]
+    assert result["removed"] == 2 and result["deleted"] == ["a.txt", "inbox/b.png"]
+    assert inbox_store.imported_paths(123456) == {}
+    assert api.post(f"{BASE}/workspaces/g123456/delete", json={"paths": []}).status_code == 422
+
+    FakeClient.files["x.csv"] = (b"x", "text/csv", "table")
+    renamed = api.post(f"{BASE}/workspaces/g123456/rename", json={"from": "x.csv", "to": "data/x.csv"})
+    assert renamed.status_code == 200 and renamed.json()["data"]["file"]["path"] == "data/x.csv"
+    assert api.post(f"{BASE}/workspaces/g123456/mkdir", json={"path": "out"}).json()["data"]["path"] == "out"

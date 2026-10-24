@@ -31,6 +31,12 @@ class ToolExecutionContext:
     current_intent_text: str | None = None
     # 本回合写操作去重/次数账本；with_capabilities() 复制上下文时共享同一个账本。
     ledger: ToolCallLedger = field(default_factory=ToolCallLedger)
+    # 本轮触发消息里的附件（``sandbox_inbox.Attachment``，含原始媒体引用，只在
+    # 进程内）；入箱工具与 run_python 首次运行据此把附件放进工作区。
+    attachments: tuple[Any, ...] = ()
+    # 附件 id → 已入箱的工作区相对路径；与 ledger 一样在复制上下文时共享。
+    inbox: dict[str, str] = field(default_factory=dict)
+    inbox_attempted: bool = False
 
     def with_capabilities(
         self, capabilities: BotGroupCapabilities

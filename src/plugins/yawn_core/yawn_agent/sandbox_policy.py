@@ -32,6 +32,8 @@ from .sandbox_client import SandboxError, cached_health
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 STATE_DIR = PROJECT_ROOT / "data" / "agent_sandbox"
 _COOLDOWN_MEMORY = 2048
+INBOX_MEDIA_TYPES = ("image", "file", "record", "video")
+InboxAutoImport = Literal["always", "sandbox_turns", "off"]
 # 撞上冷却时最多替模型等多久；更长的冷却（管理员调大了）才报错。
 MAX_COOLDOWN_WAIT = 10.0
 
@@ -55,6 +57,18 @@ class SandboxSettings(BaseModel):
     max_output_chars: int = Field(default=6000, ge=500, le=12000)
     max_share_mb: int = Field(default=20, ge=1, le=32)
     allow_unisolated: bool = False
+    # ── 群聊附件入箱（图片/文件/语音/视频 → 工作区 inbox/）──────────────────
+    inbox_enabled: bool = True
+    # always：沙箱开放的群里每个明确触发的回合都先入箱；sandbox_turns：本轮
+    # 装载了沙箱工具才入箱（默认）；off：只在模型调用 import_attachments 时入箱。
+    inbox_auto_import: InboxAutoImport = "sandbox_turns"
+    inbox_types: list[Literal["image", "file", "record", "video"]] = Field(
+        default_factory=lambda: list(INBOX_MEDIA_TYPES)
+    )
+    inbox_max_file_mb: int = Field(default=20, ge=1, le=64)
+    inbox_max_per_turn: int = Field(default=6, ge=1, le=20)
+    inbox_history_minutes: int = Field(default=180, ge=0, le=2880)
+    inbox_group_daily_mb: int = Field(default=500, ge=0, le=20000)
 
     def limits(self, *, timeout_seconds: int | None = None) -> dict[str, int]:
         timeout = self.timeout_seconds
@@ -65,6 +79,9 @@ class SandboxSettings(BaseModel):
             "memory_mb": self.memory_mb,
             "disk_quota_mb": self.disk_quota_mb,
         }
+
+    def inbox_allows(self, media_type: str) -> bool:
+        return self.inbox_enabled and media_type in self.inbox_types
 
     def group_open(self, group_id: int) -> bool:
         if group_id in self.blocked_groups:
@@ -131,10 +148,26 @@ class _Store:
         except (OSError, ValueError):
             data = {}
         if not isinstance(data, dict) or data.get("day") != today:
-            return {"day": today, "groups": {}, "members": {}}
+            return {"day": today, "groups": {}, "members": {}, "inbox": {}}
         data.setdefault("groups", {})
         data.setdefault("members", {})
+        if not isinstance(data.get("inbox"), dict):
+            data["inbox"] = {}
         return data
+
+    def add_inbox(self, group_id: int, *, files: int, size: int) -> dict[str, int]:
+        """记一笔入箱用量（文件数与字节数），按北京时间自然日清零。"""
+
+        with self._lock:
+            data = self._load_usage()
+            row = data["inbox"].get(str(group_id))
+            row = dict(row) if isinstance(row, dict) else {}
+            row["files"] = max(int(row.get("files") or 0) + files, 0)
+            row["bytes"] = max(int(row.get("bytes") or 0) + size, 0)
+            data["inbox"][str(group_id)] = row
+            with contextlib.suppress(OSError):
+                self._write_json(self.usage_path(), data)
+            return row
 
     def usage(self) -> dict[str, Any]:
         with self._lock:
@@ -191,6 +224,17 @@ def save_settings(settings: SandboxSettings) -> SandboxSettings:
 
 def usage_snapshot() -> dict[str, Any]:
     return _store.usage()
+
+
+def inbox_usage(group_id: int) -> dict[str, int]:
+    row = _store.usage()["inbox"].get(str(group_id))
+    if not isinstance(row, dict):
+        return {"files": 0, "bytes": 0}
+    return {"files": int(row.get("files") or 0), "bytes": int(row.get("bytes") or 0)}
+
+
+def record_inbox_usage(group_id: int, *, files: int, size: int) -> dict[str, int]:
+    return _store.add_inbox(group_id, files=files, size=size)
 
 
 def group_usage(group_id: int) -> int:
@@ -348,6 +392,7 @@ def reset_state_for_tests() -> None:
 
 
 __all__ = [
+    "INBOX_MEDIA_TYPES",
     "MAX_COOLDOWN_WAIT",
     "STATE_DIR",
     "RunReservation",
@@ -355,9 +400,11 @@ __all__ = [
     "SandboxSettings",
     "exposure_reason",
     "group_usage",
+    "inbox_usage",
     "load_settings",
     "member_usage",
     "quota_status",
+    "record_inbox_usage",
     "reserve_run",
     "save_settings",
     "usage_snapshot",

@@ -824,6 +824,47 @@ TOOL_DEFINITIONS = (
         keywords=("沙箱状态", "能跑代码吗", "装了什么库", "还能跑几次"),
     ),
     ToolDefinition(
+        "import_attachments",
+        "把群成员发的图片/文件/语音/视频放进本群内置电脑（沙箱工作区 inbox/），返回每个附件的路径，之后用 run_python/run_shell 处理",
+        {
+            "ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 32},
+                "maxItems": 20,
+                "description": '附件 id：本条消息的媒体序号（"1"、"2"…）或 list_chat_attachments 返回的 id；省略=本条消息的全部附件，本条没有时取发起人最近发的那条',
+            },
+        },
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="sandbox",
+        keywords=("附件", "这张图", "这个文件", "这段语音", "处理图片", "处理文件", "分析表格", "放进电脑", "传进沙箱", "导入文件", "inbox"),
+        prerequisites="附件可能已经自动入箱：先看 sandbox_inbox 提示或 list_chat_attachments 的 in_workspace，已经在的不用再导入",
+    ),
+    ToolDefinition(
+        "list_chat_attachments",
+        "列出本条消息和群里最近一段时间成员发过的图片/文件/语音/视频（id、类型、文件名、谁发的、是否已在内置电脑里）",
+        {
+            "mine_only": {"type": "boolean", "description": "只看发起人自己发的附件"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+        },
+        family="sandbox",
+        keywords=("刚才的文件", "刚发的图", "之前发的", "最近的附件", "群里发的文件", "哪个文件"),
+    ),
+    ToolDefinition(
+        "import_group_file",
+        "把当前群「群文件」里的一个文件下载进本群内置电脑（沙箱工作区 inbox/），用于分析群文件里的表格、文本、压缩包等",
+        {
+            "file_id": {"type": "string", "minLength": 1, "maxLength": 160, "description": "search_group_files 返回的 file_id"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 160, "description": "文件名（带后缀），决定工作区里的文件名"},
+            "busid": {"type": "integer", "minimum": 0},
+        },
+        required=("file_id",),
+        actions=("get_group_file_url",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="sandbox",
+        keywords=("群文件", "分析群文件", "下载群文件", "群文件里的表格"),
+        prerequisites="先用 search_group_files 拿到 file_id 和文件名",
+    ),
+    ToolDefinition(
         "send_file",
         "把机器人文件库里的文件、代码沙箱产物（sandbox: 引用）或白名单域名的链接上传到当前群文件",
         {

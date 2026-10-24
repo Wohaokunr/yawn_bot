@@ -109,6 +109,8 @@ def test_napcat_template_targets_yawnbot_reverse_websocket() -> None:
     assert client["url"] == "ws://yawnbot:8080/onebot/v11/ws"
     assert client["token"] == ""
     assert client["reconnectInterval"] == EXPECTED_RECONNECT_INTERVAL_MS
+    # 群聊附件进沙箱靠 NapCat 接口直接回传 base64（两边不共享文件系统）
+    assert config["enableLocalFile2Url"] is True
 
 
 def test_napcat_renderer_injects_shared_token(tmp_path: Path) -> None:

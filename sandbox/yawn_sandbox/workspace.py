@@ -32,12 +32,19 @@ MAX_PATH_LENGTH = 512
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 _KIND_BY_SUFFIX: dict[str, str] = {
-    **dict.fromkeys((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"), "image"),
+    **dict.fromkeys(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".ico", ".heic"),
+        "image",
+    ),
     ".svg": "vector",
-    **dict.fromkeys((".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac"), "audio"),
+    # .amr/.silk 是 QQ 语音的原始编码，群聊附件入箱时可能原样存下来。
+    **dict.fromkeys(
+        (".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".amr", ".silk", ".wma"),
+        "audio",
+    ),
     **dict.fromkeys((".mid", ".midi"), "midi"),
-    **dict.fromkeys((".mp4", ".webm", ".mov"), "video"),
-    **dict.fromkeys((".csv", ".tsv", ".xlsx", ".xls", ".parquet"), "table"),
+    **dict.fromkeys((".mp4", ".webm", ".mov", ".mkv", ".avi", ".flv", ".m4v", ".3gp"), "video"),
+    **dict.fromkeys((".csv", ".tsv", ".xlsx", ".xls", ".xlsm", ".ods", ".parquet"), "table"),
     **dict.fromkeys(
         (
             ".txt",
@@ -52,11 +59,30 @@ _KIND_BY_SUFFIX: dict[str, str] = {
             ".html",
             ".xml",
             ".tex",
+            ".jsonl",
+            ".srt",
+            ".lrc",
+            ".ass",
+            ".vtt",
+            ".sh",
+            ".sql",
+            ".js",
+            ".ts",
+            ".css",
+            ".c",
+            ".h",
+            ".cpp",
+            ".java",
+            ".go",
+            ".rs",
+            ".ipynb",
+            ".cfg",
+            ".conf",
         ),
         "text",
     ),
-    **dict.fromkeys((".zip", ".tar", ".gz", ".7z"), "archive"),
-    ".pdf": "document",
+    **dict.fromkeys((".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"), "archive"),
+    **dict.fromkeys((".pdf", ".docx", ".doc", ".pptx", ".ppt", ".odt", ".odp", ".epub", ".rtf"), "document"),
 }
 TEXT_KINDS = frozenset({"text", "table", "vector"})
 
@@ -317,13 +343,17 @@ class WorkspaceStore:
             finally:
                 os.close(fd)
 
-    def write_file(self, workspace: Workspace, path: str, data: bytes) -> FileEntry:
+    def write_file(
+        self, workspace: Workspace, path: str, data: bytes, *, overwrite: bool = True
+    ) -> FileEntry:
         parts = split_relative_path(path)
         with self._walk(workspace, parts, create=True) as parent:
             with contextlib.suppress(FileNotFoundError):
                 info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode):
                     raise WorkspaceError("invalid_path", "目标已存在且不是普通文件")
+                if not overwrite:
+                    raise WorkspaceError("exists", "同名文件已存在")
                 os.unlink(parts[-1], dir_fd=parent)
             fd = os.open(
                 parts[-1],
@@ -357,6 +387,48 @@ class WorkspaceStore:
                 return _rmtree_at(parent, parts[-1])
             os.unlink(parts[-1], dir_fd=parent)
             return 1
+
+    def rename(
+        self, workspace: Workspace, source: str, target: str, *, overwrite: bool = False
+    ) -> FileEntry:
+        """在工作区内移动/改名一个文件；两端都逐级 ``O_NOFOLLOW``，不跨工作区。"""
+
+        source_parts = split_relative_path(source)
+        target_parts = split_relative_path(target)
+        if source_parts == target_parts:
+            raise WorkspaceError("invalid_path", "新旧路径相同")
+        with self._walk(workspace, source_parts) as source_parent:
+            try:
+                info = os.stat(source_parts[-1], dir_fd=source_parent, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise WorkspaceError("not_found", "文件不存在") from exc
+            self._check_owner(workspace, info)
+            with self._walk(workspace, target_parts, create=True) as target_parent:
+                try:
+                    existing = os.stat(
+                        target_parts[-1], dir_fd=target_parent, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    existing = None
+                if existing is not None:
+                    if not overwrite:
+                        raise WorkspaceError("exists", "目标位置已有同名文件")
+                    if not stat.S_ISREG(existing.st_mode):
+                        raise WorkspaceError("invalid_path", "目标已存在且不是普通文件")
+                os.rename(
+                    source_parts[-1],
+                    target_parts[-1],
+                    src_dir_fd=source_parent,
+                    dst_dir_fd=target_parent,
+                )
+        name = "/".join(target_parts)
+        return FileEntry(name, info.st_size, info.st_mtime, file_kind(name), file_mime(name))
+
+    def make_dir(self, workspace: Workspace, path: str) -> str:
+        parts = split_relative_path(path)
+        with self._walk(workspace, (*parts, "."), create=True):
+            pass
+        return "/".join(parts)
 
     def reset(self, workspace: Workspace) -> int:
         removed = 0
@@ -448,6 +520,26 @@ class WorkspaceStore:
             )
         items.sort(key=lambda item: (-item.mtime, item.path))
         return items[:limit], total
+
+    def dir_summary(
+        self, workspace: Workspace, *, scan_limit: int = 20000, limit: int = 300
+    ) -> list[dict[str, Any]]:
+        """每个目录（含所有上级）下的文件数与字节数，供管理页画目录树。"""
+
+        dirs: dict[str, list[int]] = {}
+        for relative, info in self.iter_files(workspace, limit=scan_limit):
+            parts = relative.split("/")[:-1]
+            for depth in range(1, len(parts) + 1):
+                key = "/".join(parts[:depth])
+                if key not in dirs and len(dirs) >= limit:
+                    continue
+                row = dirs.setdefault(key, [0, 0])
+                row[0] += 1
+                row[1] += info.st_size
+        return [
+            {"path": key, "files": value[0], "bytes": value[1]}
+            for key, value in sorted(dirs.items())
+        ]
 
     def usage(self, workspace: Workspace, *, scan_limit: int = 200000) -> dict[str, int]:
         size = 0
