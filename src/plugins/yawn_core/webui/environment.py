@@ -73,6 +73,7 @@ _TASK_THINKING_KEYS = {
     "AGENT_PROACTIVE_THINKING",
     "AGENT_MEMORY_THINKING",
     "AGENT_IMAGE_THINKING",
+    "AGENT_ROUTER_THINKING",
     "RPG_KP_THINKING",
     "RPG_NPC_ROUTER_THINKING",
     "RPG_NPC_THINKING",
@@ -84,6 +85,7 @@ _PROFILE_KEYS = {
     "AGENT_PROACTIVE_LLM_PROFILE",
     "AGENT_MEMORY_LLM_PROFILE",
     "AGENT_IMAGE_LLM_PROFILE",
+    "AGENT_ROUTER_LLM_PROFILE",
     "RPG_KP_LLM_PROFILE",
     "RPG_NPC_ROUTER_LLM_PROFILE",
     "RPG_NPC_LLM_PROFILE",
@@ -91,6 +93,19 @@ _PROFILE_KEYS = {
     "WW_SPEECH_LLM_PROFILE",
 }
 _MULTIMODAL_KEYS = {"AI_DEFAULT_MULTIMODAL", "AI_LIGHT_MULTIMODAL"}
+_REASONING_EFFORTS = ["auto", "none", "minimal", "low", "medium", "high", "xhigh"]
+_GLOBAL_EFFORT_KEYS = {
+    "AI_DEFAULT_REASONING_EFFORT",
+    "AI_LIGHT_REASONING_EFFORT",
+    "AI_VISION_REASONING_EFFORT",
+}
+_TASK_EFFORT_KEYS = {
+    "AGENT_DIALOGUE_REASONING_EFFORT",
+    "AGENT_PROACTIVE_REASONING_EFFORT",
+    "AGENT_MEMORY_REASONING_EFFORT",
+    "AGENT_IMAGE_REASONING_EFFORT",
+    "AGENT_ROUTER_REASONING_EFFORT",
+}
 _ENUM_OPTIONS: dict[str, list[str]] = {
     **{key: ["auto", "enabled", "disabled"] for key in _GLOBAL_THINKING_KEYS},
     **{
@@ -98,6 +113,8 @@ _ENUM_OPTIONS: dict[str, list[str]] = {
         for key in _TASK_THINKING_KEYS
     },
     **{key: ["default", "light", "vision"] for key in _PROFILE_KEYS},
+    **{key: list(_REASONING_EFFORTS) for key in _GLOBAL_EFFORT_KEYS},
+    **{key: ["inherit", *_REASONING_EFFORTS] for key in _TASK_EFFORT_KEYS},
     **{
         key: ["auto", "supported", "unsupported"]
         for key in _MULTIMODAL_KEYS

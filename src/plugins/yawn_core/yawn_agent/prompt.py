@@ -1,9 +1,11 @@
+# ruff: noqa: TC003, E501, C901
 """群聊 Agent 的稳定提示词前缀和动态上下文尾部。"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -12,7 +14,6 @@ from .context_history import EffectiveTurn, effective_turn_query
 from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
-from .tool_router import suggest_tool_families
 
 PROMPT_VERSION = "yawn-agent-v16"
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -54,13 +55,26 @@ _FORWARD_RULES = (
 )
 _DISCOVERY_RULES = (
     "工具采用渐进披露：首轮只有最小核心能力。凡需要读取群资料、历史消息、记忆、成员资料、"
-    "表情、文件或执行任何管理动作，都先调用 discover_tools 描述任务，不要猜工具名。"
+    "表情、文件、执行管理动作，或需要运行代码做计算/画图/处理数据（sandbox 包），"
+    "都先调用 discover_tools 描述任务，不要猜工具名，也不要心算后假装算过。"
     "如果要浏览能力目录，可用 query=`全部工具` 取得紧凑的 toolpacks；"
     "如果需要某一类完整能力，再把 toolpacks.name 作为 family 调用 "
     "discover_tools 加载整包。"
     "discover_tools 只负责发现并让下一轮注入 schema，不代表任何业务动作已经执行；"
     "只能调用下一轮实际出现在 schema 中的工具。"
     "发现结果里的 args 是参数清单、requires 是前置条件，照着准备参数再调用。"
+)
+_SANDBOX_RULES = (
+    "已装载代码沙箱（run_python）：需要精确计算、统计、换算、数据分析、画图或生成文件时"
+    "直接写代码运行，不要心算或编造数字。一次写完整、能直接运行的代码，把多个步骤合在"
+    "一次运行里；结果用 print 输出关键数字或几行摘要，大表格/长文本写进文件。"
+    "报错时看 result.error 的 exception/line/fix 修正后再跑，不要原样重试；"
+    "画好的图或生成的音频用 send_message 的 image/record 段发送，file 填 sandbox: 引用。"
+)
+_SHELL_RULES = (
+    "run_shell 是同一个工作区里的 bash 终端：看文件、找内容、数行数、解压整理用"
+    " ls/cat/head/grep/find/wc/jq 这类命令更快；每次从工作区根目录开始，"
+    "要在子目录里做事就在同一条命令里 cd 再执行。"
 )
 _NOTICE_RULES = (
     "发公告时 content 写成书面、完整的公告正文：说清事项、时间和要求，"
@@ -278,6 +292,10 @@ def build_tool_guidance(tools: list[dict[str, Any]]) -> str:
         parts.append(_FORWARD_RULES)
     if "discover_tools" in tool_names:
         parts.append(_DISCOVERY_RULES)
+    if "run_python" in tool_names:
+        parts.append(_SANDBOX_RULES)
+    if "run_shell" in tool_names:
+        parts.append(_SHELL_RULES)
     if "create_group_announcement" in tool_names:
         parts.append(_NOTICE_RULES)
     if "send_file" in tool_names or "list_agent_files" in tool_names:
@@ -371,6 +389,7 @@ def _realtime_extras(
     tools: list[dict[str, Any]],
     *,
     bot_role: str | None,
+    suggested_toolpacks: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     extras: dict[str, Any] = {}
     clock = _clock_payload(current_turn)
@@ -381,12 +400,10 @@ def _realtime_extras(
     tool_names = {
         str(item.get("function", {}).get("name", "")) for item in tools
     }
-    if "discover_tools" in tool_names and current_turn is not None:
-        families = suggest_tool_families(
-            str(_turn_payload(current_turn).get("content") or "")
-        )
-        if families:
-            extras["suggested_toolpacks"] = list(families)
+    # 工具路由模型建议、但本轮还没装载的工具包（例如预装时因权限被挡）；
+    # 只是提示模型可以去发现，不注入 schema。
+    if "discover_tools" in tool_names and suggested_toolpacks:
+        extras["suggested_toolpacks"] = list(dict.fromkeys(suggested_toolpacks))
     return extras
 
 
@@ -399,6 +416,7 @@ def build_messages(  # noqa: PLR0913
     current_turn: CurrentTurn | dict[str, Any] | None = None,
     media_inputs: list[dict[str, Any]] | None = None,
     bot_role: str | None = None,
+    suggested_toolpacks: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """返回消息和固定前缀指纹。
 
@@ -428,7 +446,12 @@ def build_messages(  # noqa: PLR0913
         user_content = [{"type": "text", "text": rendered_user_prompt}, *media_inputs]
     realtime = {
         **realtime,
-        **_realtime_extras(effective_current_turn, tools, bot_role=bot_role),
+        **_realtime_extras(
+            effective_current_turn,
+            tools,
+            bot_role=bot_role,
+            suggested_toolpacks=suggested_toolpacks,
+        ),
     }
     realtime_content = f"{_REALTIME_SYSTEM_PREFIX}{canonical_json(realtime)}"
     if has_model_media:

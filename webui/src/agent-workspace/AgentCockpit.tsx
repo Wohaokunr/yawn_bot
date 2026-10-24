@@ -25,6 +25,7 @@ const LLM_TASK_LABELS: Record<string, string> = {
   agent_proactive: "主动发言",
   agent_memory: "记忆整理",
   agent_image: "图片理解",
+  agent_router: "工具路由",
 };
 
 type Navigate = (tab: string, extra?: Record<string, string>) => void;
@@ -394,7 +395,7 @@ function LlmRouteCard({ data }: { data: AgentDiagnostics }): React.JSX.Element {
           <List.Item>
             <List.Item.Meta
               title={<Space><Text strong>{LLM_TASK_LABELS[route.task] ?? route.task}</Text><Tag>{route.profile}</Tag></Space>}
-              description={`${route.provider} · ${route.model || "未配置模型"} · thinking=${route.thinking}`}
+              description={`${route.provider} · ${route.model || "未配置模型"} · thinking=${route.thinking}${route.reasoningEffort && route.reasoningEffort !== "auto" ? ` · effort=${route.reasoningEffort}` : ""}`}
             />
             <Tag color={route.configured ? "green" : "red"}>{route.configured ? "可用" : "不可用"}</Tag>
           </List.Item>

@@ -406,10 +406,15 @@ def test_dialogue_tool_policy_keeps_core_bundle_available() -> None:
     schemas = tools.build_tool_schemas(caps, include_names=memory_bundle)
     assert _tool_names(schemas) == core
 
+    # 消息段只看结构信号（@ 了别人）和路由结论，不按“回复”“表情包”字面猜。
     segment_types = tools.select_dialogue_message_segment_types(
         "回复他一个无语表情包", has_target_mentions=True
     )
-    assert segment_types == frozenset({"text", "reply", "at", "reaction"})
+    assert segment_types == frozenset({"text", "at"})
+    planned = tools.select_dialogue_message_segment_types(
+        has_target_mentions=True, planned={"reaction"}
+    )
+    assert planned == frozenset({"text", "at", "reaction"})
     send_schema = tools.build_tool_schemas(
         caps,
         include_names={"send_message"},

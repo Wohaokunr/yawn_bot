@@ -202,6 +202,7 @@ def resolve_speech_scene(
         "mention",
         "explicit_call",
         "explicit_wakeup",
+        "name_call",
         "at",
         "to_me",
         "debug_replay",

@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import API_VERSION, RUNNER_VERSION
 from .config import RunnerConfig, load_config
-from .executor import RUN_STATUSES, Executor, RunRequest
+from .executor import LANGUAGES, RUN_STATUSES, Executor, RunRequest
 from .history import RunHistory
 from .limits import resolve_limits
 from .system import installed_packages, isolation_report, resource_report
@@ -108,6 +108,7 @@ class RunnerService:
             "ok": True,
             "version": RUNNER_VERSION,
             "api": API_VERSION,
+            "languages": list(LANGUAGES),
             "python": packages["python"],
             "packages": packages["highlights"],
             "package_count": packages["total"],
@@ -165,9 +166,13 @@ class RunnerService:
                 "not_isolated",
                 "沙箱容器的隔离检查未通过（仍有网络或无法降权），已拒绝执行",
             )
+        language = str(body.get("language") or "python")
+        if language not in LANGUAGES:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_language", "language 只能是 python 或 shell")
         request = RunRequest(
             workspace=workspace,
             code=code,
+            language=language,
             limits=resolve_limits(body.get("limits"), self.config.ceilings),
             meta=_clean_meta(body.get("meta")),
         )

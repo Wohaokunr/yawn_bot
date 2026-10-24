@@ -153,12 +153,17 @@ class SandboxClient:
         *,
         limits: dict[str, int] | None = None,
         meta: dict[str, Any] | None = None,
+        language: str = "python",
     ) -> dict[str, Any]:
         timeout = float((limits or {}).get("timeout_seconds") or 30) + _RUN_TIMEOUT_GRACE
+        body: dict[str, Any] = {"workspace": workspace, "code": code, "limits": limits or {}, "meta": meta or {}}
+        if language != "python":
+            # 旧 runner 不认识 language 字段；Python 运行不带它，保持向后兼容。
+            body["language"] = language
         return await self._request(
             "POST",
             "/run",
-            json_body={"workspace": workspace, "code": code, "limits": limits or {}, "meta": meta or {}},
+            json_body=body,
             timeout=timeout,
         )
 
@@ -265,6 +270,15 @@ def peek_health() -> tuple[dict[str, Any] | None, SandboxError | None, bool]:
     return _health_cache.value, _health_cache.error, bool(_health_cache.checked_at and _health_cache.fresh())
 
 
+def supports_language(health: dict[str, Any] | None, language: str) -> bool:
+    """runner 是否支持某种运行语言；旧 runner 的 health 没有 languages，只当作支持 Python。"""
+
+    if language == "python":
+        return True
+    languages = (health or {}).get("languages")
+    return isinstance(languages, list) and language in languages
+
+
 def reset_health_cache() -> None:
     _health_cache.remember(None, None)
     _health_cache.checked_at = 0.0
@@ -287,5 +301,6 @@ __all__ = [
     "peek_health",
     "reset_health_cache",
     "sandbox_endpoint",
+    "supports_language",
     "workspace_for_group",
 ]

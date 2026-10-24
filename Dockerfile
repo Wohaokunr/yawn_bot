@@ -53,10 +53,18 @@ WORKDIR /app
 # HTMLKit uses Fontconfig at runtime. The slim base image has no CJK font, so
 # visual cards such as /help would render Chinese text as missing glyphs.
 # WenQuanYi Micro Hei keeps the added image layer small while covering CJK.
+# file/jq/tree/zip/unzip/bc 给代码沙箱终端（run_shell）用；bash、grep、sed、
+# find、coreutils 基础镜像自带。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fontconfig \
         fonts-wqy-microhei \
+        file \
+        jq \
+        tree \
+        unzip \
+        zip \
+        bc \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 

@@ -27,7 +27,16 @@ _RECENT_WINDOW = 6
 _HIGH_BOT_TURNS = 2
 _MIN_BUSY_PARTICIPANTS = 2
 _EXPLICIT_TRIGGERS = frozenset(
-    {"mention", "explicit_call", "explicit_wakeup", "at", "to_me", "reply"}
+    {
+        "mention",
+        "explicit_call",
+        "explicit_wakeup",
+        "at",
+        "to_me",
+        "reply",
+        "name_call",
+        "conversation_intent",
+    }
 )
 
 

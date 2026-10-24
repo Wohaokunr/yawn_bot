@@ -31,6 +31,7 @@ from src.plugins.yawn_core.yawn_agent import (
     media,
     outbound,
     proactive,
+    progress_notice,
     reactions,
     tools,
 )
@@ -1014,7 +1015,11 @@ async def test_wait_notice_fires_once_on_slow_turn_without_touching_history(
     await asyncio.sleep(0.25)
 
     assert len(sends) == 1
-    assert sends[0]["text"] == dialogue._WAIT_NOTICE
+    # 测试 bot 没有 call_api，贴不了表情，于是退回一句按阶段轮换的话，
+    # 不再是每次都一样的固定文案。
+    assert sends[0]["text"] in {
+        line.format(self="我") for line in progress_notice._PHASE_LINES["thinking"]
+    }
     assert sends[0]["session"] is None
     assert persisted == []
     # 提示发过之后不再重复。

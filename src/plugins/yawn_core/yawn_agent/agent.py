@@ -1,4 +1,4 @@
-# ruff: noqa: E501,F401,I001,TID252,PLR0912,PLR0913,PLR0917,C901,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100
+# ruff: noqa: E501,F401,I001,TID252,PLR0912,PLR0913,PLR0917,C901,TRY003,TRY004,TRY300,TRY301,ASYNC240,UP035,PGH004,ANN001,ANN201,ANN202,ARG001,FBT001,FBT002,COM812,RUF001,RUF100,PLR2004,PLR0915
 """群聊 Agent 入口：消息监听、触发判定、落库与成员角色同步。
 
 对话主流程（工具循环、多模态降级）在 dialogue.py；配置的
@@ -28,6 +28,8 @@ from .context import now_beijing
 from .conversation import observe_member_message
 from .dialogue import contains_word, process_group_message
 from .emotion import update_emotion_state
+from .implicit_trigger import remember_engagement, resolve_implicit_trigger
+from .persona import persona_call_names
 from .log import dbg, dbg_exc
 from .media import prepare_media_inputs
 from .message_parser import (
@@ -52,6 +54,16 @@ def wake_words_for(bot: Bot) -> tuple[str, ...]:
     if nickname:
         return (*_EXPLICIT_WAKE_WORDS, f"@{nickname}")
     return _EXPLICIT_WAKE_WORDS
+
+
+def call_names_for(bot: Bot, config: Any) -> tuple[str, ...]:
+    """不带 @ 叫 Bot 的名字：人设名 + Bot 昵称。"""
+
+    nickname = str(getattr(bot, "nickname", "") or "").strip().casefold()
+    names = list(persona_call_names(config))
+    if len(nickname) >= 2 and nickname not in names:
+        names.append(nickname)
+    return tuple(names)
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +301,30 @@ async def handle_group_agent_message(
         explicit_wakeup_enabled=explicit_wakeup_enabled,
         normalized=normalized,
     )
+    group_id = int(event.group_id)
+    bot_id = int(bot.self_id)
+    actor_id = int(event.get_user_id())
+    if trigger.respond:
+        remember_engagement(bot_id, group_id, actor_id)
+    elif explicit_wakeup_enabled:
+        # 不 @ 时：叫了名字或刚找过 Bot 的人接着提需求，由无上下文的路由模型
+        # 判断是不是在请 Bot 做事；不做关键词匹配。
+        implicit_source, _plan = await resolve_implicit_trigger(
+            normalized,
+            bot_id=bot_id,
+            group_id=group_id,
+            user_id=actor_id,
+            call_names=call_names_for(bot, config),
+        )
+        if implicit_source is not None:
+            trigger = TriggerDecision(
+                respond=True,
+                source=implicit_source,
+                replied=trigger.replied,
+                wake_word=trigger.wake_word,
+            )
+            remember_engagement(bot_id, group_id, actor_id)
+            dbg(f"群 {group_id} 隐式触发: source={implicit_source} user={actor_id}")
     normalized.trigger_source = trigger.source
     normalized.trigger_signals = trigger.signals
     emotion_mutation = update_emotion_state(
@@ -306,8 +342,6 @@ async def handle_group_agent_message(
             f"directed={trigger.respond}"
         )
     await _persist_message(bot, event, normalized, _session)
-    group_id = int(event.group_id)
-    bot_id = int(bot.self_id)
     held_key = (bot_id, group_id, int(event.get_user_id()))
     item = (bot, event, normalized)
     continuation = False
@@ -400,6 +434,7 @@ async def handle_member_notice(
 __all__ = [
     "TriggerDecision",
     "agent_listener",
+    "call_names_for",
     "handle_group_agent_message",
     "member_notice",
     "process_group_message",

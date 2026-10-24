@@ -24,7 +24,7 @@ from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
-from ..llm import complete, get_client, resolve_llm_request
+from ..llm import NO_OUTPUT_LIMIT, complete, get_client, resolve_llm_request
 from . import media_store
 from .context import now_beijing
 from .log import dbg, dbg_exc
@@ -744,8 +744,9 @@ async def _model_summary(
             messages,  # pyright: ignore[reportArgumentType]
             task="agent_memory",
             response_format={"type": "json_object"},
-            max_tokens=1200,
-            timeout=30,
+            # 后台任务：不卡输出长度，推理深浅交给 AGENT_MEMORY_REASONING_EFFORT。
+            max_tokens=NO_OUTPUT_LIMIT,
+            timeout=90,
         )
     except Exception:  # noqa: BLE001
         logger.exception("Agent 记忆模型调用失败")

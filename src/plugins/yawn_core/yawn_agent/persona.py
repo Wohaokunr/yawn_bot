@@ -620,6 +620,33 @@ def effective_persona_card(config: GroupAgentConfig | None) -> PersonaCard:
     return resolve_persona_source(config).card
 
 
+def persona_self_name(config: GroupAgentConfig | None) -> str:
+    """生效人设的自称（如“本喵”）；进度提示等运行时短句用，失败返回空串。"""
+
+    try:
+        return effective_persona_card(config).self_name
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def persona_call_names(config: GroupAgentConfig | None) -> tuple[str, ...]:
+    """群友叫 Bot 时可能用的名字：生效人设的名字。太短或太泛的名字不算。"""
+
+    try:
+        name = effective_persona_card(config).name.strip()
+    except Exception:  # noqa: BLE001
+        return ()
+    if len(name) < 2 or name.casefold() in _GENERIC_CALL_NAMES:  # noqa: PLR2004
+        return ()
+    return (name.casefold(),)
+
+
+# 当作“叫名字”会误触发的泛称；人设名是这些时不作为唤醒词。
+_GENERIC_CALL_NAMES = frozenset(
+    {"助手", "机器人", "bot", "ai", "管理员", "群主", "大家", "老师", "同学", "猫娘", "朋友"}
+)
+
+
 # ---------------------------------------------------------------- 行为推导
 
 _SOCIAL_PROBABILITY_SCALE = (0.15, 0.45, 0.75, 0.9, 1.0)
@@ -919,10 +946,12 @@ __all__ = [
     "persona_behavior_draft",
     "persona_behavior_from_card",
     "persona_behavior_instruction",
+    "persona_call_names",
     "persona_card_summary",
     "persona_override_reason",
     "persona_preset_payloads",
     "persona_prompt_tokens",
+    "persona_self_name",
     "persona_source_label",
     "persona_style_levels",
     "persona_summary",

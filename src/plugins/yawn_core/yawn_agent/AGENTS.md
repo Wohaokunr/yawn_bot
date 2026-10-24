@@ -62,7 +62,9 @@
 
 - 工具 schema 是 LLM 的唯一能力边界；不要因为 OneBot 支持某 action 就自动暴露给模型。
 - 工具元数据统一声明在 `tool_registry.py`，零 AI 成本的本轮选择逻辑放在 `tool_router.py`，`tools.py` 负责执行、结果投影和二次权限校验；不要重新把注册、路由和执行混回一个文件。
-- 普通对话保留小型 core tool bundle，再按 reply/@/media 和自然语言意图扩展；不能为了省 token 把模型退化成大多数回合没有行动能力，也不能每轮无条件注入全量 OneBot schema。
+- 普通对话保留小型 core tool bundle，再由工具路由（`tool_planner.py` + `tool_preload.py`）按当前消息预装最多两个工具包；不能为了省 token 把模型退化成大多数回合没有行动能力，也不能每轮无条件注入全量 OneBot schema。
+- **禁止按关键词/字面猜用户意图**来决定开放哪些工具或消息段。需要判断时只能用 `agent_router` 任务的轻量模型，且只给它当前这一条消息和结构布尔信号（reply/media/@别人），不给群上下文、成员资料或记忆。路由失败一律退回渐进披露，不退回关键词。唯一例外是 critical 工具的显式动作词门槛，那是安全闸，不是意图猜测。
+- 预装必须逐包走 `_discover_tools_for_actor` 的同一套权限检查；路由说要、权限不给的工具不能出现。消息段只由结构信号、路由结论和已装载工具族（`discovery_segment_types`）决定。
 - OneBot 只读工具也必须先做 compact projection；禁止把原始 payload、URL 之外的协议凭证字段、本机路径或无关账户元数据直接回灌模型。
 - 工具权限分五级：`read`（只读）、`state_write`（Agent 内部状态写入）、`message_send`（当前回合用户可见发送）、`privileged`（可逆或较低风险的群管理/群文件操作）、`critical`（踢人、管理员变更、全员禁言、破坏性群文件操作）。低等级调用者不得在 schema 中看到更高等级工具，执行时仍必须二次校验。
 - `state_write` 必须有明确的当前群成员调用者；主动/后台任务不能借空 actor 身份写人物关系。
@@ -80,6 +82,14 @@
 - 工具结果只返回完成当前推理所需的最小数据，禁止把完整群成员原始 payload、文件路径或权限内部信息回灌模型。
 - `discover_tools` 至少要有 `query` 或 `family` 之一；只给 `family` 是合法调用（族名先过 `tool_router.normalize_tool_family`，中文别名如“公告”“群管”也要认），未知族名并入关键词搜索而不是报错。当前不能用的工具放进 `unavailable` 列表并给出原因（`actor_not_admin`、`bot_not_admin`、`not_allowlisted` 等），让模型能如实告诉成员“为什么不能做”；critical 工具无论如何都不出现在任何列表里。
 - 审计 `result` 的成功/跳过/失败/待确认分类只认 `audit_outcome.classify_audit_result`：主动发言的 `wait`/`close` 是跳过，不是失败；`delivery_unknown` 是待确认。WebUI 统计、筛选和前端 `agent-meta.auditOutcome` 必须与它同口径，新增 result 值时三处一起改。
+
+## 触发、进度与回合预算
+
+- 触发来源：`mention`、`reply`、`wake_word`，以及隐式的 `name_call`（不带 @ 叫了人设名/Bot 昵称）和 `conversation_intent`（3 分钟内明确找过 Bot 的成员接着提需求）。隐式触发放在 `implicit_trigger.py`，必须同时满足：`explicit_wakeup_enabled`、没有 @ 别人/回复别人、路由模型判定 `request=true`；`conversation_intent` 还要路由给出工具包。`AGENT_IMPLICIT_TRIGGER=off` 或 `AGENT_ROUTER_ENABLED=false` 时整段关闭。
+- 慢回合反馈放在 `progress_notice.py`：先给触发消息贴 👀，只有慢工具（沙箱）超过长阈值仍在跑才补一句；文字优先用模型自己的开场白，否则按阶段轮换人设化说法。禁止恢复每轮固定的“稍等”文案。`AGENT_AI_WAIT_NOTICE_MODE` 可选 reaction/text/off。
+- 所有 Agent 模型请求都不传 `max_tokens`（`llm.NO_OUTPUT_LIMIT`），输出长短和推理深浅由 `*_REASONING_EFFORT` 控制；不要再用参数截断模型输出。超时、轮次和回合时限按装载的工具放宽（`turn_budget.py`），中途发现沙箱时顺延轮次和时限。
+- 工具参数 JSON 解析失败要区分“被截断”（`truncated=true` + 拆短提示）和“写错了”；最后一轮前注入 `FINAL_ROUND_NOTE`，让模型收尾而不是继续调工具。
+- 队列 TTL 只算排队等待，处理耗时不计入，长回合不能因为超过 120 秒被丢弃回复。
 
 ## 发言清洗与声明核验
 
@@ -129,9 +139,12 @@
 
 ## 代码沙箱
 
-- `run_python` 等 sandbox 工具族只能经 `discover_tools` 装载，发现阶段用 `sandbox_policy.exposure_reason` 门控：沙箱关闭、群未开放、仅管理员、离线、隔离自检未通过时整族隐藏并给出原因，模型据此如实说明。
+- `run_python` / `run_shell` 等 sandbox 工具族只能经 `discover_tools` 或工具路由预装（同一套检查）装载，发现阶段用 `sandbox_policy.exposure_reason` 门控：沙箱关闭、群未开放、仅管理员、离线、隔离自检未通过时整族隐藏并给出原因，模型据此如实说明。
 - 代码只在独立的无网络 runner 容器里执行（`sandbox/`），Bot 进程**绝不** `exec`/`eval` 模型代码；runner 地址只认 `AGENT_SANDBOX_URL`，Token 与任何 Bot 密钥都不得传入沙箱环境。
 - 每个群一个工作区 `g<群号>`，工具只能访问当前群的工作区；产物以 `sandbox:<相对路径>` 引用交给 `send_message`（image/record）/`send_file`，由 `sandbox_refs.materialize` 取回到 `AGENT_FILE_ROOT/.sandbox_exports/` 并以 base64 发送，发送后删除；直接引用导出目录一律拒绝。
 - 次数先预扣后执行；runner 繁忙/拒绝/离线（代码根本没跑）必须退还。审计参数不记代码正文，只记 `code_chars`。
-- 没有本轮成功的 `run_python` 不得声称“代码跑完了/图画好了/曲子生成了”（`speech_claims.py` 的 `sandbox_run` 族）。
+- 没有本轮成功的 `run_python`/`run_shell` 不得声称“代码跑完了/图画好了/曲子生成了”（`speech_claims.py` 的 `sandbox_run` 族）。
+- `run_shell` 是同一工作区里的 bash（`--noprofile --norc -o pipefail`），runner 的 `/health.languages` 不含 `shell` 时（旧 runner）不暴露；Bot 只在 shell 请求里带 `language` 字段，保持对旧 runner 兼容。
+- 可靠性约定：同一回合第二次起的运行跳过冷却（仍计每日次数）；剩余冷却不超过 `MAX_COOLDOWN_WAIT` 时等待而不是报错；runner 忙/离线各自动重试一次；代码没跑成时退还次数**和冷却**。运行失败（`status != ok`）在审计里记为 error，`ToolCallLedger` 不缓存失败结果，`run_python`/`run_shell` 永不按参数去重。
+- 结果投影走 `sandbox_output.py`：失败给 `error` 摘要（异常、用户代码行号、那行代码、对症修法），traceback 只留用户帧，成功时滤掉字体/弃用警告，按行截断并说明怎么看全量。
 - 新增 sandbox 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_sandbox.py`。

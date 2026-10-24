@@ -1,4 +1,4 @@
-# ruff: noqa: C901,PLR0912,PLR2004,E501
+# ruff: noqa: C901, PLR0912, PLR2004, E501, PLR0911
 """Deterministic, zero-AI-cost routing from one dialogue turn to tool schemas."""
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from .tool_registry import (
 
 # discover → 查目标（如 find_group_member）→ 执行 → 可能的二次发现 → 最终回答。
 MAX_TOOL_ROUNDS = 5
+SANDBOX_TOOL_ROUNDS = 7
 
 # Natural QQ requests often insert scope words inside a registered keyword, e.g.
 # "设置群精华" vs "设置精华" or "删除这条群消息精华".  Keep registry
@@ -64,21 +65,6 @@ def _fuzzy_overlap(query: str, keyword: str) -> float:
     return len(keyword_grams & _bigrams(query)) / len(keyword_grams)
 
 
-# 意图提示：当前消息里出现这些词时，在易变层提示模型优先发现对应工具包。
-# 只是提示，不注入 schema，也绝不涉及 critical 工具。
-_FAMILY_HINT_WORDS: dict[str, tuple[str, ...]] = {
-    "notice": ("公告",),
-    "file": ("文件", "群文件", "资料包", "文件夹"),
-    "moderation": ("禁言", "解禁", "撤回", "闭嘴"),
-    "member": ("管理员", "群主", "群名片", "头衔", "谁是"),
-    "essence": ("精华", "加精"),
-    "history": ("聊天记录", "刚才说", "说了什么", "之前的消息"),
-    "memory": ("记得", "还记不记得", "上次", "记住我", "别忘了", "忘掉我", "别记"),
-    "reaction": ("表情包",),
-    "sandbox": ("代码", "python", "画个图", "画图", "绘图", "图表", "算一下", "计算一下", "统计一下", "数据分析", "excel", "作曲", "旋律", "二维码", "词云"),
-}
-
-
 # 模型常把工具包写成中文名、英文复数或 OneBot 风格的叫法；这里统一归一到注册表里
 # 的 family 标识。未知名字返回 None，由调用方退回按任务搜索，而不是过滤成空结果。
 _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
@@ -113,20 +99,6 @@ def normalize_tool_family(value: str | None) -> str | None:
     if folded.endswith("s") and folded[:-1] in _FAMILY_LOOKUP:
         return _FAMILY_LOOKUP[folded[:-1]]
     return None
-
-
-def suggest_tool_families(text: str | None, *, limit: int = 3) -> tuple[str, ...]:
-    """零成本按当前消息意图给出建议发现的工具包（最多 ``limit`` 个）。"""
-
-    normalized = str(text or "").casefold()
-    if not normalized.strip():
-        return ()
-    families = [
-        family
-        for family, words in _FAMILY_HINT_WORDS.items()
-        if any(word in normalized for word in words)
-    ]
-    return tuple(families[:limit])
 
 
 def select_dialogue_tool_names(
@@ -240,75 +212,51 @@ def rank_discoverable_tools(
     return [definition for _score, _name, definition in scored[:limit]]
 
 
-# 让沙箱产物能直接发：说“画个图/作曲”时带上 image/record 段。
-_CHART_HINTS = ("图表", "画图", "画个图", "绘图", "可视化", "折线图", "柱状图", "饼图")
-_MUSIC_HINTS = ("作曲", "生成音乐", "旋律", "写首歌")
 SANDBOX_SEGMENT_TYPES = frozenset({"image", "record"})
+# 发现/预装某个工具包后，本轮最终回复需要能用的消息段。
+_FAMILY_SEGMENT_TYPES: dict[str, frozenset[str]] = {
+    "sandbox": SANDBOX_SEGMENT_TYPES,
+    "reaction": frozenset({"reaction", "face"}),
+}
 
 
 def discovery_segment_types(tool_names: frozenset[str] | set[str]) -> frozenset[str]:
-    """发现了沙箱工具时，本轮额外开放的消息段（用来发 sandbox: 产物）。"""
+    """装载了这些工具时，本轮额外开放的消息段（如沙箱产物要用 image/record 发）。"""
 
-    if any(TOOL_BY_NAME[name].family == "sandbox" for name in tool_names if name in TOOL_BY_NAME):
-        return SANDBOX_SEGMENT_TYPES
-    return frozenset()
+    selected: set[str] = set()
+    for name in tool_names:
+        definition = TOOL_BY_NAME.get(name)
+        if definition is not None:
+            selected |= _FAMILY_SEGMENT_TYPES.get(definition.family, frozenset())
+    return frozenset(selected)
 
 
 def select_dialogue_message_segment_types(
-    text: str | None,
+    text: str | None = None,
     *,
     has_target_mentions: bool = False,
     has_reply: bool = False,
     has_media: bool = False,
+    planned: frozenset[str] | set[str] | None = None,
 ) -> frozenset[str]:
-    """Select the smallest outbound segment vocabulary useful this turn."""
+    """本轮 send_message 可用的最小消息段集合。
 
-    normalized = str(text or "").strip().casefold()
+    只看结构信号（回复、@ 了别人、带附件）和工具路由模型给出的 ``planned``；
+    不再按关键词猜用户想要什么段。``text`` 参数保留给旧调用方，不参与判断。
+    """
+
+    del text
     selected: set[str] = {"text"}
-    if has_reply or any(
-        hint in normalized for hint in ("回复", "引用", "回他", "回她", "回一下", "回这条")
-    ):
-        selected.add("reply")
     if has_reply:
-        # P6: reply threads may naturally use one reaction instead of a
-        # redundant acknowledgement sentence. Actual reaction_id still has to
-        # come from search_reactions and outbound validation remains unchanged.
-        selected.add("reaction")
-    if has_target_mentions or any(
-        hint in normalized
-        for hint in ("艾特", "提醒一下", "提醒他", "提醒她", "叫他", "叫她", "叫一下", "cue", "喊他", "喊她", "@一下")
-    ):
+        # 回复线程里一个表情回应往往比一句“收到”更自然；reaction_id 仍须来自
+        # search_reactions，发送时 outbound 照常校验。
+        selected.update({"reply", "reaction"})
+    if has_target_mentions:
         selected.add("at")
-    if "表情包" in normalized or "reaction" in normalized or any(
-        hint in normalized for hint in ("无语", "吃瓜", "震惊")
-    ):
-        selected.add("reaction")
-    elif "表情" in normalized:
-        selected.add("face")
-    if any(hint in normalized for hint in ("图片", "发图", *_CHART_HINTS)):
+    if has_media:
         selected.add("image")
-    if any(hint in normalized for hint in ("语音", *_MUSIC_HINTS)):
-        selected.add("record")
-    if "视频" in normalized:
-        selected.add("video")
-    if "骰子" in normalized:
-        selected.add("dice")
-    if "猜拳" in normalized:
-        selected.add("rps")
-    if "戳一戳" in normalized or "poke" in normalized:
-        selected.add("poke")
-    if "分享" in normalized or "链接" in normalized:
-        selected.add("share")
-    if "名片" in normalized:
-        selected.add("contact")
-    if "位置" in normalized or "定位" in normalized:
-        selected.add("location")
-    if "音乐" in normalized or "歌曲" in normalized:
-        selected.add("music")
-    if has_media and any(
-        hint in normalized for hint in ("原图", "这张图", "这图片", "发回来")
-    ):
-        selected.add("image")
+    if planned:
+        selected.update(planned)
     return frozenset(selected)
 
 
@@ -318,6 +266,11 @@ def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
     names = frozenset(tool_names)
     if not names:
         return 1
+    if any(
+        TOOL_BY_NAME[name].family == "sandbox" for name in names if name in TOOL_BY_NAME
+    ):
+        # 写代码 → 运行 → 报错修正 → 再运行 → 发图/作答，比普通工具多要几轮。
+        return SANDBOX_TOOL_ROUNDS
     if names <= MESSAGE_SEND_TOOLS:
         return 2
     if "discover_tools" in names:
@@ -334,6 +287,7 @@ def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
 __all__ = [
     "MAX_TOOL_ROUNDS",
     "SANDBOX_SEGMENT_TYPES",
+    "SANDBOX_TOOL_ROUNDS",
     "dialogue_tool_round_limit",
     "discovery_segment_types",
     "has_explicit_critical_intent",
@@ -342,5 +296,4 @@ __all__ = [
     "select_critical_tool_names",
     "select_dialogue_message_segment_types",
     "select_dialogue_tool_names",
-    "suggest_tool_families",
 ]

@@ -768,6 +768,25 @@ TOOL_DEFINITIONS = (
         prerequisites="预装 numpy/pandas/scipy/matplotlib/seaborn/sympy/networkx/pillow/openpyxl/mido/jieba/wordcloud/qrcode 和 yawnkit（music/charts/files）；不能联网、不能 pip install",
     ),
     ToolDefinition(
+        "run_shell",
+        "在本群的代码沙箱里用 bash 运行终端命令（与 run_python 共用同一个工作区，无网络）；适合 ls/cat/head/tail/grep/find/wc/sort/uniq/jq/unzip 查看和整理文件，也能 python3 xxx.py 跑脚本。返回输出和新产物的 sandbox: 引用",
+        {
+            "command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 20000,
+                "description": "bash 命令或多行脚本；每次都从工作区根目录开始（cd 只在本次有效），开了 pipefail",
+            },
+            "purpose": {"type": "string", "maxLength": 80, "description": "一句话说明这条命令要做什么，会记进运行历史"},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 90, "description": "省略用管理员设置的默认时限"},
+        },
+        required=("command",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="sandbox",
+        keywords=("终端", "命令行", "shell", "bash", "grep", "cat", "ls", "查找文件", "解压", "看看文件", "统计行数", "jq"),
+        prerequisites="和 run_python 同一个群工作区；不能联网、不能 pip/apt 安装；没有 sudo",
+    ),
+    ToolDefinition(
         "list_sandbox_files",
         "列出本群代码沙箱工作区里的文件（含之前运行生成的产物）",
         {

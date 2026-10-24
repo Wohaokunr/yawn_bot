@@ -6,7 +6,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..data_models.group_agent_config import GroupAgentConfig
-from ..llm import complete, resolve_llm_request, vision_model_configured
+from ..llm import (
+    NO_OUTPUT_LIMIT,
+    complete,
+    resolve_llm_request,
+    vision_model_configured,
+)
 from .log import dbg
 from .media import MediaInput, build_media_content_blocks, store_caption
 from .message_parser import NormalizedMessage
@@ -48,8 +53,9 @@ async def _caption_single_image(
     result = await complete(  # pyright: ignore[reportArgumentType]
         messages,  # pyright: ignore[reportArgumentType]
         task="agent_image",
-        max_tokens=500,
-        timeout=30,
+        # 不卡输出长度，推理深浅交给 AGENT_IMAGE_REASONING_EFFORT。
+        max_tokens=NO_OUTPUT_LIMIT,
+        timeout=45,
     )  # pyright: ignore[reportArgumentType]
     return (result or "").strip() or None
 

@@ -730,11 +730,13 @@ async def test_discovery_returns_args_and_prerequisites(monkeypatch: pytest.Monk
     assert notice["requires"]
 
 
-def test_fuzzy_and_colloquial_routing() -> None:
-    assert router.suggest_tool_families("帮我把这个公告置顶，再发个文件") == ("notice", "file")
-    assert router.suggest_tool_families("") == ()
-    assert "at" in router.select_dialogue_message_segment_types("提醒一下他交作业")
-    assert "reply" in router.select_dialogue_message_segment_types("回他一下")
+def test_segment_routing_is_structural_not_keyword_based() -> None:
+    # 不再按“提醒一下他”“回他一下”这类字面猜消息段：只看结构信号和路由模型结论。
+    assert not hasattr(router, "suggest_tool_families")
+    assert router.select_dialogue_message_segment_types("提醒一下他交作业") == {"text"}
+    assert "at" in router.select_dialogue_message_segment_types(has_target_mentions=True)
+    assert {"reply", "reaction"} <= router.select_dialogue_message_segment_types(has_reply=True)
+    assert "image" in router.select_dialogue_message_segment_types(planned={"image"})
     assert router.MAX_TOOL_ROUNDS == 5
 
 
@@ -839,6 +841,7 @@ def test_prompt_realtime_layer_carries_clock_role_and_toolpack_hint() -> None:
         user_prompt="",
         current_turn=turn,
         bot_role="admin",
+        suggested_toolpacks=("notice",),
     )
     _plain, plain_fingerprint = prompt.build_messages(
         persona=persona, tools=[], context={"group_id": 1}, user_prompt="", current_turn=turn
