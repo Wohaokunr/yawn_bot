@@ -22,6 +22,10 @@ YawnBot 按**单实例**设计（SQLite + 进程内对局状态），边界与�
 | `production/` | 生产发布：`deploy-release.sh`、forced-command SSH 入口 `deploy-ssh-command`、`sync-control-plane.sh`、部署记录 |
 | `host/` | OpenCloudOS 9 主机分阶段初始化与 SSH 加固脚本，见 [host/README.md](host/README.md) |
 
+## 代码沙箱服务
+
+三个 Compose 都带 `sandbox` 服务：与 bot 同一镜像，入口 `python3 -s -m yawn_sandbox serve`，`network_mode: none`、只读根、`init: true`、`cap_drop: ALL` 后只加回降权所需的 SETUID/SETGID/CHOWN/FOWNER/DAC_OVERRIDE/KILL，`no-new-privileges`，内存/CPU/pids 上限。bot 与它只共享 `sandbox-run` 卷里的 Unix socket（`/run/yawnbot-sandbox/runner.sock`），**不要**给它开端口或网络、不要挂 `.env`。生产发布脚本先在旧 bot 运行时拉起沙箱并等健康，失败只告警不阻断发布。
+
 ## 规则
 
 - `production/` 与 `.github/workflows/release.yml`、`deploy-existing.yml` 属于高风险路径：PR 模板要求说明为什么必须改，并保证不可变 digest、服务器本地 secrets、SQLite 部署前备份、forced-command SSH 权限边界都不被削弱。

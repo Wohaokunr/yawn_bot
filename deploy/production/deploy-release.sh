@@ -341,6 +341,26 @@ wait_for_browser() {
     return 1
 }
 
+wait_for_sandbox() {
+    sandbox_container=$(compose ps -q sandbox)
+    [ -n "$sandbox_container" ] || return 1
+    for _ in $(seq 1 20); do
+        sandbox_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$sandbox_container" 2>/dev/null || true)
+        case "$sandbox_health" in
+            healthy)
+                echo "[deploy:sandbox] healthy"
+                return 0
+                ;;
+            exited|dead)
+                break
+                ;;
+        esac
+        sleep 2
+    done
+    compose logs --tail 50 sandbox >&2 || true
+    return 1
+}
+
 container=$(docker ps -aq --filter label=com.docker.compose.project=yawnbot \
     --filter label=com.docker.compose.service=yawnbot | head -n 1)
 playwright_container=$(docker ps -aq --filter label=com.docker.compose.project=yawnbot \
@@ -431,6 +451,17 @@ if [ -n "$browser_image" ]; then
     wait_for_browser || exit 7
 else
     compose --profile fanqie-browser stop playwright >/dev/null 2>&1 || true
+fi
+
+# Agent 代码沙箱：同一镜像的独立无网络容器，工作区在 $root/sandbox。
+# 它失败只告警、不阻断 Bot 发布——Agent 会如实告诉群成员沙箱暂时不可用。
+mkdir -p "$root/sandbox"
+chmod 711 "$root/sandbox" 2>/dev/null || true
+echo "[deploy:sandbox] start"
+if compose up -d --no-deps sandbox && wait_for_sandbox; then
+    echo "[deploy:sandbox] success"
+else
+    echo "[deploy:sandbox] warning: code sandbox is not healthy; the bot will report it as offline" >&2
 fi
 
 if [ -n "$container" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container")" = "true" ]; then

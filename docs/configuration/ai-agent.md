@@ -113,6 +113,20 @@ AGENT_DEBUG_LOG=false
 - exe、bat、ps1、vbs、apk、jar、sh 等可执行/脚本类文件一律拒绝发送。
 - 远程链接仍然只允许 `AGENT_FILE_ALLOWED_HOSTS` 里的域名；重定向会逐跳重新校验白名单，跳出白名单的下载直接拒绝。
 
+## Agent 代码沙箱
+
+Agent 可以在一个独立、无网络的 Python 容器里运行代码：数据分析、画图、生成表格/文本文件、作曲（WAV/MIDI）。部署和隔离细节见 [sandbox/README.md](../../sandbox/README.md)。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AGENT_SANDBOX_URL` | `unix:///run/yawnbot-sandbox/runner.sock` | runner 地址；Compose 已经把 socket 卷共享给 bot。置空即关闭沙箱 |
+| `AGENT_SANDBOX_TOKEN` | 空 | 只有把 runner 暴露成 TCP 时才需要；Unix socket 部署留空 |
+
+- 开放范围、仅管理员、成员/群每日次数、冷却、超时、内存、工作区配额、输出长度都在 WebUI「代码沙箱 → 策略与限额」里改，存在 `data/agent_sandbox/settings.json`，不需要数据库迁移、也不需要重启。
+- 工具族 `sandbox`（`run_python`、`list_sandbox_files`、`read_sandbox_file`、`delete_sandbox_file`、`sandbox_info`）通过 `discover_tools` 装载；沙箱离线、隔离自检失败或本群未开放时整族隐藏，模型会如实说明。
+- 每个群一个持久工作区。生成的图片/音频用 `sandbox:文件名` 引用，由 `send_message` 的 image/record 段发送；其他文件用 `send_file` 上传群文件。
+- 运行历史默认保留 14 天，WebUI 可以手动清理；运行记录里有完整代码，Agent 审计只记代码长度。
+
 ## Agent 群管理工具
 
 特权工具都要同时满足：调用者实时是群主/管理员、在 WebUI「允许的特权工具」里勾选、当日特权额度还有剩余。执行顺序固定为参数校验 → 权限校验 → 预扣额度 → 执行 → 审计，失败自动退还额度；同一轮对话里重复的同一操作只执行一次，每轮最多 3 次管理操作。

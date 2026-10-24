@@ -1,6 +1,7 @@
 import {
   AuditOutlined,
   BookOutlined,
+  CodeOutlined,
   CrownOutlined,
   DashboardOutlined,
   EyeOutlined,
@@ -24,6 +25,7 @@ export interface NavEntry {
 
 export const ADMIN_NAV: NavEntry[] = [
   { key: "/overview", label: "运行概览", icon: <DashboardOutlined />, group: "运行监控", description: "Bot、AI 与任务的健康状况", keywords: "overview dashboard 首页 状态" },
+  { key: "/sandbox", label: "代码沙箱", icon: <CodeOutlined />, group: "运行监控", description: "Agent 的 Python 虚拟机：运行记录、工作区与限额", keywords: "sandbox python 虚拟机 代码 运行 vm" },
   { key: "/audits", label: "操作审计", icon: <AuditOutlined />, group: "运行监控", description: "管理台写操作记录", keywords: "audit 日志" },
   { key: "/groups", label: "群组", icon: <TeamOutlined />, group: "群组与用户", description: "按群管理 Agent 与功能权限", keywords: "group agent 权限 群" },
   { key: "/users", label: "全局用户", icon: <UserOutlined />, group: "群组与用户", description: "跨群的用户功能覆盖", keywords: "user 用户 好感" },

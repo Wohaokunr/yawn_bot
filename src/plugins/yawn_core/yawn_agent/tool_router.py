@@ -75,6 +75,7 @@ _FAMILY_HINT_WORDS: dict[str, tuple[str, ...]] = {
     "history": ("聊天记录", "刚才说", "说了什么", "之前的消息"),
     "memory": ("记得", "还记不记得", "上次", "记住我", "别忘了", "忘掉我", "别记"),
     "reaction": ("表情包",),
+    "sandbox": ("代码", "python", "画个图", "画图", "绘图", "图表", "算一下", "计算一下", "统计一下", "数据分析", "excel", "作曲", "旋律", "二维码", "词云"),
 }
 
 
@@ -92,6 +93,7 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "reaction": ("表情", "表情包", "reactions", "sticker", "stickers", "emoji"),
     "group": ("群", "群资料", "群信息", "group_info", "honor"),
     "message": ("消息", "发消息", "转发", "send", "forward"),
+    "sandbox": ("沙箱", "代码沙箱", "虚拟机", "代码", "python", "编程", "计算", "画图", "绘图", "图表", "数据分析", "作曲", "code", "run_code", "python_sandbox", "vm"),
 }
 _FAMILY_LOOKUP: dict[str, str] = {
     alias.casefold(): family
@@ -238,6 +240,20 @@ def rank_discoverable_tools(
     return [definition for _score, _name, definition in scored[:limit]]
 
 
+# 让沙箱产物能直接发：说“画个图/作曲”时带上 image/record 段。
+_CHART_HINTS = ("图表", "画图", "画个图", "绘图", "可视化", "折线图", "柱状图", "饼图")
+_MUSIC_HINTS = ("作曲", "生成音乐", "旋律", "写首歌")
+SANDBOX_SEGMENT_TYPES = frozenset({"image", "record"})
+
+
+def discovery_segment_types(tool_names: frozenset[str] | set[str]) -> frozenset[str]:
+    """发现了沙箱工具时，本轮额外开放的消息段（用来发 sandbox: 产物）。"""
+
+    if any(TOOL_BY_NAME[name].family == "sandbox" for name in tool_names if name in TOOL_BY_NAME):
+        return SANDBOX_SEGMENT_TYPES
+    return frozenset()
+
+
 def select_dialogue_message_segment_types(
     text: str | None,
     *,
@@ -269,9 +285,9 @@ def select_dialogue_message_segment_types(
         selected.add("reaction")
     elif "表情" in normalized:
         selected.add("face")
-    if "图片" in normalized or "发图" in normalized:
+    if any(hint in normalized for hint in ("图片", "发图", *_CHART_HINTS)):
         selected.add("image")
-    if "语音" in normalized:
+    if any(hint in normalized for hint in ("语音", *_MUSIC_HINTS)):
         selected.add("record")
     if "视频" in normalized:
         selected.add("video")
@@ -317,7 +333,9 @@ def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
 
 __all__ = [
     "MAX_TOOL_ROUNDS",
+    "SANDBOX_SEGMENT_TYPES",
     "dialogue_tool_round_limit",
+    "discovery_segment_types",
     "has_explicit_critical_intent",
     "normalize_tool_family",
     "rank_discoverable_tools",

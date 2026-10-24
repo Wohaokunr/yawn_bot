@@ -29,7 +29,8 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 上下文 | `context.py`、`context_loader.py`、`context_repository.py`、`context_history.py`、`context_budget.py`、`topic_state.py`、`emotion.py` |
 | 提示词与人设 | `prompt.py`、`persona.py`（PersonaCard、模板、解析/编译/行为推导）、`persona_library.py`（人设库与全局人设缓存）、`reactions.py` |
 | 审计 | `audit_outcome.py`（审计 result → 成功/跳过/失败/待确认） |
-| 工具 | `tool_registry.py`（schema/权限/白名单别名）、`tool_router.py`（选择/发现打分/意图提示）、`tools.py`（执行与二次校验）、`tool_args.py`（参数校验、错误分类、回合账本）、`tool_execution.py`、`tool_support.py`、`tool_result_speech.py`、`tool_handlers/`（按族：`admin`、`files`、`history`、`member`、`memory`、`message`、`notice`） |
+| 工具 | `tool_registry.py`（schema/权限/白名单别名）、`tool_router.py`（选择/发现打分/意图提示）、`tools.py`（执行与二次校验）、`tool_args.py`（参数校验、错误分类、回合账本）、`tool_execution.py`、`tool_support.py`、`tool_result_speech.py`、`tool_handlers/`（按族：`admin`、`files`、`history`、`member`、`memory`、`message`、`notice`、`sandbox`） |
+| 代码沙箱 | `sandbox_client.py`（runner HTTP-over-Unix-socket 客户端、15 秒健康缓存）、`sandbox_policy.py`（开放范围/仅管理员/冷却/每日次数，JSON 落在 `data/agent_sandbox/`）、`sandbox_refs.py`（`sandbox:<路径>` 引用取回与清理）；runner 本体在仓库根 [sandbox/](../../../../sandbox/README.md) |
 | 发言 | `speech_format.py`（QQ 纯文本清洗）、`speech_claims.py`（完成声明核验）、`speech.py`、`speech_act.py`、`speech_policy.py`、`speech_native.py`、`speech_quality.py`、`speech_scorecard.py`、`speech_runtime.py`、`speech_finalize.py` |
 | 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限）、`safe_download.py`（出站下载白名单与重定向校验） |
 | 主动与短会话 | `proactive.py`、`proactive_policy.py`、`idle_warmup.py`（冷场暖场门槛/退避/骰子）、`conversation.py` |
@@ -44,4 +45,5 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 - **LLM 客户端**：[../llm.py](../CLAUDE.md)（模型路由、并发上限）。
 - **WebUI**：后端 [../webui/agent*.py](../webui/CLAUDE.md)；前端 [webui/src/agent-*](../../../../webui/CLAUDE.md)（cockpit、配置面板、调试轨迹）。
 - **测试**：[tests/test_agent_*.py](../../../../tests/CLAUDE.md)、`tests/test_group_agent.py`；各改动该跑哪些见 AGENTS.md「质量门槛」。
+- **代码沙箱**：runner 与镜像依赖在 [sandbox/](../../../../sandbox/README.md)，WebUI 管理页后端 `../webui/sandbox.py`、前端 `webui/src/sandbox/`。
 - **设计文档**：[docs/agent-speech-*.md](../../../../docs/CLAUDE.md)；配置项见 [docs/configuration/ai-agent.md](../../../../docs/configuration/ai-agent.md)。
