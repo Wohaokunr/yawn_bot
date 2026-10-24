@@ -278,3 +278,76 @@ async def test_agent_tool_usage_groups_by_tool_and_day() -> None:
     assert result["daily"][-2]["failed"] == 1
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_diagnostics_reports_paused_idle_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warmup = importlib.import_module("src.plugins.yawn_core.yawn_agent.idle_warmup")
+    config = SimpleNamespace(
+        enabled=True,
+        reply_trigger_enabled=True,
+        explicit_wakeup_enabled=True,
+        proactive_enabled=True,
+        proactive_active_enabled=True,
+        short_conversation_enabled=False,
+        daily_limit=30,
+        cooldown_minutes=8,
+        idle_threshold_minutes=15,
+        last_agent_at=None,
+        last_proactive_at=None,
+        active_topic=None,
+        media_cache_enabled=False,
+        proactive_count=0,
+        proactive_day=None,
+        tool_day=None,
+        tool_allowlist=[],
+    )
+
+    class FakeSession:
+        async def get(self, _model: object, _group_id: int) -> object:
+            return config
+
+    async def fake_runtime_enabled(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def fake_memory_status(_session: object, group_id: int) -> dict[str, object]:
+        return {"rebuildRequired": False, "consecutiveFailures": 0}
+
+    async def fake_warmup_state(_session: object, _group_id: int, now: datetime) -> object:
+        return warmup.WarmupState(
+            last_human_at=now - timedelta(hours=2),
+            last_bot_at=now - timedelta(hours=1),
+            unanswered=2,
+            warmups_today=2,
+        )
+
+    routes = [
+        {"task": task, "configured": True}
+        for task in ("agent_dialogue", "agent_proactive", "agent_memory", "agent_image")
+    ]
+    monkeypatch.setattr(service, "agent_runtime_enabled", fake_runtime_enabled)
+    monkeypatch.setattr(service, "agent_memory_status", fake_memory_status)
+    monkeypatch.setattr(service, "_warmup_state", fake_warmup_state)
+    monkeypatch.setattr(
+        service,
+        "_llm_runtime_status",
+        lambda: {"routes": routes, "unconfiguredProviders": []},
+    )
+    monkeypatch.setattr(service, "get_bots", lambda: {"9": object()})
+    monkeypatch.setattr(
+        service, "current_conversation", lambda _bot_id, _group_id: None
+    )
+
+    result = await service.agent_diagnostics(FakeSession(), 100)
+
+    status = result["effective"]["warmup"]
+    assert status["unanswered"] == 2
+    assert status["paused"] is True
+    assert status["gate"]["code"] == "unanswered_cap"
+    assert status["dailyCap"] == warmup.WARMUP_DAILY_CAP
+    codes = {item["code"] for item in result["blockers"]}
+    assert "warmup_paused" in codes
+    assert result["pipeline"]["warmupMaxUnanswered"] == warmup.WARMUP_MAX_UNANSWERED
+    assert result["pipeline"]["warmupQuietHours"] == list(warmup.WARMUP_QUIET_HOURS)

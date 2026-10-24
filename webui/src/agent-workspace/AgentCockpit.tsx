@@ -243,6 +243,28 @@ function HealthCard({
   );
 }
 
+function warmupLines(
+  warmup: AgentDiagnostics["effective"]["warmup"],
+  pipeline: AgentDiagnostics["pipeline"],
+): string[] {
+  const lines: string[] = [];
+  if (pipeline?.warmupMaxUnanswered) {
+    const quiet = pipeline.warmupQuietHours;
+    lines.push(
+      `连续 ${pipeline.warmupMaxUnanswered} 条没人接就停到有人说话`
+        + (quiet ? ` · ${quiet[0]}–${quiet[1]} 点不暖场` : ""),
+    );
+  }
+  if (warmup) {
+    const state = warmup.unanswered > 0 ? `本段冷场已说 ${warmup.unanswered} 条没人接 · ` : "";
+    lines.push(`${state}今日暖场 ${warmup.warmupsToday}/${warmup.dailyCap}`);
+    if (!warmup.gate.allowed) {
+      lines.push(`暖场门槛：${warmup.gate.reason}`);
+    }
+  }
+  return lines;
+}
+
 function RhythmCard({ data }: { data: AgentDiagnostics }): React.JSX.Element {
   const effective = data.effective;
   const pipeline = data.pipeline;
@@ -278,6 +300,7 @@ function RhythmCard({ data }: { data: AgentDiagnostics }): React.JSX.Element {
           : ["Bot 回复后在同一话题里继续接话"])}
         {stage("主动", effective.proactiveEnabled, [
           `冷场 ${effective.idleThresholdMinutes ?? "—"} 分钟后以 ${percent(effective.proactiveProbability ?? 0)} 概率暖场`,
+          ...warmupLines(effective.warmup, pipeline),
           effective.proactiveActiveEnabled
             ? `热闹时 ${effective.proactiveActiveWindowMinutes ?? "—"} 分钟窗口内 ${percent(effective.proactiveActiveProbability ?? 0)} 概率插话`
             : "热闹插话关闭",

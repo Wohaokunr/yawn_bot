@@ -8,8 +8,15 @@ from typing import Any
 
 from sqlalchemy import case, exists, func, select
 
+from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.group_agent_message import GroupAgentMessage
+from .idle_warmup import WARMUP_SENT_RESULTS, WARMUP_SKIP_ACTIONS, WarmupState
+
+# 一段沉默里最多回看多少条主动审计；暖场被门槛压得很稀，远够用。
+_WARMUP_AUDIT_SCAN_LIMIT = 60
+_WARMUP_TODAY_SCAN_LIMIT = 200
+_WARMUP_TOPIC_LIMIT = 3
 
 
 async def activity_window_counts(
@@ -122,4 +129,92 @@ async def activity_window_counts(
     }
 
 
-__all__ = ["activity_window_counts"]
+def _audit_scene(row: Any) -> tuple[str, str]:
+    arguments = row.arguments if isinstance(row.arguments, dict) else {}
+    return str(arguments.get("scene") or ""), str(arguments.get("action") or "")
+
+
+async def warmup_state(session: Any, group_id: int, now: datetime) -> WarmupState:
+    """推导当前这段沉默的暖场事实，全部来自消息与审计，重启不丢。
+
+    “真人”包含隐私退出成员：他们的消息不进 Prompt，但他们在说话就说明
+    群没冷场，旧逻辑把他们排除后会对着正在聊天的群暖场。
+    """
+
+    last_human_at = await session.scalar(
+        select(func.max(GroupAgentMessage.received_at)).where(
+            GroupAgentMessage.group_id == group_id,
+            GroupAgentMessage.role != "bot",
+            GroupAgentMessage.received_at <= now,
+        )
+    )
+    last_bot_message_at = await session.scalar(
+        select(func.max(GroupAgentMessage.received_at)).where(
+            GroupAgentMessage.group_id == group_id,
+            GroupAgentMessage.role == "bot",
+            GroupAgentMessage.received_at <= now,
+        )
+    )
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = min(last_human_at, today) if last_human_at is not None else today
+    rows = (
+        (
+            await session.execute(
+                select(AgentAudit)
+                .where(
+                    AgentAudit.group_id == group_id,
+                    AgentAudit.tool_name == "proactive_reply",
+                    AgentAudit.created_at > since,
+                    AgentAudit.created_at <= now,
+                )
+                .order_by(AgentAudit.id.desc())
+                .limit(_WARMUP_AUDIT_SCAN_LIMIT + _WARMUP_TODAY_SCAN_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    unanswered = 0
+    skips = 0
+    closed = False
+    warmups_today = 0
+    last_skip_at: datetime | None = None
+    last_sent_at: datetime | None = None
+    topics: list[str] = []
+    for row in rows:
+        scene, action = _audit_scene(row)
+        result = str(row.result or "")
+        created_at = row.created_at
+        sent = result in WARMUP_SENT_RESULTS
+        if scene == "warmup" and sent and created_at >= today:
+            warmups_today += 1
+        if last_human_at is not None and created_at <= last_human_at:
+            continue
+        if sent:
+            unanswered += 1
+            if last_sent_at is None or created_at > last_sent_at:
+                last_sent_at = created_at
+            arguments = row.arguments if isinstance(row.arguments, dict) else {}
+            topic = str(arguments.get("topic") or "").strip()
+            if topic and topic not in topics and len(topics) < _WARMUP_TOPIC_LIMIT:
+                topics.append(topic[:40])
+        elif scene == "warmup" and action == "close":
+            closed = True
+        elif scene == "warmup" and action in WARMUP_SKIP_ACTIONS:
+            skips += 1
+            if last_skip_at is None or created_at > last_skip_at:
+                last_skip_at = created_at
+    candidates = [item for item in (last_bot_message_at, last_sent_at) if item]
+    return WarmupState(
+        last_human_at=last_human_at,
+        last_bot_at=max(candidates) if candidates else None,
+        unanswered=unanswered,
+        skips=skips,
+        last_skip_at=last_skip_at,
+        closed=closed,
+        warmups_today=warmups_today,
+        recent_topics=tuple(topics),
+    )
+
+
+__all__ = ["activity_window_counts", "warmup_state"]

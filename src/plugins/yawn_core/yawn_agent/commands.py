@@ -44,6 +44,12 @@ from .context import now_beijing
 from .emotion import emotion_public_state
 from .log import dbg
 from .memory import delete_group_memories, delete_member_memories, list_memories
+from .idle_warmup import (
+    WARMUP_QUIET_HOURS,
+    effective_idle_threshold_minutes,
+    max_unanswered_for,
+    warmup_daily_cap,
+)
 from .persona import (
     MAX_ALIAS_LENGTH,
     MAX_CATCHPHRASES,
@@ -371,6 +377,16 @@ def _format_agent_runtime_summary(
         f"参与强度：{_participation_intensity(config)}；"
         f"今日主动：{proactive_today}/{config.daily_limit}；"
         f"参与冷却：{config.cooldown_minutes} 分钟"
+        f"{_warmup_rule_text(config) if config.proactive_enabled else ''}"
+    )
+
+
+def _warmup_rule_text(config: GroupAgentConfig) -> str:
+    quiet_start, quiet_end = WARMUP_QUIET_HOURS
+    return (
+        f"\n冷场暖场：安静 {effective_idle_threshold_minutes(config)} 分钟起，"
+        f"连续 {max_unanswered_for(persona_behavior(config))} 条没人接就停到有人说话；"
+        f"{quiet_start}–{quiet_end} 点不暖场，每日最多 {warmup_daily_cap(config)} 次"
     )
 
 

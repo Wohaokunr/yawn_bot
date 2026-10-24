@@ -17,7 +17,7 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 5. `speech*.py` 生成并质检 `SpeechPlan` → `outbound.py` 校验并发送 → `speech_finalize.py` 推进状态。
 6. 全程 `execution_trace.py` 记录有界、脱敏的诊断轨迹，供 WebUI 调试页使用。
 
-主动发言走 `proactive.py`（调度/副作用）+ `proactive_policy.py`（决策）；短会话在 `conversation.py`。
+主动发言走 `proactive.py`（调度/副作用）+ `proactive_policy.py`（决策）；冷场暖场门槛在 `idle_warmup.py`；短会话在 `conversation.py`。
 
 ## 模块分组
 
@@ -32,7 +32,7 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 工具 | `tool_registry.py`（schema/权限/白名单别名）、`tool_router.py`（选择/发现打分/意图提示）、`tools.py`（执行与二次校验）、`tool_args.py`（参数校验、错误分类、回合账本）、`tool_execution.py`、`tool_support.py`、`tool_result_speech.py`、`tool_handlers/`（按族：`admin`、`files`、`history`、`member`、`memory`、`message`、`notice`） |
 | 发言 | `speech_format.py`（QQ 纯文本清洗）、`speech_claims.py`（完成声明核验）、`speech.py`、`speech_act.py`、`speech_policy.py`、`speech_native.py`、`speech_quality.py`、`speech_scorecard.py`、`speech_runtime.py`、`speech_finalize.py` |
 | 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限）、`safe_download.py`（出站下载白名单与重定向校验） |
-| 主动与短会话 | `proactive.py`、`proactive_policy.py`、`conversation.py` |
+| 主动与短会话 | `proactive.py`、`proactive_policy.py`、`idle_warmup.py`（冷场暖场门槛/退避/骰子）、`conversation.py` |
 | 记忆 | `memory.py`（整理、排序、治理）、`memory_hygiene.py`（脱敏/注入/敏感类别/近似去重）、`memory_retrieval.py`（工具检索）、`memory_access.py`（召回计数缓冲）、`memory_consolidation.py`（周摘要）、`memory_self.py`（成员自助记住/忘掉） |
 | 媒体 | `media.py`、`media_context.py`、`media_provider.py`、`media_store.py`、`media_caption.py` |
 | 诊断 | `execution_trace.py` |

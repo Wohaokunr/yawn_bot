@@ -213,6 +213,37 @@ describe("Agent cockpit", () => {
     expect(screen.getByText("冷场 15 分钟后以 35% 概率暖场")).toBeTruthy();
   });
 
+  it("explains why idle warmup is paused", async () => {
+    currentDiagnostics = diagnostics({
+      warmup: {
+        lastHumanAt: "2026-10-22T10:00:00",
+        lastBotAt: "2026-10-22T10:45:00",
+        unanswered: 2,
+        skips: 0,
+        lastSkipAt: null,
+        closed: false,
+        warmupsToday: 2,
+        recentTopics: ["流星雨"],
+        dailyCap: 4,
+        paused: true,
+        gate: {
+          allowed: false,
+          code: "unanswered_cap",
+          reason: "已连续主动说了 2 条没人接，等真人开口后再说",
+          idleMinutes: 90,
+          requiredIdleMinutes: 0,
+          maxUnanswered: 2,
+          nextEligibleAt: null,
+        },
+      },
+    });
+    currentDiagnostics.pipeline = { ...currentDiagnostics.pipeline!, warmupMaxUnanswered: 2, warmupQuietHours: [1, 8] };
+    renderPage();
+    expect(await screen.findByText("连续 2 条没人接就停到有人说话 · 1–8 点不暖场")).toBeTruthy();
+    expect(screen.getByText("本段冷场已说 2 条没人接 · 今日暖场 2/4")).toBeTruthy();
+    expect(screen.getByText("暖场门槛：已连续主动说了 2 条没人接，等真人开口后再说")).toBeTruthy();
+  });
+
   it("jumps from a trace to the debugger and from a member to their profile", async () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /阿喵/ }));

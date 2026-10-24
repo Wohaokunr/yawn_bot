@@ -152,6 +152,35 @@ export interface AgentPipelineConstants {
   conversationQuietSeconds: number;
   conversationMaxSeconds: number;
   conversationMaxBotTurns: number;
+  warmupMaxUnanswered?: number;
+  warmupBackoffFactor?: number;
+  warmupDailyCap?: number;
+  warmupDeadGroupHours?: number;
+  warmupQuietHours?: [number, number];
+  warmupMinIdleMinutes?: number;
+}
+
+// 当前这段冷场的暖场状态（与调度器同一套门槛）。
+export interface AgentWarmupStatus {
+  lastHumanAt: string | null;
+  lastBotAt: string | null;
+  unanswered: number;
+  skips: number;
+  lastSkipAt: string | null;
+  closed: boolean;
+  warmupsToday: number;
+  recentTopics: string[];
+  dailyCap: number;
+  paused: boolean;
+  gate: {
+    allowed: boolean;
+    code: string;
+    reason: string;
+    idleMinutes: number;
+    requiredIdleMinutes: number;
+    maxUnanswered: number;
+    nextEligibleAt: string | null;
+  };
 }
 
 export interface AgentActivity {
@@ -210,6 +239,7 @@ export interface AgentDiagnostics {
       evaluations: number;
       consecutiveWaits: number;
     };
+    warmup?: AgentWarmupStatus | null;
   };
   memory: AgentMemoryStatus;
   llm: {
