@@ -33,7 +33,9 @@ from ..llm import resolve_llm_request, resolve_provider
 from ..metrics import ai_health_snapshot, snapshot_metrics, summarize_ai_metrics
 from ..permission import FEATURE_REGISTRY
 from ..yawn_agent import conversation as _conversation_runtime
+from ..yawn_agent import idle_warmup as _idle_warmup
 from ..yawn_agent import turn_intake as _turn_intake
+from ..yawn_agent.activity import warmup_state as _warmup_state
 from ..yawn_agent.audit_outcome import classify_audit_result
 from ..yawn_agent.config_store import agent_runtime_enabled
 from ..yawn_agent.conversation import current_conversation
@@ -1377,6 +1379,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
             "consecutiveWaits": 0,
         }
 
+    warmup = await _warmup_diagnostics(session, group_id, config, now)
     memory = await agent_memory_status(session, group_id)
     llm = _llm_runtime_status()
     route_by_task = {item["task"]: item for item in llm["routes"]}
@@ -1430,6 +1433,15 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 "severity": "warning",
                 "title": "今日主动发言额度已用尽",
                 "detail": f"今日已用 {proactive_today}/{daily_limit} 次。",
+            }
+        )
+    elif proactive_enabled and warmup is not None and warmup["paused"]:
+        blockers.append(
+            {
+                "code": "warmup_paused",
+                "severity": "info",
+                "title": "冷场暖场已暂停",
+                "detail": str(warmup["gate"]["reason"]),
             }
         )
     elif proactive_enabled and cooldown_remaining > 0:
@@ -1525,6 +1537,7 @@ async def agent_diagnostics(  # noqa: C901,PLR0912,PLR0915
                 getattr(config, "proactive_active_window_minutes", 12) or 12
             ),
             "shortConversation": conversation,
+            "warmup": warmup,
         },
         "memory": memory,
         "llm": llm,
@@ -1545,7 +1558,37 @@ def _diagnostic_persona(config: GroupAgentConfig | None) -> dict[str, Any]:
     }
 
 
-def agent_pipeline_constants() -> dict[str, float | int]:
+# 这些门槛只有等真人开口才会解除；其余（退避、深夜）到点自动恢复。
+_WARMUP_PAUSE_CODES = frozenset({"unanswered_cap", "closed", "dead_group", "no_human"})
+
+
+async def _warmup_diagnostics(
+    session: AsyncSession,
+    group_id: int,
+    config: GroupAgentConfig | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """当前这段冷场的暖场事实与门槛结论；与调度器用同一套判定。"""
+
+    if config is None:
+        return None
+    try:
+        state = await _warmup_state(session, group_id, now)
+    except Exception:  # noqa: BLE001
+        # 诊断是尽力而为；旧库缺表等情况不能拖垮整页。
+        return None
+    gate = _idle_warmup.evaluate_warmup_gate(
+        config, state, now, behavior=persona_behavior(config)
+    )
+    return {
+        **state.as_dict(),
+        "gate": gate.as_dict(),
+        "paused": gate.code in _WARMUP_PAUSE_CODES,
+        "dailyCap": _idle_warmup.warmup_daily_cap(config),
+    }
+
+
+def agent_pipeline_constants() -> dict[str, Any]:
     """群对话管线的固定节奏参数（代码常量，只读展示给管理员）。"""
 
     return {
@@ -1558,6 +1601,12 @@ def agent_pipeline_constants() -> dict[str, float | int]:
         "conversationQuietSeconds": _conversation_runtime.CONVERSATION_QUIET_SECONDS,
         "conversationMaxSeconds": _conversation_runtime.CONVERSATION_MAX_SECONDS,
         "conversationMaxBotTurns": _conversation_runtime.CONVERSATION_MAX_BOT_TURNS,
+        "warmupMaxUnanswered": _idle_warmup.WARMUP_MAX_UNANSWERED,
+        "warmupBackoffFactor": _idle_warmup.WARMUP_BACKOFF_FACTOR,
+        "warmupDailyCap": _idle_warmup.WARMUP_DAILY_CAP,
+        "warmupDeadGroupHours": _idle_warmup.WARMUP_DEAD_GROUP_HOURS,
+        "warmupQuietHours": list(_idle_warmup.WARMUP_QUIET_HOURS),
+        "warmupMinIdleMinutes": _idle_warmup.WARMUP_MIN_IDLE_MINUTES,
     }
 
 

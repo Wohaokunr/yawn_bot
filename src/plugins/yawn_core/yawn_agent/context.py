@@ -42,6 +42,9 @@ class ActivitySnapshot:
     member_messages_60m: int = 0
     member_messages_5m: int = 0
     member_participants_5m: int = 0
+    # 冷场暖场事实（idle_warmup.WarmupState）；None 表示调用方未提供，
+    # 暖场退回只看 last_message_at 的旧口径（仅测试/旧调用）。
+    warmup: Any = None
 
 
 @dataclass(frozen=True, slots=True)

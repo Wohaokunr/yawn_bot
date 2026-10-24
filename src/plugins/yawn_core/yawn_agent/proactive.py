@@ -34,6 +34,13 @@ from .conversation import (
     shutdown_conversations,
 )
 from .activity import activity_window_counts as _activity_window_counts
+from .activity import warmup_state as _warmup_state
+from .idle_warmup import (
+    WarmupState,
+    effective_idle_threshold_minutes as _effective_idle_threshold_minutes,
+    evaluate_warmup_gate as _evaluate_warmup_gate,
+    near_duplicate_of as _near_duplicate_of,
+)
 from .context_loader import load_context as _load_context
 from .dialogue_support import persist_bot_reply
 from .execution_trace import (
@@ -178,6 +185,11 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                 continue
             day = config.proactive_day or now.strftime("%Y-%m-%d")
             count = config.proactive_count if day == now.strftime("%Y-%m-%d") else 0
+            # 只有可能进入暖场分支时才多查一次沉默事实，热闹群不付这笔开销。
+            warmup: WarmupState | None = None
+            idle_seconds = (now - counts["last_message_at"]).total_seconds()
+            if idle_seconds >= _effective_idle_threshold_minutes(config) * 60:
+                warmup = await _warmup_state(session, int(config.group_id), now)
             # bot 自言只计入整体冷场时间，不算"真人在聊"；隐私退出用户
             # 已由聚合查询排除，与对话读路径口径一致。
             snapshot = ActivitySnapshot(
@@ -195,6 +207,7 @@ async def _collect_candidates(session: Any, now: datetime) -> list[dict[str, Any
                 member_messages_60m=counts["member_messages_60m"],
                 member_messages_5m=counts["member_messages_5m"],
                 member_participants_5m=counts["member_participants_5m"],
+                warmup=warmup,
             )
             scene = should_proactively_speak(config, snapshot, now)
             if scene is None:
@@ -234,6 +247,8 @@ async def _apply_result(
     session_turn: int,
     target_user_id: int | None = None,
     confidence: float | None = None,
+    topic: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """在调用方事务内落库：成功推进 last_proactive_at/last_agent_at；
     未发出（内容门拦截、生成失败、撞重）只把 last_proactive_at 回拨到
@@ -267,6 +282,9 @@ async def _apply_result(
                     "delivery_state": send_result.delivery_state,
                     "target_user_id": target_user_id,
                     "confidence": confidence,
+                    # 暖场据此避免在同一段沉默里重提同一话题。
+                    "topic": (topic or "")[:80] or None,
+                    **(extra or {}),
                 },
                 result=(
                     "speak" if send_result.sent else "delivery_unknown"
@@ -299,6 +317,14 @@ async def _apply_result(
         dbg(
             f"群 {config.group_id} 主动发言未发出,退避剩余半个冷却期至 {backoff_at}"
         )
+
+
+def _recent_reply_texts(config: GroupAgentConfig) -> list[str]:
+    return [
+        str(item.get("text") or "")
+        for item in (config.recent_response_fingerprints or [])
+        if isinstance(item, dict) and item.get("text")
+    ]
 
 
 async def _prepare_proactive_message(
@@ -396,6 +422,29 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 "Persona 群聊行为",
                 output=behavior.as_dict(),
             )
+            warmup: WarmupState | None = None
+            gate_extra: dict[str, Any] = {}
+            if scene == "warmup":
+                # 扫描到拿锁之间可能有人开口、或另一个机器人刚暖过场；
+                # 锁内按最新事实再过一次门槛，避免重复暖场。
+                warmup = await _warmup_state(session, group_id, now_beijing())
+                gate = _evaluate_warmup_gate(
+                    config, warmup, now_beijing(), behavior=behavior
+                )
+                trace_event(
+                    "policy",
+                    "冷场暖场门槛",
+                    status="success" if gate.allowed else "skipped",
+                    output={**gate.as_dict(), "state": warmup.as_dict()},
+                    detail=gate.reason,
+                )
+                if not gate.allowed:
+                    dbg(f"群 {group_id} 暖场锁内复检未通过[{gate.code}]: {gate.reason}")
+                    return "close"
+                gate_extra = {
+                    "unanswered": warmup.unanswered,
+                    "idle_minutes": round(gate.idle_minutes, 1),
+                }
             # 复用对话路径的相关上下文：先读有限候选池，再保留最后一个
             # 活跃对话簇，避免主动插话把整小时旧聊天与默认空元数据全量注入。
             # 消息仍附带 minutes_ago，便于模型判断话题的新旧与节奏。
@@ -428,7 +477,9 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 persona=resolve_persona(config),
                 tools=[],
                 context=context,
-                user_prompt=_build_user_prompt(scene, config, turn=1),
+                user_prompt=_build_user_prompt(
+                    scene, config, turn=1, warmup_state=warmup, now=now_beijing()
+                ),
             )
             trace_event(
                 "prompt",
@@ -475,6 +526,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     session_turn=1,
                     reason=failure_reason,
                     error_code=failure_code,
+                    **gate_extra,
                 )
                 await session.commit()
                 return "error"
@@ -529,6 +581,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     reason=decision.reason,
                     target_user_id=decision.target_user_id,
                     confidence=decision.confidence,
+                    **gate_extra,
                 )
                 await _apply_result(
                     session,
@@ -551,12 +604,12 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 f"群 {group_id} 主动发言生成结果: {history_text!r} "
                 f"segments={len(decision.segments)} reason={decision.reason!r}"
             )
-            if history_text.casefold() in {
-                str(item.get("text") or "").casefold()
-                for item in (config.recent_response_fingerprints or [])
-                if isinstance(item, dict)
-            }:
-                dbg(f"群 {group_id} 主动发言与近期回复撞重,跳过发送: {history_text!r}")
+            duplicate = _near_duplicate_of(history_text, _recent_reply_texts(config))
+            if duplicate is not None:
+                dbg(
+                    f"群 {group_id} 主动发言与近期回复撞重,跳过发送: "
+                    f"{history_text!r} ≈ {duplicate!r}"
+                )
                 _add_participation_audit(
                     session,
                     group_id,
@@ -564,6 +617,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     action="wait",
                     session_turn=1,
                     reason="近期回复撞重",
+                    **gate_extra,
                 )
                 await _apply_result(
                     session,
@@ -597,6 +651,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     action="wait",
                     session_turn=1,
                     reason=reason,
+                    **gate_extra,
                 )
                 await _apply_result(
                     session,
@@ -648,6 +703,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     session_turn=1,
                     reason="无可用机器人发送",
                     detail="所有机器人发送失败",
+                    **gate_extra,
                 )
                 await session.commit()
                 return "send_failed"
@@ -665,6 +721,8 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 session_turn=1,
                 target_user_id=decision.target_user_id,
                 confidence=decision.confidence,
+                topic=speech_plan.topic or decision.topic,
+                extra=gate_extra,
             )
             if config.short_conversation_enabled:
                 mark_bot_reply(
@@ -908,11 +966,9 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
             if reason == "LLM 返回了无法解析的 JSON":
                 action = "error"
                 history_text = ""
-            if action == "speak" and history_text.casefold() in {
-                str(item.get("text") or "").casefold()
-                for item in (config.recent_response_fingerprints or [])
-                if isinstance(item, dict)
-            }:
+            if action == "speak" and _near_duplicate_of(
+                history_text, _recent_reply_texts(config)
+            ):
                 action = "wait"
                 history_text = ""
                 reason = "续聊内容与近期回复撞重"
@@ -990,6 +1046,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 session_turn=batch.bot_turns + 1,
                 target_user_id=decision.target_user_id,
                 confidence=decision.confidence,
+                topic=speech_plan.topic or batch.topic,
             )
             mark_bot_reply(
                 bot_id,

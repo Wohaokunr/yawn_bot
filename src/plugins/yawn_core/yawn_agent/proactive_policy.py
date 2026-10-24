@@ -14,6 +14,16 @@ from typing import Any, Protocol
 from ..data_models.group_agent_config import GroupAgentConfig
 from .context import ActivitySnapshot, is_recent
 from .conversation import CONVERSATION_MAX_BOT_TURNS
+from .idle_warmup import (
+    WARMUP_PROBABILITY_CAP,
+    WarmupState,
+    effective_idle_threshold_minutes,
+    episode_roll,
+    evaluate_warmup_gate,
+    silence_decay,
+    streak_scale,
+    warmup_prompt_context,
+)
 from .log import dbg
 from .memory import parse_json_reply
 from .outbound import MAX_OUTBOUND_SEGMENTS
@@ -28,7 +38,7 @@ _ACTIVE_MIN_MEMBER_MESSAGES = 2
 _BUSY_MEMBER_MESSAGES_5M = 6
 _BUSY_MEMBER_PARTICIPANTS_5M = 2
 _POST_REPLY_GUARD_MINUTES = 5.0
-_WARMUP_PROBABILITY_CAP = 0.6
+_WARMUP_PROBABILITY_CAP = WARMUP_PROBABILITY_CAP
 _PROACTIVE_SEGMENT_TYPES = frozenset({"text", "reply", "at", "face", "reaction"})
 
 _ACTIVE_INTERJECT_PROMPT = (
@@ -47,9 +57,10 @@ _WARMUP_PROMPT = (
     "只有存在自然切入点时才开口——"
     "接上没聊完的话题、分享一个贴合群成员兴趣的小见闻、"
     "或抛一个轻松的新话题都可以。只有确实找不到任何不突兀的开口方式时"
-    "才保持沉默(speak=false)。\n"
+    "才保持沉默(speak=false)；觉得这段冷场就不该打扰时用 action=close。\n"
+    "冷场前最后一条若是你自己说的，别接着自己的话往下说，也别自问自答。\n"
     "开口时 1~2 句、口语化、自然随意；"
-    "不要问“大家在吗”“在干什么”，不要自称 AI 或助手。"
+    "不要问“大家在吗”“在干什么”“人呢”，不要自称 AI 或助手。"
 )
 
 _FOLLOWUP_PROMPT = (
@@ -181,14 +192,28 @@ def clamp_probability(value: Any) -> float:
         return 0.0
 
 
-def warmup_probability(config: GroupAgentConfig, idle_seconds: float) -> float:
-    """冷得越久越可能开口，但 Persona 只能在运行概率上限内继续收窄。"""
+def warmup_probability(
+    config: GroupAgentConfig,
+    idle_seconds: float,
+    *,
+    state: WarmupState | None = None,
+) -> float:
+    """冷场刚过阈值到两倍阈值之间概率爬升；之后随沉默变长和没人接的条数衰减。
+
+    旧实现只会越冷越想说，对一个已经没人的群反而最积极。Persona 只能在运行
+    概率上限内继续收窄。
+    """
 
     base = clamp_probability(config.proactive_probability)
-    threshold = max(int(config.idle_threshold_minutes), 1) * 60
+    threshold = effective_idle_threshold_minutes(config) * 60
     idle_scale = 1.0 + min(max(idle_seconds / threshold - 1.0, 0.0), 1.0)
     behavior_scale = persona_behavior(config).warmup_probability_scale
-    return min(base * idle_scale, _WARMUP_PROBABILITY_CAP) * behavior_scale
+    probability = min(base * idle_scale, _WARMUP_PROBABILITY_CAP) * behavior_scale
+    if state is not None:
+        probability *= silence_decay(idle_seconds / 60) * streak_scale(
+            state.unanswered
+        )
+    return probability
 
 
 def skip_backoff_timestamp(now: datetime, cooldown_minutes: int) -> datetime:
@@ -326,6 +351,8 @@ def build_user_prompt(
     *,
     turn: int | None = None,
     behavior: PersonaBehavior | None = None,
+    warmup_state: WarmupState | None = None,
+    now: datetime | None = None,
 ) -> str:
     """Build a prompt for an internally selected participation scene."""
     if scene == "active":
@@ -340,6 +367,10 @@ def build_user_prompt(
         persona_behavior_instruction(resolved_behavior, scene=scene),
         _MEMORY_USE_PROMPT,
     ]
+    if scene == "warmup" and warmup_state is not None and now is not None:
+        silence = warmup_prompt_context(warmup_state, now)
+        if silence:
+            parts.append(silence)
     if turn is not None:
         max_turns = min(
             CONVERSATION_MAX_BOT_TURNS, resolved_behavior.max_followup_bot_turns
@@ -357,6 +388,41 @@ def build_user_prompt(
             + "\n不要重复相近的说法或同一话题的同类反应。"
         )
     return "\n".join(parts)
+
+
+def _warmup_scene(
+    config: GroupAgentConfig,
+    state: WarmupState,
+    now: datetime,
+    *,
+    rng: RandomSource | None,
+) -> str | None:
+    """有沉默事实时的暖场判定：门槛 → 本段冷场固定骰子。"""
+
+    group_id = getattr(config, "group_id", None)
+    gate = evaluate_warmup_gate(config, state, now, behavior=persona_behavior(config))
+    if not gate.allowed:
+        dbg(f"群 {group_id} 暖场拒绝[{gate.code}]: {gate.reason}")
+        return None
+    human_idle = gate.idle_minutes * 60
+    probability = warmup_probability(config, human_idle, state=state)
+    roll = (
+        rng.random()
+        if rng is not None
+        else episode_roll(int(group_id or 0), state.last_human_at, state.unanswered)
+    )
+    if roll < probability:
+        dbg(
+            f"群 {group_id} 暖场场景触发: 真人沉默 {gate.idle_minutes:.0f} 分钟 "
+            f"未获回应 {state.unanswered} 条 roll={roll:.3f} "
+            f"probability={probability:.2f}"
+        )
+        return "warmup"
+    dbg(
+        f"群 {group_id} 暖场骰子未中(本段冷场固定点数): roll={roll:.3f} "
+        f"probability={probability:.2f}"
+    )
+    return None
 
 
 def should_proactively_speak(
@@ -395,9 +461,21 @@ def should_proactively_speak(
         return None
     roll = (rng or random).random()
 
-    if snapshot.last_message_at is not None:
-        idle_seconds = (now - snapshot.last_message_at).total_seconds()
-        if idle_seconds >= config.idle_threshold_minutes * 60:
+    warmup_state = snapshot.warmup if isinstance(snapshot.warmup, WarmupState) else None
+    last_message_at = snapshot.last_message_at
+    if (
+        warmup_state is not None
+        and warmup_state.last_human_at is not None
+        and (last_message_at is None or warmup_state.last_human_at > last_message_at)
+    ):
+        # 隐私退出成员不进聚合，但他们在说话时群并没有冷场。
+        last_message_at = warmup_state.last_human_at
+    if last_message_at is not None:
+        idle_seconds = (now - last_message_at).total_seconds()
+        threshold_seconds = effective_idle_threshold_minutes(config) * 60
+        if idle_seconds >= threshold_seconds and warmup_state is not None:
+            return _warmup_scene(config, warmup_state, now, rng=rng)
+        if idle_seconds >= threshold_seconds:
             probability = warmup_probability(config, idle_seconds)
             if roll < probability:
                 dbg(
