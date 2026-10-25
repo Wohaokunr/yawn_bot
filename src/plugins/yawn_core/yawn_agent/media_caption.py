@@ -1,8 +1,9 @@
-# ruff: noqa: C901,PLR0913,PLR0917,TID252,TC001
+# ruff: noqa: C901,PLR0912,PLR0913,PLR0917,TID252,TC001,E501
 """Dedicated image-caption fallback used by the Agent dialogue pipeline."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ..data_models.group_agent_config import GroupAgentConfig
@@ -12,6 +13,7 @@ from ..llm import (
     resolve_llm_request,
     vision_model_configured,
 )
+from . import media_memory
 from .log import dbg
 from .media import MediaInput, build_media_content_blocks, store_caption
 from .message_parser import NormalizedMessage
@@ -97,14 +99,42 @@ async def describe_images(
         return "[图片未识别：没有可用的图片数据]"
 
     caption_by_digest = dict(cached)
+    for media in media_inputs:
+        if media.content_hash not in caption_by_digest:
+            remembered = media_memory.lookup(group_id, media.content_hash)
+            if remembered:
+                caption_by_digest[media.content_hash] = remembered
     vision_request = resolve_llm_request("agent_image")
     parts: list[str] = []
     digest_set = set(digests)
-    for media in media_inputs:
+    # 多张图同时转述（各自独立请求），而不是一张一张排队等。
+    pending = [
+        media
+        for media in media_inputs
+        if has_vision_model
+        and not caption_by_digest.get(
+            media.content_hash if media.content_hash in digest_set else ""
+        )
+    ]
+    fresh: dict[int, str | None] = {}
+    if pending:
+        results = await asyncio.gather(
+            *(
+                _caption_single_image(
+                    group_id, normalized, media, session, config, diagnostics=diagnostics
+                )
+                for media in pending
+            ),
+            return_exceptions=True,
+        )
+        for media, result in zip(pending, results, strict=True):
+            fresh[id(media)] = result if isinstance(result, str) else None
+    for index, media in enumerate(media_inputs, start=1):
+        label = f"第{index}张" if len(media_inputs) > 1 else ""
         digest = media.content_hash if media.content_hash in digest_set else None
         caption = caption_by_digest.get(digest) if digest is not None else None
         if caption:
-            parts.append(f"[图片转述（缓存）] {caption}")
+            parts.append(f"[{label}图片转述（缓存）] {caption}")
             if diagnostics is not None:
                 diagnostics.append(
                     _media_diagnostic(
@@ -137,17 +167,10 @@ async def describe_images(
                 )
             continue
 
-        caption = await _caption_single_image(
-            group_id,
-            normalized,
-            media,
-            session,
-            config,
-            diagnostics=diagnostics,
-        )
+        caption = fresh.get(id(media))
         if caption is None:
             dbg(f"群 {group_id} 视觉模型返回空结果 digest={digest}")
-            parts.append("[图片未识别：视觉模型没有返回结果]")
+            parts.append(f"[{label}图片未识别：视觉模型没有返回结果]")
             if diagnostics is not None:
                 diagnostics.append(
                     _media_diagnostic(
@@ -163,6 +186,7 @@ async def describe_images(
 
         dbg(f"群 {group_id} 视觉模型识别完成 digest={digest} caption={caption!r}")
         if digest:
+            media_memory.remember(group_id, digest, caption)
             await store_caption(
                 session,
                 group_id,
@@ -171,7 +195,7 @@ async def describe_images(
                 vision_request.model,
                 cache_enabled=bool(config.media_cache_enabled),
             )
-        parts.append(f"[图片转述] {caption[:2000]}")
+        parts.append(f"[{label}图片转述] {caption[:2000]}")
         if diagnostics is not None:
             diagnostics.append(
                 _media_diagnostic(

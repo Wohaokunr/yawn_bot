@@ -160,7 +160,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "get_message",
-        "读取当前群上下文中已知 message_id 对应的消息详情",
+        "读取当前群上下文中已知 message_id 对应的消息详情；消息带图片时会把图片一起交给你看（历史里 media_types 含 image、需要看原图时用它）",
         {"message_id": {"type": "integer"}},
         required=("message_id",),
         actions=("get_msg",),

@@ -32,6 +32,7 @@ from .implicit_trigger import remember_engagement, resolve_implicit_trigger
 from .persona import persona_call_names
 from .log import dbg, dbg_exc
 from .media import prepare_media_inputs
+from .turn_media import schedule_auto_caption
 from .message_parser import (
     NormalizedMessage,
     parse_message,
@@ -166,7 +167,7 @@ async def _persist_message(
         # 历史图片可回读依赖“收到消息时就把字节物化成群内资产”。这里只做
         # 本地 MediaAsset，不触发 Files API；远端文件仍在真正需要给模型看时
         # 才上传，并由 content_hash/provider_scope 去重。
-        await prepare_media_inputs(
+        ingested, _captions, _digests = await prepare_media_inputs(
             bot,
             group_id,
             normalized.media_refs,
@@ -174,6 +175,8 @@ async def _persist_message(
             cache_enabled=False,
             asset_ttl_seconds=retention * 86400,
         )
+        # AGENT_IMAGE_AUTO_CAPTION=all：后台转述，历史里的图片就有文字说明。
+        schedule_auto_caption(group_id, ingested)
     stored = normalized.storage_dict()
     received_at = now_beijing()
     # 去重交给 uq_agent_message_bot_group_message 唯一约束：先 SELECT 再 INSERT

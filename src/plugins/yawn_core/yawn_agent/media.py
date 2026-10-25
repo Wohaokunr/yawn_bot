@@ -1,4 +1,4 @@
-# ruff: noqa: TID252,RET504,C901,ASYNC240,PLR0912,PLR0913,PLR0915,SIM105,TRY300
+# ruff: noqa: TID252,RET504,C901,ASYNC240,PLR0911,PLR0912,PLR0913,PLR0915,SIM105,TRY300,E501
 """Short-lived media materialization and vision-caption cache for Agent."""
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -26,7 +25,7 @@ from ..llm import (
     resolve_llm_request,
     resolve_provider,
 )
-from . import media_store
+from . import media_fetch, media_store
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .media_provider import (
@@ -262,35 +261,110 @@ def _url_allowed(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     return (
-        parsed.scheme in {"http", "https"} and bool(host) and host in _allowed_hosts()
+        parsed.scheme in {"http", "https"}
+        and bool(host)
+        and media_fetch.host_allowed(host, tuple(_allowed_hosts()))
     )
 
 
 async def _fetch_url(url: str) -> bytes | None:
+    """白名单下载：手动跟随并逐跳校验重定向，超限即停。"""
+
     host = (urlparse(url).hostname or "unknown").lower()
     if not _url_allowed(url):
+        media_fetch.note("host_blocked")
         dbg(f"媒体下载拒绝: URL 主机不在白名单 host={host!r}")
         return None
+    max_bytes = _max_media_bytes()
     try:
-        # QQ 图片 CDN 普遍带签名重定向；流式读取并在超限时尽早中断。
-        max_bytes = _max_media_bytes()
-        async with (
-            httpx.AsyncClient(timeout=10, follow_redirects=True) as client,
-            client.stream("GET", url) as response,
-        ):
-            response.raise_for_status()
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes(64 * 1024):
-                total += len(chunk)
-                if total > max_bytes + 1:
-                    break
-                chunks.append(chunk)
-            data = b"".join(chunks)
+        data = await media_fetch.download(url, max_bytes)
     except Exception as exc:  # noqa: BLE001
+        media_fetch.note("network")
         dbg_exc(f"Agent 媒体下载失败: host={host!r} ({type(exc).__name__})")
         return None
-    return data[: max_bytes + 1]
+    return data[: max_bytes + 1] if data is not None else None
+
+
+def _url_passthrough_allowed(url: str, reason_code: Any) -> bool:
+    """取不到字节时才考虑把白名单链接直接交给模型。
+
+    链接已过期、超限、不是图片时交过去只会让服务商整次请求报错，所以不传；
+    ``AGENT_MEDIA_URL_PASSTHROUGH=false`` 可以整体关掉（服务商访问不了 QQ 图床时）。
+    """
+
+    if not bool(getattr(ai_config, "agent_media_url_passthrough", True)):
+        return False
+    if str(reason_code or "") in {"expired", "too_large", "not_image", "host_blocked"}:
+        return False
+    return _url_allowed(url)
+
+
+def _local_roots() -> tuple[Path, ...]:
+    return tuple(dict.fromkeys((*_safe_roots(), *media_fetch.extra_local_roots())))
+
+
+def _accept(
+    data: bytes | None,
+    hint: str,
+    via: str,
+    diagnostic: dict[str, Any] | None,
+) -> tuple[bytes, str] | None:
+    if data is None:
+        return None
+    if len(data) > _max_media_bytes():
+        media_fetch.note("too_large")
+        return None
+    if not _valid_image(data, hint):
+        media_fetch.note("not_image")
+        dbg(f"媒体加载拒绝({via}): 不是可识别的图片格式 大小={len(data)}")
+        return None
+    if diagnostic is not None:
+        diagnostic["image_read_status"] = "success"
+        diagnostic["read_source"] = via
+    dbg(f"媒体加载成功({via}): {len(data)} 字节")
+    return data, hint
+
+
+async def _from_payload(
+    payload: Any, via: str, diagnostic: dict[str, Any] | None
+) -> tuple[bytes, str] | None:
+    """OneBot 取图接口的返回：``base64``（enableLocalFile2Url）、链接或共享路径。"""
+
+    if isinstance(payload, str):
+        payload = {"url": payload}
+    if not isinstance(payload, dict):
+        return None
+    max_bytes = _max_media_bytes()
+    encoded = payload.get("base64")
+    if isinstance(encoded, str) and encoded:
+        loaded = _accept(
+            media_fetch.decode_base64(encoded, max_bytes),
+            str(payload.get("file_name") or payload.get("file") or ""),
+            f"{via}_base64",
+            diagnostic,
+        )
+        if loaded:
+            return loaded
+    for key in ("url", "file", "path"):
+        text = str(payload.get(key) or "").strip()
+        if not text:
+            continue
+        if text.startswith("base64://"):
+            loaded = _accept(
+                media_fetch.decode_base64(text, max_bytes), "", f"{via}_base64", diagnostic
+            )
+        elif text.startswith(("http://", "https://")):
+            loaded = _accept(await _fetch_url(text), text, f"{via}_url", diagnostic)
+        else:
+            loaded = _accept(
+                media_fetch.read_local(text, _local_roots(), max_bytes),
+                Path(text).name,
+                "local_file",
+                diagnostic,
+            )
+        if loaded:
+            return loaded
+    return None
 
 
 async def _load_bytes(
@@ -300,104 +374,108 @@ async def _load_bytes(
     depth: int = 0,
     diagnostic: dict[str, Any] | None = None,
 ) -> tuple[bytes, str] | None:
+    """按 消息段 base64 → 链接 → 共享目录 → get_image → get_file → get_msg 刷新 取图。
+
+    失败原因写进 ``diagnostic["reason_code"]``（只是原因码，不含任何链接/路径）。
+    """
+
     if diagnostic is not None:
         diagnostic.setdefault("onebot_file", bool(ref.get("file")))
         diagnostic.setdefault("get_image_status", "not_needed")
         diagnostic.setdefault("image_read_status", "pending")
-    if depth > 1:
-        if diagnostic is not None:
-            diagnostic["image_read_status"] = "failed"
-            diagnostic["read_source"] = "get_image"
-        dbg(
-            "媒体加载放弃: get_image 递归深度超过 1 "
-            f"source={str(ref.get('source') or 'current')!r}"
+    attempts = media_fetch.FetchAttempts()
+    with media_fetch.tracking(attempts):
+        loaded = await _load_bytes_once(bot, ref, diagnostic=diagnostic)
+        if loaded is None and depth == 0 and str(ref.get("source") or "") in {"history", "reply"}:
+            # 历史/引用图片的签名链接几小时就过期；重新拉一次原消息拿新链接。
+            fresh = await media_fetch.refresh_ref(bot, ref)
+            if fresh is not None:
+                if diagnostic is not None:
+                    diagnostic["refreshed"] = True
+                fresh["source"] = ref.get("source")
+                loaded = await _load_bytes_once(bot, fresh, diagnostic=diagnostic)
+    source = str(ref.get("source") or "current")
+    if loaded is not None:
+        media_fetch.record(
+            "loaded",
+            via=str((diagnostic or {}).get("read_source") or "unknown"),
+            source=source,
         )
-        return None
-    max_bytes = _max_media_bytes()
-    url = str(ref.get("url") or "").strip()
-    url_host = (urlparse(url).hostname or "") if url else ""
-    if url.startswith(("http://", "https://")):
-        data = await _fetch_url(url)
-        if (
-            data is not None
-            and len(data) <= max_bytes
-            and _valid_image(data, url)
-        ):
-            if diagnostic is not None:
-                diagnostic["image_read_status"] = "success"
-                diagnostic["read_source"] = "url"
-            dbg(f"媒体加载成功(URL): {len(data)} 字节 host={url_host!r}")
-            return data, url
-        if data is not None:
-            dbg(
-                f"媒体加载拒绝(URL): 大小={len(data)} "
-                f"有效图片={_valid_image(data, url)} host={url_host!r}"
-            )
-    candidate_text = str(ref.get("path") or ref.get("file") or "").strip()
-    if candidate_text:
-        candidate = Path(os.path.realpath(candidate_text))
-        if candidate.is_file() and _inside(candidate, _safe_roots()):
-            try:
-                if candidate.stat().st_size <= max_bytes:
-                    data = candidate.read_bytes()
-                    # stat 与读取之间文件可能增长；以实际读到的长度复核。
-                    if len(data) <= max_bytes and _valid_image(
-                        data, candidate.name
-                    ):
-                        if diagnostic is not None:
-                            diagnostic["image_read_status"] = "success"
-                            diagnostic["read_source"] = "local_file"
-                        dbg(
-                            f"媒体加载成功(本地文件): {len(data)} 字节"
-                        )
-                        return data, candidate.name
-                    dbg(
-                        "媒体加载拒绝(本地文件): 大小或 MIME 校验未通过"
-                    )
-                else:
-                    dbg(
-                        f"媒体加载拒绝(本地文件): 超过 {max_bytes} 字节"
-                    )
-            except OSError:
-                dbg_exc("媒体加载失败(本地文件读取异常)")
-                return None
-        elif candidate_text:
-            dbg("媒体加载跳过(本地文件): 不存在或不在安全目录内")
-    if bot is not None and ref.get("file"):
-        if diagnostic is not None:
-            diagnostic["get_image_status"] = "attempted"
-        try:
-            payload = await bot.call_api("get_image", file=str(ref["file"]))
-        except Exception:  # noqa: BLE001
-            if diagnostic is not None:
-                diagnostic["get_image_status"] = "failed"
-            dbg_exc("媒体加载: get_image 调用失败")
-            payload = None
-        if isinstance(payload, dict):
-            if diagnostic is not None:
-                diagnostic["get_image_status"] = "success"
-            nested = dict(ref)
-            nested.update(
-                {
-                    key: payload[key]
-                    for key in ("url", "file", "path")
-                    if payload.get(key)
-                }
-            )
-            dbg(f"媒体加载: get_image 返回补充信息,递归重试 depth={depth + 1}")
-            return await _load_bytes(
-                bot,
-                nested,
-                depth=depth + 1,
-                diagnostic=diagnostic,
-            )
+        return loaded
+    reason = attempts.primary()
+    media_fetch.record("failed", reason=reason, source=source)
     if diagnostic is not None:
         diagnostic["image_read_status"] = "failed"
+        diagnostic["reason_code"] = reason
     dbg(
         "媒体加载失败: 所有途径均无法取得图片字节 "
-        f"source={str(ref.get('source') or 'current')!r} "
-        f"has_file={bool(ref.get('file'))} host={url_host!r}"
+        f"source={source!r} has_file={bool(ref.get('file'))} reason={reason}"
     )
+    return None
+
+
+async def _load_bytes_once(
+    bot: Any,
+    ref: dict[str, Any],
+    *,
+    diagnostic: dict[str, Any] | None = None,
+) -> tuple[bytes, str] | None:
+    max_bytes = _max_media_bytes()
+    file_value = str(ref.get("file") or "").strip()
+    if file_value.startswith("base64://"):
+        loaded = _accept(
+            media_fetch.decode_base64(file_value, max_bytes),
+            "",
+            "segment_base64",
+            diagnostic,
+        )
+        if loaded:
+            return loaded
+    url = str(ref.get("url") or "").strip()
+    if url.startswith(("http://", "https://")):
+        loaded = _accept(await _fetch_url(url), url, "url", diagnostic)
+        if loaded:
+            return loaded
+    candidate_text = str(ref.get("path") or "").strip() or (
+        file_value if not file_value.startswith("base64://") else ""
+    )
+    if candidate_text and not candidate_text.startswith(("http://", "https://")):
+        candidate = Path(os.path.realpath(candidate_text))
+        try:
+            exists = candidate.is_file() and _inside(candidate, _local_roots())
+        except OSError:
+            exists = False
+        if exists:
+            loaded = _accept(
+                media_fetch.read_local(candidate_text, _local_roots(), max_bytes),
+                candidate.name,
+                "local_file",
+                diagnostic,
+            )
+            if loaded:
+                return loaded
+    if bot is None or not file_value or file_value.startswith("base64://"):
+        if not url and not file_value:
+            media_fetch.note("no_source")
+        return None
+    if diagnostic is not None:
+        diagnostic["get_image_status"] = "attempted"
+    payload = await media_fetch.call_api(bot, "get_image", file=file_value)
+    if isinstance(payload, dict):
+        if diagnostic is not None:
+            diagnostic["get_image_status"] = "success"
+        loaded = await _from_payload(payload, "get_image", diagnostic)
+        if loaded:
+            return loaded
+    elif diagnostic is not None:
+        diagnostic["get_image_status"] = "failed"
+    file_id = str(ref.get("file_id") or "").strip()
+    params = {"file_id": file_id} if file_id else {"file": file_value}
+    payload = await media_fetch.call_api(bot, "get_file", **params)
+    if isinstance(payload, dict):
+        loaded = await _from_payload(payload, "get_file", diagnostic)
+        if loaded:
+            return loaded
     return None
 
 
@@ -969,7 +1047,7 @@ async def prepare_media_inputs(
                 continue
         loaded = await _load_bytes(bot, ref, diagnostic=diagnostic)
         if loaded is None:
-            if _url_allowed(url):
+            if _url_passthrough_allowed(url, diagnostic.get("reason_code")):
                 digest = hashlib.sha256(f"url:{url}".encode()).hexdigest()
                 media = MediaInput(
                     kind="image",
@@ -1056,10 +1134,13 @@ async def prepare_media_inputs(
                     )
                 else:
                     diagnostic["status"] = "dropped_unavailable"
-                    diagnostic["reason"] = (
-                        "onebot_get_image_failed_or_source_unavailable"
-                        if ref.get("file")
-                        else "image_bytes_and_trusted_url_unavailable"
+                    diagnostic["reason"] = str(
+                        diagnostic.get("reason_code")
+                        or (
+                            "onebot_get_image_failed_or_source_unavailable"
+                            if ref.get("file")
+                            else "image_bytes_and_trusted_url_unavailable"
+                        )
                     )
                     if known_digest:
                         diagnostic["content_hash"] = known_digest[:12]

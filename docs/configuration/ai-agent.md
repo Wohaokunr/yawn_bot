@@ -104,7 +104,10 @@ Profile 可用 `default / light / vision`；任务级 thinking 可用 `inherit /
 ```dotenv
 AGENT_MEDIA_CACHE_TTL=86400
 AGENT_MEDIA_CACHE_DIR=data/agent_media
-AGENT_MEDIA_ALLOWED_HOSTS=gchat.qpic.cn,multimedia.nt.qq.com.cn
+AGENT_MEDIA_ALLOWED_HOSTS=gchat.qpic.cn,multimedia.nt.qq.com.cn,*.qpic.cn
+AGENT_MEDIA_HTTP_FALLBACK=true
+AGENT_MEDIA_URL_PASSTHROUGH=true
+AGENT_IMAGE_AUTO_CAPTION=triggered
 AGENT_REMOTE_MEDIA_ENABLED=true
 AGENT_REMOTE_MEDIA_TTL_DAYS=7
 AGENT_REMOTE_MEDIA_MAX_BYTES=67108864
@@ -118,7 +121,13 @@ AGENT_RECEIVED_MEDIA_REUSE=deny
 AGENT_DEBUG_LOG=false
 ```
 
-- `AGENT_MEDIA_ALLOWED_HOSTS` 默认仅允许 `gchat.qpic.cn` 与 `multimedia.nt.qq.com.cn`；显式置空时，群图片不会被 Agent 主动下载用于视觉理解。
+- `AGENT_MEDIA_ALLOWED_HOSTS` 默认允许 `gchat.qpic.cn`、`multimedia.nt.qq.com.cn` 和 `*.qpic.cn`（`*.` 开头匹配子域名）；显式置空时，群图片不会被 Agent 主动下载用于视觉理解。
+- 识图取图顺序（`yawn_agent/media_fetch.py`）：消息段 `base64://` → 白名单链接（逐跳校验重定向）→ 共享目录 → `get_image` → `get_file`（返回里的 base64 需要 NapCat 打开 `enableLocalFile2Url`）→ 历史/引用图片链接过期时 `get_msg` 重新拉取。OneBot 调用 10 秒超时。
+- `AGENT_MEDIA_HTTP_FALLBACK=true`：QQ 图床 HTTPS 握手失败时对同一白名单地址改用 http 重试一次。
+- `AGENT_MEDIA_URL_PASSTHROUGH=true`：Bot 取不到字节时把白名单链接交给模型服务商下载；链接已过期、超限或不是图片时不会透传。
+- `AGENT_IMAGE_AUTO_CAPTION`：`triggered`（默认）把 Bot 看过并转述过的图记进历史（`[图片]` 旁边带 `image_notes`）；`all` 收到图片就在后台转述（并发 2、每群每小时 30 次，会多花识图费用）；`off` 关闭。转述只在进程内保留 6 小时。
+- 要不要把历史图片交给模型，不看字面：本人在 Bot 上次说话之后 3 分钟内发的图自动算本轮的图；工具路由模型返回 `image=true`（这条消息在说图）时取上下文里 15 分钟内最近的图。对话模型配成 `auto` 却拒收图片时会记住 1 小时，期间直接走识图转述。
+- WebUI Agent 配置页的“识图状态”卡片（`GET /agent/vision/status`）显示当前识图路线、近 24 小时取图成败和失败原因对应的改法。
 - `AGENT_REMOTE_MEDIA_ENABLED=true` 时，支持 Files API 的 Provider 会优先按内容哈希复用/上传远端媒体；关闭后直接使用本轮可用的 inline/URL 降级链。
 - `AGENT_REMOTE_MEDIA_TTL_DAYS` 第一版统一为 7 天，同时约束本地 MediaAsset 与远端文件生命周期；不会默认创建永久文件。
 - `AGENT_REMOTE_MEDIA_MAX_BYTES` 默认 64 MiB，也是 Agent 接受单个媒体资产的硬上限；inline `file_data`/base64 降级仍限制在 32 MiB 内。

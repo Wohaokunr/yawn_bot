@@ -278,7 +278,13 @@ def _segment_placeholder(seg_type: str, data: dict[str, Any]) -> str:
     if seg_type == "text":
         return str(data.get("text", ""))
     if seg_type == "image":
+        if _is_sticker(seg_type, data):
+            summary = _sticker_summary(data)
+            return f"[表情包: {summary}]" if summary else "[表情包]"
         return "[图片]"
+    if seg_type == "mface":
+        summary = _sticker_summary(data)
+        return f"[表情包: {summary}]" if summary else "[表情包]"
     if seg_type == "file":
         name = str(data.get("name") or data.get("file") or "未命名")[:120]
         size = _safe_media_size(data.get("size"))
@@ -318,6 +324,25 @@ def _segment_placeholder(seg_type: str, data: dict[str, Any]) -> str:
     return f"[{seg_type}]"
 
 
+def _is_sticker(seg_type: str, data: dict[str, Any]) -> bool:
+    """NapCat 用 sub_type=1 标记表情包图片；商城表情是独立的 mface 段。"""
+
+    if seg_type == "mface":
+        return True
+    if seg_type != "image":
+        return False
+    return str(data.get("sub_type") if data.get("sub_type") is not None else data.get("subType") or "") == "1"
+
+
+def _sticker_summary(data: dict[str, Any]) -> str:
+    """表情包的文字说明（如“[狗头]”），去掉方括号；“动画表情”这类泛称不算说明。"""
+
+    text = str(data.get("summary") or data.get("text") or "").strip().strip("[]【】").strip()
+    if not text or text in {"动画表情", "图片", "表情"}:
+        return ""
+    return text[:24]
+
+
 def _safe_media_size(value: object) -> str | None:
     try:
         size = int(str(value)) if value is not None else 0
@@ -352,12 +377,23 @@ def _media_prompt_label(ref: dict[str, Any]) -> str:
         name = str(ref.get("name") or "文件")[:80]
         size = _safe_media_size(ref.get("size"))
         return f"{source_label}文件 {name}{f' {size}' if size else ''}"
+    if media_type == "image" and ref.get("sticker"):
+        return f"{source_label}表情包"
     return f"{source_label}{ {'image': '图片', 'record': '语音', 'video': '视频'}.get(media_type, media_type) }"
 
 
 def _media_ref(
     seg_type: str, data: dict[str, Any], *, source: str = "current"
 ) -> dict[str, Any] | None:
+    if seg_type == "mface":
+        # 商城表情只有图片链接；当作表情包图片交给识图，没有链接就只留占位符。
+        if not str(data.get("url") or "").strip():
+            return None
+        ref = {"type": "image", "source": source, "url": data["url"], "sticker": True}
+        summary = _sticker_summary(data)
+        if summary:
+            ref["summary"] = summary
+        return ref
     if seg_type not in {"image", "file", "record", "video"}:
         return None
     keys = ("url", "file", "file_id", "name", "size", "path", "busid")
@@ -366,6 +402,11 @@ def _media_ref(
         "source": source,
         **{key: data[key] for key in keys if key in data},
     }
+    if seg_type == "image" and _is_sticker(seg_type, data):
+        ref["sticker"] = True
+        summary = _sticker_summary(data)
+        if summary:
+            ref["summary"] = summary
     # NapCat 用 file_size 表示大小、文件段把原名放在 file 里；统一成 size/name，
     # 入箱时才能提前判断超限、给工作区文件起对名字。
     if "size" not in ref and data.get("file_size") not in (None, ""):
@@ -556,6 +597,9 @@ def normalize_message(
         if len(media) < MAX_MEDIA_REFS:
             ref = _media_ref(seg_type, data)
             if ref:
+                if ref.get("type") == "image":
+                    # 第几张图：历史图片链接过期后用 get_msg 重新拉取时按它对位。
+                    ref["image_index"] = sum(1 for item in media if item.get("type") == "image")
                 media.append(ref)
     return NormalizedMessage(
         "".join(text_parts).strip(),

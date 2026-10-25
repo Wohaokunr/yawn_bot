@@ -91,9 +91,77 @@ def test_effective_turn_does_not_cross_another_speaker() -> None:
         query_text="",
     )
 
+    # 文字不跨过别人的插话拼接；但本人刚发、Bot 还没回应过的图仍是本轮的图。
     assert effective.used_history is False
-    assert effective.media_requested is False
     assert effective.message_ids == ()
+    assert effective.media_message_ids == (101,)
+    assert effective.media_requested is True
+
+
+def test_own_recent_image_binds_without_any_image_words() -> None:
+    context_history, _media_context = _load_modules()
+    messages = [
+        _image_message(101, 20001, minutes_ago=1),
+        _text_message(102, 30001, "哈哈哈", minutes_ago=1),
+    ]
+
+    effective = context_history.effective_turn_query(
+        messages, focus_user_ids=[20001], query_text="这是啥"
+    )
+
+    assert effective.trigger_only is False
+    assert effective.primary == "这是啥"
+    assert effective.media_message_ids == (101,)
+    assert effective.media_binding is True
+
+
+def test_bare_mention_after_image_binds_image() -> None:
+    context_history, _media_context = _load_modules()
+    effective = context_history.effective_turn_query(
+        [_image_message(101, 20001)],
+        focus_user_ids=[20001],
+        query_text="[用户仅@机器人，没有附加正文]",
+    )
+
+    assert effective.media_message_ids == (101,)
+    assert effective.media_binding is True
+
+
+def test_image_before_bot_reply_or_too_old_is_not_rebound() -> None:
+    context_history, _media_context = _load_modules()
+    bot_reply = {"message_id": 102, "user_id": 50001, "role": "bot", "text": "回过了", "minutes_ago": 1}
+    after_reply = context_history.effective_turn_query(
+        [_image_message(101, 20001, minutes_ago=2), bot_reply],
+        focus_user_ids=[20001],
+        query_text="再说说",
+    )
+    stale = context_history.effective_turn_query(
+        [_image_message(101, 20001, minutes_ago=10)],
+        focus_user_ids=[20001],
+        query_text="这是啥",
+    )
+    others = context_history.effective_turn_query(
+        [_image_message(101, 30001, minutes_ago=1)],
+        focus_user_ids=[20001],
+        query_text="这是啥",
+    )
+
+    assert after_reply.media_binding is False
+    assert stale.media_binding is False
+    assert others.media_binding is False
+
+
+def test_router_media_hint_binds_without_structural_image() -> None:
+    context_history, _media_context = _load_modules()
+    effective = context_history.effective_turn_query(
+        [_image_message(101, 30001, minutes_ago=1)],
+        focus_user_ids=[20001],
+        query_text="这是啥",
+        media_hint=True,
+    )
+
+    assert effective.media_binding is True
+    assert context_history.query_requests_media("刚才那张图") is False
 
 
 def test_effective_turn_does_not_recover_stale_split_turn() -> None:
@@ -141,6 +209,7 @@ def test_direct_media_query_keeps_existing_history_behavior() -> None:
         ],
         focus_user_ids=[20001],
         query_text="刚才那张图还有什么细节？",
+        media_hint=True,
     )
 
     media_trace = next(item for item in selection.trace if item["message_id"] == 101)

@@ -28,15 +28,14 @@ CONTEXT_PROACTIVE_MAX_AGE_MINUTES = 45
 CONTEXT_PROACTIVE_MAX_MESSAGES = 10
 EFFECTIVE_TURN_MAX_MESSAGES = 4
 EFFECTIVE_TURN_MAX_AGE_MINUTES = 2
+# 同一成员先发图、再 @ 机器人提问：只要中间 Bot 没回过话，这么久以内的图都算本轮的图。
+MEDIA_BINDING_MAX_AGE_MINUTES = 3
+MEDIA_BINDING_MAX_MESSAGES = 6
 TRIGGER_CONTINUATION_MAX_AGE_MINUTES = 10
 LOW_INFO_HISTORY_TEXTS = frozenset(
-    {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[json]"}
+    {"", "了", "嗯", "哦", "啊", "好", "好的", "ok", "OK", "[图片]", "[表情包]", "[json]"}
 )
 _NON_SEMANTIC_QUERY_SENTINELS = frozenset({"[用户仅@机器人，没有附加正文]", "[非文本消息]"})
-_MEDIA_QUERY_RE = re.compile(
-    r"(?:图片|截图|照片|相片|这张|那张|上面那|前面那|刚才那|刚刚那|"
-    r"我刚才发的|我刚发的|第[一二三四五六七八九十\d]+张|图里|图上|这里是不是|还有什么细节)"
-)
 _TRIGGER_MARKUP_RE = re.compile(
     r"(?:@[\w\-\u4e00-\u9fff]+|\[(?:at|提及|@)[^\]]*\])",
     re.IGNORECASE,
@@ -122,11 +121,52 @@ class ContextSelection:
     media_message_ids: tuple[int, ...] = ()
 
 
-def query_requests_media(query_text: str | None) -> bool:
-    """统一判断一次用户语义回合是否显式指向图片。"""
+def query_requests_media(query_text: str | None, *, media_hint: bool = False) -> bool:
+    """兼容旧调用：是否要把历史图片绑定进本轮。
 
-    text = " ".join(str(query_text or "").split())
-    return bool(text and _MEDIA_QUERY_RE.search(text))
+    不再按“图片/这张/截图”等字面猜意图（关键词永远列不全，“这是啥”“帮我看看”
+    都不含这些词）。是否绑定只看结构事实（见 :func:`actor_recent_media_ids`）和
+    工具路由模型给出的 ``media_hint``；这里只把后者原样传回。
+    """
+
+    del query_text
+    return bool(media_hint)
+
+
+def actor_recent_media_ids(
+    messages: Sequence[dict[str, Any]],
+    actor_user_id: int | None,
+    *,
+    max_age_minutes: float = MEDIA_BINDING_MAX_AGE_MINUTES,
+) -> tuple[int, ...]:
+    """当前发言人在 Bot 上一次说话之后、最近几分钟里发的图片消息。
+
+    QQ 里最常见的是“先发图，再 @ 机器人问这是啥”，中间还可能夹着别人的
+    插话。这里从新到旧扫：遇到 Bot 的消息或超出时间窗就停，别人的消息跳过，
+    只收当前发言人带图片的消息。纯结构判断，不看文字内容。
+    """
+
+    if actor_user_id is None:
+        return ()
+    found: list[int] = []
+    scanned = 0
+    for item in reversed(messages):
+        if scanned >= MEDIA_BINDING_MAX_MESSAGES:
+            break
+        if _minutes_ago(item) > max_age_minutes:
+            break
+        if str(item.get("role") or "member") == "bot":
+            break
+        scanned += 1
+        if _optional_positive_int(item.get("user_id")) != actor_user_id:
+            continue
+        if "image" not in [str(kind) for kind in item.get("media_types") or ()]:
+            continue
+        message_id = _optional_positive_int(item.get("message_id"))
+        if message_id is not None and message_id not in found:
+            found.append(message_id)
+    found.reverse()
+    return tuple(found)
 
 
 def _trigger_only_query(query_text: str | None) -> bool:
@@ -209,6 +249,7 @@ def effective_turn_query(
     *,
     focus_user_ids: Sequence[int] | None = None,
     query_text: str | None = None,
+    media_hint: bool = False,
 ) -> EffectiveTurn:
     """把 QQ 的“前置内容 → 单独触发”恢复成有角色分工的语义回合。
 
@@ -220,8 +261,10 @@ def effective_turn_query(
 
     query = " ".join(str(query_text or "").split())
     trigger_only = _trigger_only_query(query)
+    actor_user_id = _latest_actor_id(messages, focus_user_ids)
+    recent_media_ids = actor_recent_media_ids(messages, actor_user_id)
     if not trigger_only:
-        media_binding = query_requests_media(query)
+        media_binding = bool(recent_media_ids) or bool(media_hint)
         kind = _interaction_kind(
             query,
             (),
@@ -232,13 +275,14 @@ def effective_turn_query(
             primary=query,
             media_binding=media_binding,
             interaction_kind=kind,
+            media_message_ids=recent_media_ids,
             trigger_only=False,
         )
 
-    actor_user_id = _latest_actor_id(messages, focus_user_ids)
     if actor_user_id is None:
         return EffectiveTurn(
             primary=query,
+            media_binding=bool(media_hint),
             interaction_kind=INTERACTION_PING_ACK,
             trigger_only=True,
         )
@@ -267,7 +311,9 @@ def effective_turn_query(
     if not collected:
         return EffectiveTurn(
             primary=query,
+            media_binding=bool(recent_media_ids) or bool(media_hint),
             interaction_kind=INTERACTION_PING_ACK,
+            media_message_ids=recent_media_ids,
             trigger_only=True,
         )
 
@@ -294,7 +340,14 @@ def effective_turn_query(
     elif len(primary) <= 8 and previous_texts and not _looks_like_task(primary):
         support = tuple(previous_texts[-1:])
 
-    media_binding = query_requests_media(primary)
+    for message_id in recent_media_ids:
+        if message_id not in media_message_ids:
+            media_message_ids.append(message_id)
+    # 纠正/催促 Bot（repair/ping）不是在问图；其余情况本人刚发的图就是本轮的图。
+    ping_or_repair = _looks_like_ping(primary) or _looks_like_repair(primary)
+    media_binding = bool(media_hint) or (bool(media_message_ids) and not ping_or_repair)
+    if not media_binding:
+        media_message_ids = []
     kind = _interaction_kind(
         primary,
         support,
@@ -455,10 +508,33 @@ def history_message_meta(row: GroupAgentMessage) -> dict[str, Any]:
         meta["reply_to"] = reply_to
     if media_types:
         meta["media_types"] = media_types
+        notes = _history_image_notes(row)
+        if notes:
+            meta["image_notes"] = notes
     forward_nodes = min(len(list(row.forward_tree or [])), 20)
     if forward_nodes:
         meta["forward_nodes"] = forward_nodes
     return meta
+
+
+def _history_image_notes(row: GroupAgentMessage) -> list[str]:
+    """历史图片的短转述（Bot 之前看过或收图即转述过的）；没有就不写这个字段。"""
+
+    from .media_memory import history_note
+
+    try:
+        group_id = int(row.group_id)
+    except (TypeError, ValueError):
+        return []
+    notes: list[str] = []
+    for item in list(row.media_refs or [])[:4]:
+        if not isinstance(item, dict) or str(item.get("type") or "") != "image":
+            continue
+        note = history_note(group_id, str(item.get("content_hash") or "") or None)
+        if note:
+            kind = "表情包" if item.get("sticker") else "图片"
+            notes.append(f"{kind}转述: {note}")
+    return notes
 
 
 def history_message_payload(
@@ -499,6 +575,9 @@ def _minutes_ago(item: dict[str, Any]) -> int:
 
 
 def _is_low_info(item: dict[str, Any]) -> bool:
+    if item.get("image_notes"):
+        # 有转述的图片带着真实信息，不能当成“嗯/哦”一类的低信息消息丢掉。
+        return False
     text = str(item.get("text") or "").strip()
     if text in LOW_INFO_HISTORY_TEXTS:
         return True
@@ -588,6 +667,7 @@ def select_context_messages(
     *,
     focus_user_ids: Sequence[int] | None = None,
     query_text: str | None = None,
+    media_hint: bool = False,
 ) -> ContextSelection:
     """选择真正相关的历史，并返回不进入 Prompt 的选择追踪。"""
 
@@ -603,6 +683,7 @@ def select_context_messages(
         messages,
         focus_user_ids=focus_user_ids,
         query_text=query_text,
+        media_hint=media_hint,
     )
     query = effective.primary
     query_tokens = extract_bigrams(query[:1000]) if query else set()
