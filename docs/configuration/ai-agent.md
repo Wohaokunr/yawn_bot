@@ -144,6 +144,8 @@ AGENT_OPTIONAL_MESSAGE_SEGMENTS=
 AGENT_SHARE_ALLOWED_HOSTS=
 AGENT_RECEIVED_MEDIA_REUSE=deny
 AGENT_DEBUG_LOG=false
+AGENT_TRACE_PROMPT_CAPTURE=full
+AGENT_PROMPT_OVERRIDES_PATH=
 ```
 
 - `AGENT_MEDIA_ALLOWED_HOSTS` 默认允许 `gchat.qpic.cn`、`multimedia.nt.qq.com.cn` 和 `*.qpic.cn`（`*.` 开头匹配子域名）；显式置空时，群图片不会被 Agent 主动下载用于视觉理解。
@@ -167,6 +169,20 @@ AGENT_DEBUG_LOG=false
 - `AGENT_SHARE_ALLOWED_HOSTS` 单独限制分享卡片链接域名。
 - `AGENT_RECEIVED_MEDIA_REUSE` 默认 `deny`；如明确需要，可设置 `same_group` 仅允许同群复用已缓存媒体。
 - `AGENT_DEBUG_LOG=true` 会输出大量包含群消息和 LLM 回复的调试信息，只适合本地短时排障。
+- `AGENT_TRACE_PROMPT_CAPTURE=full`（默认）：每条执行 Trace 记录真实发给模型的完整请求（全部 messages、tools、参数和回复），在 WebUI 调试台 Trace 的“完整提示词”页查看。只存在内存里，每条 Trace 最多 16 次请求、单次 32 万字符，最近 48 条 Trace 保留；链接、本机路径、内嵌媒体会脱敏；只有管理员能看。设为 `off` 不再抓取。
+- `AGENT_PROMPT_OVERRIDES_PATH`：WebUI“提示词”页保存的分段覆盖（删除、替换、追加、前置，全局或本群）写到这个 JSON 文件，默认 `data/yawn_agent/prompt_overrides.json`。文件损坏时 Bot 按代码默认提示词运行，页面会显示错误。不需要数据库迁移。
+
+### 提示词分段与覆盖
+
+Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里登记为一个分段（核心策略、安全与边界、分层表头、上下文数据、工具说明、发言策略、主动发言、工具路由、识图、记忆整理，以及每个工具的描述）。WebUI 调试分区的“提示词”页可以：
+
+- 查看每段的默认文字、最近一次真实生成的样例、生效文字和 Token 估算；
+- 按全局或本群删除、替换、追加、前置；本群可选“用代码默认”，不继承全局覆盖；
+- “一键删除安全上下文”去掉全部安全分段（需要确认）；删除只影响模型看到的文字，工具权限分级、特权配额、critical 动作门槛、出站校验、隐私退出过滤这些代码保护仍然生效；
+- 导入/导出覆盖、查看每段修改历史（每段保留 12 条）、对比默认与改动；
+- 不保存直接“预览完整提示词”：草稿只作用于这一次调试运行。
+
+没有任何覆盖时，提示词与改动前逐字一致。整层被删空时，这一条 system 消息不再发送。上下文数据分段（群背景、成员资料、实时状态、当前回合）只能整块保留或删除。
 
 图片类表情包放在 `AGENT_FILE_ROOT/reactions/`，索引文件为 `index.json`。模型只接触 reaction id、标签和描述，不直接猜本地路径。
 

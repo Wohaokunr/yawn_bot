@@ -96,6 +96,7 @@ from .proactive_policy import (
     _PROACTIVE_SEGMENT_TYPES,
     _WARMUP_PROMPT,
     build_user_prompt as _build_user_prompt,
+    build_user_prompt_parts as _build_user_prompt_parts,
     clamp_probability as _clamp_probability,
     decide_proactive_reply as _decide_proactive_reply,
     recent_proactive_lines as _recent_proactive_lines,
@@ -565,7 +566,8 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 persona=resolve_persona(config),
                 tools=[],
                 context=context,
-                user_prompt=_build_user_prompt(
+                user_prompt="",
+                user_prompt_parts=_build_user_prompt_parts(
                     scene, config, turn=1, warmup_state=warmup, now=now_beijing()
                 ),
             )
@@ -976,7 +978,8 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 persona=resolve_persona(config),
                 tools=[],
                 context=context,
-                user_prompt=_build_user_prompt(
+                user_prompt="",
+                user_prompt_parts=_build_user_prompt_parts(
                     "followup", config, turn=batch.bot_turns + 1
                 ),
             )

@@ -1,3 +1,5 @@
+import type { PromptSnapshot, PromptSpan } from "./agent-prompts/prompt-meta";
+
 export interface Overview {
   bots: string[];
   plugins: { name: string; state: "loaded" | "missing" | "failed"; detail?: string | null }[];
@@ -537,6 +539,10 @@ export interface AgentExecutionTraceSummary {
   slowestPhase?: { phase: string; label: string; durationMs: number | null } | null;
   /** 事件数达到单条 Trace 上限，后续事件已被丢弃。 */
   truncated?: boolean;
+  /** 抓到的真实模型请求次数（完整提示词）；旧后端没有该字段。 */
+  promptCount?: number;
+  /** 完整提示词因全局上限已被清掉，只剩摘要。 */
+  promptsEvicted?: boolean;
 }
 
 export interface AgentExecutionTraceStats {
@@ -572,6 +578,8 @@ export interface AgentExecutionTrace {
   outcome: string | null;
   durationMs: number | null;
   events: AgentExecutionTraceEvent[];
+  promptCount?: number;
+  promptsEvictedCount?: number;
 }
 
 export interface AgentSpeechSimulation {
@@ -631,6 +639,11 @@ export interface AgentDebugResponse {
   }>;
   contextBudget: Array<Record<string, unknown>>;
   promptMessages: Array<{ role: string; content: unknown }>;
+  /** 每个提示词分段落在哪条消息的哪一段（旧后端没有）。 */
+  promptSpans?: PromptSpan[];
+  /** 与真实请求同格式的完整提示词快照：试跑时是实际请求，仅构建时是“将要发送”。 */
+  promptSnapshots?: PromptSnapshot[];
+  promptDrafts?: string[];
   tools: Array<Record<string, unknown>>;
   toolPermissions: Array<{
     name: string;

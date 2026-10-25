@@ -1,0 +1,1599 @@
+# ruff: noqa: E501, PLR0913
+"""Agent 提示词分段注册表与 WebUI 覆盖。
+
+Agent 发给模型的每一段固定文字、每一个动态生成块、每一个分层表头都在这里登记成
+一个 *分段*（section）。运行时通过 :func:`apply_section` 取得该段的生效文本：
+
+- 没有覆盖时返回代码默认值（或本轮动态生成的文本），行为与改造前逐字一致；
+- WebUI 可以在 **全局** 或 **本群** 范围内对任意分段做 替换 / 追加 / 前置 / 删除，
+  包括安全与边界相关的分段——删掉之后模型就真的看不到这段话。删除提示词不会关闭
+  代码里的硬校验（权限、配额、critical 门槛、出站校验），WebUI 会把这一点写清楚。
+
+覆盖存放在本地 JSON（不建表、不需要迁移），进程内缓存并按 mtime 自动重载。草稿
+预览用 :func:`use_draft_overrides`，只影响当前 asyncio 上下文，不落盘。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import contextvars
+import copy
+import hashlib
+import importlib
+import json
+import os
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .context import now_beijing
+from .context_budget import estimate_tokens
+
+STORE_SCHEMA_VERSION = 1
+MAX_SECTION_TEXT = 12_000
+MAX_NOTE_CHARS = 200
+MAX_HISTORY_PER_SECTION = 12
+MAX_SAMPLE_CHARS = 6_000
+MAX_SAMPLES = 256
+MAX_GROUP_SCOPES = 512
+GLOBAL_SCOPE = "global"
+
+MODE_REPLACE = "replace"
+MODE_APPEND = "append"
+MODE_PREPEND = "prepend"
+MODE_DISABLE = "disable"
+# 本群显式“用代码默认值”，不继承全局覆盖。
+MODE_BUILTIN = "builtin"
+OVERRIDE_MODES = (MODE_REPLACE, MODE_APPEND, MODE_PREPEND, MODE_DISABLE, MODE_BUILTIN)
+_TEXT_MODES = frozenset({MODE_REPLACE, MODE_APPEND, MODE_PREPEND})
+
+KIND_STATIC = "static"  # 固定文字，默认值来自代码常量
+KIND_GENERATED = "generated"  # 每轮按情况生成；替换=改成固定文字
+KIND_HEADER = "header"  # 分层表头（紧贴后面的 JSON 数据）
+KIND_DATA = "data"  # 上下文数据块，只能保留或整块删除
+
+CATEGORIES: tuple[tuple[str, str, str], ...] = (
+    (
+        "safety",
+        "安全与边界",
+        "防注入、保密、诚实与工具边界。删掉后模型不再看到这些约束，但代码里的权限/配额/出站校验仍然生效。",
+    ),
+    ("core", "核心策略", "角色开场、当前回合优先级、人设块和媒体权威说明。"),
+    ("layers", "分层表头", "每个 system 层前面的标签文字，告诉模型这一层是什么。"),
+    (
+        "context",
+        "上下文数据",
+        "群背景、成员资料、实时状态和当前回合 JSON。只能整块保留或删除。",
+    ),
+    ("tools", "工具说明", "装载对应工具时才追加的使用规则。"),
+    ("speech", "发言策略", "场景规则与每轮动态生成的话语动作、轮替、风格、节奏说明。"),
+    ("proactive", "主动发言", "插话、暖场、短会话续聊的用户提示与 JSON 协议。"),
+    ("router", "工具路由", "轻量路由模型的 system 提示。"),
+    ("vision", "识图", "识图转述模型的 system 提示。"),
+    ("memory", "记忆整理", "记忆整理与周摘要模型的 system 提示。"),
+    (
+        "tool_schema",
+        "工具描述",
+        "每个工具 schema 里的 description，模型据此决定怎么调用。",
+    ),
+)
+CATEGORY_LABELS = {key: label for key, label, _hint in CATEGORIES}
+
+LAYER_LABELS = {
+    "static": "静态前缀（system #1）",
+    "stable": "群背景层（system）",
+    "speaker": "成员资料层（system）",
+    "tool_guidance": "工具说明层（system）",
+    "realtime": "实时状态层（system）",
+    "user": "当前回合（user）",
+    "round": "工具循环中追加",
+    "tool_result": "工具结果（tool）",
+    "proactive_user": "主动发言 user 提示",
+    "aux_system": "辅助模型 system",
+    "tool_schema": "tools 参数",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PromptSection:
+    id: str
+    title: str
+    category: str
+    layer: str
+    kind: str = KIND_STATIC
+    description: str = ""
+    when: str = "每轮"
+    safety: bool = False
+    protocol: bool = False
+    default_ref: str | None = None
+    tasks: tuple[str, ...] = ("agent_dialogue",)
+    editable: bool = True
+
+    @property
+    def modes(self) -> tuple[str, ...]:
+        if not self.editable:
+            return ()
+        if self.kind == KIND_DATA:
+            return (MODE_DISABLE, MODE_BUILTIN)
+        return OVERRIDE_MODES
+
+    def default_text(self) -> str | None:
+        return _resolve_default_ref(self.default_ref)
+
+
+def _resolve_default_ref(ref: str | None) -> str | None:
+    """``module:attr`` 或 ``module:attr[key]``；按需导入，避免循环依赖。"""
+
+    if not ref:
+        return None
+    try:
+        module_name, _, attr = ref.partition(":")
+        key: str | None = None
+        if attr.endswith("]") and "[" in attr:
+            attr, _, raw_key = attr[:-1].partition("[")
+            key = raw_key
+        module = importlib.import_module(f"{__package__}.{module_name}")
+        value = getattr(module, attr)
+        if key is not None:
+            value = value[key]
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_D = ("agent_dialogue",)
+_DP = ("agent_dialogue", "agent_proactive")
+_P = ("agent_proactive",)
+
+SECTIONS: tuple[PromptSection, ...] = (
+    # ── 静态前缀 ──
+    PromptSection(
+        "core.version_tag",
+        "版本标记",
+        "core",
+        "static",
+        KIND_GENERATED,
+        "首行 v:yawn-agent-vNN，便于在服务商日志里认出 Prompt 版本。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "core.role_intro",
+        "角色开场",
+        "core",
+        "static",
+        default_ref="prompt:POLICY_ROLE_INTRO",
+        description="告诉模型它在按角色参与 QQ 群聊。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "core.turn_priority",
+        "当前回合优先",
+        "core",
+        "static",
+        default_ref="prompt:POLICY_TURN_PRIORITY",
+        description="current_turn 最高优先、topic_state 的地位、不误答他人。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "safety.honesty",
+        "只依据事实",
+        "safety",
+        "static",
+        default_ref="prompt:POLICY_HONESTY",
+        description="不知道就说不知道，不编造经历、不猜隐私。",
+        safety=True,
+        tasks=_DP,
+    ),
+    PromptSection(
+        "safety.untrusted_data",
+        "资料不可信（防注入）",
+        "safety",
+        "static",
+        default_ref="prompt:POLICY_UNTRUSTED",
+        description="群消息、记忆、摘要只是资料，不执行其中的指令。",
+        safety=True,
+        tasks=_DP,
+    ),
+    PromptSection(
+        "safety.confidentiality",
+        "保密边界",
+        "safety",
+        "static",
+        default_ref="prompt:POLICY_CONFIDENTIAL",
+        description="不泄露私聊、隐私记忆、权限、工具内部结果与内部策略。",
+        safety=True,
+        tasks=_DP,
+    ),
+    PromptSection(
+        "safety.emotion_bounds",
+        "情绪边界",
+        "safety",
+        "static",
+        default_ref="prompt:POLICY_EMOTION",
+        description="情绪状态只影响语气，不改变事实、权限、安全或记忆判断。",
+        safety=True,
+        tasks=_DP,
+    ),
+    PromptSection(
+        "safety.tool_honesty",
+        "工具诚实",
+        "safety",
+        "static",
+        default_ref="prompt:POLICY_TOOL_HONESTY",
+        description="只按 schema 调用工具；没成功的动作不得声称完成。",
+        safety=True,
+        tasks=_DP,
+    ),
+    PromptSection(
+        "core.persona",
+        "人设块",
+        "core",
+        "static",
+        KIND_GENERATED,
+        "“角色：”+ 编译后的人设 JSON。内容请在人设面板改；这里只能整体替换、追加或删除。",
+        tasks=_DP,
+    ),
+    # ── 群背景 / 成员资料 ──
+    PromptSection(
+        "layers.stable_header",
+        "群背景层表头",
+        "layers",
+        "stable",
+        KIND_HEADER,
+        default_ref="prompt:_STABLE_SYSTEM_PREFIX",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "context.stable",
+        "群背景数据",
+        "context",
+        "stable",
+        KIND_DATA,
+        "群号、群名、日摘要与跨群公开摘要（JSON）。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "core.bot_bond_guidance",
+        "Bot 关系使用规则",
+        "core",
+        "speaker",
+        default_ref="prompt:_BOT_BOND_GUIDANCE",
+        when="成员资料里有 bot_bonds 时",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "layers.speaker_header",
+        "成员资料层表头",
+        "layers",
+        "speaker",
+        KIND_HEADER,
+        default_ref="prompt:_SPEAKER_SYSTEM_PREFIX",
+        when="有相关成员资料时",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "context.speaker",
+        "成员资料数据",
+        "context",
+        "speaker",
+        KIND_DATA,
+        "相关成员、画像记忆、关系与 Bot 关系（JSON）。",
+        when="有相关成员资料时",
+        tasks=_DP,
+    ),
+    # ── 工具说明 ──
+    PromptSection(
+        "tools.result_speech",
+        "工具结果怎么说",
+        "safety",
+        "tool_guidance",
+        default_ref="tool_result_speech:TOOL_RESULT_SPEECH_INSTRUCTION",
+        description="工具返回是后台事实，不照抄 JSON；没成功不说完成。",
+        when="本轮装载了任何工具时",
+        safety=True,
+    ),
+    PromptSection(
+        "tools.send_message",
+        "send_message 规则",
+        "safety",
+        "tool_guidance",
+        default_ref="prompt:_SEND_MESSAGE_RULES",
+        description="id 必须来自上下文、禁 CQ 码/@all、成功即结束、QQ 纯文本。",
+        when="装载 send_message 时",
+        safety=True,
+    ),
+    PromptSection(
+        "tools.reaction",
+        "表情包规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_REACTION_RULES",
+        when="装载 search_reactions 时",
+    ),
+    PromptSection(
+        "tools.forward",
+        "合并转发规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_FORWARD_RULES",
+        when="装载 send_forward 时",
+    ),
+    PromptSection(
+        "tools.discovery",
+        "渐进披露规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_DISCOVERY_RULES",
+        when="装载 discover_tools 时",
+    ),
+    PromptSection(
+        "tools.sandbox",
+        "代码沙箱规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_SANDBOX_RULES",
+        when="装载 run_python 时",
+    ),
+    PromptSection(
+        "tools.shell",
+        "终端规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_SHELL_RULES",
+        when="装载 run_shell 时",
+    ),
+    PromptSection(
+        "tools.notice",
+        "公告规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_NOTICE_RULES",
+        when="装载 create_group_announcement 时",
+    ),
+    PromptSection(
+        "tools.file",
+        "群文件规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_FILE_RULES",
+        when="装载 send_file / list_agent_files 时",
+    ),
+    PromptSection(
+        "tools.target_member",
+        "管理对象确认",
+        "safety",
+        "tool_guidance",
+        default_ref="prompt:_TARGET_MEMBER_RULES",
+        description="管理操作的 user_id 必须是本轮明确指向的人。",
+        when="装载禁言/踢人/改名片等成员管理工具时",
+        safety=True,
+    ),
+    PromptSection(
+        "tools.final_round",
+        "最后一轮提示",
+        "tools",
+        "round",
+        default_ref="turn_budget:FINAL_ROUND_NOTE",
+        when="有工具结果且只剩最后一轮时追加一条 system",
+    ),
+    PromptSection(
+        "tools.media_followup",
+        "工具图片说明",
+        "tools",
+        "round",
+        default_ref="turn_budget:TOOL_MEDIA_NOTE",
+        when="工具查询结果带回图片、追加一条 user 图片消息时",
+    ),
+    PromptSection(
+        "tools.truncated_args",
+        "参数被截断提示",
+        "tools",
+        "tool_result",
+        default_ref="turn_budget:TRUNCATED_ARGS_HINT",
+        when="工具参数 JSON 因输出截断而不完整时，写进 tool 结果的 hint",
+    ),
+    # ── 实时状态 ──
+    PromptSection(
+        "layers.realtime_header",
+        "实时状态层表头",
+        "layers",
+        "realtime",
+        KIND_HEADER,
+        default_ref="prompt:_REALTIME_SYSTEM_PREFIX",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "context.realtime",
+        "实时状态数据",
+        "context",
+        "realtime",
+        KIND_DATA,
+        "最近消息、话题、情绪、时钟、Bot 身份等（JSON）。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "layers.media_header",
+        "媒体状态表头",
+        "layers",
+        "realtime",
+        KIND_HEADER,
+        default_ref="prompt:_MEDIA_SYSTEM_PREFIX",
+        when="本轮 user 消息附带媒体块时",
+    ),
+    PromptSection(
+        "core.media_policy",
+        "本轮媒体权威",
+        "core",
+        "realtime",
+        default_ref="prompt:_CURRENT_MEDIA_POLICY",
+        description="有图就看图，别被历史里“看不到图”的旧回复带偏。",
+        when="本轮 user 消息附带媒体块时",
+    ),
+    PromptSection(
+        "layers.speech_header",
+        "发言策略表头",
+        "safety",
+        "realtime",
+        KIND_HEADER,
+        default_ref="prompt:_SPEECH_SYSTEM_PREFIX",
+        description="声明发言策略只约束表达，不改变事实/权限/工具边界。",
+        safety=True,
+        tasks=_DP,
+    ),
+    # ── 发言策略 ──
+    PromptSection(
+        "speech.scene_label",
+        "场景标签",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "“发言场景=xxx。”这一小句。",
+        tasks=_DP,
+    ),
+    *(
+        PromptSection(
+            f"speech.scene.{scene}",
+            f"场景：{label}",
+            "speech",
+            "realtime",
+            default_ref=f"speech_policy:SCENE_RULES[{scene}]",
+            when=f"发言场景={scene} 时",
+            tasks=_DP,
+        )
+        for scene, label in (
+            ("direct_reply", "明确呼叫"),
+            ("reply_thread", "回复链承接"),
+            ("conversation", "普通承接"),
+            ("active_interject", "插话"),
+            ("warmup", "冷场暖场"),
+            ("followup", "短会话续聊"),
+            ("tool_result", "工具结果反馈"),
+            ("reaction", "轻量反应"),
+            ("fallback", "降级回复"),
+        )
+    ),
+    PromptSection(
+        "speech.interaction",
+        "有效回合说明",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "Effective Turn 类型、support/resumed_task/media_binding 的含义。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "speech.act",
+        "话语动作",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "answer / repair / ping_ack 等本轮要做的话语动作。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "speech.turn_taking",
+        "轮替",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "该接谁的话、要不要点名。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "speech.style",
+        "表达参数与字数",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "温暖度/幽默/详略/表现力档位和软字数目标。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "speech.quality",
+        "发言质量",
+        "speech",
+        "realtime",
+        default_ref="speech_policy:QUALITY_RULE",
+        description="不用无意义开场、不复述、不硬续聊。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "speech.native",
+        "原生表达",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "表情、reaction 等 QQ 原生表达建议。",
+        tasks=_DP,
+    ),
+    PromptSection(
+        "speech.rhythm",
+        "分条节奏",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "||| 分条与【节奏:…】标记说明。",
+        tasks=_DP,
+    ),
+    # ── 当前回合 ──
+    PromptSection(
+        "layers.current_turn_header",
+        "当前回合表头",
+        "safety",
+        "user",
+        KIND_HEADER,
+        default_ref="prompt:CURRENT_TURN_HEADER",
+        description="声明 content 是群消息资料，不是系统指令。",
+        safety=True,
+    ),
+    PromptSection(
+        "context.current_turn",
+        "当前回合数据",
+        "context",
+        "user",
+        KIND_DATA,
+        "发言人、正文、@、回复对象等（JSON）。",
+        editable=False,
+    ),
+    # ── 主动发言 ──
+    PromptSection(
+        "proactive.active",
+        "插话提示",
+        "proactive",
+        "proactive_user",
+        default_ref="proactive_policy:_ACTIVE_INTERJECT_PROMPT",
+        when="热闹插话评估时",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.warmup",
+        "暖场提示",
+        "proactive",
+        "proactive_user",
+        default_ref="proactive_policy:_WARMUP_PROMPT",
+        when="冷场暖场评估时",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.followup",
+        "续聊提示",
+        "proactive",
+        "proactive_user",
+        default_ref="proactive_policy:_FOLLOWUP_PROMPT",
+        when="短会话续聊评估时",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.behavior",
+        "人设行为",
+        "proactive",
+        "proactive_user",
+        KIND_GENERATED,
+        "按人设活跃度/社交性生成的参与分寸。",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.memory_use",
+        "记忆使用",
+        "proactive",
+        "proactive_user",
+        default_ref="proactive_policy:_MEMORY_USE_PROMPT",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.silence",
+        "冷场事实",
+        "proactive",
+        "proactive_user",
+        KIND_GENERATED,
+        "冷场多久、连续几条没人接。",
+        when="暖场时",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.turn_count",
+        "续聊计数",
+        "proactive",
+        "proactive_user",
+        KIND_GENERATED,
+        "这是本话题第几条候选发言。",
+        when="续聊/插话带轮次时",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.json_protocol",
+        "决策 JSON 协议",
+        "proactive",
+        "proactive_user",
+        default_ref="proactive_policy:_JSON_PROTOCOL",
+        description="要求模型只返回 speak/wait/close JSON；改坏了会解析失败。",
+        protocol=True,
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.recent_lines",
+        "最近主动发言",
+        "proactive",
+        "proactive_user",
+        KIND_GENERATED,
+        "最近几条主动发言，避免重复。",
+        when="有最近主动发言时",
+        tasks=_P,
+    ),
+    # ── 辅助模型 ──
+    PromptSection(
+        "router.system",
+        "路由器 system",
+        "router",
+        "aux_system",
+        default_ref="tool_planner:_SYSTEM_PROMPT",
+        description="判断要不要做事、预装哪些工具包；只返回 JSON。",
+        protocol=True,
+        safety=True,
+        tasks=("agent_router",),
+    ),
+    PromptSection(
+        "vision.caption",
+        "识图 system",
+        "vision",
+        "aux_system",
+        default_ref="media_caption:_VISION_SYSTEM_PROMPT",
+        when="模型不支持多模态、改走识图转述时",
+        tasks=("agent_image",),
+    ),
+    PromptSection(
+        "vision.auto_caption",
+        "自动转述 system",
+        "vision",
+        "aux_system",
+        default_ref="turn_media:_AUTO_CAPTION_PROMPT",
+        when="后台给群图片做缓存转述时",
+        tasks=("agent_image",),
+    ),
+    PromptSection(
+        "memory.consolidation",
+        "记忆整理 system",
+        "memory",
+        "aux_system",
+        KIND_GENERATED,
+        "提取事实/关系/Bot 关系并合并摘要；只返回 JSON。改坏了整理会失败并保留游标重试。",
+        protocol=True,
+        safety=True,
+        when="记忆整理任务",
+        tasks=("agent_memory",),
+    ),
+    PromptSection(
+        "memory.weekly",
+        "周摘要 system",
+        "memory",
+        "aux_system",
+        KIND_GENERATED,
+        "把一周日摘要合并成周摘要；只返回 JSON。",
+        protocol=True,
+        when="周摘要任务",
+        tasks=("agent_memory",),
+    ),
+)
+
+_SECTION_INDEX: dict[str, PromptSection] = {section.id: section for section in SECTIONS}
+TOOL_SECTION_PREFIX = "tool."
+
+
+def _tool_definitions() -> list[Any]:
+    try:
+        from .tool_registry import TOOL_DEFINITIONS
+
+        return list(TOOL_DEFINITIONS)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def tool_section(name: str) -> PromptSection:
+    return PromptSection(
+        f"{TOOL_SECTION_PREFIX}{name}",
+        f"工具 {name}",
+        "tool_schema",
+        "tool_schema",
+        description="tools[].function.description",
+        when=f"本轮装载 {name} 时",
+    )
+
+
+def get_section(section_id: str) -> PromptSection | None:
+    section = _SECTION_INDEX.get(section_id)
+    if section is not None:
+        return section
+    if section_id.startswith(TOOL_SECTION_PREFIX):
+        name = section_id[len(TOOL_SECTION_PREFIX) :]
+        if any(getattr(item, "name", None) == name for item in _tool_definitions()):
+            return tool_section(name)
+    return None
+
+
+def all_sections() -> list[PromptSection]:
+    tools = sorted(
+        {str(getattr(item, "name", "")) for item in _tool_definitions()} - {""}
+    )
+    return [*SECTIONS, *(tool_section(name) for name in tools)]
+
+
+def section_default(section: PromptSection) -> str | None:
+    if section.category == "tool_schema":
+        name = section.id[len(TOOL_SECTION_PREFIX) :]
+        for item in _tool_definitions():
+            if getattr(item, "name", None) == name:
+                return str(getattr(item, "description", "") or "")
+        return None
+    return section.default_text()
+
+
+# ── 覆盖存储 ─────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class Override:
+    mode: str
+    text: str = ""
+    note: str = ""
+    updated_at: str = ""
+    updated_by: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "text": self.text,
+            "note": self.note,
+            "updatedAt": self.updated_at,
+            "updatedBy": self.updated_by,
+        }
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> Override | None:
+        if not isinstance(raw, Mapping):
+            return None
+        mode = str(raw.get("mode") or "")
+        if mode not in OVERRIDE_MODES:
+            return None
+        return cls(
+            mode=mode,
+            text=str(raw.get("text") or "")[:MAX_SECTION_TEXT],
+            note=str(raw.get("note") or "")[:MAX_NOTE_CHARS],
+            updated_at=str(raw.get("updatedAt") or raw.get("updated_at") or ""),
+            updated_by=str(raw.get("updatedBy") or raw.get("updated_by") or ""),
+        )
+
+
+@dataclass(slots=True)
+class _StoreState:
+    revision: int = 0
+    scopes: dict[str, dict[str, Override]] = field(default_factory=dict)
+    history: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    updated_at: str = ""
+    loaded_mtime: float | None = None
+    load_error: str | None = None
+
+
+class PromptStoreConflictError(RuntimeError):
+    """写入时 revision 不匹配：别处（另一个标签页）刚改过。"""
+
+    def __init__(self, current: int) -> None:
+        super().__init__(f"提示词覆盖已被修改（当前版本 {current}），请刷新后重试")
+        self.current = current
+
+
+class PromptStoreValidationError(ValueError):
+    def __init__(self, message: str, *, field_name: str = "text") -> None:
+        super().__init__(message)
+        self.field_name = field_name
+
+
+def _default_store_path() -> Path:
+    raw = os.environ.get("AGENT_PROMPT_OVERRIDES_PATH", "").strip()
+    if raw:
+        return Path(raw)
+    return Path("data") / "yawn_agent" / "prompt_overrides.json"
+
+
+_store_path: Path | None = None
+_state = _StoreState()
+_lock = threading.RLock()
+
+
+def store_path() -> Path:
+    return _store_path or _default_store_path()
+
+
+def set_store_path(path: Path | None) -> None:
+    """测试/部署用：切换覆盖文件并清空缓存。"""
+
+    global _store_path, _state  # noqa: PLW0603
+    with _lock:
+        _store_path = path
+        _state = _StoreState()
+
+
+def _scope_key(group_id: int | None) -> str:
+    return GLOBAL_SCOPE if group_id is None else str(int(group_id))
+
+
+def _load_locked() -> _StoreState:  # noqa: C901
+    global _state  # noqa: PLW0603
+    path = store_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        if _state.loaded_mtime is not None:
+            _state = _StoreState()
+        return _state
+    if _state.loaded_mtime == mtime:
+        return _state
+    fresh = _StoreState(loaded_mtime=mtime)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # 文件损坏时保持“没有覆盖”，不能让 Agent 因为一个 JSON 起不来。
+        fresh.load_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        _state = fresh
+        return _state
+    if isinstance(raw, Mapping):
+        fresh.revision = int(raw.get("revision") or 0)
+        fresh.updated_at = str(raw.get("updatedAt") or "")
+        for scope, entries in dict(raw.get("scopes") or {}).items():
+            if not isinstance(entries, Mapping):
+                continue
+            parsed = {
+                str(section_id): override
+                for section_id, value in entries.items()
+                if (override := Override.from_raw(value)) is not None
+            }
+            if parsed:
+                fresh.scopes[str(scope)] = parsed
+        for scope, sections in dict(raw.get("history") or {}).items():
+            if isinstance(sections, Mapping):
+                fresh.history[str(scope)] = {
+                    str(key): [
+                        dict(item)
+                        for item in list(value)[-MAX_HISTORY_PER_SECTION:]
+                        if isinstance(item, Mapping)
+                    ]
+                    for key, value in sections.items()
+                    if isinstance(value, list)
+                }
+    _state = fresh
+    return _state
+
+
+def _save_locked(state: _StoreState) -> None:
+    path = store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schemaVersion": STORE_SCHEMA_VERSION,
+        "revision": state.revision,
+        "updatedAt": state.updated_at,
+        "scopes": {
+            scope: {key: value.as_dict() for key, value in sorted(entries.items())}
+            for scope, entries in sorted(state.scopes.items())
+            if entries
+        },
+        "history": state.history,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)  # noqa: PTH105
+    with contextlib.suppress(OSError):
+        state.loaded_mtime = path.stat().st_mtime
+
+
+def store_snapshot() -> dict[str, Any]:
+    with _lock:
+        state = _load_locked()
+        return {
+            "revision": state.revision,
+            "updatedAt": state.updated_at or None,
+            "path": str(store_path().name),
+            "loadError": state.load_error,
+            "scopes": {
+                scope: {key: value.as_dict() for key, value in entries.items()}
+                for scope, entries in state.scopes.items()
+            },
+        }
+
+
+def store_revision() -> int:
+    with _lock:
+        return _load_locked().revision
+
+
+def scope_overrides(group_id: int | None) -> dict[str, Override]:
+    with _lock:
+        return dict(_load_locked().scopes.get(_scope_key(group_id), {}))
+
+
+def section_history(section_id: str, group_id: int | None) -> list[dict[str, Any]]:
+    with _lock:
+        state = _load_locked()
+        return list(
+            reversed(state.history.get(_scope_key(group_id), {}).get(section_id, []))
+        )
+
+
+def validate_override(
+    section: PromptSection,
+    mode: str,
+    text: str,
+    *,
+    confirm_safety: bool = False,
+) -> str:
+    """返回规范化后的文本；不合法时抛 :class:`PromptStoreValidationError`。"""
+
+    if not section.editable:
+        raise PromptStoreValidationError(
+            "这一段是本轮数据，不能在这里改", field_name="mode"
+        )
+    if mode not in section.modes:
+        raise PromptStoreValidationError(f"这一段不支持“{mode}”", field_name="mode")
+    cleaned = str(text or "").replace("\x00", "").replace("\r\n", "\n")
+    if len(cleaned) > MAX_SECTION_TEXT:
+        raise PromptStoreValidationError(f"文本最长 {MAX_SECTION_TEXT} 字")  # noqa: TRY003
+    if mode in _TEXT_MODES and not cleaned.strip():
+        raise PromptStoreValidationError(
+            "替换/追加/前置需要填写文本；想删除这段请选“删除”"
+        )
+    if mode not in _TEXT_MODES:
+        cleaned = ""
+    if section.safety and mode in {MODE_DISABLE, MODE_REPLACE} and not confirm_safety:
+        raise PromptStoreValidationError(
+            "这是安全相关分段，删除或替换前需要确认", field_name="confirmSafety"
+        )
+    return cleaned
+
+
+def _history_entry(
+    scope_entry: Override | None, action: str, actor: str, revision: int
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "revision": revision,
+        "at": now_beijing().isoformat(timespec="seconds"),
+        "by": actor[:32],
+        "override": scope_entry.as_dict() if scope_entry is not None else None,
+    }
+
+
+def _check_revision(state: _StoreState, expected: int | None) -> None:
+    if expected is not None and int(expected) != state.revision:
+        raise PromptStoreConflictError(state.revision)
+
+
+def _commit(state: _StoreState) -> int:
+    state.revision += 1
+    state.updated_at = now_beijing().isoformat(timespec="seconds")
+    _save_locked(state)
+    return state.revision
+
+
+def set_override(
+    section_id: str,
+    *,
+    group_id: int | None,
+    mode: str,
+    text: str = "",
+    note: str = "",
+    actor: str = "",
+    expected_revision: int | None = None,
+    confirm_safety: bool = False,
+) -> dict[str, Any]:
+    section = get_section(section_id)
+    if section is None:
+        raise PromptStoreValidationError("未知的提示词分段", field_name="sectionId")
+    cleaned = validate_override(section, mode, text, confirm_safety=confirm_safety)
+    if mode == MODE_BUILTIN and group_id is None:
+        # 全局的“用默认值”就是删除全局覆盖。
+        return clear_override(
+            section_id, group_id=None, actor=actor, expected_revision=expected_revision
+        )
+    with _lock:
+        state = _load_locked()
+        _check_revision(state, expected_revision)
+        scope = _scope_key(group_id)
+        if (
+            scope != GLOBAL_SCOPE
+            and scope not in state.scopes
+            and len(state.scopes) >= MAX_GROUP_SCOPES
+        ):
+            raise PromptStoreValidationError(
+                "单独覆盖提示词的群太多了", field_name="groupId"
+            )
+        override = Override(
+            mode=mode,
+            text=cleaned,
+            note=str(note or "").strip()[:MAX_NOTE_CHARS],
+            updated_at=now_beijing().isoformat(timespec="seconds"),
+            updated_by=str(actor or "")[:32],
+        )
+        state.scopes.setdefault(scope, {})[section_id] = override
+        revision = state.revision + 1
+        bucket = state.history.setdefault(scope, {}).setdefault(section_id, [])
+        bucket.append(_history_entry(override, "set", actor, revision))
+        del bucket[:-MAX_HISTORY_PER_SECTION]
+        _commit(state)
+        return {"revision": state.revision, "override": override.as_dict()}
+
+
+def clear_override(
+    section_id: str,
+    *,
+    group_id: int | None,
+    actor: str = "",
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
+    with _lock:
+        state = _load_locked()
+        _check_revision(state, expected_revision)
+        scope = _scope_key(group_id)
+        entries = state.scopes.get(scope, {})
+        if section_id not in entries:
+            return {"revision": state.revision, "override": None, "changed": False}
+        entries.pop(section_id, None)
+        if not entries:
+            state.scopes.pop(scope, None)
+        bucket = state.history.setdefault(scope, {}).setdefault(section_id, [])
+        bucket.append(_history_entry(None, "clear", actor, state.revision + 1))
+        del bucket[:-MAX_HISTORY_PER_SECTION]
+        _commit(state)
+        return {"revision": state.revision, "override": None, "changed": True}
+
+
+def bulk_apply(  # noqa: C901
+    changes: list[dict[str, Any]],
+    *,
+    group_id: int | None,
+    actor: str = "",
+    expected_revision: int | None = None,
+    confirm_safety: bool = False,
+    replace_scope: bool = False,
+) -> dict[str, Any]:
+    """一次提交多处改动（批量删除安全段、导入、整组恢复默认）；全部校验通过才写。"""
+
+    prepared: list[tuple[str, Override | None]] = []
+    for item in changes:
+        section_id = str(item.get("sectionId") or "")
+        section = get_section(section_id)
+        if section is None:
+            raise PromptStoreValidationError(
+                f"未知的提示词分段：{section_id[:64]}", field_name="sectionId"
+            )
+        mode = str(item.get("mode") or "")
+        if mode in {"", "inherit", "default"}:
+            prepared.append((section_id, None))
+            continue
+        cleaned = validate_override(
+            section, mode, str(item.get("text") or ""), confirm_safety=confirm_safety
+        )
+        if mode == MODE_BUILTIN and group_id is None:
+            prepared.append((section_id, None))
+            continue
+        prepared.append(
+            (
+                section_id,
+                Override(
+                    mode=mode,
+                    text=cleaned,
+                    note=str(item.get("note") or "").strip()[:MAX_NOTE_CHARS],
+                    updated_at=now_beijing().isoformat(timespec="seconds"),
+                    updated_by=str(actor or "")[:32],
+                ),
+            )
+        )
+    with _lock:
+        state = _load_locked()
+        _check_revision(state, expected_revision)
+        scope = _scope_key(group_id)
+        entries = {} if replace_scope else dict(state.scopes.get(scope, {}))
+        revision = state.revision + 1
+        touched = 0
+        for section_id, override in prepared:
+            before = entries.get(section_id)
+            if override is None:
+                if before is None:
+                    continue
+                entries.pop(section_id, None)
+            else:
+                entries[section_id] = override
+            touched += 1
+            bucket = state.history.setdefault(scope, {}).setdefault(section_id, [])
+            bucket.append(_history_entry(override, "bulk", actor, revision))
+            del bucket[:-MAX_HISTORY_PER_SECTION]
+        if replace_scope:
+            touched = max(touched, len(state.scopes.get(scope, {})))
+        if entries:
+            state.scopes[scope] = entries
+        else:
+            state.scopes.pop(scope, None)
+        if touched:
+            _commit(state)
+        return {"revision": state.revision, "changed": touched}
+
+
+def export_scope(group_id: int | None) -> dict[str, Any]:
+    return {
+        "kind": "yawnbot.prompt-overrides",
+        "schemaVersion": STORE_SCHEMA_VERSION,
+        "scope": _scope_key(group_id),
+        "exportedAt": now_beijing().isoformat(timespec="seconds"),
+        "overrides": {
+            key: value.as_dict()
+            for key, value in sorted(scope_overrides(group_id).items())
+        },
+    }
+
+
+# ── 解析与应用 ───────────────────────────────────────────────────────────
+
+_DRAFT: contextvars.ContextVar[dict[str, dict[str, Override]] | None] = (
+    contextvars.ContextVar("yawn_agent_prompt_draft", default=None)
+)
+
+
+@contextlib.contextmanager
+def use_draft_overrides(
+    drafts: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    group_id: int | None,
+) -> Iterator[None]:
+    """在当前上下文里叠加未保存的草稿（预览用），不落盘。
+
+    ``drafts`` 为 ``{section_id: {"mode":..., "text":...}}``；``mode=inherit`` 表示
+    预览“去掉这一层覆盖”的效果。
+    """
+
+    if not drafts:
+        yield
+        return
+    scope = _scope_key(group_id)
+    layer: dict[str, Override] = {}
+    for section_id, raw in drafts.items():
+        if str(raw.get("mode") or "") in {"inherit", "default"}:
+            layer[str(section_id)] = Override(mode="inherit")
+            continue
+        parsed = Override.from_raw(raw)
+        if parsed is not None and get_section(str(section_id)) is not None:
+            layer[str(section_id)] = parsed
+    token = _DRAFT.set({scope: layer})
+    try:
+        yield
+    finally:
+        _DRAFT.reset(token)
+
+
+def _current_group_id() -> int | None:
+    try:
+        from .execution_trace import current_execution_trace
+
+        trace = current_execution_trace()
+        return int(trace.group_id) if trace is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedOverride:
+    override: Override | None
+    scope: str | None  # "draft" / "group" / "global" / None
+
+
+def resolve_override(section_id: str, group_id: int | None = None) -> ResolvedOverride:
+    """本群草稿 → 本群覆盖 → 全局草稿 → 全局覆盖；``builtin``/``inherit`` 停止查找。"""
+
+    gid = group_id if group_id is not None else _current_group_id()
+    drafts = _DRAFT.get() or {}
+    with _lock:
+        state = _load_locked()
+    for scope in ([str(int(gid))] if gid is not None else []) + [GLOBAL_SCOPE]:
+        label = "global" if scope == GLOBAL_SCOPE else "group"
+        draft = drafts.get(scope, {}).get(section_id)
+        if draft is not None:
+            if draft.mode == "inherit":
+                continue
+            if draft.mode == MODE_BUILTIN:
+                return ResolvedOverride(None, "draft")
+            return ResolvedOverride(draft, "draft")
+        stored = state.scopes.get(scope, {}).get(section_id)
+        if stored is not None:
+            if stored.mode == MODE_BUILTIN:
+                return ResolvedOverride(None, label)
+            return ResolvedOverride(stored, label)
+    return ResolvedOverride(None, None)
+
+
+def compose(base: str, override: Override | None) -> str:
+    if override is None:
+        return base
+    if override.mode == MODE_REPLACE:
+        return override.text
+    if override.mode == MODE_DISABLE:
+        return ""
+    if override.mode == MODE_APPEND:
+        return f"{base}\n{override.text}" if base else override.text
+    if override.mode == MODE_PREPEND:
+        return f"{override.text}\n{base}" if base else override.text
+    return base
+
+
+@dataclass(slots=True)
+class _Sample:
+    text: str
+    chars: int
+    seen: int
+    last_seen: float
+    last_group: int | None
+    effective_chars: int
+
+
+_SAMPLES: OrderedDict[str, _Sample] = OrderedDict()
+_SAMPLE_LOCK = threading.Lock()
+
+
+def _record_sample(
+    section_id: str, generated: str, effective: str, group_id: int | None
+) -> None:
+    with _SAMPLE_LOCK:
+        sample = _SAMPLES.get(section_id)
+        seen = (sample.seen if sample is not None else 0) + 1
+        _SAMPLES[section_id] = _Sample(
+            text=generated[:MAX_SAMPLE_CHARS],
+            chars=len(generated),
+            seen=seen,
+            last_seen=time.time(),
+            last_group=group_id,
+            effective_chars=len(effective),
+        )
+        _SAMPLES.move_to_end(section_id)
+        while len(_SAMPLES) > MAX_SAMPLES:
+            _SAMPLES.popitem(last=False)
+
+
+def section_sample(section_id: str) -> dict[str, Any] | None:
+    with _SAMPLE_LOCK:
+        sample = _SAMPLES.get(section_id)
+        if sample is None:
+            return None
+        return {
+            "text": sample.text,
+            "chars": sample.chars,
+            "truncated": sample.chars > len(sample.text),
+            "seen": sample.seen,
+            "lastSeenAt": time.strftime(
+                "%Y-%m-%dT%H:%M:%S", time.localtime(sample.last_seen)
+            ),
+            "lastGroupId": str(sample.last_group)
+            if sample.last_group is not None
+            else None,
+            "effectiveChars": sample.effective_chars,
+        }
+
+
+def apply_section(
+    section_id: str, generated: str, *, group_id: int | None = None
+) -> str:
+    """返回分段的生效文本；任何异常都退回代码默认，绝不影响对话。"""
+
+    try:
+        gid = group_id if group_id is not None else _current_group_id()
+        resolved = resolve_override(section_id, gid)
+        effective = compose(generated, resolved.override)
+        section = _SECTION_INDEX.get(section_id)
+        # 数据块（群消息、成员资料）不进进程级样例缓存：它们只该出现在有界的 Trace 里。
+        if section is None or section.kind != KIND_DATA:
+            _record_sample(section_id, generated, effective, gid)
+        return effective  # noqa: TRY300
+    except Exception:  # noqa: BLE001
+        return generated
+
+
+def section_text(section_id: str, default: str, *, group_id: int | None = None) -> str:
+    """静态分段的便捷入口：``default`` 就是代码常量。"""
+
+    return apply_section(section_id, default, group_id=group_id)
+
+
+def system_messages(
+    section_id: str, default: str, *, group_id: int | None = None
+) -> list[dict[str, Any]]:
+    """单条 system 提示：被 WebUI 删除时返回空列表，不给服务商发空 system。"""
+
+    text = section_text(section_id, default, group_id=group_id)
+    return [{"role": "system", "content": text}] if text else []
+
+
+# ── 片段拼装：生效文本 + 每段在消息里的位置 ─────────────────────────────
+
+
+@dataclass(slots=True)
+class Span:
+    section_id: str
+    start: int
+    end: int
+
+    def as_dict(self, message_index: int) -> dict[str, Any]:
+        return {
+            "message": message_index,
+            "sectionId": self.section_id,
+            "start": self.start,
+            "end": self.end,
+        }
+
+
+@dataclass(slots=True)
+class ContentBuilder:
+    """把若干分段拼成一条消息，并记下每段落在哪个字符区间。"""
+
+    parts: list[tuple[str | None, str]] = field(default_factory=list)
+
+    def add(self, section_id: str | None, text: str) -> None:
+        if text:
+            self.parts.append((section_id, text))
+
+    def build(self) -> tuple[str, list[Span]]:
+        content = ""
+        spans: list[Span] = []
+        for section_id, text in self.parts:
+            start = len(content)
+            content += text
+            if section_id:
+                spans.append(Span(section_id, start, len(content)))
+        return content, spans
+
+
+def join_builders(builders: list[ContentBuilder], separator: str) -> ContentBuilder:
+    """按行拼接若干子块，空块整块跳过（避免删掉一段后留下空行）。"""
+
+    joined = ContentBuilder()
+    first = True
+    for builder in builders:
+        if not builder.parts:
+            continue
+        if not first:
+            joined.add(None, separator)
+        joined.parts.extend(builder.parts)
+        first = False
+    return joined
+
+
+_MANIFEST: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "yawn_agent_prompt_manifest", default=None
+)
+
+
+def remember_manifest(
+    messages: list[dict[str, Any]], spans: list[dict[str, Any]]
+) -> None:
+    """记住最近一次构建的分段位置；捕获请求时按首条消息内容配对。"""
+
+    try:
+        first = messages[0].get("content") if messages else ""
+        digest = hashlib.sha256(str(first).encode("utf-8")).hexdigest()[:16]
+        _MANIFEST.set(
+            {"anchor": digest, "count": len(messages), "spans": copy.deepcopy(spans)}
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
+def manifest_for(messages: list[Any]) -> list[dict[str, Any]] | None:
+    manifest = _MANIFEST.get()
+    if manifest is None or not messages:
+        return None
+    first = messages[0].get("content") if isinstance(messages[0], Mapping) else ""
+    digest = hashlib.sha256(str(first).encode("utf-8")).hexdigest()[:16]
+    if digest != manifest.get("anchor"):
+        return None
+    count = int(manifest.get("count") or 0)
+    return [
+        span
+        for span in list(manifest.get("spans") or [])
+        if int(span.get("message", -1)) < count
+    ]
+
+
+def locate_sections(  # noqa: C901
+    messages: list[Any], *, known: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """没有构建清单的消息（路由、识图、工具循环追加的 system）按生效文本定位分段。"""
+
+    spans = list(known or [])
+    covered = {int(span["message"]) for span in spans}
+    candidates: list[tuple[str, str]] = []
+    for section in SECTIONS:
+        if section.kind in {KIND_DATA, KIND_GENERATED}:
+            continue
+        default = section.default_text()
+        if not default:
+            continue
+        effective = apply_section_preview(section.id, default)
+        if len(effective) >= 8:  # noqa: PLR2004
+            candidates.append((section.id, effective))
+    for index, message in enumerate(messages):
+        if index in covered or not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            text = "".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, Mapping) and part.get("type") == "text"
+            )
+        else:
+            text = str(content or "")
+        if not text:
+            continue
+        for section_id, effective in candidates:
+            start = text.find(effective)
+            if start >= 0:
+                spans.append(
+                    {
+                        "message": index,
+                        "sectionId": section_id,
+                        "start": start,
+                        "end": start + len(effective),
+                    }
+                )
+    spans.sort(key=lambda span: (int(span["message"]), int(span["start"])))
+    return spans
+
+
+def apply_section_preview(
+    section_id: str, default: str, *, group_id: int | None = None
+) -> str:
+    """和 :func:`apply_section` 同口径，但不记样例（只读查询用）。"""
+
+    try:
+        return compose(default, resolve_override(section_id, group_id).override)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+# ── WebUI 目录 ───────────────────────────────────────────────────────────
+
+
+def _override_payload(override: Override | None) -> dict[str, Any] | None:
+    return override.as_dict() if override is not None else None
+
+
+def catalog(group_id: int | None) -> dict[str, Any]:
+    """返回全部分段：默认值、全局/本群覆盖、生效文本、最近样例与 Token 估算。"""
+
+    with _lock:
+        state = _load_locked()
+        global_entries = dict(state.scopes.get(GLOBAL_SCOPE, {}))
+        group_entries = (
+            dict(state.scopes.get(str(int(group_id)), {}))
+            if group_id is not None
+            else {}
+        )
+        revision = state.revision
+        load_error = state.load_error
+        updated_at = state.updated_at
+    rows: list[dict[str, Any]] = []
+    for section in all_sections():
+        default = section_default(section)
+        sample = section_sample(section.id)
+        base = default if default is not None else (sample or {}).get("text") or ""
+        resolved = resolve_override(section.id, group_id)
+        effective = compose(base, resolved.override)
+        rows.append(
+            {
+                "id": section.id,
+                "title": section.title,
+                "category": section.category,
+                "categoryLabel": CATEGORY_LABELS.get(
+                    section.category, section.category
+                ),
+                "layer": section.layer,
+                "layerLabel": LAYER_LABELS.get(section.layer, section.layer),
+                "kind": section.kind,
+                "description": section.description,
+                "when": section.when,
+                "safety": section.safety,
+                "protocol": section.protocol,
+                "editable": section.editable,
+                "modes": list(section.modes),
+                "tasks": list(section.tasks),
+                "defaultText": default,
+                "defaultTokens": estimate_tokens(default) if default else 0,
+                "sample": sample,
+                "globalOverride": _override_payload(global_entries.get(section.id)),
+                "groupOverride": _override_payload(group_entries.get(section.id)),
+                "effectiveScope": resolved.scope,
+                "effectiveMode": resolved.override.mode
+                if resolved.override is not None
+                else "default",
+                "effectiveText": effective if (default is not None or sample) else None,
+                "effectiveTokens": estimate_tokens(effective) if effective else 0,
+            }
+        )
+    return {
+        "revision": revision,
+        "updatedAt": updated_at or None,
+        "loadError": load_error,
+        "storeFile": store_path().name,
+        "groupId": str(group_id) if group_id is not None else None,
+        "categories": [
+            {"key": key, "label": label, "hint": hint}
+            for key, label, hint in CATEGORIES
+        ],
+        "sections": rows,
+        "summary": {
+            "total": len(rows),
+            "globalOverrides": len(global_entries),
+            "groupOverrides": len(group_entries),
+            "disabled": sum(1 for row in rows if row["effectiveMode"] == MODE_DISABLE),
+            "safetyDisabled": sum(
+                1
+                for row in rows
+                if row["safety"]
+                and row["effectiveMode"] in {MODE_DISABLE, MODE_REPLACE}
+            ),
+        },
+    }
+
+
+__all__ = [
+    "CATEGORIES",
+    "GLOBAL_SCOPE",
+    "MODE_APPEND",
+    "MODE_BUILTIN",
+    "MODE_DISABLE",
+    "MODE_PREPEND",
+    "MODE_REPLACE",
+    "OVERRIDE_MODES",
+    "SECTIONS",
+    "ContentBuilder",
+    "Override",
+    "PromptSection",
+    "PromptStoreConflictError",
+    "PromptStoreValidationError",
+    "apply_section",
+    "bulk_apply",
+    "catalog",
+    "clear_override",
+    "export_scope",
+    "get_section",
+    "join_builders",
+    "locate_sections",
+    "manifest_for",
+    "remember_manifest",
+    "resolve_override",
+    "section_history",
+    "section_text",
+    "set_override",
+    "set_store_path",
+    "store_revision",
+    "store_snapshot",
+    "system_messages",
+    "use_draft_overrides",
+]

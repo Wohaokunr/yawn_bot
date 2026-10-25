@@ -1212,7 +1212,7 @@ class _FakeDebugSession:
 
 
 @pytest.mark.asyncio
-async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
+async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _FakeDebugSession()
@@ -1313,6 +1313,38 @@ async def test_agent_debug_simulation_is_read_only_and_never_executes_tool(
     assert any(
         event["phase"] == "state" and event["status"] == "skipped"
         for event in trace_events
+    )
+
+    # 未调用模型时也有“将要发送”的完整请求；草稿覆盖只作用于这一次预览。
+    unsent = preview["data"]["promptSnapshots"]
+    assert unsent[0]["kind"] == "unsent"
+    assert len(unsent[0]["messages"]) == len(preview["data"]["promptMessages"])
+    assert any(
+        span["sectionId"] == "safety.honesty" for span in preview["data"]["promptSpans"]
+    )
+    honesty = importlib.import_module(
+        "src.plugins.yawn_core.yawn_agent.prompt"
+    ).POLICY_HONESTY
+    drafted = await agent_routes.run_agent_debug(
+        100,
+        route_models.AgentDebugRunBody.model_validate(
+            {
+                "mode": "dialogue",
+                "text": "到底有没有一起玩",
+                "actorUserId": 123,
+                "promptOverrides": {"safety.honesty": {"mode": "disable"}},
+            }
+        ),
+        None,
+    )
+    assert drafted["data"]["promptDrafts"] == ["safety.honesty"]
+    assert all(
+        honesty not in str(message.get("content"))
+        for message in drafted["data"]["promptSnapshots"][0]["messages"]
+    )
+    assert any(
+        honesty in str(message.get("content"))
+        for message in unsent[0]["messages"]
     )
 
     active = 0

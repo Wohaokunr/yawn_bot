@@ -877,9 +877,7 @@ async def _run_turn(turn: _DialogueTurn) -> None:
         if turn.had_tool_results and turn_budget.is_final_round(
             turn.rounds, turn.round_limit
         ):
-            turn.messages.append(
-                {"role": "system", "content": turn_budget.FINAL_ROUND_NOTE}
-            )
+            turn.messages.extend(turn_budget.final_round_messages())
         llm_started = time.monotonic()
         completion = await _request_completion(turn)
         if completion is _REBUILT:
@@ -1344,7 +1342,7 @@ async def _run_tool_round(
                 "content": [
                     {
                         "type": "text",
-                        "text": "以下图片来自刚才的工具查询结果，请结合该工具结果继续回答。",
+                        "text": turn_budget.tool_media_note(),
                     },
                     *state.media_blocks,
                 ],

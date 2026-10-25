@@ -23,6 +23,7 @@ import {
   triggerSourceLabel,
 } from "./debug-utils";
 import { diagnoseTrace, downloadJson, traceKpis, traceMarkdown } from "./trace-analysis";
+import { TracePromptsPanel } from "../agent-prompts/TracePromptsPanel";
 import { TraceTimeline } from "./TraceTimeline";
 import { PhaseBreakdownView, TraceDiagnosis, TraceKpiRow, TraceWaterfall } from "./TraceVisuals";
 import type { ExecutionTracesState } from "./useExecutionTraces";
@@ -159,6 +160,7 @@ function TraceDetail({
         { key: "waterfall", label: "瀑布图", children: <TraceWaterfall trace={trace} onSelectEvent={selectEvent} /> },
         { key: "phases", label: "阶段耗时", children: <PhaseBreakdownView trace={trace} stats={stats} /> },
         { key: "diagnosis", label: <span>诊断{problems > 0 && <span className="dbg-tab-badge">{problems}</span>}</span>, children: <TraceDiagnosis insights={insights} onSelectEvent={selectEvent} /> },
+        { key: "prompts", label: `完整提示词${trace.promptCount ? ` ${trace.promptCount}` : ""}`, children: <TracePromptsPanel groupId={groupId} traceId={trace.traceId} /> },
         { key: "audits", label: "关联审计", children: <TraceAudits groupId={groupId} traceId={trace.traceId} /> },
         { key: "raw", label: "原始 JSON", children: <DebugRawBlock value={trace} /> },
       ]}

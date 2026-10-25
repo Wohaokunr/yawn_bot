@@ -13,6 +13,7 @@ import "./layout.css";
 import "./design-system.css";
 import "./agent-workspace/agent-workspace.css";
 import "./agent-debug/debug-console.css";
+import "./agent-prompts/prompts.css";
 import "./relations/relations.css";
 import "./environment.css";
 import "./sandbox/sandbox.css";

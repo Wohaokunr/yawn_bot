@@ -206,6 +206,10 @@ AGENT_SHARE_ALLOWED_HOSTS=
 AGENT_RECEIVED_MEDIA_REUSE=deny
 # Agent 海量调试日志，会包含完整群消息与 LLM 回复，仅供本地短时排障
 AGENT_DEBUG_LOG=false
+# Trace 是否保存每次真实发给模型的完整请求（messages/tools/参数/回复，已脱敏、只在内存）：full / off
+AGENT_TRACE_PROMPT_CAPTURE=full
+# WebUI 提示词覆盖文件（删除/改写安全上下文等分段），留空用 data/yawn_agent/prompt_overrides.json
+AGENT_PROMPT_OVERRIDES_PATH=
 
 # ── Agent 代码沙箱 ─────────────────────────────────────────────────────────────
 

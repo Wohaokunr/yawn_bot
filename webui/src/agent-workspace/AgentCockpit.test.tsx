@@ -287,7 +287,7 @@ describe("Agent cockpit power tools", () => {
     fireEvent.keyDown(window, { key: "4", code: "Digit4", altKey: true });
     await waitFor(() => expect(screen.getByLabelText("location").textContent).toContain("tab=memories"));
     fireEvent.keyDown(window, { key: "0", code: "Digit0", altKey: true });
-    await waitFor(() => expect(screen.getByLabelText("location").textContent).toContain("tab=audit"));
+    await waitFor(() => expect(screen.getByLabelText("location").textContent).toContain("tab=privacy"));
   });
 
   it("can turn auto refresh off", async () => {

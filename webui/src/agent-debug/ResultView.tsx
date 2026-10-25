@@ -1,6 +1,7 @@
 import { DownloadOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, Descriptions, List, Progress, Segmented, Space, Tabs, Tag, Tooltip, Typography } from "antd";
 import { useMemo, useState } from "react";
+import { PromptSnapshotView } from "../agent-prompts/PromptSnapshotView";
 import type { AgentDebugResponse, AgentDeliveryPreview } from "../types";
 import { ContextBudgetInspector, ContextInspector, CurrentTurnInspector } from "./ContextInspector";
 import {
@@ -200,6 +201,15 @@ export function ResultView({
         },
         { key: "context", label: "上下文", children: <ContextInspector context={result.context} selection={result.contextSelection} budget={result.contextBudget} /> },
         { key: "prompt", label: `Prompt ${result.promptMessages.length}`, children: <PromptInspector messages={result.promptMessages} /> },
+        {
+          key: "request",
+          label: "完整请求",
+          children: <PromptSnapshotView
+            snapshots={result.promptSnapshots ?? []}
+            filenamePrefix={`debug-${result.mode}`}
+            emptyHint="后端版本较旧，没有返回完整请求快照"
+          />,
+        },
         { key: "tools", label: `工具 ${exposedTools}/${result.toolPermissions.length}`, children: <ToolInspector tools={result.tools} permissions={result.toolPermissions} /> },
         { key: "model", label: "模型结果", children: <DebugModelInspector result={result.result} /> },
         {

@@ -17,6 +17,7 @@ from . import media_memory
 from .log import dbg
 from .media import MediaInput, build_media_content_blocks, store_caption
 from .message_parser import NormalizedMessage
+from .prompt_sections import system_messages
 
 _VISION_SYSTEM_PROMPT = (
     "你是图片识别器。只描述图片中可见且与用户问题相关的事实，"
@@ -43,7 +44,7 @@ async def _caption_single_image(
     if not blocks:
         return None
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _VISION_SYSTEM_PROMPT},
+        *system_messages("vision.caption", _VISION_SYSTEM_PROMPT, group_id=group_id),
         {
             "role": "user",
             "content": [

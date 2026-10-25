@@ -216,6 +216,66 @@ class PersonaTemplatePatchBody(BaseModel):
     is_global: bool | None = Field(default=None, alias="isGlobal")
 
 
+PromptOverrideMode = Literal[
+    "replace", "append", "prepend", "disable", "builtin", "inherit"
+]
+
+
+class PromptDraftOverride(BaseModel):
+    """未保存的提示词分段草稿（只用于预览）。"""
+
+    mode: PromptOverrideMode
+    text: str = Field(default="", max_length=12_000)
+
+
+class PromptOverrideBody(BaseModel):
+    """保存一个提示词分段的覆盖。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    scope: Literal["global", "group"] = "global"
+    group_id: int | None = Field(default=None, alias="groupId", gt=0)
+    mode: Literal["replace", "append", "prepend", "disable", "builtin"]
+    text: str = Field(default="", max_length=12_000)
+    note: str = Field(default="", max_length=200)
+    confirm_safety: bool = Field(default=False, alias="confirmSafety")
+    expected_revision: int | None = Field(default=None, alias="expectedRevision", ge=0)
+
+    @model_validator(mode="after")
+    def group_scope_needs_id(self) -> "PromptOverrideBody":
+        if self.scope == "group" and self.group_id is None:
+            raise ValueError("本群范围需要 groupId")
+        return self
+
+
+class PromptBulkChange(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId", min_length=1, max_length=96)
+    mode: PromptOverrideMode
+    text: str = Field(default="", max_length=12_000)
+    note: str = Field(default="", max_length=200)
+
+
+class PromptBulkBody(BaseModel):
+    """批量改分段：一键删除安全段、整类恢复默认、导入。全部通过校验才写入。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    scope: Literal["global", "group"] = "global"
+    group_id: int | None = Field(default=None, alias="groupId", gt=0)
+    changes: list[PromptBulkChange] = Field(default_factory=list, max_length=400)
+    confirm_safety: bool = Field(default=False, alias="confirmSafety")
+    expected_revision: int | None = Field(default=None, alias="expectedRevision", ge=0)
+    replace_scope: bool = Field(default=False, alias="replaceScope")
+
+    @model_validator(mode="after")
+    def group_scope_needs_id(self) -> "PromptBulkBody":
+        if self.scope == "group" and self.group_id is None:
+            raise ValueError("本群范围需要 groupId")
+        return self
+
+
 class AgentDebugRunBody(BaseModel):
     """无副作用的 Agent 提示词回放或模拟试跑。"""
 
@@ -230,6 +290,10 @@ class AgentDebugRunBody(BaseModel):
     run_model: bool = Field(default=False, alias="runModel")
     persona_draft: PersonaCard | None = Field(
         default=None, alias="personaDraft"
+    )
+    # 提示词分段草稿：{section_id: {mode, text}}，只影响这一次调试构建。
+    prompt_overrides: dict[str, PromptDraftOverride] | None = Field(
+        default=None, alias="promptOverrides", max_length=400
     )
 
     @model_validator(mode="after")

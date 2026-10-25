@@ -3,6 +3,7 @@ import {
   BookOutlined,
   BugOutlined,
   DashboardOutlined,
+  FileTextOutlined,
   IdcardOutlined,
   LockOutlined,
   MessageOutlined,
@@ -44,6 +45,9 @@ const LazyAgentMessagesPanel = lazy(() =>
 const LazyAgentDebugger = lazy(() =>
   import("./agent-debug/AgentDebugger").then(({ AgentDebugger }) => ({ default: AgentDebugger })),
 );
+const LazyPromptStudio = lazy(() =>
+  import("./agent-prompts/PromptStudio").then(({ PromptStudio }) => ({ default: PromptStudio })),
+);
 const LazyPrivacyPanel = lazy(() =>
   import("./agent-panels/PrivacyPanel").then(({ PrivacyPanel }) => ({ default: PrivacyPanel })),
 );
@@ -60,6 +64,7 @@ const NAV_ICONS: Record<string, React.ReactNode> = {
   relations: <ShareAltOutlined />,
   messages: <MessageOutlined />,
   debug: <BugOutlined />,
+  prompts: <FileTextOutlined />,
   privacy: <LockOutlined />,
   audit: <AuditOutlined />,
 };
@@ -100,6 +105,7 @@ function panel(content: React.ReactNode): React.JSX.Element {
 
 function shortcutDigit(key: string): string {
   const index = AGENT_NAV_ORDER.indexOf(key);
+  if (index < 0 || index > 9) return "";
   return index === 9 ? "0" : String(index + 1);
 }
 
@@ -191,6 +197,7 @@ export function AgentDetailPage(): React.JSX.Element {
     relations: () => panel(<LazyRelationsPanel groupId={groupId} />),
     messages: () => panel(<LazyAgentMessagesPanel groupId={groupId} />),
     debug: () => panel(<LazyAgentDebugger groupId={groupId} />),
+    prompts: () => panel(<LazyPromptStudio groupId={groupId} />),
     privacy: () => panel(<LazyPrivacyPanel groupId={groupId} />),
     audit: () => panel(<LazyAgentAuditsPanel groupId={groupId} />),
   };
@@ -220,7 +227,7 @@ export function AgentDetailPage(): React.JSX.Element {
                     aria-selected={active}
                     aria-controls={`agent-ws-panel-${item.key}`}
                     className={`agent-ws-nav-item${active ? " is-active" : ""}`}
-                    title={`${item.hint}（Alt+${shortcutDigit(item.key)}）`}
+                    title={shortcutDigit(item.key) ? `${item.hint}（Alt+${shortcutDigit(item.key)}）` : item.hint}
                     onClick={() => navigate(item.key)}
                   >
                     <span className="agent-ws-nav-icon" aria-hidden="true">{NAV_ICONS[item.key]}</span>

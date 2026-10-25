@@ -36,7 +36,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 
 | 后端 | 依赖的业务模块 | 前端页面（`webui/src/`） |
 |---|---|---|
-| `agent*.py` | [yawn_agent/](../yawn_agent/CLAUDE.md)（`execution_trace.py`、`speech_runtime.py` 等）、Agent 相关 [data_models](../data_models/CLAUDE.md) | `agent.tsx`、`agent-panels/`、`agent-workspace/`、`agent-debug/` |
+| `agent*.py`（`agent_prompt_routes.py`：提示词分段目录、覆盖读写/批量/导出、Trace 完整提示词） | [yawn_agent/](../yawn_agent/CLAUDE.md)（`execution_trace.py`、`prompt_sections.py`、`prompt_capture.py`、`speech_runtime.py` 等）、Agent 相关 [data_models](../data_models/CLAUDE.md) | `agent.tsx`、`agent-panels/`、`agent-workspace/`、`agent-debug/`、`agent-prompts/` |
 | `games.py` | [yawn_werewolf/](../yawn_werewolf/CLAUDE.md)（`game_log.py`）、[yawn_rpg/](../yawn_rpg/CLAUDE.md)、`../event_log.py`、`../replay.py` | `games.tsx` |
 | `rpg_modules.py` | `yawn_rpg/module_schema.py`、`yawn_rpg/modules/` | `modules.tsx` |
 | `fanqie.py` | [yawn_fanqie/](../yawn_fanqie/CLAUDE.md) | `fanqie.tsx` |

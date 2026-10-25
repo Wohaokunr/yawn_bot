@@ -28,6 +28,7 @@ from . import media_memory
 from .log import dbg, dbg_exc
 from .media import MediaInput, build_media_content_blocks, get_cached_caption
 from .media_context import resolve_media_context
+from .prompt_sections import system_messages
 
 if TYPE_CHECKING:
     from ..data_models.group_agent_config import GroupAgentConfig
@@ -171,7 +172,7 @@ async def caption_media(group_id: int, media: MediaInput, *, session: Any = None
     if not blocks:
         return None
     messages: list[Any] = [
-        {"role": "system", "content": _AUTO_CAPTION_PROMPT},
+        *system_messages("vision.auto_caption", _AUTO_CAPTION_PROMPT, group_id=group_id),
         {"role": "user", "content": [blocks[0]]},
     ]
     try:

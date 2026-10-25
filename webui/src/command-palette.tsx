@@ -30,6 +30,7 @@ function groupItems(rows: GroupSummary[]): PaletteItem[] {
       { id: `agent-${row.groupId}`, to: `/agent/${row.groupId}`, title: name, hint: `${row.groupId} · Agent 工作台`, icon: <ApiOutlined />, section: "群组" },
       { id: `access-${row.groupId}`, to: `/groups/${row.groupId}`, title: name, hint: `${row.groupId} · 功能权限`, icon: <SafetyOutlined />, section: "群组" },
       { id: `debug-${row.groupId}`, to: `/agent/${row.groupId}?tab=debug`, title: name, hint: `${row.groupId} · 调试台`, icon: <BugOutlined />, section: "群组" },
+      { id: `prompts-${row.groupId}`, to: `/agent/${row.groupId}?tab=prompts`, title: name, hint: `${row.groupId} · 提示词`, icon: <BugOutlined />, section: "群组" },
     ];
   });
 }
