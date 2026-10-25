@@ -243,6 +243,12 @@ def persona_override_reason(card: PersonaCard) -> str | None:
     return None
 
 
+def text_overrides_policy(text: str) -> bool:
+    """单段文本是否试图覆盖系统规则或伪造消息；Bot 关系里的语气/称呼也复用它。"""
+
+    return any(pattern.search(str(text or "")) for pattern in _OVERRIDE_PATTERNS)
+
+
 @dataclass(frozen=True, slots=True)
 class PersonaMutation:
     semantic_changed: bool
@@ -964,4 +970,5 @@ __all__ = [
     "resolve_persona_source",
     "resolve_preset_id",
     "set_global_persona_card",
+    "text_overrides_policy",
 ]

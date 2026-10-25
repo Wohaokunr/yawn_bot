@@ -321,3 +321,35 @@ class RelationPatchBody(BaseModel):
 
     note: str | None = Field(default=None, max_length=200)
     confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class BondPatchBody(BaseModel):
+    """管理员修改 Bot 与某成员的关系；改过的字段自动锁定，整理任务不再覆盖。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    label: str | None = Field(default=None, max_length=16)
+    member_calls_bot: str | None = Field(
+        default=None, alias="memberCallsBot", max_length=12
+    )
+    bot_calls_member: str | None = Field(
+        default=None, alias="botCallsMember", max_length=12
+    )
+    tone: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=120)
+    inside_jokes: list[Annotated[str, Field(max_length=40)]] | None = Field(
+        default=None, alias="insideJokes", max_length=5
+    )
+    boundaries: list[Annotated[str, Field(max_length=40)]] | None = Field(
+        default=None, max_length=5
+    )
+    affinity: float | None = Field(default=None, ge=-1, le=1)
+    trust: float | None = Field(default=None, ge=0, le=1)
+    # 显式解锁：让这些字段重新交给整理任务维护。
+    unlock: list[str] | None = Field(default=None, max_length=12)
+
+
+class BondMomentBody(BaseModel):
+    """管理员手动补一段 Bot 与成员的共同经历。"""
+
+    content: str = Field(min_length=1, max_length=120)

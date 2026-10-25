@@ -93,6 +93,7 @@ def test_group_scoped_notify_calls_are_explicit() -> None:
         "agent_member_data",
         "agent_privacy",
         "agent_relation",
+        "agent_bond",
         "group_feature",
         "user_feature",
     }

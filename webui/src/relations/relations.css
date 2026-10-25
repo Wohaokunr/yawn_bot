@@ -700,3 +700,33 @@ label.rg-settings-row { cursor: pointer; }
   .rg-edge-dashed .rg-edge-line, .rg-edge-path .rg-edge-line, .rg-link-draft { animation: none !important; }
   .rg-viewport-anim { transition: none !important; }
 }
+
+/* ---------- Bot 视角 ---------- */
+.rel-bond-view { display: flex; flex-direction: column; gap: 12px; }
+.rel-bond-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: end; }
+.rel-bond-metric { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); min-width: 0; }
+.rel-bond-metric-num { font-size: 20px; font-weight: 700; font-family: var(--font-heading, inherit); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rel-bond-stagebar { grid-column: 1 / -1; display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--border); }
+.rel-bond-stagebar > span { min-width: 4px; }
+.rel-bond-stage-select { width: 140px; }
+.rel-bond-card { gap: 8px; }
+.rel-bond-stage { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--rel-type-color); background: color-mix(in srgb, var(--rel-type-color) 14%, transparent); }
+.rel-bond-stage.is-large { font-size: 14px; padding: 4px 12px; }
+.rel-bond-lock { color: var(--ink-tertiary); }
+.rel-bond-label { font-size: 13px; text-align: left; }
+.rel-bond-detail { display: flex; flex-direction: column; gap: 16px; }
+.rel-bond-hero { display: flex; align-items: center; gap: 12px; }
+.rel-bond-hero-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.rel-bond-meters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.rel-bond-meters > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rel-bond-section { display: flex; flex-direction: column; gap: 8px; }
+.rel-bond-stats { flex-wrap: wrap; row-gap: 4px; }
+.rel-bond-timeline { margin-top: 4px; }
+.rel-bond-moment { margin-bottom: 0 !important; }
+.rel-bond-evidence { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.rel-bond-danger { flex-direction: row; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 12px; }
+.rel-bond-form .ant-space-compact { gap: 8px; }
+@media (max-width: 640px) {
+  .rel-bond-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rel-bond-meters { grid-template-columns: 1fr; }
+}

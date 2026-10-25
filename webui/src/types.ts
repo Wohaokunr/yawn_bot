@@ -1159,3 +1159,71 @@ export interface FanqieJobDetail {
   job: FanqieJob;
   chapters: FanqieJobChapter[];
 }
+
+// Bot 视角关系：Bot 自己与某位成员的关系（后端 AgentBotBond）。访客投影只有少数字段。
+export type AgentBondStage = "stranger" | "acquaintance" | "familiar" | "friend" | "close" | "strained";
+
+export interface AgentBondItem {
+  id: string;
+  userId: string;
+  botId?: string;
+  name: string;
+  stage: AgentBondStage;
+  stageLabel: string;
+  familiarity: number;
+  rawFamiliarity?: number;
+  affinity?: number;
+  trust?: number;
+  label: string;
+  memberCallsBot?: string;
+  botCallsMember?: string;
+  tone?: string;
+  note?: string;
+  insideJokes?: string[];
+  boundaries?: string[];
+  lockedFields?: string[];
+  sourceKind?: string;
+  memberToBotCount?: number;
+  botToMemberCount?: number;
+  exchangeCount?: number;
+  positiveCount?: number;
+  negativeCount?: number;
+  activeDays: number;
+  knownDays?: number | null;
+  idleDays?: number | null;
+  evidenceCount?: number;
+  momentCount?: number;
+  firstInteractionAt?: string | null;
+  lastInteractionAt: string | null;
+  lastModelUpdateAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface AgentBondMoment {
+  id: string;
+  content: string;
+  sourceKind: string;
+  accessCount: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+  expiresAt: string | null;
+}
+
+export interface AgentBondDetail extends AgentBondItem {
+  moments?: AgentBondMoment[];
+  evidence?: Array<{ id: string; text: string; receivedAt: string | null }>;
+  evidenceMissing?: number;
+}
+
+export interface AgentBondSummary {
+  tableReady: boolean;
+  total: number;
+  stageCounts: Array<{ stage: AgentBondStage; label: string; count: number }>;
+  avgFamiliarity?: number | null;
+  avgAffinity?: number | null;
+  activeWeekCount?: number;
+  top?: Array<{ userId: string; name: string; stage: AgentBondStage; stageLabel: string; familiarity: number; label: string }>;
+  strainedCount?: number;
+  lockedCount?: number;
+  sourceCounts?: Array<{ source: string; count: number }>;
+}
