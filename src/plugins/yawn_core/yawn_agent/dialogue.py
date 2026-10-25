@@ -97,6 +97,11 @@ from .execution_trace import (
 from .log import dbg, dbg_exc
 from .media import MediaInput, get_cached_caption
 from .media_caption import describe_images as _describe_images
+from .turn_media import (
+    effective_multimodal_mode,
+    load_turn_media,
+    remember_multimodal_unsupported,
+)
 from .media_context import (
     project_context_for_llm,
     project_tool_result_media,
@@ -273,7 +278,7 @@ async def _prepare_media_prompt(
     unresolved_snapshot = [dict(item) for item in (diagnostics or [])]
     dialogue_request = resolve_llm_request("agent_dialogue")
     vision_request = resolve_llm_request("agent_image")
-    mode = dialogue_request.multimodal
+    mode = effective_multimodal_mode(dialogue_request)
     dbg(f"群 {group_id} 多模态模式={mode!r}")
     user_prompt = _semantic_query_text(normalized)
     dedicated_vision = (
@@ -450,7 +455,8 @@ class _DialogueTurn:
             user_prompt=self.user_prompt,
             current_turn=self.current_turn,
             media_inputs=self.media_blocks
-            if resolve_llm_request("agent_dialogue").multimodal != "unsupported"
+            if effective_multimodal_mode(resolve_llm_request("agent_dialogue"))
+            != "unsupported"
             else None,
             bot_role=cached_bot_role(self.bot, self.group_id),
             suggested_toolpacks=self.suggested_toolpacks,
@@ -480,39 +486,6 @@ class _RoundState:
     discovered_names: set[str] = field(default_factory=set)
     discovered_requires_admin: bool = False
     media_blocks: list[dict[str, Any]] = field(default_factory=list)
-
-
-async def _load_turn_media(
-    turn_bot: Bot,
-    session: Any,
-    group_id: int,
-    normalized: NormalizedMessage,
-    config: GroupAgentConfig,
-    context: dict[str, Any],
-) -> tuple[list[MediaInput], list[dict[str, Any]], list[tuple[str, str]]]:
-    diagnostics: list[dict[str, Any]] = []
-    media_inputs = await resolve_media_context(
-        turn_bot,
-        session,
-        group_id,
-        current_message=normalized,
-        reply_chain=normalized.reply_chain,
-        selected_history=list(context.get("messages") or []),
-        query_text=_semantic_query_text(normalized),
-        asset_ttl_seconds=max(int(config.raw_retention_days), 1) * 86400,
-        cache_enabled=bool(config.media_cache_enabled),
-        diagnostics=diagnostics,
-    )
-    cached_captions: list[tuple[str, str]] = []
-    if config.media_cache_enabled:
-        vision_model = resolve_llm_request("agent_image").model
-        for media_input in media_inputs:
-            caption = await get_cached_caption(
-                session, group_id, media_input.content_hash, vision_model
-            )
-            if caption:
-                cached_captions.append((media_input.content_hash, caption))
-    return media_inputs, diagnostics, cached_captions
 
 
 async def _prepare_turn(
@@ -628,8 +601,16 @@ async def _prepare_turn(
     )
 
     media_started = time.monotonic()
-    media_inputs, media_diagnostics, cached_captions = await _load_turn_media(
-        bot, session, group_id, normalized, config, context
+    media_inputs, media_diagnostics, cached_captions = await load_turn_media(
+        bot,
+        session,
+        group_id,
+        normalized,
+        config,
+        context,
+        query_text=query_text,
+        media_hint=tool_plan.image,
+        actor_user_id=actor_user_id,
     )
     media_digests = [item.content_hash for item in media_inputs]
     dbg(f"群 {group_id} 媒体输入: {len(media_inputs)} 字幕={len(cached_captions)} digests={media_digests}")
@@ -863,6 +844,7 @@ async def _request_completion(turn: _DialogueTurn) -> Any:
             round_index=turn.rounds + 1,
         )
         dbg(f"群 {turn.group_id} 模型不支持多模态,降级为视觉转述重建提示词(不占轮次)")
+        remember_multimodal_unsupported(resolve_llm_request("agent_dialogue"))
         turn.fallback_attempted = True
         described = await _describe_images(
             turn.group_id,
@@ -1091,8 +1073,9 @@ async def _project_tool_media(
     note: str | None = None
     dialogue_request = resolve_llm_request("agent_dialogue")
     vision_request = resolve_llm_request("agent_image")
-    direct = dialogue_request.multimodal == "supported" or (
-        dialogue_request.multimodal == "auto"
+    tool_mode = effective_multimodal_mode(dialogue_request)
+    direct = tool_mode == "supported" or (
+        tool_mode == "auto"
         and dialogue_request.provider == vision_request.provider
         and dialogue_request.model == vision_request.model
     )

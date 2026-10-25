@@ -122,6 +122,8 @@ _MEDIA_FALLBACK_PREFIXES = (
     "[图片转述",
     "[图片未识别",
     "[media_context",
+    # 多张图时转述带序号：“[第1张图片转述] …”
+    *(f"[第{index}张图片" for index in range(1, 9)),
 )
 _MODEL_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "file", "input_image"})
 

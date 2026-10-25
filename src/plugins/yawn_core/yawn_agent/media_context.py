@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import LLMTask
-from .context_history import EffectiveTurn, effective_turn_query, query_requests_media
+from .context_history import EffectiveTurn, effective_turn_query
 from .log import dbg, dbg_exc
 from .media import (
     MediaInput,
@@ -36,10 +36,39 @@ class MediaContextProjection:
         return any(item.block is not None for item in self.resolutions)
 
 
-def query_requests_historical_media(query_text: str | None) -> bool:
-    """Compatibility wrapper around the single effective-turn media predicate."""
+_HINT_HISTORY_MAX_MINUTES = 15
 
-    return query_requests_media(query_text)
+
+def query_requests_historical_media(
+    query_text: str | None, *, media_hint: bool = False
+) -> bool:
+    """兼容旧调用；历史图片是否绑定不再看字面，只看路由模型的 ``media_hint``。"""
+
+    del query_text
+    return bool(media_hint)
+
+
+def _recent_image_history_ids(
+    selected_history: Sequence[dict[str, Any]] | None,
+) -> list[int]:
+    """路由判定“在说图片”但本人最近没发图时：取上下文里最近的几张图（新的在前）。"""
+
+    output: list[int] = []
+    for item in reversed(list(selected_history or [])):
+        if not isinstance(item, dict):
+            continue
+        if "image" not in [str(kind) for kind in item.get("media_types") or ()]:
+            continue
+        try:
+            minutes = float(item.get("minutes_ago") or 0)
+        except (TypeError, ValueError):
+            minutes = 0.0
+        if minutes > _HINT_HISTORY_MAX_MINUTES:
+            break
+        message_id = _optional_int(item.get("message_id"))
+        if message_id and message_id not in output:
+            output.append(message_id)
+    return output
 
 
 def _media_refs_from_current(current_message: Any) -> list[dict[str, Any]]:
@@ -231,10 +260,12 @@ def _append_unique_refs(
 def _history_effective_turn(
     selected_history: Sequence[dict[str, Any]] | None,
     query_text: str | None,
+    *,
+    media_hint: bool = False,
+    actor_user_id: int | None = None,
 ) -> EffectiveTurn:
     history = [dict(item) for item in selected_history or [] if isinstance(item, dict)]
-    actor_user_id: int | None = None
-    for item in reversed(history):
+    for item in reversed(history if actor_user_id is None else []):
         if str(item.get("role") or "member") == "bot":
             continue
         actor_user_id = _optional_int(item.get("user_id"))
@@ -244,6 +275,7 @@ def _history_effective_turn(
         history,
         focus_user_ids=[actor_user_id] if actor_user_id else None,
         query_text=query_text,
+        media_hint=media_hint,
     )
 
 
@@ -252,6 +284,7 @@ def _trace_media_selection(
     effective: EffectiveTurn,
     history_ids: Sequence[int],
     reply_ids: Sequence[int],
+    media_hint: bool = False,
 ) -> None:
     try:
         from .execution_trace import trace_event
@@ -263,6 +296,7 @@ def _trace_media_selection(
             output={
                 "effective_query_preview": effective.text[:320],
                 "media_requested": effective.media_requested,
+                "router_media_hint": media_hint,
                 "effective_turn_message_ids": list(effective.message_ids),
                 "effective_turn_media_ids": list(effective.media_message_ids),
                 "history_message_ids": list(history_ids),
@@ -287,6 +321,8 @@ async def resolve_media_context(
     asset_ttl_seconds: int | None = None,
     cache_enabled: bool = False,
     diagnostics: list[dict[str, Any]] | None = None,
+    media_hint: bool = False,
+    actor_user_id: int | None = None,
 ) -> list[MediaInput]:
     """Resolve all supported media entry points to content-addressed MediaInput values.
 
@@ -306,16 +342,24 @@ async def resolve_media_context(
         bot_id = None
 
     reply_ids = _message_ids(reply_chain)
-    effective = _history_effective_turn(selected_history, query_text)
+    effective = _history_effective_turn(
+        selected_history,
+        query_text,
+        media_hint=media_hint,
+        actor_user_id=actor_user_id,
+    )
     if effective.media_requested:
         preferred_history_ids = list(effective.media_message_ids)
-        history_ids = preferred_history_ids or _message_ids(selected_history)
+        history_ids = preferred_history_ids or _recent_image_history_ids(
+            selected_history
+        )
     else:
         history_ids = []
     _trace_media_selection(
         effective=effective,
         history_ids=history_ids,
         reply_ids=reply_ids,
+        media_hint=media_hint,
     )
     row_ids = [*reply_ids, *(item for item in history_ids if item not in reply_ids)]
     try:
@@ -509,6 +553,20 @@ def _unresolved_media_resolutions(
     return output
 
 
+def _unavailable_explanation(reason: str | None) -> str:
+    """把取图失败原因码翻成一句可以照实告诉成员的话（不含链接/路径）。"""
+
+    from .media_fetch import REASON_TEXT
+
+    entry = REASON_TEXT.get(str(reason or ""))
+    if entry is None:
+        return ""
+    text, _admin_hint = entry
+    if reason in {"expired", "no_source", "too_large", "not_image"}:
+        return f"原因：{text}，可以请对方重新发一次。"
+    return f"原因：{text}（需要管理员处理，可以如实告诉对方暂时看不了图）。"
+
+
 async def project_context_for_llm(
     media_inputs: list[MediaInput],
     *,
@@ -560,10 +618,12 @@ async def project_context_for_llm(
                 f"{item.caption}"
             )
         elif item.status == "unavailable":
+            explain = _unavailable_explanation(item.reason)
             status_lines.append(
                 f"[media_context status=unavailable source={item.source} digest={digest} "
                 f"reason={item.reason or 'image_unavailable'}] "
                 "找到了这张图片的引用，但图片文件现在无法读取。不要声称已经看过该图。"
+                f"{explain}"
             )
 
     blocks = list(current_blocks)

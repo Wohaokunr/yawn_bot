@@ -167,8 +167,14 @@ WW_SPEECH_THINKING=inherit
 AGENT_MEDIA_CACHE_TTL=86400
 # 媒体缓存目录，应位于持久化数据盘
 AGENT_MEDIA_CACHE_DIR=data/agent_media
-# 允许下载群图片的主机白名单（逗号分隔）；置空后群图片无法用于视觉理解
-AGENT_MEDIA_ALLOWED_HOSTS=gchat.qpic.cn,multimedia.nt.qq.com.cn
+# 允许下载群图片的主机白名单（逗号分隔，*.qpic.cn 匹配子域名）；置空后群图片无法用于视觉理解
+AGENT_MEDIA_ALLOWED_HOSTS=gchat.qpic.cn,multimedia.nt.qq.com.cn,*.qpic.cn
+# QQ 图床 HTTPS 握手失败时改用 http 对同一地址重试一次
+AGENT_MEDIA_HTTP_FALLBACK=true
+# Bot 取不到图片字节时，是否把白名单链接直接交给模型服务商下载（服务商访问不了 QQ 图床就关掉）
+AGENT_MEDIA_URL_PASSTHROUGH=true
+# 看过的图片转述记进历史：off 关闭 / triggered 只记 Bot 看过的图 / all 群里每张新图都提前转述（会多花识图费用）
+AGENT_IMAGE_AUTO_CAPTION=triggered
 # 支持 Files API 的提供商优先按内容哈希复用/上传远端媒体
 AGENT_REMOTE_MEDIA_ENABLED=true
 # 本地 MediaAsset 与远端文件的保留天数

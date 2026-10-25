@@ -188,3 +188,77 @@ async def patch_agent_config(
             "group_feature", f"{group_id}:group_agent", group_id=group_id
         )
     return ok(result)
+
+
+@router.get("/agent/vision/status")
+async def get_agent_vision_status(_session: AdminReadSession) -> dict[str, Any]:
+    """识图诊断：现在走哪条识图路线、最近 24 小时取图成败与原因、对应的改法。
+
+    只返回原因码、计数和非敏感配置，不含任何图片链接、本机路径或密钥。
+    """
+
+    from ..yawn_agent import media_fetch, media_memory
+    from ..yawn_agent.turn_media import vision_route
+
+    route = vision_route()
+    stats = media_fetch.stats()
+    reasons = [
+        {
+            "code": code,
+            "count": count,
+            "message": media_fetch.reason_text(code)[0],
+            "hint": media_fetch.reason_text(code)[1],
+        }
+        for code, count in sorted(
+            stats["reasons"].items(), key=lambda item: item[1], reverse=True
+        )
+    ]
+    advice: list[str] = []
+    if route["route"] == "none":
+        advice.append(
+            "对话模型不支持图片，也没有配置识图模型：在环境配置里填 AI_VISION_MODEL，"
+            "或把 AI_DEFAULT_MULTIMODAL 设为 supported 并换成支持图片的对话模型。"
+        )
+    if route["learned_unsupported"]:
+        advice.append(
+            "对话模型最近拒收了图片，接下来一小时自动改走识图转述；"
+            "如果它其实支持图片，检查服务商是否开通了视觉能力。"
+        )
+    if not media_fetch.host_patterns():
+        advice.append("AGENT_MEDIA_ALLOWED_HOSTS 是空的，群图片一律不会下载。")
+    advice.extend(
+        item["hint"]
+        for item in reasons
+        if item["code"] in {"protocol_local_only", "tls_failed", "host_blocked"}
+    )
+    return ok(
+        {
+            "route": route["route"],
+            "dialogueProvider": route["dialogue_provider"],
+            "dialogueModel": route["dialogue_model"],
+            "dialogueMultimodal": route["dialogue_multimodal"],
+            "learnedUnsupported": route["learned_unsupported"],
+            "visionConfigured": route["vision_configured"],
+            "visionProvider": route["vision_provider"],
+            "visionModel": route["vision_model"],
+            "stats": {
+                "total": stats["total"],
+                "loaded": stats["loaded"],
+                "failed": stats["failed"],
+                "via": stats["via"],
+            },
+            "reasons": reasons,
+            "advice": list(dict.fromkeys(advice)),
+            "settings": {
+                "allowedHosts": list(media_fetch.host_patterns()),
+                "httpFallback": bool(
+                    getattr(ai_config, "agent_media_http_fallback", True)
+                ),
+                "urlPassthrough": bool(
+                    getattr(ai_config, "agent_media_url_passthrough", True)
+                ),
+                "autoCaption": media_memory.auto_caption_mode(),
+            },
+            "captionMemory": media_memory.size(),
+        }
+    )

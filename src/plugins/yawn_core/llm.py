@@ -134,7 +134,14 @@ class LLMRoutingConfig(BaseModel):
     # NapCat/QQNT received-image segments expose signed image URLs on these
     # QQ-owned CDN hosts.  This remains an exact allowlist: explicitly setting
     # AGENT_MEDIA_ALLOWED_HOSTS= still disables remote image downloads.
-    agent_media_allowed_hosts: str = "gchat.qpic.cn,multimedia.nt.qq.com.cn"
+    # ``*.qpic.cn`` 这种写法匹配子域名（c2cpicdw.qpic.cn 等）。
+    agent_media_allowed_hosts: str = "gchat.qpic.cn,multimedia.nt.qq.com.cn,*.qpic.cn"
+    # QQ 图床偶发 HTTPS 握手失败时，改用 http 对同一白名单地址再试一次。
+    agent_media_http_fallback: bool = True
+    # 取不到图片字节时，是否把白名单链接直接交给模型服务商去下载。
+    agent_media_url_passthrough: bool = True
+    # 群里有新图片时提前转述并记进历史：off / triggered（只转述 Bot 被叫时看过的图）/ all。
+    agent_image_auto_caption: Literal["off", "triggered", "all"] = "triggered"
 
     @model_validator(mode="after")
     def validate_providers(self) -> "LLMRoutingConfig":

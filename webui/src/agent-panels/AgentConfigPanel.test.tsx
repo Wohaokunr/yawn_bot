@@ -147,3 +147,50 @@ describe("AgentConfigPanel regression safety", () => {
     expect(screen.getByText("有未保存的修改")).toBeTruthy();
   });
 });
+
+describe("VisionStatusCard", () => {
+  it("shows the vision route, failure reasons and the NapCat hint", async () => {
+    apiMock.mockImplementation((path?: string) => {
+      if (path === "/agent/vision/status") {
+        return Promise.resolve({
+          data: {
+            route: "direct",
+            dialogueProvider: "default",
+            dialogueModel: "gpt-test",
+            dialogueMultimodal: "auto",
+            learnedUnsupported: false,
+            visionConfigured: false,
+            visionProvider: "default",
+            visionModel: "gpt-test",
+            stats: { total: 3, loaded: 1, failed: 2, via: { url: 1 } },
+            reasons: [
+              {
+                code: "protocol_local_only",
+                count: 2,
+                message: "协议端只返回了它自己机器上的文件路径，Bot 读不到",
+                hint: "在 NapCat 的 OneBot 配置里打开 enableLocalFile2Url 并重启 NapCat",
+              },
+            ],
+            advice: ["在 NapCat 的 OneBot 配置里打开 enableLocalFile2Url 并重启 NapCat"],
+            settings: { allowedHosts: ["*.qpic.cn"], httpFallback: true, urlPassthrough: true, autoCaption: "triggered" },
+            captionMemory: 0,
+          },
+          meta: {},
+        });
+      }
+      return Promise.resolve({ data: baseConfig, meta: {} });
+    });
+    renderPanel();
+
+    await screen.findByText("对话模型直接看图");
+    expect(screen.getByText(/成功 1，失败 2/)).toBeTruthy();
+    expect(screen.getAllByText(/enableLocalFile2Url/).length).toBeGreaterThan(0);
+  });
+
+  it("renders nothing when the status endpoint returns something unexpected", async () => {
+    apiMock.mockResolvedValue({ data: baseConfig, meta: {} });
+    renderPanel();
+    await screen.findByText("配置已同步");
+    expect(screen.queryByLabelText("识图诊断")).toBeNull();
+  });
+});

@@ -193,19 +193,33 @@ async def test_history_image_is_lazy_and_restored_by_asset_id(tmp_path: Path) ->
         await session.commit()
 
         bot = SimpleNamespace(self_id=30001)
+        history = [
+            {
+                "message_id": 88,
+                "user_id": 40001,
+                "text": "[图片]",
+                "media_types": ["image"],
+                "minutes_ago": 8,
+            }
+        ]
+        # 别人很早发的图：没有结构绑定、路由也没说在聊图时不恢复。
         hidden = await modules["media_context"].resolve_media_context(
             bot,
             session,
             20001,
-            selected_history=[{"message_id": 88, "text": "[图片]"}],
+            selected_history=history,
             query_text="今天聊点别的",
+            actor_user_id=40002,
         )
+        # 路由模型判定这条消息在说图片时，恢复上下文里最近的图。
         restored = await modules["media_context"].resolve_media_context(
             bot,
             session,
             20001,
-            selected_history=[{"message_id": 88, "text": "[图片]"}],
+            selected_history=history,
             query_text="刚才那张图还有什么细节？",
+            actor_user_id=40002,
+            media_hint=True,
         )
 
     assert hidden == []
@@ -291,15 +305,18 @@ def test_image_reference_query_keeps_image_only_history_candidate() -> None:
                 "minutes_ago": 2,
             },
         ],
-        query_text="刚才那张截图报什么错？",
+        query_text="报什么错？",
+        focus_user_ids=[10],
     )
 
+    # 同一成员两分钟前发的图：不看字面也会绑定成本轮的图。
     assert any(item["message_id"] == media_message_id for item in selection.messages)
     trace = next(
         item for item in selection.trace if item["message_id"] == media_message_id
     )
     assert trace["selected"] is True
-    assert trace["reason"] == "media_reference"
+    assert trace["reason"] == "effective_turn_media"
+    assert selection.media_message_ids == (media_message_id,)
 
 
 @pytest.mark.asyncio

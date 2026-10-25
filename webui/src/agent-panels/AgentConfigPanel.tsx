@@ -12,6 +12,7 @@ import {
 } from "../shared";
 import type { AgentConfig } from "../types";
 import { ConfigTransferBar } from "../agent-workspace/ConfigTransferBar";
+import { VisionStatusCard } from "./VisionStatusCard";
 import { type PortableAgentConfig, TOOL_PRESETS } from "../agent-workspace/config-transfer";
 
 type ParticipationIntensity = "restrained" | "balanced" | "active" | "custom";
@@ -301,6 +302,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                   <Switch />
                 </Form.Item>
               </div>
+              <VisionStatusCard />
             </section>
 
             <section className="agent-config-section liquid-glass agent-config-floating">

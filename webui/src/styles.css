@@ -677,6 +677,25 @@ h1, h2, h3, h4, h5,
   border-radius: 14px;
   background: rgba(255, 249, 251, 0.68);
 }
+.agent-vision-card {
+  align-items: flex-start;
+  margin-top: 12px;
+}
+.agent-vision-body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.agent-vision-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.agent-vision-advice {
+  color: var(--ink);
+}
 .agent-config-toggle-card-featured {
   margin-bottom: 18px;
   background: linear-gradient(135deg, rgba(255, 240, 245, 0.92), rgba(245, 241, 255, 0.76));
