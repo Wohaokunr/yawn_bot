@@ -26,6 +26,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
+from .speech_rhythm import strip_rhythm_markup
+
 WAIT_NOTICE_DEFAULT_DELAY = 6.0
 WAIT_NOTICE_LONG_DELAY = 25.0
 WAIT_NOTICE_MODES = ("reaction", "text", "off")
@@ -141,7 +143,8 @@ def wait_notice_mode() -> str:
 def clean_preamble(text: str | None) -> str | None:
     """模型随工具调用一起给的开场白，能当进度提示用就返回清洗后的版本。"""
 
-    value = " ".join(str(text or "").split())
+    # 开场白里的分条标记/节奏标签不能原样发出去：进度提示只有一条。
+    value = " ".join(strip_rhythm_markup(text).split())
     if not value or len(value) > _PREAMBLE_MAX_CHARS or _PREAMBLE_REJECT.search(value):
         return None
     if value.endswith(("?", "？")):

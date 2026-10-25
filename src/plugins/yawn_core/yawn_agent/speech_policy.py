@@ -44,6 +44,7 @@ from .speech_act import (
     speech_act_instruction,
 )
 from .speech_native import native_expression_instruction, plan_native_expression
+from .speech_rhythm import rhythm_instruction
 from .turn_taking import plan_turn_taking, turn_taking_instruction
 
 if TYPE_CHECKING:
@@ -364,9 +365,15 @@ def build_speech_instruction(
         plan_native_expression(current_turn, scene=scene, style=style)
     )
     interaction_rule = _interaction_instruction(effective)
+    rhythm_rule = rhythm_instruction(
+        scene=scene,
+        act=act_plan.act,
+        complexity=complexity,
+        style=style,
+    )
     return (
         f"发言场景={scene}。{_SCENE_RULES[scene]}{interaction_rule}{act_rule}{turn_rule}"
-        f"{style_rule}{quality_rule}{native_rule}"
+        f"{style_rule}{quality_rule}{native_rule}{rhythm_rule}"
     )
 
 

@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
-from nonebot import get_bots
+from nonebot import get_bots, logger
 from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -60,6 +60,7 @@ from ..yawn_agent.persona import (
 )
 from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
 from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
+from ..yawn_agent.speech_runtime import rhythm_preview
 from ..yawn_agent.tools import (
     build_tool_schemas,
     dialogue_tool_round_limit,
@@ -478,8 +479,14 @@ def _debug_model_payload(result: Any, mode: str) -> dict[str, Any]:
         },
         "durationMs": round(float(result.duration_ms), 1),
     }
+    if mode == "dialogue" and content and not payload["toolCalls"]:
+        payload["delivery"] = _debug_delivery_preview(text=content)
     if mode != "dialogue" and content:
         decision = _decide_proactive_reply(content)
+        if decision.should_speak:
+            payload["delivery"] = _debug_delivery_preview(
+                text=decision.text, segments=list(decision.segments)
+            )
         payload["decision"] = {
             "action": decision.action,
             "targetUserId": (
@@ -494,6 +501,18 @@ def _debug_model_payload(result: Any, mode: str) -> dict[str, Any]:
             "segments": list(decision.segments),
         }
     return payload
+
+
+def _debug_delivery_preview(
+    *, text: str = "", segments: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
+    """模型输出真发出去时的分条与停顿预览；只计算，不发送。"""
+
+    try:
+        return rhythm_preview(text=text, segments=segments or ())
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("Agent 调试分条预览失败")
+        return None
 
 
 def _debug_bots() -> list[Any]:

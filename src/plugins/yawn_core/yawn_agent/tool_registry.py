@@ -365,14 +365,20 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "send_message",
-        "发送当前群的一条结构化消息；成功后不要重复发送同样最终文本",
+        "发送当前群的结构化消息；text 里用 ||| 隔开的部分会像真人一样依次发成几条，"
+        "rhythm 选节奏（block 整段/split 分条/burst 连发/pop 蹦字）；成功后不要重复发送同样最终文本",
         {
             "segments": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": MAX_OUTBOUND_SEGMENTS,
                 "items": MESSAGE_SEGMENT_SCHEMA,
-            }
+            },
+            "rhythm": {
+                "type": "string",
+                "enum": ["auto", "block", "split", "burst", "pop"],
+                "description": "发送节奏；不填为 auto：按 ||| 分条，没写就一条发完",
+            },
         },
         required=("segments",),
         actions=("send_group_msg",),

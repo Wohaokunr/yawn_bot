@@ -11,6 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .speech_rhythm import (
+    BREAK_SEGMENT_TYPE,
+    RHYTHM_AUTO,
+    normalize_rhythm,
+    parse_rhythm_markup,
+    split_segment_markup,
+)
+
 SPEECH_SCENE_DIRECT_REPLY = "direct_reply"
 SPEECH_SCENE_REPLY_THREAD = "reply_thread"
 SPEECH_SCENE_CONVERSATION = "conversation"
@@ -119,6 +127,10 @@ class SpeechPlan:
     # 本轮真实成功的工具名；None 表示调用方不提供（主动发言、调试等），
     # 此时不做“已完成”声明核验。
     verified_tools: tuple[str, ...] | None = None
+    # 模型用 ||| 标出的分条（≥2 条时才有值；text 是它们用换行拼起来的全文）
+    # 和模型声明的发送节奏（auto/block/split/burst/pop），由 speech_rhythm 解析。
+    parts: tuple[str, ...] = ()
+    rhythm: str = RHYTHM_AUTO
 
     @property
     def should_speak(self) -> bool:
@@ -129,10 +141,20 @@ class SpeechPlan:
         if self.text.strip():
             return self.text.strip()
         return "".join(
-            str(item.get("text") or "")
+            "\n"
+            if str(item.get("type") or "") == BREAK_SEGMENT_TYPE
+            else str(item.get("text") or "")
             for item in self.segments
-            if str(item.get("type") or "").strip().lower() == "text"
+            if str(item.get("type") or "").strip().lower() in {"text", BREAK_SEGMENT_TYPE}
         ).strip()
+
+    @property
+    def part_count(self) -> int:
+        if self.segments:
+            return 1 + sum(
+                1 for item in self.segments if item.get("type") == BREAK_SEGMENT_TYPE
+            )
+        return max(len(self.parts), 1 if self.text.strip() else 0)
 
     def with_content(
         self,
@@ -140,12 +162,14 @@ class SpeechPlan:
         text: str | None = None,
         segments: tuple[dict[str, Any], ...] | None = None,
         issues: tuple[SpeechQualityIssue, ...] | None = None,
+        parts: tuple[str, ...] | None = None,
     ) -> SpeechPlan:
         return replace(
             self,
             text=self.text if text is None else text,
             segments=self.segments if segments is None else segments,
             issues=self.issues if issues is None else issues,
+            parts=self.parts if parts is None else parts,
         )
 
     def trace_payload(self) -> dict[str, Any]:
@@ -156,8 +180,12 @@ class SpeechPlan:
             "reply_to_message_id": self.target.reply_to_message_id,
             "text_chars": len(self.visible_text),
             "segment_types": [
-                str(item.get("type") or "") for item in self.segments
+                str(item.get("type") or "")
+                for item in self.segments
+                if item.get("type") != BREAK_SEGMENT_TYPE
             ],
+            "rhythm": self.rhythm,
+            "parts": self.part_count,
             "style": self.style.as_dict(),
             "act": self.act,
             "turn_pressure": self.turn_pressure,
@@ -189,10 +217,15 @@ def speech_plan_from_text(
     topic: str | None = None,
     topic_action: str = "continue",
     interaction_plan: dict[str, Any] | None = None,
+    rhythm: object = RHYTHM_AUTO,
 ) -> SpeechPlan:
+    markup = parse_rhythm_markup(text)
+    declared = normalize_rhythm(rhythm)
     return SpeechPlan(
         scene=normalize_speech_scene(scene),
-        text=str(text or ""),
+        text=markup.text if markup.marked or markup.rhythm != RHYTHM_AUTO else str(text or ""),
+        parts=markup.parts,
+        rhythm=declared if declared != RHYTHM_AUTO else markup.rhythm,
         style=style or SpeechStyle(),
         target=target or SpeechTarget(),
         reason=str(reason or "")[:240],
@@ -220,11 +253,16 @@ def speech_plan_from_segments(
     topic: str | None = None,
     topic_action: str = "continue",
     interaction_plan: dict[str, Any] | None = None,
+    rhythm: object = RHYTHM_AUTO,
 ) -> SpeechPlan:
-    safe_segments = tuple(dict(item) for item in segments if isinstance(item, dict))
+    safe_segments, tagged = split_segment_markup(
+        [dict(item) for item in segments if isinstance(item, dict)]
+    )
+    declared = normalize_rhythm(rhythm)
     return SpeechPlan(
         scene=normalize_speech_scene(scene),
         segments=safe_segments,
+        rhythm=declared if declared != RHYTHM_AUTO else tagged,
         style=style or SpeechStyle(),
         target=target or SpeechTarget(),
         reason=str(reason or "")[:240],

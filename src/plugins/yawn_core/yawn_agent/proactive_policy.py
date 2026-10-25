@@ -88,6 +88,7 @@ _JSON_PROTOCOL = (
     '"confidence": 0.8, '
     '"message": {"segments": [{"type": "text/reply/at/face/reaction", "...": "对应字段"}]}, '
     '"text": "兼容旧模型的纯文本；使用 message 时可省略，保持沉默时为空字符串"}。'
+    "想像真人一样分两条发时，在文字里用 ||| 隔开；一般一条就够。"
     "主动消息只允许 text/reply/at/face/reaction；reply.message_id 与 at.user_id 必须来自上下文，"
     "reaction_id 必须是系统表情包索引中的真实 ID；不确定时不要使用 reaction，禁止猜图片路径。"
 )

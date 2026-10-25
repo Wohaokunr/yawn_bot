@@ -671,7 +671,19 @@ export interface AgentDebugResponse {
     };
     durationMs: number;
     decision?: Record<string, unknown>;
+    delivery?: AgentDeliveryPreview | null;
   };
+}
+
+/** 模型输出真发出去时的分条与停顿（后端 speech_runtime.rhythm_preview）。 */
+export interface AgentDeliveryPreview {
+  rhythm: "block" | "split" | "burst" | "pop" | string;
+  rhythmLabel: string;
+  declared: string;
+  source: string;
+  spreadMs: number;
+  parts: Array<{ text: string; delayMs: number }>;
+  settings: { mode: string; max_parts: number; pace: number; max_spread_seconds: number };
 }
 
 export interface PrivacyItem {

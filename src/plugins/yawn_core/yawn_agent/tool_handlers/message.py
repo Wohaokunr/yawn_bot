@@ -4,8 +4,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..context import now_beijing
-from ..outbound import send_forward_message, send_outbound_message
+from ..outbound import send_forward_message
 from ..reactions import search_reactions
+from ..speech_delivery import send_outbound_parts
 from ..tool_execution import ToolExecutionContext, ToolHandlerResult
 from ..tool_support import (
     _require_known_message,
@@ -51,14 +52,16 @@ async def handle(
             "reacted": not remove,
         }
     elif name == "send_message":
-        sent = await send_outbound_message(
+        delivery = await send_outbound_parts(
             bot,
             group_id,
             args.get("segments"),
+            rhythm=args.get("rhythm"),
             session=session,
             actor_user_id=actor_user_id,
             source="tool",
         )
+        sent = delivery.combined()
         result = {
             "sent": sent.sent,
             "message_id": sent.message_id,
@@ -70,6 +73,14 @@ async def handle(
             "text": sent.normalized_text[:500],
             "outbound": sent.storage_payload(),
         }
+        if len(delivery.results) > 1:
+            # 分条发送：每条单独落库，撤回/引用都能对上真实 message_id。
+            result["parts"] = len(delivery.results)
+            result["outbound_parts"] = [
+                item.storage_payload() for item in delivery.results if item.sent
+            ]
+            if delivery.hurried:
+                result["hurried"] = delivery.hurried
     elif name == "send_forward":
         sent = await send_forward_message(
             bot,

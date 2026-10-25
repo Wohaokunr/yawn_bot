@@ -108,6 +108,17 @@
 - QQ 纯文本规范化放在 `speech_format.py`（Markdown、重复标点/笑声/emoji、AI 免责声明、客服结尾、角色标签、泄漏的工具 JSON/内部字段/QQ 号、重复句子），由 `speech_quality._polish_text` 统一调用；代码块原样保留，清洗后为空时保留原文。
 - “已完成”声明核验放在 `speech_claims.py`。对话路径通过 `SpeechPlan.verified_tools` 传入本轮真实成功的工具；为 None 时（主动发言、调试）不做核验。新增写操作工具时同步补它的声明族。
 
+## 发言节奏（分条发送）
+
+- 一次发言拆成几条、什么节奏由模型决定：正文用 `|||` 分条，开头可写 `【节奏:整段/分条/连发/蹦字】`。解析、兜底拆分、停顿计算全部在 `speech_rhythm.py`（纯函数）；依次发送、催促合并、失败停止在 `speech_delivery.py`。不要在别处另写分条逻辑。
+- 兜底拆分只看结构（代码块、列表、空行段落、换行、句末标点），**不按关键词猜情绪或意图**；代码块里的 `|||` 不拆。复杂问题（complexity=complex）和短回应（ping_ack/acknowledge/react/close）不兜底拆，`AGENT_REPLY_SPLIT=marked` 时只认模型标记，`off` 时一律一条。
+- 清洗按条做：开场类清洗只看第一条、结尾类只看最后一条（`_polish_text(position=...)`），长度修剪和撞重在整句层面做；近似重复的后续分条直接去掉。声明核验对整句做。
+- 只有第一条带自动引用、只有第一条检查触发过期；模型自己写的 reply/at 段留在它所在的那一条。任何一条准备失败都整体退回单条发送。
+- 发送中群队列里出现新的触发（`collector.queue_size > 0`）或停顿总和超过 `AGENT_REPLY_MAX_SPREAD_SECONDS`，剩下的合成一条立刻发完；某条确认失败或回执不确定就停止后续，没发的条目要清理临时文件。
+- 每条单独落库（`persist_delivered`），`send_message` 的分条结果放在 `outbound_parts` 里由 `record_tool_send` 逐条写；去重指纹、近期发言、主动发言审计按整句记，主动/续聊的一次分条只记一条 `proactive_reply` 审计（`arguments.parts` 记条数），不计入多次 unanswered。
+- `break` 伪消息段只在 SpeechPlan 内部存在，发送前一定被 `segment_groups` / `strip_break_segments` 消费，绝不进 OneBot 校验。进度提示、历史文本等单条场景用 `strip_rhythm_markup` 去掉标记。
+- 节奏说明只放在易变的发言策略层（`rhythm_instruction`），不进 450 token 的静态前缀。
+
 ## 主动发言与短会话
 
 - 主动发言策略、Prompt 和结构化决策解析放在 `proactive_policy.py`；`proactive.py` 负责调度、数据库和发送副作用。
