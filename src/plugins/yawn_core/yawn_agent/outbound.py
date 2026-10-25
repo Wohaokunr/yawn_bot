@@ -50,6 +50,14 @@ from .speech import (
     speech_plan_from_text,
 )
 from .speech_quality import finalize_speech_plan
+from .speech_rhythm import (
+    RhythmPlan,
+    plan_group_rhythm,
+    plan_text_rhythm,
+    segment_groups,
+    single_rhythm,
+    strip_break_segments,
+)
 
 MAX_OUTBOUND_SEGMENTS = 12
 MAX_OUTBOUND_TEXT_CHARS = 4_000
@@ -569,6 +577,254 @@ async def _prepare_quoted_plan(
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedSpeechParts:
+    """一次发言规划成的 1~N 条消息，以及每条之前的停顿（秒）。"""
+
+    messages: tuple[PreparedOutboundMessage, ...]
+    rhythm: RhythmPlan
+
+    @property
+    def delays(self) -> tuple[float, ...]:
+        delays = tuple(self.rhythm.delays)
+        if len(delays) != len(self.messages):
+            return tuple(0.0 for _ in self.messages)
+        return delays
+
+    @property
+    def normalized_text(self) -> str:
+        return "\n".join(item.normalized_text for item in self.messages)
+
+
+def _group_text(group: list[dict[str, Any]]) -> str:
+    return "".join(
+        str(item.get("text") or "") for item in group if item.get("type") == "text"
+    ).strip()
+
+
+def _strip_reply_target(plan: SpeechPlan) -> SpeechPlan:
+    if plan.target.reply_to_message_id is None:
+        return plan
+    return replace(plan, target=replace(plan.target, reply_to_message_id=None))
+
+
+async def prepare_speech_parts(
+    plan: SpeechPlan,
+    *,
+    session: Any,
+    group_id: int,
+    actor_user_id: int | None = None,
+    allowed_segment_types: frozenset[str] | None = None,
+    speech_user_text: str = "",
+    recent_speech: tuple[str, ...] | list[str] = (),
+    speech_autofix: bool = True,
+    trace_context: dict[str, Any] | None = None,
+    emotion: object = None,
+) -> PreparedSpeechParts:
+    """像真人一样分条：清洗一次整句，按节奏拆成几条，各自走 OneBot 校验。
+
+    只有第一条带自动引用；模型自己写的 reply/at 段留在它所在的那一条里。
+    任何一条校验失败都整体退回单条发送，不能让分条把整轮变成沉默。
+    """
+
+    resolved = finalize_speech_plan(
+        plan,
+        user_text=speech_user_text,
+        recent_texts=recent_speech,
+        autofix=speech_autofix,
+    )
+    trace_payload = resolved.trace_payload()
+    if trace_context:
+        trace_payload.update(trace_context)
+    trace_event(
+        "speech",
+        "发言决策",
+        status="planned" if resolved.should_speak else "skipped",
+        output=trace_payload,
+        detail=(
+            "SpeechPlan 已通过表达质量层，准备进入发送节奏规划。"
+            if resolved.should_speak
+            else "SpeechPlan 决定不产生用户可见消息。"
+        ),
+    )
+    if not resolved.should_speak:
+        raise ValueError("SpeechPlan 当前动作不应发送消息")
+    rhythm, sub_plans = _rhythm_sub_plans(resolved, emotion=emotion)
+    messages: list[PreparedOutboundMessage] = []
+    try:
+        for index, sub in enumerate(sub_plans):
+            messages.append(
+                await _prepare_resolved_plan(
+                    sub if index == 0 else _strip_reply_target(sub),
+                    session=session,
+                    group_id=group_id,
+                    actor_user_id=actor_user_id,
+                    allowed_segment_types=allowed_segment_types,
+                    speech_user_text=speech_user_text,
+                    recent_speech=recent_speech,
+                )
+            )
+    except (ValueError, PermissionError, LookupError) as exc:
+        for prepared in messages:
+            for path in prepared.temporary_files:
+                path.unlink(missing_ok=True)
+        if len(sub_plans) <= 1:
+            raise
+        dbg(f"群 {group_id} 分条校验失败,退回单条发送: {exc}")
+        trace_event(
+            "speech",
+            "发送节奏",
+            status="degraded",
+            output={**rhythm.trace_payload(), "fallback": "single"},
+            detail=f"分条中有一条没通过发送校验（{type(exc).__name__}），整句改为一条发送",
+        )
+        single = replace(
+            resolved,
+            parts=(),
+            segments=tuple(strip_break_segments(resolved.segments)),
+        )
+        prepared = await _prepare_resolved_plan(
+            single,
+            session=session,
+            group_id=group_id,
+            actor_user_id=actor_user_id,
+            allowed_segment_types=allowed_segment_types,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+        )
+        return PreparedSpeechParts(
+            (prepared,),
+            single_rhythm(prepared.normalized_text, source="fallback"),
+        )
+    trace_event(
+        "speech",
+        "发送节奏",
+        status="planned",
+        output=rhythm.trace_payload(),
+        detail=(
+            f"按「{rhythm.trace_payload()['rhythm_label']}」节奏"
+            f"分 {len(messages)} 条发送"
+            if len(messages) > 1
+            else "一条发完"
+        ),
+    )
+    return PreparedSpeechParts(tuple(messages), rhythm)
+
+
+def _rhythm_sub_plans(
+    resolved: SpeechPlan, *, emotion: object
+) -> tuple[RhythmPlan, list[SpeechPlan]]:
+    complexity = resolved.style.response_complexity
+    if resolved.segments:
+        groups = segment_groups(resolved.segments)
+        only_text = len(groups) == 1 and all(
+            item.get("type") in {"text", "reply"} for item in groups[0]
+        )
+        if only_text and _group_text(groups[0]):
+            reply = [item for item in groups[0] if item.get("type") == "reply"]
+            rhythm = plan_text_rhythm(
+                _group_text(groups[0]),
+                declared=resolved.rhythm,
+                scene=resolved.scene,
+                act=resolved.act,
+                complexity=complexity,
+                style=resolved.style,
+                emotion=emotion,
+            )
+            if rhythm.multi:
+                return rhythm, [
+                    replace(
+                        resolved,
+                        parts=(),
+                        segments=(
+                            *(reply if index == 0 else []),
+                            {"type": "text", "text": part},
+                        ),
+                    )
+                    for index, part in enumerate(rhythm.parts)
+                ]
+        if len(groups) <= 1:
+            only = tuple(groups[0]) if groups else resolved.segments
+            return single_rhythm(
+                resolved.visible_text or "[消息段]", source="segments"
+            ), [replace(resolved, segments=only)]
+        rhythm = plan_group_rhythm(
+            [_group_text(group) for group in groups],
+            declared=resolved.rhythm,
+            style=resolved.style,
+            emotion=emotion,
+            seed=resolved.visible_text,
+        )
+        return rhythm, [replace(resolved, segments=tuple(group)) for group in groups]
+    rhythm = plan_text_rhythm(
+        resolved.text,
+        parts=resolved.parts,
+        declared=resolved.rhythm,
+        scene=resolved.scene,
+        act=resolved.act,
+        complexity=complexity,
+        style=resolved.style,
+        emotion=emotion,
+    )
+    if not rhythm.multi:
+        return rhythm, [replace(resolved, parts=(), text=rhythm.text or resolved.text)]
+    return rhythm, [replace(resolved, parts=(), text=part) for part in rhythm.parts]
+
+
+async def _prepare_resolved_plan(
+    plan: SpeechPlan,
+    *,
+    session: Any,
+    group_id: int,
+    actor_user_id: int | None,
+    allowed_segment_types: frozenset[str] | None,
+    speech_user_text: str,
+    recent_speech: tuple[str, ...] | list[str],
+) -> PreparedOutboundMessage:
+    """已清洗过的一条子计划 -> OneBot 消息；不再重复自动修正。"""
+
+    quoted = await _prepare_quoted_plan(
+        plan,
+        session=session,
+        group_id=group_id,
+        actor_user_id=actor_user_id,
+        allowed_segment_types=allowed_segment_types,
+        speech_user_text=speech_user_text,
+        recent_speech=recent_speech,
+    )
+    if quoted is not None:
+        prepared = quoted
+    elif plan.segments:
+        prepared = await prepare_outbound_message(
+            list(plan.segments),
+            session=session,
+            group_id=group_id,
+            actor_user_id=actor_user_id,
+            allowed_segment_types=allowed_segment_types,
+            speech_scene=plan.scene,
+            speech_style=plan.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=False,
+            trace_speech=False,
+        )
+    else:
+        prepared = prepare_text_message(
+            plan.text,
+            speech_scene=plan.scene,
+            speech_style=plan.style,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=False,
+            trace_speech=False,
+        )
+    return replace(
+        prepared,
+        speech_scene=plan.scene,
+        quality_issues=_quality_codes(plan),
+    )
+
+
 def prepare_text_message(
     text: str,
     *,
@@ -648,7 +904,7 @@ async def prepare_outbound_message(
             status="planned" if plan.should_speak else "skipped",
             output=plan.trace_payload(),
         )
-    raw_segments = list(plan.segments)
+    raw_segments = strip_break_segments(plan.segments)
 
     reply_count = sum(item.get("type") == "reply" for item in raw_segments)
     media_count = sum(
@@ -1628,10 +1884,12 @@ __all__ = [
     "MAX_OUTBOUND_TEXT_CHARS",
     "PreparedForwardMessage",
     "PreparedOutboundMessage",
+    "PreparedSpeechParts",
     "SendResult",
     "extract_message_id",
     "prepare_forward_message",
     "prepare_outbound_message",
+    "prepare_speech_parts",
     "prepare_speech_plan",
     "prepare_text_message",
     "send_forward_message",

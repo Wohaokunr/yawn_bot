@@ -312,8 +312,71 @@ def speech_simulation_payload(
     return payload
 
 
+def rhythm_preview(
+    *,
+    text: object = "",
+    segments: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+    style: SpeechStyle | None = None,
+    scene: str = "conversation",
+    emotion: object = None,
+) -> dict[str, Any]:
+    """调试页用：这段模型输出真发出去会拆成几条、每条前停多久（不发送）。"""
+
+    from .speech_rhythm import (
+        RHYTHM_LABELS,
+        plan_group_rhythm,
+        plan_text_rhythm,
+        rhythm_settings,
+        segment_groups,
+    )
+
+    plan = (
+        speech_plan_from_segments(segments, scene=scene, style=style)
+        if segments
+        else speech_plan_from_text(text, scene=scene, style=style)
+    )
+    resolved = finalize_speech_plan(plan, autofix=True)
+    if resolved.segments:
+        groups = segment_groups(resolved.segments)
+        rhythm = plan_group_rhythm(
+            [
+                "".join(
+                    str(item.get("text") or "")
+                    for item in group
+                    if item.get("type") == "text"
+                )
+                or "[消息段]"
+                for group in groups
+            ],
+            declared=resolved.rhythm,
+            style=resolved.style,
+            emotion=emotion,
+        )
+    else:
+        rhythm = plan_text_rhythm(
+            resolved.text,
+            parts=resolved.parts,
+            declared=resolved.rhythm,
+            scene=resolved.scene,
+            act=resolved.act,
+            complexity=resolved.style.response_complexity,
+            style=resolved.style,
+            emotion=emotion,
+        )
+    return {
+        "rhythm": rhythm.rhythm,
+        "rhythmLabel": RHYTHM_LABELS.get(rhythm.rhythm, rhythm.rhythm),
+        "declared": rhythm.declared,
+        "source": rhythm.source,
+        "spreadMs": round(rhythm.spread_seconds * 1000),
+        "parts": rhythm.preview(),
+        "settings": rhythm_settings().as_dict(),
+    }
+
+
 __all__ = [
     "build_runtime_speech_plan",
+    "rhythm_preview",
     "speech_simulation_payload",
     "trace_speech_decision",
 ]

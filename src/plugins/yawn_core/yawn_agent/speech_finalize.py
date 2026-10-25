@@ -1,4 +1,4 @@
-# ruff: noqa: E501,TID252,TC001,TC002,PLR0915,PLR0917,SIM114
+# ruff: noqa: E501,TID252,TC001,TC002,PLR0915,PLR0917,SIM114,C901,PLR0912
 """SpeechPlan finalization and post-send state updates for dialogue."""
 
 from __future__ import annotations
@@ -15,9 +15,16 @@ from .context import now_beijing
 from .execution_trace import trace_event
 from .log import dbg, dbg_exc
 from .message_parser import NormalizedMessage
-from .outbound import PreparedOutboundMessage, SendResult, prepare_speech_plan
+from .outbound import (
+    PreparedOutboundMessage,
+    PreparedSpeechParts,
+    SendResult,
+    prepare_speech_parts,
+)
 from .persona import persona_behavior
 from .speech import SpeechPlan
+from .speech_delivery import deliver_parts, persist_delivered, queued_trigger_check
+from .speech_rhythm import single_rhythm
 from .topic_state import TOPIC_ACTION_CLOSE, TOPIC_ACTION_SHIFT
 
 SendFunc = Callable[..., Awaitable[SendResult]]
@@ -68,7 +75,7 @@ async def finalize_reply(  # noqa: PLR0913
             for item in (config.recent_response_fingerprints or [])
             if isinstance(item, dict) and item.get("text")
         )[-4:]
-        prepared = await prepare_speech_plan(
+        prepared = await prepare_speech_parts(
             content,
             session=session,
             group_id=group_id,
@@ -76,10 +83,13 @@ async def finalize_reply(  # noqa: PLR0913
             speech_user_text=normalized.plain_text,
             recent_speech=recent_speech,
             trace_context={"emotion": emotion_state},
+            emotion=emotion_state,
         )
         speech_plan = content
     else:
-        prepared = content
+        prepared = PreparedSpeechParts(
+            (content,), single_rhythm(content.normalized_text, source="prepared")
+        )
         speech_plan = None
     reply_text = prepared.normalized_text
     short_conversation_enabled = bool(config.short_conversation_enabled)
@@ -89,7 +99,9 @@ async def finalize_reply(  # noqa: PLR0913
         else 1
     )
     fingerprint_source = reply_text or json.dumps(
-        list(prepared.segment_records), ensure_ascii=False, sort_keys=True
+        [record for item in prepared.messages for record in item.segment_records],
+        ensure_ascii=False,
+        sort_keys=True,
     )
     input_fingerprint = hashlib.sha256(
         user_prompt.casefold().encode("utf-8")
@@ -112,18 +124,35 @@ async def finalize_reply(  # noqa: PLR0913
             detail="与近 10 分钟同一输入/回复指纹重复",
         )
         dbg(f"群 {group_id} 回复与近 10 分钟内重复,抑制发送: {reply_text!r}")
+        for item in prepared.messages:
+            for path in item.temporary_files:
+                path.unlink(missing_ok=True)
         return
-    sent = await send_func(
-        bot,
-        group_id,
+
+    async def send_one(part: PreparedOutboundMessage, index: int) -> SendResult:
+        # 只有第一条做触发过期检查：已经开口了就把话说完。
+        return await send_func(
+            bot,
+            group_id,
+            part,
+            enqueued_at if index == 0 else None,
+            label="正文发送" if index == 0 else f"正文分条 {index + 1}",
+            message_id=message_id,
+            session=session,
+            actor_user_id=None,
+            source="dialogue",
+        )
+
+    bot_id = int(bot.self_id)
+    outcome = await deliver_parts(
         prepared,
-        enqueued_at,
-        label="正文发送",
-        message_id=message_id,
-        session=session,
-        actor_user_id=None,
-        source="dialogue",
+        send_one=send_one,
+        hurry=queued_trigger_check(group_id, bot_id),
+        group_id=group_id,
     )
+    sent = outcome.combined()
+    if outcome.visible_text:
+        reply_text = outcome.visible_text
     if not sent.ends_turn:
         dbg(f"群 {group_id} 回复确认未发送(触发过期或明确失败),放弃本轮状态更新")
         return
@@ -134,18 +163,14 @@ async def finalize_reply(  # noqa: PLR0913
     )
 
     try:
-        if sent.sent:
-            await persist_func(
+        if outcome.delivered:
+            await persist_delivered(
+                outcome,
+                persist_func,
                 session,
-                int(bot.self_id),
+                bot_id,
                 group_id,
-                sent.message_id,
-                sent.normalized_text,
                 int(config.raw_retention_days),
-                segments=sent.segments,
-                reply_chain=sent.reply_chain,
-                forward_tree=sent.forward_tree,
-                media_refs=sent.media_refs,
             )
         else:
             dbg(
@@ -247,23 +272,31 @@ async def record_tool_send(  # noqa: PLR0913
     if not isinstance(payload, dict):
         return
 
-    def _list(key: str) -> list[Any]:
-        value = payload.get(key)
-        return value if isinstance(value, list) else []
-
     text = str(payload.get("text") or "")
-    await persist_func(
-        session,
-        bot_id,
-        group_id,
-        extract_message_id(payload.get("message_id")),
-        text,
-        int(config.raw_retention_days),
-        segments=_list("segments"),
-        reply_chain=_list("reply_chain"),
-        forward_tree=_list("forward_tree"),
-        media_refs=_list("media_refs"),
+    parts = raw_result.get("outbound_parts") if isinstance(raw_result, dict) else None
+    entries = (
+        [item for item in parts if isinstance(item, dict)]
+        if isinstance(parts, list) and parts
+        else [payload]
     )
+    for entry in entries:
+
+        def _entry_list(key: str, source: dict[str, Any] = entry) -> list[Any]:
+            value = source.get(key)
+            return value if isinstance(value, list) else []
+
+        await persist_func(
+            session,
+            bot_id,
+            group_id,
+            extract_message_id(entry.get("message_id")),
+            str(entry.get("text") or ""),
+            int(config.raw_retention_days),
+            segments=_entry_list("segments"),
+            reply_chain=_entry_list("reply_chain"),
+            forward_tree=_entry_list("forward_tree"),
+            media_refs=_entry_list("media_refs"),
+        )
     now = now_beijing()
     fingerprint_source = text or json.dumps(
         {

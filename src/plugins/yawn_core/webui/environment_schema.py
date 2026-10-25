@@ -29,6 +29,7 @@ EXTRA_ENUM_OPTIONS: dict[str, list[str]] = {
     "LOG_LEVEL": ["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
     "AGENT_RECEIVED_MEDIA_REUSE": ["deny", "same_group"],
     "AGENT_IMAGE_AUTO_CAPTION": ["off", "triggered", "all"],
+    "AGENT_REPLY_SPLIT": ["auto", "marked", "off"],
 }
 # 只给候选、不限制取值
 SUGGESTIONS: dict[str, list[str]] = {

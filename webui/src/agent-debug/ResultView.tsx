@@ -1,7 +1,7 @@
 import { DownloadOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, Descriptions, List, Progress, Segmented, Space, Tabs, Tag, Tooltip, Typography } from "antd";
 import { useMemo, useState } from "react";
-import type { AgentDebugResponse } from "../types";
+import type { AgentDebugResponse, AgentDeliveryPreview } from "../types";
 import { ContextBudgetInspector, ContextInspector, CurrentTurnInspector } from "./ContextInspector";
 import {
   AGENT_DEBUG_MODES,
@@ -45,6 +45,7 @@ function DebugModelInspector({ result }: { result: AgentDebugResponse["result"] 
       { key: "segments", label: "消息段", children: debugDisplay(decision.segments) },
     ]} /></Card>}
     <Card size="small" title="模型文本"><Paragraph copyable={Boolean(result.text)} style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{result.text || "（无文本输出）"}</Paragraph></Card>
+    {result.delivery && <DeliveryPreview delivery={result.delivery} />}
     {result.toolCalls.length > 0 && <Card size="small" title={`工具意图（${result.toolCalls.length}）`}><List
       size="small"
       dataSource={result.toolCalls}
@@ -58,6 +59,42 @@ function DebugModelInspector({ result }: { result: AgentDebugResponse["result"] 
       </div></List.Item>}
     /></Card>}
   </Space>;
+}
+
+const RHYTHM_SOURCE_LABELS: Record<string, string> = {
+  model: "模型用 ||| 标的",
+  model_clauses: "模型要连发，按短句拆",
+  model_sentences: "模型要分条，按句子拆",
+  pop_downgraded: "太长不适合蹦字，改成连发",
+  auto_paragraph: "按段落兜底拆分",
+  auto_line: "按换行兜底拆分",
+  auto_sentence: "按句子兜底拆分",
+  structured: "含代码/列表，整条发",
+  single: "一条发完",
+  disabled: "分条已关闭",
+  segments: "按消息段分组",
+};
+
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`;
+}
+
+/** 模拟 QQ 里一条条冒出来的样子：每条前面标出停顿。 */
+export function DeliveryPreview({ delivery }: { delivery: AgentDeliveryPreview }): React.JSX.Element {
+  const multi = delivery.parts.length > 1;
+  return <Card size="small" title={<Space wrap size={6}>
+    <span>发送节奏预览</span>
+    <Tag color={multi ? "magenta" : "default"}>{delivery.rhythmLabel}</Tag>
+    <Text type="secondary">{RHYTHM_SOURCE_LABELS[delivery.source] ?? delivery.source}</Text>
+  </Space>} extra={multi ? <Text type="secondary">共 {delivery.parts.length} 条 · 历时约 {formatSeconds(delivery.spreadMs)}</Text> : null}>
+    <ol className="dbg-delivery" aria-label="分条发送预览">
+      {delivery.parts.map((part, index) => <li key={`${index}-${part.text}`} className="dbg-delivery-item">
+        {index > 0 && <span className="dbg-delivery-gap">停 {formatSeconds(part.delayMs)}</span>}
+        <span className="dbg-delivery-bubble">{part.text}</span>
+      </li>)}
+    </ol>
+    {delivery.settings.mode === "off" && <Alert type="info" showIcon message="AGENT_REPLY_SPLIT=off：所有回复都一条发完" />}
+  </Card>;
 }
 
 // 与 PersonaBehavior.as_dict 的字段对齐；source 在标题里单独展示。

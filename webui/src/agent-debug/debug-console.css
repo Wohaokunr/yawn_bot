@@ -680,3 +680,17 @@
 @media (prefers-reduced-motion: reduce) {
   .dbg *, .dbg *::before { transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* 发送节奏预览：像 QQ 聊天一样一条条排下来，条与条之间标出停顿。 */
+.dbg-delivery { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.dbg-delivery-item { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.dbg-delivery-gap { font-size: 12px; color: var(--ant-color-text-tertiary, #8c8c8c); padding-left: 6px; }
+.dbg-delivery-bubble {
+  max-width: min(100%, 520px);
+  padding: 6px 12px;
+  border-radius: 4px 14px 14px 14px;
+  background: var(--ant-color-primary-bg, rgba(236, 72, 153, 0.08));
+  border: 1px solid var(--ant-color-primary-border, rgba(236, 72, 153, 0.25));
+  white-space: pre-wrap;
+  word-break: break-word;
+}

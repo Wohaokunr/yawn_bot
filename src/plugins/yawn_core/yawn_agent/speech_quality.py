@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: noqa: E501,PLR0912,PLR0913,PLR2004,C901
 """Deterministic speech-quality checks for user-visible Agent output.
 
 The linter is deliberately conservative. It may remove obvious assistant-like
@@ -273,14 +273,24 @@ def _dedupe_issues(items: list[SpeechQualityIssue]) -> tuple[SpeechQualityIssue,
     return tuple(result)
 
 
-def _polish_text(  # noqa: C901,PLR0912,PLR0915
+def _polish_text(  # noqa: PLR0915
     text: str,
     plan: SpeechPlan,
     *,
     user_text: str,
     recent_texts: Iterable[str],
     autofix: bool,
+    position: str = "only",
 ) -> tuple[str, tuple[SpeechQualityIssue, ...]]:
+    """position 是分条发送时这段在整句里的位置：only/first/middle/last。
+
+    开场类清洗（客套开场、元话语、复述）只看第一条，结尾类清洗（通用续聊、
+    二选一反问）只看最后一条；长度修剪和撞重在整句层面做，分条时跳过。
+    """
+
+    opening = position in {"only", "first"}
+    closing = position in {"only", "last"}
+    whole = position == "only"
     original = _clean_lines(text)
     if not original:
         return "", (_issue("empty", "发言文本为空", severity="warning"),)
@@ -334,7 +344,9 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
             if autofix:
                 cleaned = claims.text
 
-    candidate, boilerplate = _strip_boilerplate(cleaned)
+    candidate, boilerplate = (
+        _strip_boilerplate(cleaned) if opening else (cleaned, False)
+    )
     if boilerplate:
         issues.append(
             _issue(
@@ -346,8 +358,10 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix:
             cleaned = candidate
 
-    strategy_detected = bool(_ANSWER_STRATEGY_META_RE.search(cleaned))
-    candidate, strategy_prefix = _strip_answer_strategy_prefix(cleaned)
+    strategy_detected = opening and bool(_ANSWER_STRATEGY_META_RE.search(cleaned))
+    candidate, strategy_prefix = (
+        _strip_answer_strategy_prefix(cleaned) if opening else (cleaned, False)
+    )
     if strategy_prefix or strategy_detected:
         issues.append(
             _issue(
@@ -360,7 +374,9 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix and strategy_prefix:
             cleaned = candidate
 
-    candidate, echoed = _strip_user_echo(cleaned, user_text)
+    candidate, echoed = (
+        _strip_user_echo(cleaned, user_text) if opening else (cleaned, False)
+    )
     if echoed:
         issues.append(
             _issue(
@@ -372,7 +388,7 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix:
             cleaned = candidate
 
-    candidate, cta = _strip_generic_cta(cleaned)
+    candidate, cta = _strip_generic_cta(cleaned) if closing else (cleaned, False)
     if cta:
         issues.append(
             _issue(
@@ -384,10 +400,14 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix:
             cleaned = candidate
 
-    forced_choice_detected = bool(
+    forced_choice_detected = closing and bool(
         plan.act in _SHORT_ACTS and _FORCED_CHOICE_SUFFIX_RE.search(cleaned)
     )
-    candidate, forced_choice = _strip_forced_choice_followup(cleaned, plan)
+    candidate, forced_choice = (
+        _strip_forced_choice_followup(cleaned, plan)
+        if closing
+        else (cleaned, False)
+    )
     if forced_choice_detected:
         issues.append(
             _issue(
@@ -400,7 +420,9 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix and forced_choice:
             cleaned = candidate
 
-    candidate, social_trimmed = _trim_social_monologue(cleaned, plan)
+    candidate, social_trimmed = (
+        _trim_social_monologue(cleaned, plan) if whole else (cleaned, False)
+    )
     if social_trimmed:
         issues.append(
             _issue(
@@ -413,7 +435,9 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix:
             cleaned = candidate
 
-    candidate, trimmed = _trim_short_scene(cleaned, plan)
+    candidate, trimmed = (
+        _trim_short_scene(cleaned, plan) if whole else (cleaned, False)
+    )
     if trimmed:
         issues.append(
             _issue(
@@ -425,7 +449,7 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
         if autofix:
             cleaned = candidate
 
-    repeat_score = _recent_repeat(cleaned, recent_texts)
+    repeat_score = _recent_repeat(cleaned, recent_texts) if whole else 0.0
     if repeat_score >= _REPEAT_SIMILARITY_THRESHOLD:
         issues.append(
             _issue(
@@ -438,7 +462,7 @@ def _polish_text(  # noqa: C901,PLR0912,PLR0915
     return _clean_lines(cleaned), _dedupe_issues(issues)
 
 
-def finalize_speech_plan(  # noqa: C901
+def finalize_speech_plan(
     plan: SpeechPlan,
     *,
     user_text: str = "",
@@ -447,6 +471,10 @@ def finalize_speech_plan(  # noqa: C901
 ) -> SpeechPlan:
     """Lint one plan and optionally apply only conservative wording fixes."""
 
+    if len(plan.parts) >= 2:
+        return _finalize_parts(
+            plan, user_text=user_text, recent_texts=recent_texts, autofix=autofix
+        )
     if plan.text:
         text, issues = _polish_text(
             plan.text,
@@ -540,6 +568,116 @@ def finalize_speech_plan(  # noqa: C901
         item for item in fixed_issues if item.code not in {old.code for old in merged}
     )
     return plan.with_content(segments=tuple(segments), issues=_dedupe_issues(merged))
+
+
+_PART_REPEAT_THRESHOLD = 0.9
+
+
+def _is_whole_cta(text: str) -> bool:
+    cleaned = _clean_lines(text)
+    for pattern in _GENERIC_CTA_SUFFIXES:
+        match = pattern.search(cleaned)
+        if match is not None and not cleaned[: match.start()].strip(" ，,；;：:"):
+            return True
+    return False
+
+
+def _part_position(index: int, count: int) -> str:
+    if count <= 1:
+        return "only"
+    if index == 0:
+        return "first"
+    return "last" if index == count - 1 else "middle"
+
+
+def _finalize_parts(
+    plan: SpeechPlan,
+    *,
+    user_text: str,
+    recent_texts: Iterable[str],
+    autofix: bool,
+) -> SpeechPlan:
+    """模型用 ||| 标了分条：逐条清洗，再在整句层面做撞重和短场景预算。"""
+
+    issues: list[SpeechQualityIssue] = []
+    kept: list[str] = []
+    count = len(plan.parts)
+    for index, part in enumerate(plan.parts):
+        if autofix and index == count - 1 and index > 0 and _is_whole_cta(part):
+            issues.append(
+                _issue(
+                    "generic_followup_cta",
+                    "最后一条整条都是“还有问题继续问”式强行续聊，已去掉",
+                    autofixed=True,
+                )
+            )
+            continue
+        cleaned, part_issues = _polish_text(
+            part,
+            plan,
+            user_text=user_text,
+            recent_texts=(),
+            autofix=autofix,
+            position=_part_position(index, count),
+        )
+        issues.extend(item for item in part_issues if item.code != "empty")
+        if not cleaned:
+            continue
+        if autofix and any(
+            speech_similarity(cleaned, earlier) >= _PART_REPEAT_THRESHOLD
+            and len(_similarity_key(cleaned)) >= _MIN_SIMILARITY_CHARS
+            for earlier in kept
+        ):
+            issues.append(
+                _issue(
+                    "duplicate_part",
+                    "分条里有一条几乎重复了前面的内容，已去掉",
+                    autofixed=True,
+                )
+            )
+            continue
+        kept.append(cleaned)
+    if not kept:
+        return plan.with_content(
+            text="",
+            parts=(),
+            issues=(_issue("empty", "发言文本为空", severity="warning"),),
+        )
+    target = plan.style.soft_target_chars
+    short_turn = plan.scene in _SHORT_SCENES or plan.act in _SHORT_ACTS
+    if autofix and short_turn and target and len(kept) > 1:
+        budget = min(max(target * 2, 48), 360)
+        bounded: list[str] = []
+        used = 0
+        for part in kept:
+            if bounded and used + len(part) > budget:
+                break
+            bounded.append(part)
+            used += len(part)
+        if len(bounded) < len(kept):
+            issues.append(
+                _issue(
+                    "scene_overlong",
+                    "短发言场景的分条总长明显超过软长度目标，已去掉后面几条",
+                    autofixed=True,
+                )
+            )
+            kept = bounded
+    joined = "\n".join(kept)
+    repeat_score = _recent_repeat(joined, recent_texts)
+    if repeat_score >= _REPEAT_SIMILARITY_THRESHOLD:
+        issues.append(
+            _issue(
+                "recent_repeat",
+                f"与近期 Bot 发言高度相似（{repeat_score:.2f}）",
+                severity="warning",
+            )
+        )
+    return plan.with_content(
+        text=joined,
+        parts=tuple(kept) if len(kept) >= 2 else (),
+        issues=_dedupe_issues(issues),
+    )
 
 
 __all__ = [

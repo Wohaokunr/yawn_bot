@@ -69,12 +69,20 @@ from .memory_access import flush_access
 from .memory_consolidation import consolidate_weekly_summaries
 from .persona import persona_behavior, resolve_persona
 from .speech import SpeechPlan, speech_plan_from_segments, speech_plan_from_text
+from .speech_delivery import (
+    DeliveryOutcome,
+    deliver_parts,
+    persist_delivered,
+    queued_trigger_check,
+)
 from .speech_finalize import apply_speech_topic
 from .speech_runtime import build_runtime_speech_plan, trace_speech_decision
 from .prompt import build_messages
 from .outbound import (
     PreparedOutboundMessage,
     SendResult,
+    PreparedSpeechParts,
+    prepare_speech_parts,
     prepare_speech_plan,
     send_prepared_outbound,
 )
@@ -258,6 +266,7 @@ async def _apply_result(
     confidence: float | None = None,
     topic: str | None = None,
     extra: dict[str, Any] | None = None,
+    delivery: DeliveryOutcome | None = None,
 ) -> None:
     """在调用方事务内落库：成功推进 last_proactive_at/last_agent_at；
     未发出（内容门拦截、生成失败、撞重）只把 last_proactive_at 回拨到
@@ -293,6 +302,11 @@ async def _apply_result(
                     "confidence": confidence,
                     # 暖场据此避免在同一段沉默里重提同一话题。
                     "topic": (topic or "")[:80] or None,
+                    **(
+                        {"parts": len(delivery.results)}
+                        if delivery is not None and len(delivery.results) > 1
+                        else {}
+                    ),
                     **(extra or {}),
                 },
                 result=(
@@ -301,7 +315,17 @@ async def _apply_result(
                 detail=audit_text[:500],
             )
         )
-        if send_result.sent:
+        if delivery is not None and len(delivery.results) > 1:
+            # 分条发送：每条都有自己的 message_id，逐条写历史。
+            await persist_delivered(
+                delivery,
+                persist_bot_reply,
+                session,
+                int(bot_id or 0),
+                int(config.group_id),
+                int(config.raw_retention_days),
+            )
+        elif send_result.sent:
             await persist_bot_reply(
                 session,
                 int(bot_id or 0),
@@ -344,8 +368,13 @@ async def _prepare_proactive_message(
     speech_user_text: str = "",
     recent_speech: tuple[str, ...] | list[str] = (),
     emotion_state: object = None,
-) -> PreparedOutboundMessage:
-    """Compatibility parser boundary -> unified SpeechPlan -> outbound."""
+    split: bool = False,
+) -> PreparedOutboundMessage | PreparedSpeechParts:
+    """Compatibility parser boundary -> unified SpeechPlan -> outbound.
+
+    ``split=True`` 时按发送节奏规划成多条（主动/续聊的真实发送路径）；
+    默认仍返回单条，供只关心消息形状的调用方使用。
+    """
 
     if isinstance(decision, SpeechPlan):
         plan = decision
@@ -364,6 +393,22 @@ async def _prepare_proactive_message(
             reason=decision.reason,
             confidence=decision.confidence,
         )
+    trace_context = {
+        "emotion": emotion_state,
+        "participation_action": plan.action,
+    }
+    if split:
+        return await prepare_speech_parts(
+            plan,
+            session=session,
+            group_id=group_id,
+            actor_user_id=None,
+            speech_user_text=speech_user_text,
+            recent_speech=recent_speech,
+            speech_autofix=True,
+            trace_context=trace_context,
+            emotion=emotion_state,
+        )
     return await prepare_speech_plan(
         plan,
         session=session,
@@ -372,12 +417,46 @@ async def _prepare_proactive_message(
         speech_user_text=speech_user_text,
         recent_speech=recent_speech,
         speech_autofix=True,
-        trace_context={
-            "emotion": emotion_state,
-            "participation_action": plan.action,
-        },
+        trace_context=trace_context,
     )
 
+
+async def _deliver_proactive(
+    bot: Any,
+    group_id: int,
+    prepared: Any,
+    *,
+    session: Any,
+    source: str,
+) -> DeliveryOutcome:
+    """主动/续聊按节奏分条发送；群里有人排队找 Bot 时剩下的合并立刻发完。"""
+
+    messages = (
+        prepared.messages if isinstance(prepared, PreparedSpeechParts) else (prepared,)
+    )
+    delays = (
+        prepared.delays
+        if isinstance(prepared, PreparedSpeechParts)
+        else tuple(0.0 for _ in messages)
+    )
+
+    async def send_one(part: Any, _index: int) -> SendResult:
+        return await send_prepared_outbound(
+            bot,
+            group_id,
+            part,
+            session=session,
+            actor_user_id=None,
+            source=source,
+        )
+
+    return await deliver_parts(
+        list(messages),
+        delays=delays,
+        send_one=send_one,
+        hurry=queued_trigger_check(group_id, int(str(getattr(bot, "self_id", "") or 0))),
+        group_id=group_id,
+    )
 
 
 async def _latest_group_bot_id(session: Any, group_id: int) -> int | None:
@@ -649,6 +728,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                     group_id=group_id,
                     recent_speech=_recent_proactive_lines(config),
                     emotion_state=context.get("emotion_state"),
+                    split=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = f"主动消息计划无效: {exc}"
@@ -679,17 +759,14 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
 
             # 多机器人部署下逐个尝试；通常只有一个连接，首个即成功。
             sent_result: SendResult | None = None
+            delivery: DeliveryOutcome | None = None
             sent_bot_id = primary_self_id
             for bot in bots:
                 try:
-                    sent_result = await send_prepared_outbound(
-                        bot,
-                        group_id,
-                        prepared,
-                        session=session,
-                        actor_user_id=None,
-                        source="proactive",
+                    delivery = await _deliver_proactive(
+                        bot, group_id, prepared, session=session, source="proactive"
                     )
+                    sent_result = delivery.combined()
                 except Exception:  # noqa: BLE001
                     logger.warning("群 %s 主动消息发送失败，尝试下一个机器人", group_id)
                     dbg_exc(
@@ -732,6 +809,7 @@ async def _process_candidate_impl(candidate: dict[str, Any], bots: list[Any]) ->
                 confidence=decision.confidence,
                 topic=speech_plan.topic or decision.topic,
                 extra=gate_extra,
+                delivery=delivery,
             )
             if config.short_conversation_enabled:
                 mark_bot_reply(
@@ -1014,15 +1092,12 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                     group_id=group_id,
                     recent_speech=_recent_proactive_lines(config),
                     emotion_state=context.get("emotion_state"),
+                    split=True,
                 )
-                sent_result = await send_prepared_outbound(
-                    bot,
-                    group_id,
-                    prepared,
-                    session=session,
-                    actor_user_id=None,
-                    source="followup",
+                delivery = await _deliver_proactive(
+                    bot, group_id, prepared, session=session, source="followup"
                 )
+                sent_result = delivery.combined()
             except Exception:  # noqa: BLE001
                 logger.warning("群 %s 短会话续聊发送失败", group_id)
                 dbg_exc(
@@ -1056,6 +1131,7 @@ async def _process_followup_impl(batch: ConversationBatch) -> str:
                 target_user_id=decision.target_user_id,
                 confidence=decision.confidence,
                 topic=speech_plan.topic or batch.topic,
+                delivery=delivery,
             )
             mark_bot_reply(
                 bot_id,
