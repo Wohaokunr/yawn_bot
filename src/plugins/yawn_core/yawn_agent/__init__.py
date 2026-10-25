@@ -24,8 +24,12 @@ from . import (
     persona,
     proactive,
     prompt,
+    prompt_capture,
     tools,
 )
+
+# 把每次真实发给模型的完整请求挂进执行追踪（AGENT_TRACE_PROMPT_CAPTURE=off 可关）。
+prompt_capture.install()
 
 COMMAND_GROUP = register_command_group(
     PluginCommandGroup(

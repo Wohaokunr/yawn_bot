@@ -29,6 +29,7 @@ from nonebot_plugin_orm import get_session
 
 from ..data_models.web_admin_audit import WebAdminAudit
 from .agent import router as agent_router
+from .agent_prompt_routes import router as agent_prompt_router
 from .audits import router as audits_router
 from .auth import Session, verify_session, websocket_session
 from .auth_routes import router as auth_router
@@ -124,6 +125,7 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(groups_router)
     app.include_router(users_router)
     app.include_router(agent_router)
+    app.include_router(agent_prompt_router)
     app.include_router(audits_router)
     app.include_router(games_router)
     app.include_router(fanqie_router)

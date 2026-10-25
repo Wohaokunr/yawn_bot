@@ -14,6 +14,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from .prompt_sections import section_text
 from .tool_registry import TOOL_BY_NAME
 from .tool_router import MAX_TOOL_ROUNDS, SANDBOX_TOOL_ROUNDS
 
@@ -31,6 +32,7 @@ FINAL_ROUND_NOTE = (
     "工具轮次只剩最后一轮：这一轮不要再调用查询或运行类工具，"
     "根据已有结果直接给出最终回复；没做成的事如实说明原因。"
 )
+TOOL_MEDIA_NOTE = "以下图片来自刚才的工具查询结果，请结合该工具结果继续回答。"
 TRUNCATED_ARGS_HINT = (
     "上一轮输出被服务商截断，工具参数没写完整。把代码写短一些"
     "（去掉注释和示例数据）、分成两次运行，或先把中间结果写进文件再读取。"
@@ -104,7 +106,7 @@ def argument_error_payload(
             "error": "工具参数不完整（输出被截断）",
             "error_code": "invalid_args",
             "truncated": True,
-            "hint": TRUNCATED_ARGS_HINT,
+            "hint": section_text("tools.truncated_args", TRUNCATED_ARGS_HINT),
         }
     return {
         "ok": False,
@@ -112,6 +114,19 @@ def argument_error_payload(
         "error_code": "invalid_args",
         "hint": "参数必须是一个 JSON 对象，字符串里的换行和引号要转义",
     }
+
+
+def final_round_messages() -> list[dict[str, str]]:
+    """最后一轮前追加的 system 提示；WebUI 删掉这一段时不追加空消息。"""
+
+    text = section_text("tools.final_round", FINAL_ROUND_NOTE)
+    return [{"role": "system", "content": text}] if text else []
+
+
+def tool_media_note() -> str:
+    """工具查询带回图片时，追加的 user 消息里那句说明（可在 WebUI 改写）。"""
+
+    return section_text("tools.media_followup", TOOL_MEDIA_NOTE)
 
 
 def _looks_truncated(text: str) -> bool:
@@ -138,7 +153,9 @@ __all__ = [
     "completion_timeout",
     "discovery_deadline",
     "discovery_round_limit",
+    "final_round_messages",
     "has_sandbox_tools",
     "is_final_round",
+    "tool_media_note",
     "turn_seconds",
 ]

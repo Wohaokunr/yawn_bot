@@ -26,6 +26,7 @@ from ..llm import (
     resolve_llm_request,
     resolve_provider,
 )
+from ..yawn_agent import prompt_capture
 from ..yawn_agent.capabilities import (
     BotGroupCapabilities,
     capability_runtime_snapshot,
@@ -41,7 +42,9 @@ from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.emotion import emotion_context_state, emotion_public_state
 from ..yawn_agent.execution_trace import (
     begin_execution_trace,
+    bind_execution_trace,
     clear_execution_traces,
+    current_execution_trace,
     execution_trace_by_id,
     execution_trace_stats,
     finish_execution_trace,
@@ -58,8 +61,13 @@ from ..yawn_agent.persona import (
     resolve_persona_draft,
     resolve_persona_source,
 )
-from ..yawn_agent.proactive import _build_user_prompt, _decide_proactive_reply
-from ..yawn_agent.prompt import PROMPT_VERSION, build_messages
+from ..yawn_agent.proactive import (
+    _build_user_prompt,
+    _build_user_prompt_parts,
+    _decide_proactive_reply,
+)
+from ..yawn_agent.prompt import PROMPT_VERSION, build_prompt
+from ..yawn_agent.prompt_sections import use_draft_overrides
 from ..yawn_agent.speech_runtime import rhythm_preview
 from ..yawn_agent.tools import (
     build_tool_schemas,
@@ -543,8 +551,24 @@ async def _run_debug_completion(
 async def run_agent_debug(
     group_id: int, body: AgentDebugRunBody, _session: AdminWriteSession
 ) -> dict[str, Any]:
-    """构建线上同源提示词；可选调用模型，但不执行工具、发送或落库。"""
+    """构建线上同源提示词；可选调用模型，但不执行工具、发送或落库。
 
+    ``promptOverrides`` 是未保存的提示词分段草稿，只在这一次构建里生效。调试 Trace
+    在构建与试跑期间绑定为当前 Trace，真实请求会被完整抓取进 ``promptSnapshots``。
+    """
+
+    drafts = {
+        key: value.model_dump() for key, value in (body.prompt_overrides or {}).items()
+    }
+    previous_trace = current_execution_trace()
+    try:
+        with use_draft_overrides(drafts, group_id=group_id):
+            return await _run_agent_debug(group_id, body)
+    finally:
+        bind_execution_trace(previous_trace)  # pyright: ignore[reportArgumentType]
+
+
+async def _run_agent_debug(group_id: int, body: AgentDebugRunBody) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         config = await db.get(GroupAgentConfig, group_id)
@@ -683,6 +707,7 @@ async def run_agent_debug(
             actor_user_id=actor_user_id,
             message_id=current_turn.message_id,
         )
+        bind_execution_trace(debug_trace)
         trace_event(
             "intake",
             "载入调试场景",
@@ -901,13 +926,25 @@ async def run_agent_debug(
             else resolve_persona(config)
         )
         prompt_started = time.monotonic()
-        prompt_messages, _fingerprint = build_messages(
+        built = build_prompt(
             persona=applied_persona,
             tools=tools,
             context=context,
             user_prompt=user_prompt,
             current_turn=current_turn if body.mode == "dialogue" else None,
+            user_prompt_parts=(
+                None
+                if body.mode == "dialogue"
+                else _build_user_prompt_parts(
+                    body.mode,
+                    config,
+                    turn=2 if body.mode == "followup" else 1,
+                    behavior=applied_behavior,
+                )
+            ),
+            group_id=group_id,
         )
+        prompt_messages, _fingerprint = built.messages, built.fingerprint
         trace_event(
             "prompt",
             "Prompt 构建",
@@ -1013,6 +1050,14 @@ async def run_agent_debug(
                     trace=debug_trace,
                 )
         else:
+            prompt_capture.capture_unsent(
+                debug_trace,
+                task=task,
+                model=route.model,
+                messages=prompt_messages,
+                tools=tools,
+                params={"stream": False, **route.reasoning_kwargs},
+            )
             trace_event(
                 "llm",
                 "模型调用",
@@ -1081,6 +1126,9 @@ async def run_agent_debug(
             "contextSelection": context_selection,
             "contextBudget": context_budget,
             "promptMessages": prompt_messages,
+            "promptSpans": built.spans,
+            "promptSnapshots": list(debug_trace.prompts),
+            "promptDrafts": sorted(body.prompt_overrides or {}),
             "tools": tools,
             "toolPermissions": tool_permissions,
             "route": {

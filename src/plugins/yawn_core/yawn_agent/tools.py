@@ -26,6 +26,7 @@ from .context import now_beijing
 from .execution_trace import current_execution_trace
 from .log import dbg, dbg_exc
 from .outbound import MAX_FORWARD_NODES
+from .prompt_sections import apply_section
 from .tool_registry import (
     ADMIN_TOOLS as _ADMIN_TOOLS,
     CONTROLLED_TOOLS as _CONTROLLED_TOOLS,
@@ -215,7 +216,10 @@ def build_tool_schemas(
                 "type": "function",
                 "function": {
                     "name": definition.name,
-                    "description": definition.description,
+                    # 描述是 tool.<name> 提示词分段，WebUI 可改写。
+                    "description": apply_section(
+                        f"tool.{definition.name}", definition.description
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": properties,

@@ -51,6 +51,7 @@ from .memory_hygiene import (
     scrub_pii,
 )
 from .message_parser import redact_opted_out_media_refs, redact_opted_out_reply_chain
+from .prompt_sections import section_text
 
 _COMPACT_BATCH_LIMIT = 40
 _COMPACT_INPUT_CHAR_LIMIT = 12_000
@@ -758,6 +759,9 @@ async def _model_summary(
             ),
         },
     ]
+    # 整个 system 是一个提示词分段（memory.consolidation），WebUI 可改写或删除。
+    messages[0]["content"] = section_text("memory.consolidation", str(messages[0]["content"]))
+    messages = [item for item in messages if item["content"]]
     try:
         response = await complete(  # pyright: ignore[reportArgumentType]
             messages,  # pyright: ignore[reportArgumentType]

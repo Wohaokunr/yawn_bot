@@ -30,7 +30,16 @@
 - 合并转发正文只允许生成有节点数/字符数上限的当前回合摘要，禁止把整棵转发树无限展开进 Prompt。
 - 执行追踪统一放在 `execution_trace.py`。Trace 只允许作为当前进程内、数量和事件数都有硬上限的诊断数据，禁止写成新的长期聊天/媒体副本。
 - Trace 必须同时做 key 级和字符串级脱敏：原始媒体 URL、签名地址、本机路径、`file`、裸 OneBot/CQ payload、密钥等不得进入 WebUI 执行轨迹。追踪本身失败也不得改变 Agent 正常控制流。
+- 完整提示词抓取放在 `prompt_capture.py`，通过 `llm.add_request_observer` 记录每次真实请求（messages、tools、参数、回复）。只挂在当前 Trace 上（每条 `MAX_SNAPSHOTS_PER_TRACE` 次、单次 `MAX_SNAPSHOT_CHARS` 字符、全局 `MAX_TRACES_WITH_PROMPTS` 条），链接/本机路径/内嵌媒体统一脱敏，只给管理员看；观察者异常不得影响模型调用。`AGENT_TRACE_PROMPT_CAPTURE=off` 关闭。
 - 调试执行与真实执行必须明确区分。dry-run 中模型提出的 tool call 只能标记为 `planned`，实际未执行的工具、发送和数据库写入必须显示为 `skipped`，禁止在 UI 上伪装成成功副作用。
+
+## 提示词分段
+
+- 发给模型的每一段文字都必须登记在 `prompt_sections.py` 的 `SECTIONS`，并通过 `apply_section` / `section_text` / `system_messages` 或 `ContentBuilder` 输出。新加提示词文字不登记就等于对 WebUI 黑箱，禁止直接拼进 messages。
+- 没有覆盖时输出必须与默认逐字一致（有测试守着）；覆盖解析顺序是本群草稿 → 本群 → 全局草稿 → 全局。整层删空时不发空 system 消息。
+- 安全分段（`safety=True`）可以被删除或替换，但写入必须带 `confirm_safety`。删除提示词文字不得关掉代码里的权限分级、特权配额、critical 门槛、出站校验和隐私退出过滤。
+- 上下文数据分段（`KIND_DATA`）只能整块保留/删除，不得记录进程级样例，避免群消息越过 Trace 的隐私边界。
+- 覆盖存 JSON（`AGENT_PROMPT_OVERRIDES_PATH`），带 `revision` 乐观锁和每段 12 条历史，不建表、不需要迁移。文件损坏时按默认运行。
 
 ## 隐私与记忆
 

@@ -149,6 +149,10 @@ class ExecutionTrace:
     outcome: str | None = None
     duration_ms: float | None = None
     events: list[TraceEvent] = field(default_factory=list)
+    # 真实发给模型的完整请求（prompt_capture 写入；有全局上限，超出时清空并计数）。
+    prompts: list[dict[str, Any]] = field(default_factory=list)
+    prompts_evicted: int = 0
+    prompts_dropped: int = 0
 
     def as_summary(self) -> dict[str, Any]:
         """Return the small representation used by the trace collection API."""
@@ -198,6 +202,8 @@ class ExecutionTrace:
             "llmRounds": sum(1 for event in self.events if event.phase == "llm"),
             "slowestPhase": self._slowest_event(),
             "truncated": len(self.events) >= _MAX_EVENTS,
+            "promptCount": len(self.prompts),
+            "promptsEvicted": self.prompts_evicted > 0,
         }
 
     def _preview(self) -> str | None:
@@ -254,6 +260,8 @@ class ExecutionTrace:
             "outcome": self.outcome,
             "durationMs": self.duration_ms,
             "events": [event.as_dict() for event in self.events],
+            "promptCount": len(self.prompts),
+            "promptsEvictedCount": self.prompts_evicted,
         }
 
 
@@ -469,6 +477,13 @@ def execution_trace_by_id(group_id: int, trace_id: str) -> dict[str, Any] | None
     return None
 
 
+def execution_trace_object(group_id: int, trace_id: str) -> ExecutionTrace | None:
+    for trace in _recent_traces.get(int(group_id), ()):
+        if trace.trace_id == trace_id:
+            return trace
+    return None
+
+
 def clear_execution_traces(group_id: int) -> int:
     """清空一个群的 Trace 缓冲，返回被丢弃的条数。"""
     bucket = _recent_traces.pop(int(group_id), None)
@@ -575,6 +590,7 @@ __all__ = [
     "clear_execution_traces",
     "current_execution_trace",
     "execution_trace_by_id",
+    "execution_trace_object",
     "execution_trace_stats",
     "finish_execution_trace",
     "recent_execution_trace_summaries",

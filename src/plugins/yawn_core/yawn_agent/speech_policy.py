@@ -19,6 +19,7 @@ from .context_history import (
     effective_turn_from_context,
 )
 from .persona import persona_style_levels
+from .prompt_sections import apply_section
 from .speech import (
     SPEECH_SCENE_ACTIVE_INTERJECT,
     SPEECH_SCENE_CONVERSATION,
@@ -92,6 +93,14 @@ _SCENE_RULES: dict[str, str] = {
         "这是降级回复。只说明当前能确认的事实和下一步，不虚构已经完成的操作，也不要长篇解释内部故障。"
     ),
 }
+
+# 公开名给提示词分段注册表（prompt_sections）读取默认值。
+SCENE_RULES = _SCENE_RULES
+QUALITY_RULE = (
+    "发言质量：不要用“好的/当然可以/没问题/我来帮你”作为无意义开场；"
+    "不要先复述用户刚说的话；不要用“还需要我帮你吗/如果还有问题可以继续问”之类"
+    "通用结尾强行续聊。只有真正缺少关键信息时才反问。"
+)
 
 _SCENE_CONTINUE_TARGETS: dict[str, tuple[int | None, ...]] = {
     SPEECH_SCENE_DIRECT_REPLY: (100, 180, 300, 480, 720),
@@ -321,13 +330,20 @@ def _interaction_instruction(effective: EffectiveTurn) -> str:
     return "".join(parts)
 
 
-def build_speech_instruction(
+def build_speech_parts(
     persona: dict[str, Any] | None,
     current_turn: CurrentTurn | dict[str, Any] | None = None,
     *,
     source: str | None = None,
     context: dict[str, Any] | None = None,
-) -> str:
+    group_id: int | None = None,
+) -> list[tuple[str, str]]:
+    """按提示词分段返回本轮发言策略：``[(section_id, 生效文本), …]``。
+
+    每一块都经过 :func:`prompt_sections.apply_section`，WebUI 可以单独替换或删除；
+    没有覆盖时拼起来与旧版 ``build_speech_instruction`` 逐字一致。
+    """
+
     scene = resolve_speech_scene(current_turn, source=source)
     effective = _effective_for_speech(current_turn, context)
     act_plan = plan_speech_act(current_turn, scene=scene, effective_turn=effective)
@@ -352,36 +368,65 @@ def build_speech_instruction(
         f"详略 {style.verbosity}/4、"
         f"表现力 {style.expressiveness}/4；响应复杂度={complexity}。{target}"
     )
-    quality_rule = (
-        "发言质量：不要用“好的/当然可以/没问题/我来帮你”作为无意义开场；"
-        "不要先复述用户刚说的话；不要用“还需要我帮你吗/如果还有问题可以继续问”之类"
-        "通用结尾强行续聊。只有真正缺少关键信息时才反问。"
+    generated = (
+        ("speech.scene_label", f"发言场景={scene}。"),
+        (f"speech.scene.{scene}", _SCENE_RULES[scene]),
+        ("speech.interaction", _interaction_instruction(effective)),
+        ("speech.act", speech_act_instruction(act_plan)),
+        (
+            "speech.turn_taking",
+            turn_taking_instruction(
+                plan_turn_taking(current_turn, scene=scene, context=context)
+            ),
+        ),
+        ("speech.style", style_rule),
+        ("speech.quality", QUALITY_RULE),
+        (
+            "speech.native",
+            native_expression_instruction(
+                plan_native_expression(current_turn, scene=scene, style=style)
+            ),
+        ),
+        (
+            "speech.rhythm",
+            rhythm_instruction(
+                scene=scene,
+                act=act_plan.act,
+                complexity=complexity,
+                style=style,
+            ),
+        ),
     )
-    act_rule = speech_act_instruction(act_plan)
-    turn_rule = turn_taking_instruction(
-        plan_turn_taking(current_turn, scene=scene, context=context)
-    )
-    native_rule = native_expression_instruction(
-        plan_native_expression(current_turn, scene=scene, style=style)
-    )
-    interaction_rule = _interaction_instruction(effective)
-    rhythm_rule = rhythm_instruction(
-        scene=scene,
-        act=act_plan.act,
-        complexity=complexity,
-        style=style,
-    )
-    return (
-        f"发言场景={scene}。{_SCENE_RULES[scene]}{interaction_rule}{act_rule}{turn_rule}"
-        f"{style_rule}{quality_rule}{native_rule}{rhythm_rule}"
+    return [
+        (section_id, apply_section(section_id, text, group_id=group_id))
+        for section_id, text in generated
+    ]
+
+
+def build_speech_instruction(
+    persona: dict[str, Any] | None,
+    current_turn: CurrentTurn | dict[str, Any] | None = None,
+    *,
+    source: str | None = None,
+    context: dict[str, Any] | None = None,
+    group_id: int | None = None,
+) -> str:
+    return "".join(
+        text
+        for _section, text in build_speech_parts(
+            persona, current_turn, source=source, context=context, group_id=group_id
+        )
     )
 
 
 __all__ = [
+    "QUALITY_RULE",
     "RESPONSE_COMPLEXITY_COMPLEX",
     "RESPONSE_COMPLEXITY_NORMAL",
     "RESPONSE_COMPLEXITY_SIMPLE",
+    "SCENE_RULES",
     "build_speech_instruction",
+    "build_speech_parts",
     "classify_response_complexity",
     "resolve_speech_scene",
     "resolve_speech_style",

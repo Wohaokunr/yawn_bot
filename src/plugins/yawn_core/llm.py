@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -459,6 +459,62 @@ async def _completion_slot(timeout: float) -> AsyncIterator[float]:
         _COMPLETION_CONCURRENCY.release()
 
 
+# 请求观察者：每次非流式补全结束后收到“实际发给服务商的请求 + 回复”。
+# Agent 用它把真实完整提示词挂进执行追踪；观察者异常一律吞掉，绝不影响调用。
+RequestObserver = Callable[[dict[str, Any]], None]
+_REQUEST_OBSERVERS: list[RequestObserver] = []
+
+
+def add_request_observer(observer: RequestObserver) -> None:
+    if observer not in _REQUEST_OBSERVERS:
+        _REQUEST_OBSERVERS.append(observer)
+
+
+def remove_request_observer(observer: RequestObserver) -> None:
+    if observer in _REQUEST_OBSERVERS:
+        _REQUEST_OBSERVERS.remove(observer)
+
+
+def _notify_request_observers(record: dict[str, Any]) -> None:
+    for observer in _REQUEST_OBSERVERS:
+        try:
+            observer(record)
+        except Exception:  # noqa: BLE001, PERF203
+            logger.opt(exception=True).debug("LLM 请求观察者异常（已忽略）")
+
+
+def _observe(
+    *,
+    kind: str,
+    task: str,
+    request: "LLMRequestConfig | None",
+    create_kwargs: dict[str, Any] | None,
+    response: object,
+    outcome: str,
+    started: float,
+    timeout: float,
+) -> None:
+    if not _REQUEST_OBSERVERS:
+        return
+    kwargs = dict(create_kwargs or {})
+    _notify_request_observers(
+        {
+            "kind": kind,
+            "task": task,
+            "provider": request.provider if request is not None else None,
+            "profile": request.profile if request is not None else None,
+            "model": request.model if request is not None else None,
+            "messages": kwargs.pop("messages", None),
+            "tools": kwargs.pop("tools", None),
+            "params": kwargs,
+            "timeout": timeout,
+            "response": response,
+            "outcome": outcome,
+            "duration_ms": max(time.perf_counter() - started, 0.0) * 1000,
+        }
+    )
+
+
 # 最近一次 ``complete()`` 的结果分类（success/timeout/empty/not_configured/error）；
 # 按 asyncio 任务隔离，供只拿到 None 的调用方写出可诊断的失败原因。
 _LAST_COMPLETION_OUTCOME: ContextVar[str] = ContextVar(
@@ -472,7 +528,7 @@ def last_completion_outcome() -> str:
     return _LAST_COMPLETION_OUTCOME.get()
 
 
-async def complete(  # noqa: PLR0911
+async def complete(  # noqa: PLR0911, PLR0915
     messages: list[ChatCompletionMessageParam],
     *,
     max_tokens: Optional[int] = None,
@@ -492,6 +548,9 @@ async def complete(  # noqa: PLR0911
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
+    request: LLMRequestConfig | None = None
+    create_kwargs: dict[str, Any] | None = None
+    response: Any = None
     try:
         request = resolve_llm_request(task)
         llm_client = get_client(request.provider)
@@ -501,27 +560,24 @@ async def complete(  # noqa: PLR0911
                 f"LLM 提供商未配置密钥（task={task}, provider={request.provider}）"
             )
             return None
+        create_kwargs = {
+            "model": request.model,
+            "messages": messages,
+            "stream": False,
+            **_max_tokens_kwargs(max_tokens),
+            **request.reasoning_kwargs,
+            **({"response_format": response_format} if response_format else {}),
+            **(
+                {"extra_body": request.extra_body}
+                if request.extra_body is not None
+                else {}
+            ),
+            **extra,
+        }
         try:
             async with _completion_slot(timeout) as remaining:
                 response = await asyncio.wait_for(
-                    llm_client.chat.completions.create(
-                        model=request.model,
-                        messages=messages,
-                        stream=False,
-                        **_max_tokens_kwargs(max_tokens),
-                        **request.reasoning_kwargs,
-                        **(
-                            {"response_format": response_format}
-                            if response_format
-                            else {}
-                        ),
-                        **(
-                            {"extra_body": request.extra_body}
-                            if request.extra_body is not None
-                            else {}
-                        ),
-                        **extra,
-                    ),
+                    llm_client.chat.completions.create(**create_kwargs),
                     timeout=remaining,
                 )
                 _record_ai_usage(task, response)
@@ -574,6 +630,16 @@ async def complete(  # noqa: PLR0911
     finally:
         _record_ai_metric(task, outcome, started)
         _LAST_COMPLETION_OUTCOME.set(outcome)
+        _observe(
+            kind="complete",
+            task=task,
+            request=request,
+            create_kwargs=create_kwargs,
+            response=response,
+            outcome=outcome,
+            started=started,
+            timeout=timeout,
+        )
     return result
 
 
@@ -617,7 +683,7 @@ def _tool_completion_result(
     )
 
 
-async def complete_with_tools_result(  # noqa: C901,PLR0911
+async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0915
     messages: list[ChatCompletionMessageParam],
     tools: list[ChatCompletionToolParam],
     *,
@@ -640,6 +706,9 @@ async def complete_with_tools_result(  # noqa: C901,PLR0911
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
+    request: LLMRequestConfig | None = None
+    create_kwargs: dict[str, Any] | None = None
+    response: Any = None
     try:
         request = resolve_llm_request(task)
         llm_client = get_client(request.provider)
@@ -651,30 +720,27 @@ async def complete_with_tools_result(  # noqa: C901,PLR0911
             return _tool_completion_result(
                 message=None, outcome=outcome, started=started
             )
+        create_kwargs = {
+            "model": request.model,
+            "messages": messages,
+            # OpenAI 官方及多数兼容端点对空 tools 数组直接 400；
+            # 无工具场景（如主动发言）不传该参数。
+            **({"tools": tools} if tools else {}),
+            "stream": False,
+            **_max_tokens_kwargs(max_tokens),
+            **request.reasoning_kwargs,
+            **({"response_format": response_format} if response_format else {}),
+            **(
+                {"extra_body": request.extra_body}
+                if request.extra_body is not None
+                else {}
+            ),
+            **extra,
+        }
         try:
             async with _completion_slot(timeout) as remaining:
                 response = await asyncio.wait_for(
-                    llm_client.chat.completions.create(
-                        model=request.model,
-                        messages=messages,
-                        # OpenAI 官方及多数兼容端点对空 tools 数组直接 400；
-                        # 无工具场景（如主动发言）不传该参数。
-                        **({"tools": tools} if tools else {}),
-                        stream=False,
-                        **_max_tokens_kwargs(max_tokens),
-                        **request.reasoning_kwargs,
-                        **(
-                            {"response_format": response_format}
-                            if response_format
-                            else {}
-                        ),
-                        **(
-                            {"extra_body": request.extra_body}
-                            if request.extra_body is not None
-                            else {}
-                        ),
-                        **extra,
-                    ),
+                    llm_client.chat.completions.create(**create_kwargs),
                     timeout=remaining,
                 )
                 _record_ai_usage(task, response)
@@ -751,6 +817,16 @@ async def complete_with_tools_result(  # noqa: C901,PLR0911
         return _tool_completion_result(message=None, outcome=outcome, started=started)
     finally:
         _record_ai_metric(task, outcome, started)
+        _observe(
+            kind="tools",
+            task=task,
+            request=request,
+            create_kwargs=create_kwargs,
+            response=response,
+            outcome=outcome,
+            started=started,
+            timeout=timeout,
+        )
     return _tool_completion_result(message=None, outcome=outcome, started=started)
 
 

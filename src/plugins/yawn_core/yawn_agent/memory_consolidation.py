@@ -22,6 +22,7 @@ from ..llm import NO_OUTPUT_LIMIT, complete, get_client, resolve_llm_request
 from .log import dbg
 from .memory import _compaction_lock, parse_json_reply
 from .memory_hygiene import sanitize_summary
+from .prompt_sections import section_text
 
 WEEKLY_TTL_DAYS = 120
 # 只合并至少这么旧的日摘要，保证所在自然周已经结束、不会再被增量追加。
@@ -87,6 +88,8 @@ async def _model_weekly_summary(dailies: list[AgentMemory]) -> str | None:
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
+    messages[0]["content"] = section_text("memory.weekly", str(messages[0]["content"]))
+    messages = [item for item in messages if item["content"]]
     try:
         response = await complete(  # pyright: ignore[reportArgumentType]
             messages,  # pyright: ignore[reportArgumentType]

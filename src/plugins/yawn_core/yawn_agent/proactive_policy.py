@@ -32,6 +32,7 @@ from .persona import (
     persona_behavior,
     persona_behavior_instruction,
 )
+from .prompt_sections import apply_section
 
 _ACTIVE_MIN_GAP_SECONDS = 30.0
 _ACTIVE_MIN_MEMBER_MESSAGES = 2
@@ -346,6 +347,63 @@ def recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
     return [line for line in lines if line][-4:]
 
 
+def build_user_prompt_parts(
+    scene: str,
+    config: GroupAgentConfig,
+    *,
+    turn: int | None = None,
+    behavior: PersonaBehavior | None = None,
+    warmup_state: WarmupState | None = None,
+    now: datetime | None = None,
+) -> list[tuple[str | None, str]]:
+    """按提示词分段返回主动/续聊 user 提示；每段都可在 WebUI 改写或删除。"""
+
+    gid = int(config.group_id) if getattr(config, "group_id", None) else None
+    if scene == "active":
+        base = ("proactive.active", _ACTIVE_INTERJECT_PROMPT)
+    elif scene == "followup":
+        base = ("proactive.followup", _FOLLOWUP_PROMPT)
+    else:
+        base = ("proactive.warmup", _WARMUP_PROMPT)
+    resolved_behavior = behavior or persona_behavior(config)
+    parts: list[tuple[str, str]] = [
+        base,
+        ("proactive.behavior", persona_behavior_instruction(resolved_behavior, scene=scene)),
+        ("proactive.memory_use", _MEMORY_USE_PROMPT),
+    ]
+    if scene == "warmup" and warmup_state is not None and now is not None:
+        silence = warmup_prompt_context(warmup_state, now)
+        if silence:
+            parts.append(("proactive.silence", silence))
+    if turn is not None:
+        max_turns = min(
+            CONVERSATION_MAX_BOT_TURNS, resolved_behavior.max_followup_bot_turns
+        )
+        parts.append(
+            (
+                "proactive.turn_count",
+                f"这是本话题中 Bot 的第 {turn} 条候选发言，当前 Persona 最多 "
+                f"{max_turns} 条。",
+            )
+        )
+    parts.append(("proactive.json_protocol", _JSON_PROTOCOL))
+    recent = recent_proactive_lines(config)
+    if recent:
+        parts.append(
+            (
+                "proactive.recent_lines",
+                "你最近主动发言过：\n"
+                + "\n".join(f"- {line}" for line in recent)
+                + "\n不要重复相近的说法或同一话题的同类反应。",
+            )
+        )
+    applied = [
+        (section_id, apply_section(section_id, text, group_id=gid))
+        for section_id, text in parts
+    ]
+    return [(section_id, text) for section_id, text in applied if text]
+
+
 def build_user_prompt(
     scene: str,
     config: GroupAgentConfig,
@@ -356,39 +414,17 @@ def build_user_prompt(
     now: datetime | None = None,
 ) -> str:
     """Build a prompt for an internally selected participation scene."""
-    if scene == "active":
-        base = _ACTIVE_INTERJECT_PROMPT
-    elif scene == "followup":
-        base = _FOLLOWUP_PROMPT
-    else:
-        base = _WARMUP_PROMPT
-    resolved_behavior = behavior or persona_behavior(config)
-    parts = [
-        base,
-        persona_behavior_instruction(resolved_behavior, scene=scene),
-        _MEMORY_USE_PROMPT,
-    ]
-    if scene == "warmup" and warmup_state is not None and now is not None:
-        silence = warmup_prompt_context(warmup_state, now)
-        if silence:
-            parts.append(silence)
-    if turn is not None:
-        max_turns = min(
-            CONVERSATION_MAX_BOT_TURNS, resolved_behavior.max_followup_bot_turns
+    return "\n".join(
+        text
+        for _section, text in build_user_prompt_parts(
+            scene,
+            config,
+            turn=turn,
+            behavior=behavior,
+            warmup_state=warmup_state,
+            now=now,
         )
-        parts.append(
-            f"这是本话题中 Bot 的第 {turn} 条候选发言，当前 Persona 最多 "
-            f"{max_turns} 条。"
-        )
-    parts.append(_JSON_PROTOCOL)
-    recent = recent_proactive_lines(config)
-    if recent:
-        parts.append(
-            "你最近主动发言过：\n"
-            + "\n".join(f"- {line}" for line in recent)
-            + "\n不要重复相近的说法或同一话题的同类反应。"
-        )
-    return "\n".join(parts)
+    )
 
 
 def _warmup_scene(

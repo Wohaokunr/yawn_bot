@@ -32,6 +32,7 @@ from typing import Any
 
 from ..llm import NO_OUTPUT_LIMIT, ai_config, complete
 from .log import dbg
+from .prompt_sections import system_messages
 
 ROUTER_TASK = "agent_router"
 ROUTER_TIMEOUT_SECONDS = 12.0
@@ -125,7 +126,7 @@ def build_router_messages(
         "toolpacks": catalog,
     }
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        *system_messages("router.system", _SYSTEM_PROMPT),
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
 
