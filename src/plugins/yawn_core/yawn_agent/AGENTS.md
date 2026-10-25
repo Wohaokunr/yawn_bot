@@ -49,6 +49,17 @@
 - WebUI 管理员编辑 auto/agent 记忆的内容后，该行转为 `manual`；像指令的记忆内容一律拒绝（应写进人设）。
 - 话题记忆注入必须满足最低相关性（`TOPIC_MEMORY_MIN_RELEVANCE`），并用 MMR 去冗余；不要把与当前对话无关的高显著旧记忆塞进 Prompt。
 
+## Bot 与成员的关系（bot_bond）
+
+- Bot 视角的关系只存在 `AgentBotBond`（群 + Bot + 成员唯一）和 `AgentMemory(type="bond")`（共同经历），**不得**写进成员关系图 `AgentRelation`；整理时模型给出的含 Bot 的 relations 一律剔除，`@Bot` 也不记 mentions 边。
+- 互动统计只看结构：消息段 `at`、`reply_chain[0].user_id`、Bot 说话后 3 分钟内的接话、5 分钟一呼一应。不要按正文关键词判断"在找 Bot"或"关系变好"，情绪判断交给记忆模型。
+- 熟悉度由计数确定性推导（消息量开平方 + 活跃天数），模型只能有界地调好感/信任（每批 ±0.12 / ±0.08，单证据减半），不能直接给熟悉度或阶段。
+- 模型观察必须同时有该成员本人的证据和本批真实来往；已有文本字段只接受置信 ≥0.6 的新观察；被锁定的字段（`locked_fields`）任何自动路径都不改。
+- 关系文本全部走 `bot_bond.clean_bond_text`（memory_hygiene + 人设覆盖检查，打码即整条丢弃）；不要在别处另写校验。
+- 注入只放在发言人层（`_SPEAKER_CONTEXT_KEYS` 的 `bot_bonds`），只给词语不给数值，900 字符硬预算；关系使用规则 `_BOT_BOND_GUIDANCE` 只在有关系时追加，静态前缀不变。
+- `note_our_bond` 只写调用者本人并锁字段；`forget_about_me` 删关系时保留管理员手工内容并如实告知。隐私退出成员读写都拒绝、WebUI 不展示。
+- 表未迁移时 `prefetch_bonds` 返回 None，整理、上下文、工具全部降级跳过，不能让原有记忆整理失败。
+
 ## 消息发送与 OneBot
 
 - 普通文本、引用、@、face、reaction、图片、语音、视频等复合消息统一通过 `outbound.py`；不要在业务路径重新直接拼 CQ 码或各自实现发送器。

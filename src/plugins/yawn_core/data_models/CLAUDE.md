@@ -21,11 +21,11 @@ yawn_core 与群聊 Agent 共用的 SQLAlchemy 2.0 模型（`nonebot_plugin_orm.
 | 好友申请 | `friend_request.py` | `friend_approve.py` |
 | 定时提醒 | `scheduled_reminder.py` | `reminder.py` |
 | 私聊 AI 对话 | `chat_session.py`、`chat_message.py`（`is_deleted` 软删除） | `ai_chat.py`、`chat_state.py` |
-| 群聊 Agent | `group_agent_config.py`、`group_agent_message.py`、`agent_memory.py`、`agent_audit.py`、`agent_media_asset.py`、`agent_media_cache.py`、`agent_persona_template.py`（人设库） | [yawn_agent/](../yawn_agent/CLAUDE.md)、WebUI `agent*_routes.py` |
+| 群聊 Agent | `group_agent_config.py`、`group_agent_message.py`、`agent_memory.py`、`agent_audit.py`、`agent_media_asset.py`、`agent_media_cache.py`、`agent_persona_template.py`（人设库）、`agent_bot_bond.py`（Bot 与成员的关系） | [yawn_agent/](../yawn_agent/CLAUDE.md)、WebUI `agent*_routes.py` |
 | WebUI | `web_admin_audit.py`、`guest_access.py` | [webui/](../webui/CLAUDE.md) |
 | 工具 | `timeutil.py` | 所有模型的时间默认值 |
 
 ## 关联位置
 
 - WebUI 读写这些表主要经 [webui/service.py](../webui/CLAUDE.md)。
-- 迁移测试：`tests/test_agent_persona_migration.py`、`tests/test_agent_persona_cleanup_migration.py`、`tests/test_agent_persona_library.py`（人设库表）。
+- 迁移测试：`tests/test_agent_persona_migration.py`、`tests/test_agent_persona_cleanup_migration.py`、`tests/test_agent_persona_library.py`（人设库表）、`tests/test_agent_bot_bond.py`（Bot 关系表）。
