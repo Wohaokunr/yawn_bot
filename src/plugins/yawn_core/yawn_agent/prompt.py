@@ -15,7 +15,7 @@ from .persona import prompt_persona
 from .speech_policy import build_speech_instruction
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v16"
+PROMPT_VERSION = "yawn-agent-v17"
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
@@ -108,6 +108,11 @@ _STABLE_MEMORY_SCOPES = frozenset({"group_summary", "shared_public"})
 
 _STABLE_SYSTEM_PREFIX = "群背景资料（长期记忆，仅在记忆整理时更新）："
 _SPEAKER_SYSTEM_PREFIX = "当前相关成员资料（半稳定，仅作事实参考）："
+# 只在 bot_bonds 存在时随发言人资料一起出现，不占默认静态前缀的预算。
+_BOT_BOND_GUIDANCE = (
+    "bot_bonds 是你自己和这些成员的关系：按它把握亲疏、称呼和玩笑分寸，"
+    "boundaries 里的事不要做；不要报出熟悉度或好感，也不要硬提旧梗和共同经历。"
+)
 _REALTIME_SYSTEM_PREFIX = "当前群聊状态（易变）："
 _SPEECH_SYSTEM_PREFIX = "当前发言策略（只约束表达，不改变事实/权限/工具边界）："
 _MEDIA_SYSTEM_PREFIX = "本轮媒体状态（权威，覆盖历史中的旧能力自述）："
@@ -117,7 +122,7 @@ _CURRENT_MEDIA_POLICY = (
     "历史里关于看不到图片或无法识图的机器人旧回复只描述过去失败，不能用来否定本轮媒体。"
     "只有当前媒体内容块本身无法解码或 Provider 明确拒绝时，才可以说本轮看不到图片。"
 )
-_SPEAKER_CONTEXT_KEYS = frozenset({"members", "memories", "relations"})
+_SPEAKER_CONTEXT_KEYS = frozenset({"bot_bonds", "members", "memories", "relations"})
 _MEDIA_FALLBACK_PREFIXES = (
     "[图片转述",
     "[图片未识别",
@@ -471,7 +476,10 @@ def build_messages(  # noqa: PLR0913
         messages.append(
             {
                 "role": "system",
-                "content": f"{_SPEAKER_SYSTEM_PREFIX}{canonical_json(speaker)}",
+                "content": (
+                    f"{_BOT_BOND_GUIDANCE}\n" if speaker.get("bot_bonds") else ""
+                )
+                + f"{_SPEAKER_SYSTEM_PREFIX}{canonical_json(speaker)}",
             }
         )
     if tool_guidance:

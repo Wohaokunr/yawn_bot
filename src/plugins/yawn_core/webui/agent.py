@@ -68,6 +68,9 @@ from ..yawn_agent.tools import (
     tool_permission_snapshot,
 )
 from . import (
+    agent_bond_routes as _agent_bond_routes,
+)
+from . import (
     agent_config_routes as _agent_config_routes,
 )
 from . import (
@@ -1088,6 +1091,7 @@ for _route_group in (
     _agent_persona_routes.router.routes,
     _agent_memory_routes.router.routes,
     _agent_relation_routes.router.routes,
+    _agent_bond_routes.router.routes,
     _agent_message_routes.router.routes,
     _agent_privacy_routes.router.routes,
     _debug_router.routes,

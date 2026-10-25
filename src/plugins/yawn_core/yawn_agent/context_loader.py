@@ -18,6 +18,7 @@ from ..data_models.agent_memory import AgentMemory, AgentPrivacy
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..metrics import record_agent_context_db_queries
+from .bot_bond import BOND_MEMORY_TYPE, load_context_bonds
 from .context import ActivitySnapshot, build_context, now_beijing, trim_context_messages
 from .context_budget import pack_context
 from .context_history import history_message_payload as _history_message_payload
@@ -327,6 +328,8 @@ async def load_context(
         seen_local_ids.add(row_id)
         if (
             str(row.memory_key).startswith("public_daily:")
+            # 共同经历只在 bot_bonds 里按发言人注入，不和话题记忆抢名额。
+            or row.memory_type == BOND_MEMORY_TYPE
             or int(row.subject_user_id or 0) in opted_out
             or opted_out.intersection(set(row.related_user_ids or []))
         ):
@@ -512,6 +515,24 @@ async def load_context(
         )
         note = str(row.note or "").strip()
         relations.append(f"{line}：{note}" if note else line)
+    context_bonds = await load_context_bonds(
+        repo.session,
+        group_id,
+        bot_id=bot_id,
+        speaker_id=speaker_id if speaker_id not in opted_out else None,
+        participant_ids=[*focus_ids, *recent_member_ids],
+        opted_out=opted_out,
+        name_by_id=name_by_id,
+        recent_texts=recent_texts,
+        now=context_now,
+    )
+    repo.query_count += context_bonds.queries
+    record_access(context_bonds.memory_ids, now=now)
+    bot_bonds = context_bonds.views
+    dbg(
+        f"群 {group_id} 加载上下文: Bot 关系 {len(bot_bonds)} 条"
+        f"(发言人={speaker_id})"
+    )
     context_pack = pack_context(
         messages=messages,
         members=members,
@@ -577,6 +598,7 @@ async def load_context(
         members=members,
         memories=memories,
         relations=relations,
+        bot_bonds=bot_bonds,
         activity=activity,
         active_topic=config.active_topic,
         emotion_state=emotion_context_state(

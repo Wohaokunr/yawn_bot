@@ -252,6 +252,7 @@ def build_context(
     memories: list[dict[str, Any]],
     relations: list[str],
     activity: ActivitySnapshot,
+    bot_bonds: list[dict[str, Any]] | None = None,
     persona: dict[str, Any] | str | None = None,
     active_topic: str | None = None,
     emotion_state: dict[str, Any] | None = None,
@@ -338,6 +339,9 @@ def build_context(
         "messages": trimmed_messages,
         "memories": prompt_memories,
         "relations": relation_lines,
+        # Bot 自己与当前发言人/相关成员的关系（见 bot_bond.py）；空时不写，
+        # 保持旧上下文形状与 token 不变。
+        **({"bot_bonds": list(bot_bonds[:6])} if bot_bonds else {}),
     }
 
 

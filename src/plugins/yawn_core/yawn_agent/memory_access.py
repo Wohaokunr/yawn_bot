@@ -29,8 +29,9 @@ MAX_PENDING_IDS = 5_000
 FLUSH_BATCH = 500
 # 召回续期：自动记忆被用到时，过期时间至少顺延到 now + 该天数，
 # 但不超过类型保留期的两倍，避免"热门"记忆永不过期。
-ACCESS_RENEW_DAYS: dict[str, int] = {"summary": 14, "profile": 30}
-ACCESS_RENEW_CAP_DAYS: dict[str, int] = {"summary": 60, "profile": 180}
+# 共同经历（bond）被想起来一次就多留两个月，最多留一年。
+ACCESS_RENEW_DAYS: dict[str, int] = {"summary": 14, "profile": 30, "bond": 60}
+ACCESS_RENEW_CAP_DAYS: dict[str, int] = {"summary": 60, "profile": 180, "bond": 365}
 
 _lock = threading.Lock()
 _pending: dict[int, int] = {}

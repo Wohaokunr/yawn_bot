@@ -1,7 +1,7 @@
 import type { AgentRelationItem } from "../types";
 import type { RelationGraphState } from "./use-relation-graph";
 
-export type RelationsView = "table" | "graph" | "members" | "matrix" | "insights";
+export type RelationsView = "table" | "graph" | "members" | "matrix" | "insights" | "bot";
 
 export const RELATION_VIEWS: Array<{ key: RelationsView; label: string; hint: string }> = [
   { key: "table", label: "列表", hint: "分页表格，支持排序、筛选与批量操作" },
@@ -9,6 +9,7 @@ export const RELATION_VIEWS: Array<{ key: RelationsView; label: string; hint: st
   { key: "members", label: "成员", hint: "以人为中心的关系卡片" },
   { key: "matrix", label: "矩阵", hint: "核心成员两两关系热力图" },
   { key: "insights", label: "洞察", hint: "健康分、社群、关键人物与待复核队列" },
+  { key: "bot", label: "Bot", hint: "Bot 自己和每位成员的关系：熟悉度、称呼、梗与边界" },
 ];
 
 export interface RelationFilters {

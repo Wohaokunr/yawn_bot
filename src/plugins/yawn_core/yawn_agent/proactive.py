@@ -56,6 +56,7 @@ from .execution_trace import (
     reset_execution_trace,
     trace_event,
 )
+from .bot_bond import decay_stale_bonds
 from .log import dbg, dbg_exc
 from .memory import (
     compact_group_memory_backlog,
@@ -1271,6 +1272,10 @@ async def _compact_tick(*, force: bool = False, cleanup: bool = False) -> None:
                 decayed = await decay_stale_relations(session, now_beijing())
                 if decayed:
                     dbg(f"每日关系衰减: 更新 {decayed} 条陈旧 auto 边")
+                # Bot 与成员的关系同步做一次：久未互动的好感回落、阶段重算。
+                bonds_touched = await decay_stale_bonds(session, now_beijing())
+                if bonds_touched:
+                    dbg(f"每日 Bot 关系衰减: 更新/删除 {bonds_touched} 条")
                 await session.commit()
             # 媒体清理单独使用事务：cleanup_media_cache 只有在 DB 删除提交
             # 成功后才删磁盘文件，不能和关系衰减共享一个未提交事务。

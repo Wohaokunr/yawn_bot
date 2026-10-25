@@ -24,6 +24,7 @@ _GROUP_SCOPED_RESOURCES = frozenset(
         "agent_member_data",
         "agent_privacy",
         "agent_relation",
+        "agent_bond",
         "group_feature",
         "user_feature",
     }

@@ -7,6 +7,13 @@ from sqlalchemy import or_, select
 
 from ...data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ...data_models.user_group import UserGroup
+from ..bot_bond import (
+    BOND_MEMORY_TYPE,
+    bond_summary,
+    forget_member_bond,
+    note_member_bond,
+    prefetch_bonds,
+)
 from ..context import now_beijing
 from ..log import dbg
 from ..memory import (
@@ -43,11 +50,15 @@ NAMES = frozenset(
         "record_user_relation",
         "remember_about_me",
         "forget_about_me",
+        "get_my_relationship",
+        "note_our_bond",
     ]
 )
 _WRITE_TOOLS = frozenset(
-    {"record_user_relation", "remember_about_me", "forget_about_me"}
+    {"record_user_relation", "remember_about_me", "forget_about_me", "note_our_bond"}
 )
+# 关系查询工具一次返回的共同经历条数。
+_BOND_TOOL_MOMENTS = 5
 # 有效置信度低于该值的关系边（沉寂已久的弱观察）不再返回给模型。
 _MIN_RELATION_EFFECTIVE_CONFIDENCE = 0.2
 # Agent 重复观察同一关系时的置信度增量与上限；未经管理员确认不超过 0.9。
@@ -363,6 +374,109 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             f"群 {group_id} remember_about_me: 成员 {context.actor_user_id} "
             f"key={result['key']} created={result['created']}"
         )
+    elif name == "get_my_relationship":
+        if session is None:
+            raise PermissionError("关系查询需要数据库会话")
+        raw_target = args.get("user_id")
+        subject_id = (
+            int(raw_target)
+            if raw_target is not None
+            else int(context.actor_user_id or 0)
+        )
+        if subject_id <= 0:
+            raise ValueError("需要 user_id 或明确的调用者")
+        bot_id = int(getattr(context.bot, "self_id", 0) or 0)
+        opted_out = await opted_out_user_ids(session, group_id)
+        bonds = (
+            None
+            if subject_id in opted_out
+            else await prefetch_bonds(session, group_id, user_ids={subject_id})
+        )
+        bond = (bonds or {}).get((bot_id, subject_id))
+        if bond is None:
+            result = {"user_id": subject_id, "known": False}
+        else:
+            summary = bond_summary(bond, now)
+            moment_rows = list(
+                (
+                    await session.execute(
+                        select(AgentMemory)
+                        .where(
+                            AgentMemory.group_id == group_id,
+                            AgentMemory.subject_user_id == subject_id,
+                            AgentMemory.memory_type == BOND_MEMORY_TYPE,
+                            (
+                                AgentMemory.expires_at.is_(None)
+                                | (AgentMemory.expires_at >= now)
+                            ),
+                        )
+                        .order_by(AgentMemory.updated_at.desc())
+                        .limit(_BOND_TOOL_MOMENTS)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            record_access((int(row.id or 0) for row in moment_rows), now=now)
+            result = {
+                "known": True,
+                **{
+                    key: value
+                    for key, value in summary.items()
+                    if key != "bot_id" and value not in ("", [], None)
+                },
+                "shared_moments": [
+                    {
+                        "content": str(row.content or ""),
+                        "date": (row.updated_at or now).date().isoformat(),
+                    }
+                    for row in moment_rows
+                ],
+            }
+        dbg(
+            f"群 {group_id} get_my_relationship: 成员 {subject_id} "
+            f"known={result.get('known')}"
+        )
+    elif name == "note_our_bond":
+        if session is None:
+            raise PermissionError("关系写入需要数据库会话")
+        if context.actor_user_id is None:
+            raise PermissionError("关系写入需要明确的调用者")
+        actor_id = int(context.actor_user_id)
+        if actor_id in await opted_out_user_ids(session, group_id):
+            raise PermissionError("该成员已退出 Agent 记忆，不能写入")
+        result = await note_member_bond(
+            session,
+            group_id=group_id,
+            bot_id=int(getattr(context.bot, "self_id", 0) or 0),
+            user_id=actor_id,
+            kind=str(args.get("kind") or ""),
+            content=str(args.get("content") or ""),
+            now=now,
+        )
+        dbg(
+            f"群 {group_id} note_our_bond: 成员 {actor_id} kind={result['kind']} "
+            f"created={result['created']}"
+        )
+    elif name == "forget_about_me" and str(args.get("key") or "") == "bot_bond":
+        if session is None:
+            raise PermissionError("记忆删除需要数据库会话")
+        if context.actor_user_id is None:
+            raise PermissionError("记忆删除需要明确的调用者")
+        forgotten = await forget_member_bond(
+            session, group_id=group_id, user_id=int(context.actor_user_id)
+        )
+        result = {
+            "removed": (
+                ["bot_bond"] if forgotten["removed"] or forgotten["moments"] else []
+            ),
+            "trimmed": [],
+            **({"protected": ["bot_bond"]} if forgotten["protected"] else {}),
+        }
+        dbg(
+            f"群 {group_id} forget_about_me(bot_bond): 成员 {context.actor_user_id} "
+            f"结果 {forgotten}"
+        )
     elif name == "forget_about_me":
         if session is None:
             raise PermissionError("记忆删除需要数据库会话")
@@ -375,6 +489,13 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             raw_key=str(args.get("key") or "") or None,
             keyword=str(args.get("keyword") or "") or None,
         )
+        if not args.get("key") and not args.get("keyword"):
+            # “把我忘掉”不带范围时，连同他和 Bot 之间的关系一起忘掉。
+            forgotten = await forget_member_bond(
+                session, group_id=group_id, user_id=int(context.actor_user_id)
+            )
+            if forgotten["removed"] or forgotten["moments"]:
+                result["removed"] = [*result["removed"], "bot_bond"]
         dbg(
             f"群 {group_id} forget_about_me: 成员 {context.actor_user_id} "
             f"removed={result['removed']} trimmed={result['trimmed']}"

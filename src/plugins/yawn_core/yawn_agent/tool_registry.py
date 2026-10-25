@@ -273,6 +273,37 @@ TOOL_DEFINITIONS = (
         keywords=("记录关系", "记住关系", "我们是", "是我朋友", "是我对象", "是我同事", "是我同学", "是我搭子", "是我死党", "是我伴侣"),
     ),
     ToolDefinition(
+        "get_my_relationship",
+        "查看你（Bot）和某位成员之间的关系：熟悉程度、他怎么叫你、你们的梗、他的边界和共同经历；不传 user_id 时查当前发言人",
+        {
+            "user_id": {"type": "integer"},
+        },
+        family="profile",
+        keywords=("我们熟吗", "你认识我吗", "你记得我吗", "我们的关系", "你和他熟吗", "我们之间"),
+    ),
+    ToolDefinition(
+        "note_our_bond",
+        "按调用者本人的明确要求，记住他和你（Bot）之间的一件事：他怎么称呼你、希望你怎么称呼他、你们的梗、他不希望你做的事、一段共同经历（只能写调用者自己与你的关系）",
+        {
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "member_calls_bot",
+                    "bot_calls_member",
+                    "inside_joke",
+                    "boundary",
+                    "moment",
+                ],
+                "description": "member_calls_bot他对你的称呼/bot_calls_member他希望你怎么叫他/inside_joke你们的梗/boundary他不希望你做的事/moment值得记住的共同经历",
+            },
+            "content": {"type": "string", "minLength": 1, "maxLength": 100},
+        },
+        required=("kind", "content"),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="memory",
+        keywords=("记住我们", "我们的梗", "以后叫你", "以后你叫我", "别再叫我", "别对我"),
+    ),
+    ToolDefinition(
         "remember_about_me",
         "按调用者本人的明确要求记住关于他自己的一条事实（只能写调用者自己的资料）；敏感信息和联系方式会被拒绝",
         {
@@ -311,7 +342,9 @@ TOOL_DEFINITIONS = (
                     "skill",
                     "recurring_topic",
                     "current_status",
+                    "bot_bond",
                 ],
+                "description": "bot_bond 表示忘掉他和你（Bot）之间的关系与共同经历",
             },
             "keyword": {"type": "string", "minLength": 1, "maxLength": 40},
         },

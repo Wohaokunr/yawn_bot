@@ -1,7 +1,7 @@
-// 人物关系面板外壳：指标条 + 工具栏（视图/搜索/筛选/导出/新增）+ 五个视图 + 共享抽屉。
+// 人物关系面板外壳：指标条 + 工具栏（视图/搜索/筛选/导出/新增）+ 六个视图（含 Bot 视角） + 共享抽屉。
 // 视图与筛选写进 URL（relations.*），刷新或分享链接能回到同一现场；写操作统一在这里完成后刷新各数据源。
 import {
-  AppstoreOutlined, BulbOutlined, CloseOutlined, DeploymentUnitOutlined, DownloadOutlined, FilterOutlined,
+  AppstoreOutlined, BulbOutlined, RobotOutlined, CloseOutlined, DeploymentUnitOutlined, DownloadOutlined, FilterOutlined,
   PlusOutlined, ReloadOutlined, TeamOutlined, UnorderedListOutlined,
 } from "@ant-design/icons";
 import {
@@ -35,6 +35,7 @@ const LazyRelationGraphView = lazy(() =>
 const LazyMembersView = lazy(() => import("../relations/RelationMembersView").then((mod) => ({ default: mod.RelationMembersView })));
 const LazyMatrixView = lazy(() => import("../relations/RelationMatrixView").then((mod) => ({ default: mod.RelationMatrixView })));
 const LazyInsightsView = lazy(() => import("../relations/RelationInsightsView").then((mod) => ({ default: mod.RelationInsightsView })));
+const LazyBondView = lazy(() => import("../relations/RelationBondView").then((mod) => ({ default: mod.RelationBondView })));
 
 const VIEW_ICONS: Record<RelationsView, React.ReactNode> = {
   table: <UnorderedListOutlined />,
@@ -42,6 +43,7 @@ const VIEW_ICONS: Record<RelationsView, React.ReactNode> = {
   members: <TeamOutlined />,
   matrix: <AppstoreOutlined />,
   insights: <BulbOutlined />,
+  bot: <RobotOutlined />,
 };
 const VIEW_KEYS = new Set(RELATION_VIEWS.map((view) => view.key));
 
@@ -140,7 +142,7 @@ export function RelationsPanel({
     return () => window.clearTimeout(timer);
   }, [searchDraft, filters.search, patchFilters]);
 
-  const graphNeeded = view !== "table" || memberId !== null;
+  const graphNeeded = (view !== "table" && view !== "bot") || memberId !== null;
   const graph = useRelationGraph(groupId, graphNeeded);
 
   const listQuery = useApiQuery({
@@ -309,7 +311,7 @@ export function RelationsPanel({
     }
   };
 
-  // 面板快捷键：/ 聚焦搜索，N 新增，1–5 切视图；只在面板可见且未在输入时生效。
+  // 面板快捷键：/ 聚焦搜索，N 新增，1–6 切视图；只在面板可见且未在输入时生效。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return;
@@ -321,7 +323,7 @@ export function RelationsPanel({
       } else if ((event.key === "n" || event.key === "N") && !readOnly) {
         event.preventDefault();
         openCreate();
-      } else if (/^[1-5]$/.test(event.key)) {
+      } else if (/^[1-6]$/.test(event.key)) {
         const target = RELATION_VIEWS[Number(event.key) - 1];
         if (target) setView(target.key);
       }
@@ -381,6 +383,8 @@ export function RelationsPanel({
         return renderGraphBody(() => graph.data && <LazyMatrixView ctx={ctx} graph={graph.data} />);
       case "insights":
         return renderGraphBody(() => graph.data && <LazyInsightsView ctx={ctx} graph={graph.data} />);
+      case "bot":
+        return <Suspense fallback={<div className="rg-loading-wrap"><Spin /></div>}><LazyBondView ctx={ctx} /></Suspense>;
       default:
         return (
           <RelationTableView
@@ -499,7 +503,7 @@ export function RelationsPanel({
             </Popover>
             <span className="rel-grow" />
             <Text type="secondary" className="rel-small rel-kbd-hint">
-              <kbd>/</kbd> 搜索{readOnly ? "" : <> · <kbd>N</kbd> 新增</>} · <kbd>1</kbd>–<kbd>5</kbd> 切视图
+              <kbd>/</kbd> 搜索{readOnly ? "" : <> · <kbd>N</kbd> 新增</>} · <kbd>1</kbd>–<kbd>6</kbd> 切视图
             </Text>
           </div>
         </div>
