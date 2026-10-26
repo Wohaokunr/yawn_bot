@@ -17,6 +17,7 @@ import "./agent-prompts/prompts.css";
 import "./relations/relations.css";
 import "./environment.css";
 import "./sandbox/sandbox.css";
+import "./schedules/schedules.css";
 import "./theme-anime.css";
 
 installGlassGlow();

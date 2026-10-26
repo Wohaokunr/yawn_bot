@@ -205,6 +205,7 @@ export const TRACE_TRIGGER_SOURCE_LABELS: Record<string, string> = {
   proactive_interject: "主动参与 · 加入话题",
   proactive_participation: "主动参与",
   conversation_followup: "自然续聊",
+  scheduled_task: "定时任务唤醒",
 };
 
 export function triggerSourceLabel(value: unknown): string {

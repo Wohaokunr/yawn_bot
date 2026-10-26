@@ -34,6 +34,7 @@ from .memory import (
 from .memory_access import record_access
 from .memory_hygiene import contains_pii, looks_like_instruction
 from .persona import effective_persona_card
+from .schedule_wake import current_wake
 
 _MEMORY_CONTEXT_CHAR_BUDGET = 6_000
 _MEMORY_CONTEXT_LIMIT = 24
@@ -591,7 +592,7 @@ async def load_context(
     )
     (_record_db_queries or record_agent_context_db_queries)(repo.query_count)
     dbg(f"群 {group_id} 上下文组装完成: 群名={group.group_name if group else None!r}")
-    return build_context(
+    context = build_context(
         group_id=group_id,
         group_name=group.group_name if group else None,
         messages=messages,
@@ -609,6 +610,11 @@ async def load_context(
         ),
         reference_at=context_now,
     )
+    wake = current_wake()
+    if wake is not None and wake.group_id == group_id:
+        # 定时任务到点：任务事实放进实时状态层（易变），不进稳定前缀。
+        context["scheduled_wake"] = wake.prompt_payload()
+    return context
 
 
 __all__ = ["activity_window_counts", "load_context"]

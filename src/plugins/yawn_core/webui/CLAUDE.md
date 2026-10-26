@@ -30,6 +30,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `environment_schema.py` | 纯函数：从目录默认值/说明推断类型、范围（如“1-168”“最大 120”）、格式（秒/字节/列表），写入校验与 Token 强度提示；前端 `environment-fields.ts` 镜像同一套规则 |
 | `environment_catalog.dotenv` | 「环境配置」页的完整配置项目录（**不是** `.env.example`） |
 | `guest_access.py` / `guest_access_routes.py` | 持久化访客访问策略 |
+| `schedules.py` | 「定时任务」管理页：状态/任务列表与详情/手动新建（以某位群成员名义，不受数量上限）/编辑（`revision` 乐观锁，409）/暂停恢复取消/立即执行（后台）/批量/规则预览/运行记录/策略，全部仅管理员；表未迁移时只读接口返回 `ready:false`，写接口 503 |
 | `sandbox.py` | 「代码沙箱」管理页：状态/统计/运行历史/工作区文件/控制台/策略，全部仅管理员；runner 离线时只读接口降级为 200 + `online:false`，写接口 503；文件下载强制 `nosniff` + CSP sandbox，HTML/SVG 强制附件 |
 
 ## 关联位置（跨目录）
@@ -42,6 +43,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `fanqie.py` | [yawn_fanqie/](../yawn_fanqie/CLAUDE.md) | `fanqie.tsx` |
 | `environment*.py`、`environment_catalog.dotenv` | 各插件 `config.py`；文档 [docs/configuration/](../../../../docs/configuration/README.md) | `environment.tsx`、`environment-config.ts` |
 | `sandbox.py` | `yawn_agent/sandbox_client.py`、`sandbox_policy.py`；runner 在仓库根 `sandbox/` | `sandbox/` |
+| `schedules.py` | `yawn_agent/schedule_store.py`、`schedule_policy.py`、`schedule_runner.py`、`schedule_spec.py` | `schedules/` |
 | `groups.py`、`users.py`、`guest_access*` | `../permission.py`、核心 data_models | `group-workspace.tsx`、`access-pages.tsx`、`guest-*.tsx` |
 
 - 新增插件 `Config` 字段时，要登记进 `environment_catalog.dotenv`，`tests/test_webui_environment.py` 会检查。
