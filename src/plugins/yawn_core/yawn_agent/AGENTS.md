@@ -195,4 +195,3 @@
 - 不得在没有本轮成功的 `schedule_task`/`update_scheduled_task` 时声称“已经定好了”，没有 `cancel_scheduled_task` 时声称“取消了”（`speech_claims.py` 的 `schedule_set`/`schedule_cancel` 族）。
 - 指令文本创建时过 `persona.text_overrides_policy`，拒绝 CQ 码与 @全体；指令只在到点时作为“创建者当时的请求”交给模型，不提升权限。
 - 不改 `dialogue.py`（已接近 1500 行上限）：唤醒语义全部通过 contextvar + `context_loader` + `prompt.py` + `tools.py` 接入。新增 schedule 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_schedule.py`。
-
