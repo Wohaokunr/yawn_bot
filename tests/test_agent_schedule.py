@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001,ANN002,ANN003,ARG001,ARG005,DTZ001,E501,PLR0913,PLR2004,TRY003,RUF001,SLF001
+# ruff: noqa: ANN001,ANN002,ANN003,ARG001,DTZ001,DTZ007,E501,PLR0913,PLR2004,RUF001
 """Agent 定时任务：时间规则、落库与限额、调度决策、唤醒执行、工具权限与提示词。"""
 
 from __future__ import annotations
@@ -713,7 +713,7 @@ def test_migration_matches_model_on_agent_branch() -> None:
     migration = importlib.import_module("data.nonebot_plugin_orm.migrations.yawn_core.d7f9b1c3e5a7_agent_scheduled_tasks")
     assert migration.down_revision == "c4e6a8b0d2f3"
     source = Path(migration.__file__).read_text(encoding="utf-8")
-    for column in task_models.AgentScheduledTask.__table__.columns.keys():
+    for column in task_models.AgentScheduledTask.__table__.columns.keys():  # noqa: SIM118
         assert f'"{column}"' in source, column
     for index in task_models.AgentScheduledTask.__table__.indexes:
         assert index.name in source, index.name
@@ -759,7 +759,7 @@ async def test_wake_turn_runs_through_real_dialogue_pipeline(monkeypatch: pytest
             segment_types=tuple(item["type"] for item in prepared.segment_records),
         )
 
-    monkeypatch.setattr(dialogue, "get_session", lambda: maker())
+    monkeypatch.setattr(dialogue, "get_session", maker)
     monkeypatch.setattr(dialogue, "complete_with_tools_result", fake_complete)
     monkeypatch.setattr(dialogue, "send_prepared_outbound", fake_send)
     monkeypatch.setenv("AGENT_AI_WAIT_NOTICE_DELAY", "0")
