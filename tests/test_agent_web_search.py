@@ -45,7 +45,7 @@ webui_routes = importlib.import_module("src.plugins.yawn_core.webui.web_search")
 
 GROUP = 123456
 USER = 42
-KEY = "sk-test-0123456789abcdef"
+KEY = "test-key-0123456789abcdef"
 
 SEARCH_PAYLOAD = {
     "results": [
@@ -656,7 +656,7 @@ async def test_webui_status_masks_key_and_reports_usage() -> None:
     reservation.settle("billed")
     data = (await webui_routes.web_search_status(None))["data"]
     assert data["state"] == "ready" and data["configured"] is True
-    assert data["keyMasked"] == "sk-…cdef" and KEY not in json.dumps(data, ensure_ascii=False)
+    assert data["keyMasked"] == "tes…cdef" and KEY not in json.dumps(data, ensure_ascii=False)
     assert data["usage"]["billed"] == 1 and data["usage"]["costYuan"] == pytest.approx(0.005)
     assert data["usage"]["groups"][0]["groupId"] == str(GROUP)
     assert data["settings"]["memberDailyCalls"] == 30
