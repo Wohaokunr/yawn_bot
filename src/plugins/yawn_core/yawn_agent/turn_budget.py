@@ -16,13 +16,16 @@ from typing import Any
 
 from .prompt_sections import section_text
 from .tool_registry import TOOL_BY_NAME
-from .tool_router import MAX_TOOL_ROUNDS, SANDBOX_TOOL_ROUNDS
+from .tool_router import MAX_TOOL_ROUNDS, SANDBOX_TOOL_ROUNDS, WEB_TOOL_ROUNDS
 
 # 不限输出长度后推理可能更久；长参数工具（代码、公告、合并转发）再多给一些。
 DEFAULT_COMPLETION_TIMEOUT = 60.0
 LONG_ARGUMENT_COMPLETION_TIMEOUT = 90.0
 DEFAULT_TURN_SECONDS = 120.0
 SANDBOX_TURN_SECONDS = 210.0
+# 搜索单次最多 30 秒（抓取 60 秒），一轮里搜一次再打开一两页要留够时间。
+WEB_TURN_SECONDS = 180.0
+WEB_EXTENSION_SECONDS = 90.0
 # 回合中途才发现沙箱时，从发现那一刻起至少再给这么久。
 SANDBOX_EXTENSION_SECONDS = 150.0
 LONG_ARGUMENT_TOOLS = frozenset(
@@ -59,6 +62,14 @@ def has_sandbox_tools(tools_or_names: Iterable[Any]) -> bool:
     )
 
 
+def has_web_tools(tools_or_names: Iterable[Any]) -> bool:
+    return any(
+        TOOL_BY_NAME[name].family == "web"
+        for name in _names(tools_or_names)
+        if name in TOOL_BY_NAME
+    )
+
+
 def completion_timeout(tools: Iterable[Any]) -> float:
     if _names(tools) & LONG_ARGUMENT_TOOLS:
         return LONG_ARGUMENT_COMPLETION_TIMEOUT
@@ -68,7 +79,11 @@ def completion_timeout(tools: Iterable[Any]) -> float:
 def turn_seconds(tools: Iterable[Any]) -> float:
     """整轮时限：跑代码要给“写代码 → 运行 → 修 → 再运行 → 发图”留时间。"""
 
-    return SANDBOX_TURN_SECONDS if has_sandbox_tools(tools) else DEFAULT_TURN_SECONDS
+    if has_sandbox_tools(tools):
+        return SANDBOX_TURN_SECONDS
+    if has_web_tools(tools):
+        return WEB_TURN_SECONDS
+    return DEFAULT_TURN_SECONDS
 
 
 def discovery_round_limit(
@@ -78,6 +93,8 @@ def discovery_round_limit(
 
     if has_sandbox_tools(tool_names):
         return max(round_limit, min(SANDBOX_TOOL_ROUNDS, rounds_done + 4))
+    if has_web_tools(tool_names):
+        return max(round_limit, min(WEB_TOOL_ROUNDS, rounds_done + 3))
     return max(round_limit, min(MAX_TOOL_ROUNDS, rounds_done + 2))
 
 
@@ -86,6 +103,8 @@ def discovery_deadline(deadline: float, now: float, tool_names: Iterable[Any]) -
 
     if has_sandbox_tools(tool_names):
         return max(deadline, now + SANDBOX_EXTENSION_SECONDS)
+    if has_web_tools(tool_names):
+        return max(deadline, now + WEB_EXTENSION_SECONDS)
     return deadline
 
 
@@ -149,12 +168,15 @@ __all__ = [
     "SANDBOX_EXTENSION_SECONDS",
     "SANDBOX_TOOL_ROUNDS",
     "SANDBOX_TURN_SECONDS",
+    "WEB_EXTENSION_SECONDS",
+    "WEB_TURN_SECONDS",
     "argument_error_payload",
     "completion_timeout",
     "discovery_deadline",
     "discovery_round_limit",
     "final_round_messages",
     "has_sandbox_tools",
+    "has_web_tools",
     "is_final_round",
     "tool_media_note",
     "turn_seconds",

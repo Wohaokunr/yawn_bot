@@ -17,12 +17,13 @@ from . import (
     notice,
     sandbox,
     schedule,
+    web,
 )
 
 Handler = Callable[[str, dict, ToolExecutionContext], Awaitable[ToolHandlerResult]]
 
 _HANDLERS: dict[str, Handler] = {}
-for module in (
+_MODULES = (
     history,
     member,
     memory,
@@ -32,8 +33,10 @@ for module in (
     admin,
     sandbox,
     inbox,
+    web,
     schedule,
-):
+)
+for module in _MODULES:
     for tool_name in module.NAMES:
         _HANDLERS[tool_name] = module.handle
 

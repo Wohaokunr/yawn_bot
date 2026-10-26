@@ -88,6 +88,9 @@ _BLOCKED_TOOL_REASONS: dict[str, str] = {
     "sandbox_closed": "管理员没有在本群开放代码沙箱",
     "sandbox_offline": "代码沙箱服务当前离线",
     "sandbox_unsafe": "代码沙箱隔离自检未通过，已暂停使用",
+    "web_closed": "管理员没有在本群开放网页搜索",
+    "web_no_key": "网页搜索还没有配置 DeepSeek API 密钥",
+    "web_paused": "管理员暂停了网页搜索（今日预算为 0）",
     "schedule_closed": "管理员没有在本群开放定时任务",
     "scheduled_wake": "定时任务执行时不能做群管理操作或再设新的定时任务",
 }
@@ -103,6 +106,14 @@ async def _sandbox_exposure(group_id: int, *, actor_is_admin: bool) -> str | Non
     return exposure_reason(
         group_id, actor_is_admin=actor_is_admin, health=health, health_error=error
     )
+
+
+def _web_exposure(group_id: int, *, actor_is_admin: bool) -> str | None:
+    """网页搜索工具族的发现前置检查：开放范围、密钥、仅管理员、今日预算。"""
+
+    from .web_search_policy import exposure_reason
+
+    return exposure_reason(group_id, actor_is_admin=actor_is_admin)
 
 
 def _schedule_exposure(group_id: int, *, actor_is_admin: bool) -> str | None:
@@ -347,6 +358,11 @@ async def _discover_tools_for_actor(
         if requested_family in {None, "sandbox"}
         else None
     )
+    web_reason = (
+        _web_exposure(group_id, actor_is_admin=allow_admin_tools)
+        if requested_family in {None, "web"}
+        else None
+    )
     schedule_reason = (
         _schedule_exposure(group_id, actor_is_admin=allow_admin_tools)
         if requested_family in {None, "schedule"}
@@ -368,6 +384,8 @@ async def _discover_tools_for_actor(
         )
         if exposed and definition.family == "sandbox" and sandbox_reason is not None:
             exposed, reason = False, sandbox_reason
+        if exposed and definition.family == "web" and web_reason is not None:
+            exposed, reason = False, web_reason
         if exposed and definition.family == "schedule" and schedule_reason is not None:
             exposed, reason = False, schedule_reason
         if exposed and definition.name == "run_shell" and not _sandbox_has_shell():

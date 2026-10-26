@@ -54,6 +54,9 @@ function writeCollapsed(value: boolean): void {
 
 const BREADCRUMB_LABELS: Record<string, string> = {
   overview: "运行概览",
+  sandbox: "代码沙箱",
+  "web-search": "网页搜索",
+  schedules: "定时任务",
   audits: "操作审计",
   groups: "群组",
   users: "全局用户",

@@ -86,6 +86,16 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         ),
         frozenset({"import_attachments", "import_group_file", "run_python", "run_shell"}),
     ),
+    # 联网搜索：没真的搜过就说“我搜了一下/网上查到”，等于把记忆包装成实时信息。
+    # 句子里带“查”会被读语境排除，所以这里只认“搜”和“网上/联网”这类说法。
+    "web_search": (
+        re.compile(
+            r"(?:刚|刚刚|已经|已|我|本喵|帮你)(?:在网上|上网|联网|去网上)?搜(?:了|过)(?:一下|下|一圈)?"
+            r"|(?:在网上|上网|联网)(?:搜|找)(?:了|到)"
+            r"|搜(?:索)?结果(?:显示|说|里)"
+        ),
+        frozenset({"web_search", "web_fetch"}),
+    ),
     # 定时任务：没真的建成就说“提醒设好了”，到点什么都不会发生。
     "schedule_set": (
         re.compile(

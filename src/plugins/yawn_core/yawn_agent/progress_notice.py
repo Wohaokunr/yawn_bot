@@ -34,7 +34,7 @@ WAIT_NOTICE_MODES = ("reaction", "text", "off")
 # 👀：表示“看到了，在弄”，比文字更不打扰。
 WAIT_NOTICE_EMOJI_ID = "128064"
 # 这些工具一跑就可能十几秒，值得在表情之外补一句话。
-SLOW_TOOLS = frozenset({"run_python", "run_shell"})
+SLOW_TOOLS = frozenset({"run_python", "run_shell", "web_search", "web_fetch"})
 _PREAMBLE_MAX_CHARS = 40
 _ROTATION_LIMIT = 256
 
@@ -44,6 +44,11 @@ _PHASE_LINES: dict[str, tuple[str, ...]] = {
         "代码在跑了，马上出结果",
         "{self}在算，稍等一会儿",
         "跑着呢，别急～",
+    ),
+    "web": (
+        "在网上搜了，稍等",
+        "{self}查查网上怎么说",
+        "翻网页中，马上",
     ),
     "lookup": (
         "{self}翻一下记录，稍等",
@@ -86,7 +91,9 @@ class TurnProgress:
         self.tool = name
         self.tool_family = family
         self.tool_started_at = time.monotonic()
-        if name in SLOW_TOOLS or family == "sandbox":
+        if family == "web" or name in {"web_search", "web_fetch"}:
+            self.phase = "web"
+        elif name in SLOW_TOOLS or family == "sandbox":
             self.phase = "sandbox"
         elif family in _LOOKUP_FAMILIES and not _ADMIN_HINT.search(name):
             self.phase = "lookup"
@@ -103,7 +110,7 @@ class TurnProgress:
 
     @property
     def running_slow_tool(self) -> bool:
-        return self.phase == "sandbox" and self.tool is not None
+        return self.phase in {"sandbox", "web"} and self.tool is not None
 
 
 WAIT_NOTICE_TASK: ContextVar[asyncio.Task[None] | None] = ContextVar(

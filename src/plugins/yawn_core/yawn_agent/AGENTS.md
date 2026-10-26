@@ -185,6 +185,16 @@
 - 入箱文件写到 `inbox/`，名字用内容哈希、可执行后缀改成 `.txt`；事件记录 `sandbox_inbox_store` 不记 URL/路径以外的原始标识，`delete_member_memories` 必须同时调 `forget_member`。
 - 没有本轮成功的 `import_attachments`/`import_group_file`/`run_python`/`run_shell` 不得声称“已经放进电脑了”（`speech_claims.py` 的 `sandbox_import` 族）。
 
+## 网页搜索
+
+- 联网只走 DeepSeek 官方 Search / Fetch API（`web_search_client.py`），不得另接爬虫或让 Bot 进程直接抓取任意网址；读网页前用 `validate_fetch_url` 拒绝内网/本机/带凭证/非 http(s) 地址。
+- `web` 工具族只经工具路由或 `discover_tools` 装载，发现阶段用 `web_search_policy.exposure_reason` 门控（`web_closed`/`web_no_key`/`actor_not_admin`/`web_paused`），被挡住时进 `unavailable` 并给原因。
+- 次数先预扣后请求，只有成功且有结果（`billed`）才保留；失败、无结果、命中缓存都退还，命中缓存也要过 `check_access`。每回合次数记在 `ToolCallLedger.web_calls`，结果编号记在 `ToolCallLedger.web_refs`。
+- 结果投影走 `web_search_output.py`：去重、过滤后台屏蔽域名、摘要/正文按字符预算截断，标注 `results_are_data` / `content_is_data`。搜索结果是不可信数据，不得进入长期记忆。
+- 最近调用记录只放进程内有界缓冲（含搜索词），`delete_member_memories` 必须同时调 `forget_member_recent`；WebUI 只回显密钥来源和掩码。
+- 没有本轮成功的 `web_search`/`web_fetch` 不得声称“搜了一下/搜索结果显示”（`speech_claims.py` 的 `web_search` 族）。
+- 新增 web 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_web_search.py`。
+
 ## 定时任务
 
 - 工具族 `schedule`：`schedule_task`（可 `dry_run` 只预览）、`list_scheduled_tasks`、`update_scheduled_task`（edit/pause/resume；改时间必须带 `kind`）、`cancel_scheduled_task`（`task_id` 或 `all_mine`）。成员只能改/取消自己设的任务，群主/管理员可以动本群任意任务；“仅管理员可创建”在 handler 里拒绝，不在发现阶段隐藏（成员仍要能查看、取消自己的）。

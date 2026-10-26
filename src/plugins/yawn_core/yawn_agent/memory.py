@@ -1964,6 +1964,13 @@ async def delete_member_memories(session: Any, group_id: int, user_id: int) -> i
         removed += forget_member(group_id, user_id)
     except Exception:  # noqa: BLE001
         dbg_exc(f"群 {group_id} 清除成员 {user_id} 的入箱记录失败(忽略)")
+    # 网页搜索的最近调用记录里有他的搜索词，一起抹掉（只在内存，不计入删除数）。
+    from .web_search_policy import forget_member_recent
+
+    try:
+        forget_member_recent(group_id, user_id)
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {group_id} 清除成员 {user_id} 的搜索记录失败(忽略)")
     return removed
 
 
