@@ -25,6 +25,7 @@ from . import (
     proactive,
     prompt,
     prompt_capture,
+    schedule_runner,
     tools,
 )
 
@@ -63,5 +64,6 @@ __all__ = [
     "persona",
     "proactive",
     "prompt",
+    "schedule_runner",
     "tools",
 ]

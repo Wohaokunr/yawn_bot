@@ -101,6 +101,20 @@ _SHELL_RULES = (
     " ls/cat/head/grep/find/wc/jq 这类命令更快；每次从工作区根目录开始，"
     "要在子目录里做事就在同一条命令里 cd 再执行。"
 )
+_SCHEDULE_RULES = (
+    "定时任务：成员要你“到某个时间/每隔多久/每天每周”提醒或做事时用 schedule_task。"
+    "先把相对时间按实时状态里的 clock 换算成北京时间；只是提醒一句话用 mode=notify，"
+    "到点需要查资料、计算、看群聊再说的用 mode=agent，instruction 写清对象和要点。"
+    "时间或频率含糊（“过几天”“经常”）先问清楚或用 dry_run 预览给对方确认；"
+    "设好后用一句话复述规则和下次时间，不要承诺工具没设上的提醒。"
+)
+_SCHEDULED_WAKE_RULES = (
+    "本轮不是有人刚发消息：是实时状态 scheduled_wake 里那个定时任务到点了，"
+    "current_turn.content 是当初设下的任务说明，发言人是设任务的人。"
+    "直接完成任务并把结果发到群里，像到点自然开口，不要回复“收到/好的”，不要复述这是定时任务；"
+    "remind_set_by 为 true 时用 at 段提醒设任务的人。不能再设新的定时任务，也不能做群管理操作；"
+    "任务已经无意义（对象不在、事情办完了）就简短说明。"
+)
 _NOTICE_RULES = (
     "发公告时 content 写成书面、完整的公告正文：说清事项、时间和要求，"
     "不带角色口癖、表情和 Markdown；对方没给出正文时先问清楚，不要自己编。"
@@ -339,6 +353,7 @@ _TOOL_GUIDANCE_RULES: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("tools.sandbox", _SANDBOX_RULES, frozenset({"run_python"})),
     ("tools.shell", _SHELL_RULES, frozenset({"run_shell"})),
     ("tools.notice", _NOTICE_RULES, frozenset({"create_group_announcement"})),
+    ("tools.schedule", _SCHEDULE_RULES, frozenset({"schedule_task"})),
     ("tools.file", _FILE_RULES, frozenset({"send_file", "list_agent_files"})),
     ("tools.target_member", _TARGET_MEMBER_RULES, _TARGET_MEMBER_TOOLS),
 )
@@ -502,7 +517,7 @@ def _builder_from_parts(parts: Sequence[tuple[str | None, str]]) -> ContentBuild
     return join_builders(builders, "\n")
 
 
-def build_prompt(  # noqa: PLR0913, PLR0915
+def build_prompt(  # noqa: PLR0912, PLR0913, PLR0915
     *,
     persona: dict[str, Any],
     tools: list[dict[str, Any]],
@@ -577,6 +592,10 @@ def build_prompt(  # noqa: PLR0913, PLR0915
         media.add("layers.media_header", apply_section("layers.media_header", _MEDIA_SYSTEM_PREFIX, group_id=gid))
         media.add("core.media_policy", apply_section("core.media_policy", _CURRENT_MEDIA_POLICY, group_id=gid))
         realtime_blocks.append(media)
+    if realtime.get("scheduled_wake"):
+        wake = ContentBuilder()
+        wake.add("core.scheduled_wake", apply_section("core.scheduled_wake", _SCHEDULED_WAKE_RULES, group_id=gid))
+        realtime_blocks.append(wake)
     speech = ContentBuilder()
     for section_id, text in speech_parts:
         speech.add(section_id, text)

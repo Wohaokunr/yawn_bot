@@ -347,6 +347,14 @@ SECTIONS: tuple[PromptSection, ...] = (
         when="装载 run_shell 时",
     ),
     PromptSection(
+        "tools.schedule",
+        "定时任务规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_SCHEDULE_RULES",
+        when="装载 schedule_task 时",
+    ),
+    PromptSection(
         "tools.notice",
         "公告规则",
         "tools",
@@ -432,6 +440,15 @@ SECTIONS: tuple[PromptSection, ...] = (
         default_ref="prompt:_CURRENT_MEDIA_POLICY",
         description="有图就看图，别被历史里“看不到图”的旧回复带偏。",
         when="本轮 user 消息附带媒体块时",
+    ),
+    PromptSection(
+        "core.scheduled_wake",
+        "定时任务唤醒",
+        "core",
+        "realtime",
+        default_ref="prompt:_SCHEDULED_WAKE_RULES",
+        description="定时任务到点执行时，说明这一轮的来历和边界。",
+        when="定时任务（agent 模式）到点唤醒时",
     ),
     PromptSection(
         "layers.speech_header",

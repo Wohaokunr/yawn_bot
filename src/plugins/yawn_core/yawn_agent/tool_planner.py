@@ -55,6 +55,7 @@ TOOLPACK_CATALOG: dict[str, str] = {
     "essence": "精华消息：查看、设为精华、取消精华",
     "reaction": "表情包与表情回应",
     "message": "合并转发等特殊消息",
+    "schedule": "定时任务：让 Bot 到某个时间（单次、N 分钟后、每天/每周/每月/每年、固定间隔、cron）提醒某人或自动做一件事；查看、修改、暂停、取消已经设好的定时任务",
 }
 PLANNABLE_SEGMENTS = frozenset(
     {"image", "record", "video", "at", "reply", "face", "reaction", "dice", "rps", "poke", "share", "contact", "location", "music"}
@@ -65,6 +66,7 @@ _SYSTEM_PROMPT = (
     "做事，以及机器人回复它时第一步就需要哪些工具包。你看不到聊天上下文，不要猜测"
     "上下文；拿不准就少选。只是闲聊、打招呼、问看法时 toolpacks 为空。"
     "需要精确计算、统计、画图、处理数据或生成文件时选 sandbox，不要指望心算。"
+    "要 Bot 将来某个时间或周期性地提醒、播报、做事，或查看/取消已设的提醒时选 schedule。"
     "signals 里的 image/file/audio/video 表示这条消息带了这类附件；要对附件本身做"
     "处理（改图、读表格、统计文件内容、解压、转格式、分析音频）时选 sandbox，只是"
     "问图里是什么、聊附件内容时不用。"
