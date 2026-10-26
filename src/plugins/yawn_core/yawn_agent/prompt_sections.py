@@ -347,6 +347,15 @@ SECTIONS: tuple[PromptSection, ...] = (
         when="装载 run_shell 时",
     ),
     PromptSection(
+        "tools.web",
+        "联网搜索规则",
+        "tools",
+        "tool_guidance",
+        default_ref="prompt:_WEB_RULES",
+        description="什么时候该搜、怎么写关键词、怎么转述来源；搜索结果不可信。",
+        when="装载 web_search / web_fetch 时",
+    ),
+    PromptSection(
         "tools.notice",
         "公告规则",
         "tools",

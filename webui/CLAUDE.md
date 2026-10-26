@@ -40,6 +40,7 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | `/fanqie` | `fanqie.tsx` | `fanqie.py` |
 | `/environment` | `environment.tsx`（页面：分类导航 + 单分类字段列表 / 跨分类搜索结果，状态在 URL `env.*`）、`environment-editors.tsx`（按类型的字段编辑器、Token 编辑器）、`environment-components.tsx`（提供商/档位卡片、任务路由表、体检、待重启横幅、保存栏与预览）、`environment-fields.ts`（纯逻辑：分类、筛选、校验——镜像后端 `environment_schema.py`）、`environment-config.ts`（模型档位/任务路由表）、`environment.css` | `environment*.py` |
 | `/sandbox` | `sandbox/`（`SandboxPage.tsx` 状态条 + 概览/运行记录/工作区文件/控制台/策略五个标签；`sandbox-meta.ts` 纯逻辑与校验，`sandbox-api.ts` 接口；状态在 URL `sandbox.*`，控制台草稿存 `localStorage`） | `sandbox.py` |
+| `/web-search` | `web-search/`（`WebSearchPage.tsx` 状态条 + 概览/最近调用/试搜/策略与限额四个标签，复用沙箱页的 `sbx-*` 样式；`web-search-meta.ts` 纯逻辑与校验，`web-search-api.ts` 接口；标签在 URL `web.tab`） | `web_search.py` |
 | `/guest-access` | `guest-access.tsx` | `guest_access_routes.py` |
 | `/audits` | `audits.tsx` | `audits.py` |
 | `/guest`、`/guest/:groupId`（访客） | `guest-home.tsx` | 访客只读接口（`deps.py` 过滤） |

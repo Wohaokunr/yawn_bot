@@ -31,6 +31,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `environment_catalog.dotenv` | 「环境配置」页的完整配置项目录（**不是** `.env.example`） |
 | `guest_access.py` / `guest_access_routes.py` | 持久化访客访问策略 |
 | `sandbox.py` | 「代码沙箱」管理页：状态/统计/运行历史/工作区文件/控制台/策略，全部仅管理员；runner 离线时只读接口降级为 200 + `online:false`，写接口 503；文件下载强制 `nosniff` + CSP sandbox，HTML/SVG 强制附件 |
+| `web_search.py` | 「网页搜索」管理页：状态（密钥只回显来源与掩码）/策略与限额/今日用量与费用/最近调用/试搜试读/清空缓存，全部仅管理员；试搜计入全站计费统计但不占群配额 |
 
 ## 关联位置（跨目录）
 
@@ -42,6 +43,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `fanqie.py` | [yawn_fanqie/](../yawn_fanqie/CLAUDE.md) | `fanqie.tsx` |
 | `environment*.py`、`environment_catalog.dotenv` | 各插件 `config.py`；文档 [docs/configuration/](../../../../docs/configuration/README.md) | `environment.tsx`、`environment-config.ts` |
 | `sandbox.py` | `yawn_agent/sandbox_client.py`、`sandbox_policy.py`；runner 在仓库根 `sandbox/` | `sandbox/` |
+| `web_search.py` | `yawn_agent/web_search_client.py`、`web_search_policy.py`、`web_search_output.py`、`tool_handlers/web.py` | — |
 | `groups.py`、`users.py`、`guest_access*` | `../permission.py`、核心 data_models | `group-workspace.tsx`、`access-pages.tsx`、`guest-*.tsx` |
 
 - 新增插件 `Config` 字段时，要登记进 `environment_catalog.dotenv`，`tests/test_webui_environment.py` 会检查。

@@ -222,6 +222,13 @@ AGENT_SANDBOX_INBOX_HOSTS=
 # NapCat 只给本机路径时可读取的共享目录（逗号分隔，NapCat 与 Bot 挂载同一目录时才需要）；留空则不读本机文件
 AGENT_SANDBOX_INBOX_LOCAL_ROOTS=
 
+# ── Agent 网页搜索 ─────────────────────────────────────────────────────────────
+
+# DeepSeek 官方搜索（Search / Fetch API）密钥；留空时依次用 DEEPSEEK_API_KEY、指向 api.deepseek.com 的模型提供商密钥，都没有则不开放联网搜索
+AGENT_WEB_SEARCH_API_KEY=
+# DeepSeek Search / Fetch API 的 Base URL（一般不用改）
+AGENT_WEB_SEARCH_BASE_URL=https://api.deepseek.com
+
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 
 # RPG 是否启用 AI 叙事/工具流程；false 为确定性模式

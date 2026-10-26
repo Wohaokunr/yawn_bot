@@ -16,6 +16,8 @@ from .tool_registry import (
 # discover → 查目标（如 find_group_member）→ 执行 → 可能的二次发现 → 最终回答。
 MAX_TOOL_ROUNDS = 5
 SANDBOX_TOOL_ROUNDS = 7
+# 搜索 → 打开一两条核对 → 必要时换关键词再搜 → 作答。
+WEB_TOOL_ROUNDS = 6
 
 # Natural QQ requests often insert scope words inside a registered keyword, e.g.
 # "设置群精华" vs "设置精华" or "删除这条群消息精华".  Keep registry
@@ -79,6 +81,7 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "reaction": ("表情", "表情包", "reactions", "sticker", "stickers", "emoji"),
     "group": ("群", "群资料", "群信息", "group_info", "honor"),
     "message": ("消息", "发消息", "转发", "send", "forward"),
+    "web": ("网页", "网页搜索", "联网", "联网搜索", "上网", "搜索", "搜一下", "网上", "web_search", "search", "internet", "browse", "browser", "fetch", "news", "新闻"),
     "sandbox": ("沙箱", "代码沙箱", "虚拟机", "代码", "python", "编程", "计算", "画图", "绘图", "图表", "数据分析", "作曲", "内置电脑", "电脑", "附件", "inbox", "code", "run_code", "python_sandbox", "vm"),
 }
 _FAMILY_LOOKUP: dict[str, str] = {
@@ -271,6 +274,10 @@ def dialogue_tool_round_limit(tool_names: frozenset[str] | set[str]) -> int:
     ):
         # 写代码 → 运行 → 报错修正 → 再运行 → 发图/作答，比普通工具多要几轮。
         return SANDBOX_TOOL_ROUNDS
+    if any(
+        TOOL_BY_NAME[name].family == "web" for name in names if name in TOOL_BY_NAME
+    ):
+        return WEB_TOOL_ROUNDS
     if names <= MESSAGE_SEND_TOOLS:
         return 2
     if "discover_tools" in names:
@@ -288,6 +295,7 @@ __all__ = [
     "MAX_TOOL_ROUNDS",
     "SANDBOX_SEGMENT_TYPES",
     "SANDBOX_TOOL_ROUNDS",
+    "WEB_TOOL_ROUNDS",
     "dialogue_tool_round_limit",
     "discovery_segment_types",
     "has_explicit_critical_intent",

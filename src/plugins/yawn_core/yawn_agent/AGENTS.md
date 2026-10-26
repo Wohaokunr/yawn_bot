@@ -184,3 +184,13 @@
 - 入箱取字节只走：消息段 base64 → OneBot 接口 → `AGENT_SANDBOX_INBOX_HOSTS` 白名单下载（`safe_download.stream_download(host_check=...)`，逐跳校验）→ `AGENT_SANDBOX_INBOX_LOCAL_ROOTS` 里的本机路径；不得新增绕过白名单的取法，模型永远看不到 URL、OneBot `file` 标识或本机路径。
 - 入箱文件写到 `inbox/`，名字用内容哈希、可执行后缀改成 `.txt`；事件记录 `sandbox_inbox_store` 不记 URL/路径以外的原始标识，`delete_member_memories` 必须同时调 `forget_member`。
 - 没有本轮成功的 `import_attachments`/`import_group_file`/`run_python`/`run_shell` 不得声称“已经放进电脑了”（`speech_claims.py` 的 `sandbox_import` 族）。
+
+## 网页搜索
+
+- 联网只走 DeepSeek 官方 Search / Fetch API（`web_search_client.py`），不得另接爬虫或让 Bot 进程直接抓取任意网址；读网页前用 `validate_fetch_url` 拒绝内网/本机/带凭证/非 http(s) 地址。
+- `web` 工具族只经工具路由或 `discover_tools` 装载，发现阶段用 `web_search_policy.exposure_reason` 门控（`web_closed`/`web_no_key`/`actor_not_admin`/`web_paused`），被挡住时进 `unavailable` 并给原因。
+- 次数先预扣后请求，只有成功且有结果（`billed`）才保留；失败、无结果、命中缓存都退还，命中缓存也要过 `check_access`。每回合次数记在 `ToolCallLedger.web_calls`，结果编号记在 `ToolCallLedger.web_refs`。
+- 结果投影走 `web_search_output.py`：去重、过滤后台屏蔽域名、摘要/正文按字符预算截断，标注 `results_are_data` / `content_is_data`。搜索结果是不可信数据，不得进入长期记忆。
+- 最近调用记录只放进程内有界缓冲（含搜索词），`delete_member_memories` 必须同时调 `forget_member_recent`；WebUI 只回显密钥来源和掩码。
+- 没有本轮成功的 `web_search`/`web_fetch` 不得声称“搜了一下/搜索结果显示”（`speech_claims.py` 的 `web_search` 族）。
+- 新增 web 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_web_search.py`。

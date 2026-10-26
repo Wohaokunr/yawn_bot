@@ -1,0 +1,99 @@
+/* 网页搜索页：大部分布局复用代码沙箱页的 sbx-* 样式，这里只补自己的部件。 */
+.web-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.web-service {
+  margin-bottom: 16px;
+}
+
+.web-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0 0 12px;
+}
+
+.web-dl dt {
+  color: var(--text-secondary, rgba(0, 0, 0, 0.55));
+}
+
+.web-dl dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.web-toolbar,
+.web-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.web-search-box {
+  display: flex;
+  width: 100%;
+}
+
+.web-search-box .ant-input-affix-wrapper,
+.web-search-box > .ant-input {
+  flex: 1;
+}
+
+.web-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.web-test {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.web-results {
+  margin-top: 12px;
+}
+
+.web-hit-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.web-hit {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+}
+
+.web-hit-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.web-hit p {
+  margin: 4px 0 0;
+}
+
+.web-page-preview pre {
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(0, 0, 0, 0.03));
+}
+
+@media (max-width: 640px) {
+  .web-dl {
+    grid-template-columns: 1fr;
+  }
+}

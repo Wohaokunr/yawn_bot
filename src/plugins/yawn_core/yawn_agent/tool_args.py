@@ -292,6 +292,10 @@ class ToolCallLedger:
     controlled_calls: int = 0
     # 本回合已经真正跑过几次沙箱；同一回合里的“改错再跑”不再吃冷却。
     sandbox_runs: int = 0
+    # 本回合已经发出的网页搜索/抓取次数（含命中缓存），受 max_calls_per_turn 约束。
+    web_calls: int = 0
+    # 本回合网页结果的短编号 → 网址（w1、w2…），web_fetch 可以直接用编号。
+    web_refs: dict[str, str] = field(default_factory=dict)
 
     def duplicate_of(self, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
         previous = self.successes.get(_ledger_key(name, args))
