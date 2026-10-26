@@ -1,0 +1,137 @@
+/* 定时任务页：版式沿用代码沙箱（sbx-*），这里只放本页特有的块。 */
+
+.sch-task-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sch-task-cell > strong,
+.sch-task-cell > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sch-row {
+  cursor: pointer;
+}
+.sch-next {
+  display: flex;
+  flex-direction: column;
+  font-variant-numeric: tabular-nums;
+}
+.sch-next small {
+  color: var(--ink-tertiary);
+}
+.sch-bad {
+  color: #d92d20;
+  font-size: 12px;
+}
+.sch-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent, #d63384);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.sch-link:hover {
+  text-decoration: underline;
+}
+.sch-mono input,
+input.sch-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+/* 详情抽屉 */
+.sch-instruction {
+  padding: 10px 12px;
+  background: var(--surface-muted, rgba(0, 0, 0, 0.03));
+  border-radius: 10px;
+  white-space: pre-wrap;
+}
+.sch-output {
+  white-space: pre-wrap;
+}
+.sch-upcoming {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sch-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sch-history-preview {
+  color: var(--ink-secondary);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+.sch-trace-link {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+/* 编辑抽屉：左表单，右实时预览 */
+.sch-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 20px;
+}
+.sch-editor-side {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sch-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sch-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.sch-kind-hint {
+  margin: 0;
+}
+.sch-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.sch-preview.is-idle {
+  color: var(--ink-tertiary);
+  font-size: 12px;
+}
+.sch-preview ol {
+  margin: 0;
+  padding-left: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.sch-field-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 760px) {
+  .sch-editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sch-editor-side {
+    position: static;
+    order: -1;
+  }
+  .sch-field-grid-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

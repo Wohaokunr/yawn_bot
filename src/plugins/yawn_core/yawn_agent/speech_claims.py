@@ -96,6 +96,21 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         ),
         frozenset({"web_search", "web_fetch"}),
     ),
+    # 定时任务：没真的建成就说“提醒设好了”，到点什么都不会发生。
+    "schedule_set": (
+        re.compile(
+            rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:设|定|建|安排)(?:好|上|了)[^。！？!?\n]{{0,8}}(?:提醒|定时|闹钟|日程)"
+            r"|(?:提醒|定时任务|定时|闹钟)(?:已经|已)?(?:设|定|建|安排)(?:好|上)(?:了|啦)?"
+        ),
+        frozenset({"schedule_task", "update_scheduled_task"}),
+    ),
+    "schedule_cancel": (
+        re.compile(
+            rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:取消|删掉|关掉|停掉)[^。！？!?\n]{{0,6}}(?:提醒|定时|闹钟)"
+            r"|(?:提醒|定时任务|闹钟)(?:已经|已)?(?:取消|删掉|关掉|停掉)(?:了|啦)"
+        ),
+        frozenset({"cancel_scheduled_task", "update_scheduled_task"}),
+    ),
 }
 
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]*|\n")

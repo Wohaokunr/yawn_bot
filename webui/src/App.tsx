@@ -37,6 +37,9 @@ const GuestAccessPage = lazy(() =>
 const WebAuditsPage = lazy(() =>
   import("./audits").then(({ WebAuditsPage: Page }) => ({ default: Page })),
 );
+const SchedulesPage = lazy(() =>
+  import("./schedules/SchedulesPage").then(({ SchedulesPage: Page }) => ({ default: Page })),
+);
 const SandboxPage = lazy(() =>
   import("./sandbox/SandboxPage").then(({ SandboxPage: Page }) => ({ default: Page })),
 );
@@ -116,6 +119,7 @@ function App(): React.JSX.Element {
           <Route path="audits" element={<WebAuditsPage />} />
           <Route path="sandbox" element={<SandboxPage />} />
           <Route path="web-search" element={<WebSearchPage />} />
+          <Route path="schedules" element={<SchedulesPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>

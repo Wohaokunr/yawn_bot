@@ -82,6 +82,7 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "group": ("群", "群资料", "群信息", "group_info", "honor"),
     "message": ("消息", "发消息", "转发", "send", "forward"),
     "web": ("网页", "网页搜索", "联网", "联网搜索", "上网", "搜索", "搜一下", "网上", "web_search", "search", "internet", "browse", "browser", "fetch", "news", "新闻"),
+    "schedule": ("定时", "定时任务", "提醒", "闹钟", "日程", "计划任务", "schedule", "schedules", "reminder", "reminders", "timer", "cron", "scheduled_task", "scheduled_tasks"),
     "sandbox": ("沙箱", "代码沙箱", "虚拟机", "代码", "python", "编程", "计算", "画图", "绘图", "图表", "数据分析", "作曲", "内置电脑", "电脑", "附件", "inbox", "code", "run_code", "python_sandbox", "vm"),
 }
 _FAMILY_LOOKUP: dict[str, str] = {

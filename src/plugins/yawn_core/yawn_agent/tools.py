@@ -27,6 +27,7 @@ from .execution_trace import current_execution_trace
 from .log import dbg, dbg_exc
 from .outbound import MAX_FORWARD_NODES
 from .prompt_sections import apply_section
+from .schedule_wake import WAKE_BLOCKED_TOOLS, in_scheduled_wake
 from .tool_registry import (
     ADMIN_TOOLS as _ADMIN_TOOLS,
     CONTROLLED_TOOLS as _CONTROLLED_TOOLS,
@@ -90,6 +91,8 @@ _BLOCKED_TOOL_REASONS: dict[str, str] = {
     "web_closed": "管理员没有在本群开放网页搜索",
     "web_no_key": "网页搜索还没有配置 DeepSeek API 密钥",
     "web_paused": "管理员暂停了网页搜索（今日预算为 0）",
+    "schedule_closed": "管理员没有在本群开放定时任务",
+    "scheduled_wake": "定时任务执行时不能做群管理操作或再设新的定时任务",
 }
 
 
@@ -111,6 +114,22 @@ def _web_exposure(group_id: int, *, actor_is_admin: bool) -> str | None:
     from .web_search_policy import exposure_reason
 
     return exposure_reason(group_id, actor_is_admin=actor_is_admin)
+
+
+def _schedule_exposure(group_id: int, *, actor_is_admin: bool) -> str | None:
+    from .schedule_policy import exposure_reason
+
+    return exposure_reason(group_id, actor_is_admin=actor_is_admin)
+
+
+def _wake_blocks(definition: _ToolDefinition) -> bool:
+    """定时任务唤醒回合（没有人在场确认）不暴露、不执行群管理与再建任务。"""
+
+    return in_scheduled_wake() and (
+        definition.permission_level
+        in {TOOL_PERMISSION_PRIVILEGED, TOOL_PERMISSION_CRITICAL}
+        or definition.name in WAKE_BLOCKED_TOOLS
+    )
 
 
 def _sandbox_has_shell() -> bool:
@@ -143,6 +162,8 @@ def _tool_exposure_reason(  # noqa: PLR0911
     max_permission_level: str,
     privileged_allowlist: set[str] | None,
 ) -> tuple[bool, str]:
+    if _wake_blocks(definition):
+        return False, "scheduled_wake"
     if _TOOL_PERMISSION_RANK[definition.permission_level] > _TOOL_PERMISSION_RANK[
         max_permission_level
     ]:
@@ -342,6 +363,11 @@ async def _discover_tools_for_actor(
         if requested_family in {None, "web"}
         else None
     )
+    schedule_reason = (
+        _schedule_exposure(group_id, actor_is_admin=allow_admin_tools)
+        if requested_family in {None, "schedule"}
+        else None
+    )
     for definition in _TOOL_DEFINITIONS:
         if (
             not definition.discoverable
@@ -360,6 +386,8 @@ async def _discover_tools_for_actor(
             exposed, reason = False, sandbox_reason
         if exposed and definition.family == "web" and web_reason is not None:
             exposed, reason = False, web_reason
+        if exposed and definition.family == "schedule" and schedule_reason is not None:
+            exposed, reason = False, schedule_reason
         if exposed and definition.name == "run_shell" and not _sandbox_has_shell():
             # 旧 runner 不支持终端：直接不暴露，模型会改用 run_python。
             continue
@@ -540,6 +568,9 @@ async def _check_tool_policy(
     definition = _TOOL_BY_NAME.get(name)
     if definition is None:
         raise ValueError(f"未知工具: {name}")
+    if _wake_blocks(definition):
+        dbg(f"群 {group_id} 工具策略拒绝 {name}: 定时任务唤醒回合不允许")
+        raise PermissionError("定时任务执行时不能做群管理操作，也不能再设新的定时任务")
     if definition.admin and not capabilities.can_manage:
         dbg(f"群 {group_id} 工具策略拒绝 {name}: 机器人没有群管理权限")
         raise PermissionError("机器人没有群管理权限")

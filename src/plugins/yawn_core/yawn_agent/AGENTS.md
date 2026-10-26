@@ -194,3 +194,14 @@
 - 最近调用记录只放进程内有界缓冲（含搜索词），`delete_member_memories` 必须同时调 `forget_member_recent`；WebUI 只回显密钥来源和掩码。
 - 没有本轮成功的 `web_search`/`web_fetch` 不得声称“搜了一下/搜索结果显示”（`speech_claims.py` 的 `web_search` 族）。
 - 新增 web 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_web_search.py`。
+
+## 定时任务
+
+- 工具族 `schedule`：`schedule_task`（可 `dry_run` 只预览）、`list_scheduled_tasks`、`update_scheduled_task`（edit/pause/resume；改时间必须带 `kind`）、`cancel_scheduled_task`（`task_id` 或 `all_mine`）。成员只能改/取消自己设的任务，群主/管理员可以动本群任意任务；“仅管理员可创建”在 handler 里拒绝，不在发现阶段隐藏（成员仍要能查看、取消自己的）。
+- 规则引擎是纯函数 `schedule_spec.py`：once/interval/daily/weekly/monthly/cron，附加 window、start_at/end_at、months、skip_dates。**APScheduler 3 的星期 0=周一**，标准 cron 的星期字段一律先转成 sun…sat 名字再交给 CronTrigger；新增规则种类时同步 `describe`、`min_gap_minutes` 与前端 `webui/src/schedules/schedule-meta.ts`。
+- 存储走 `AgentScheduledTask`（迁移 `d7f9b1c3e5a7`），表不存在时 `schedule_store` 抛 `ScheduleUnavailableError`，工具如实说“暂不可用”，WebUI 只读接口降级。策略与当日用量是 JSON（`data/agent_schedule/`），不需要迁移和重启。
+- 执行器 `schedule_runner.py` 每 20 秒一次：`claim_due` 用 `revision` 条件更新领租约，**先推进 `next_run_at` 并提交再执行**，进程崩溃最多漏一次、不会重复执行。同一个群串行（共用群锁），跨群并发受 `concurrency` 限制。错过宽限按 `missed_policy`（补跑最多一次、只补 `catch_up_max_hours` 以内）；免打扰按 `quiet_policy` 推迟或跳过；失败按 2/5/15 分钟退避重试，连续失败到上限自动暂停；创建者退群自动暂停。
+- `agent` 模式的唤醒回合：设置 contextvar `ScheduledWake`，构造 `trigger_source="scheduled_task"`、`message_id=None` 的合成事件交给 `dialogue.process_group_message`，创建者作为 actor（`mention_creator` 时进 `mentions` 以便 @）。`context_loader` 把 `wake.prompt_payload()` 放进 `context["scheduled_wake"]`，`prompt.py` 据此追加 `core.scheduled_wake` 段。**唤醒回合里隐藏并拦截**特权/高危工具和 `schedule_task`（`tools._wake_blocks`），防止定时任务自我繁殖或无人值守地管群。`notify` 模式不调模型，直接 `send_outbound_message` 并落库。
+- 不得在没有本轮成功的 `schedule_task`/`update_scheduled_task` 时声称“已经定好了”，没有 `cancel_scheduled_task` 时声称“取消了”（`speech_claims.py` 的 `schedule_set`/`schedule_cancel` 族）。
+- 指令文本创建时过 `persona.text_overrides_policy`，拒绝 CQ 码与 @全体；指令只在到点时作为“创建者当时的请求”交给模型，不提升权限。
+- 不改 `dialogue.py`（已接近 1500 行上限）：唤醒语义全部通过 contextvar + `context_loader` + `prompt.py` + `tools.py` 接入。新增 schedule 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_schedule.py`。

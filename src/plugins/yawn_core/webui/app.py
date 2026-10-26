@@ -43,6 +43,7 @@ from .hub import hub
 from .overview_routes import router as overview_router
 from .rpg_modules import router as rpg_modules_router
 from .sandbox import router as sandbox_router
+from .schedules import router as schedules_router
 from .service import BEIJING_TZ, overview
 from .users import router as users_router
 from .web_search import router as web_search_router
@@ -133,6 +134,7 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(rpg_modules_router)
     app.include_router(sandbox_router)
     app.include_router(web_search_router)
+    app.include_router(schedules_router)
 
     @app.middleware("http")
     async def webui_audit_middleware(request: Request, call_next: Any) -> Response:

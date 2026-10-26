@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: noqa: E501, RUF001
 """Agent tool registry: schema, permissions and OneBot capability metadata."""
 
 from __future__ import annotations
@@ -106,6 +106,31 @@ class ToolDefinition:
     intent_keywords: tuple[str, ...] = ()
     # 给模型的前置依赖提示，随 discover_tools 结果返回；例如“先查 user_id”。
     prerequisites: str = ""
+
+
+# 定时任务的时间规则参数；schedule_task 与 update_scheduled_task 共用。
+_CLOCK_PATTERN = r"^([01]?\d|2[0-3])[:：][0-5]\d$"
+_SCHEDULE_FIELDS: dict[str, Any] = {
+    "instruction": {"type": "string", "minLength": 1, "maxLength": 600, "description": "mode=agent：到点时你要做的事（写清楚对象和要点，如“提醒@小明交作业并说一句鼓励”“查今天的热点发到群里”）；mode=notify：到点原样发出的提醒正文"},
+    "title": {"type": "string", "maxLength": 40, "description": "简短标题，省略用 instruction 开头"},
+    "mode": {"type": "string", "enum": ["agent", "notify"], "description": "agent=到点唤醒你执行（默认）；notify=到点直接发 instruction 原文，不调模型，适合纯提醒"},
+    "kind": {"type": "string", "enum": ["once", "interval", "daily", "weekly", "monthly", "cron"], "description": "once 单次（配 at 或 delay_minutes）；interval 每隔 every_minutes；daily/weekly/monthly 配 times；cron 配 cron"},
+    "at": {"type": "string", "maxLength": 32, "description": "单次触发时间 YYYY-MM-DD HH:MM（北京时间）"},
+    "delay_minutes": {"type": "integer", "minimum": 1, "maximum": 525600, "description": "单次：从现在起多少分钟后（“半小时后”=30）"},
+    "every_minutes": {"type": "integer", "minimum": 1, "maximum": 44640, "description": "interval：间隔分钟数"},
+    "times": {"type": "array", "items": {"type": "string", "pattern": _CLOCK_PATTERN}, "maxItems": 8, "description": 'daily/weekly/monthly：一天里的钟点，如 ["08:00","21:30"]'},
+    "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 7}, "maxItems": 7, "description": "weekly：1=周一…7=周日；工作日 [1,2,3,4,5]"},
+    "month_days": {"type": "array", "items": {"type": "integer", "minimum": -1, "maximum": 31}, "maxItems": 31, "description": "monthly：几号，-1=每月最后一天"},
+    "months": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 12}, "maxItems": 12, "description": "只在这些月份；monthly + months + month_days 就是每年某天（生日、纪念日）"},
+    "cron": {"type": "string", "maxLength": 64, "description": 'kind=cron：5 段 分 时 日 月 周（周 0/7=周日），如 "30 8 * * 1-5"'},
+    "window_start": {"type": "string", "pattern": _CLOCK_PATTERN, "description": "interval：每天只在 window_start–window_end 之间触发"},
+    "window_end": {"type": "string", "pattern": _CLOCK_PATTERN},
+    "start_at": {"type": "string", "maxLength": 32, "description": "循环任务从这个时间起生效 YYYY-MM-DD HH:MM"},
+    "end_at": {"type": "string", "maxLength": 32, "description": "循环任务到这个时间为止"},
+    "skip_dates": {"type": "array", "items": {"type": "string"}, "maxItems": 60, "description": "跳过的日期 YYYY-MM-DD（节假日等）"},
+    "max_runs": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "循环任务总共执行几次后自动结束"},
+    "mention_me": {"type": "boolean", "description": "到点时是否 @ 设任务的人（默认 true；给全群的播报可设 false）"},
+}
 
 
 TOOL_DEFINITIONS = (
@@ -975,6 +1000,58 @@ TOOL_DEFINITIONS = (
         family="file",
         keywords=("发文件", "发送文件", "上传文件", "传文件", "发个文件", "传到群文件"),
         prerequisites="先用 list_agent_files 拿到真实文件名，不要猜路径",
+    ),
+    ToolDefinition(
+        "schedule_task",
+        "设一个定时任务：到点唤醒你执行一段任务（mode=agent，可查资料、跑代码、发图），或直接在群里发一句提醒（mode=notify）。支持单次、N 分钟后、固定间隔、每天/每周/每月的几个钟点、每年某天和 cron；可加起止时间、只在某时段触发、跳过日期、总次数",
+        _SCHEDULE_FIELDS
+        | {
+            "dry_run": {"type": "boolean", "description": "true 时只校验并返回接下来几次触发时间，不真正创建；时间不确定时先预览给成员确认"},
+        },
+        required=("instruction", "kind"),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="schedule",
+        keywords=("定时", "定时任务", "提醒我", "叫我", "到点", "闹钟", "每天", "每周", "每月", "每年", "几点", "分钟后", "小时后", "明天", "早上", "晚上", "循环", "周期", "倒计时", "cron", "日程", "打卡提醒", "生日"),
+        prerequisites="时间一律按北京时间；at 写 YYYY-MM-DD HH:MM（看实时状态里的 clock 换算“明天/下周”），只写 HH:MM 表示下一次到这个钟点",
+    ),
+    ToolDefinition(
+        "list_scheduled_tasks",
+        "查看本群的定时任务（谁设的、规则、下次触发、已运行次数、上次结果）",
+        {
+            "scope": {"type": "string", "enum": ["mine", "group"], "description": "mine 只看调用者自己设的（默认），group 看全群"},
+            "include_finished": {"type": "boolean", "description": "是否包括已完成/已取消的任务"},
+            "task_id": {"type": "integer", "minimum": 1, "description": "只看这一个任务（含接下来几次触发时间和最近运行记录）"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        },
+        family="schedule",
+        keywords=("我的提醒", "有哪些提醒", "定时任务列表", "查看定时", "设了什么", "下次提醒", "提醒还在吗"),
+    ),
+    ToolDefinition(
+        "update_scheduled_task",
+        "修改、暂停或恢复一个定时任务（只能改调用者自己设的；群主/管理员可以改任何人的）。改时间时传 kind 和对应字段，整条规则会被替换",
+        {
+            "task_id": {"type": "integer", "minimum": 1},
+            "action": {"type": "string", "enum": ["edit", "pause", "resume"], "description": "edit 修改内容/规则（默认）；pause 暂停；resume 恢复"},
+        }
+        | {key: value for key, value in _SCHEDULE_FIELDS.items() if key != "kind"}
+        | {"kind": {**_SCHEDULE_FIELDS["kind"], "description": "要改时间规则时才传；不传则保留原规则"}},
+        required=("task_id",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="schedule",
+        keywords=("改提醒", "改成", "推迟提醒", "暂停提醒", "恢复提醒", "修改定时", "换个时间"),
+        prerequisites="先用 list_scheduled_tasks 拿到 task_id",
+    ),
+    ToolDefinition(
+        "cancel_scheduled_task",
+        "取消定时任务（只能取消调用者自己设的；群主/管理员可以取消任何人的）。all_mine=true 取消调用者在本群的全部任务",
+        {
+            "task_id": {"type": "integer", "minimum": 1},
+            "all_mine": {"type": "boolean"},
+        },
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="schedule",
+        keywords=("取消提醒", "不用提醒了", "删掉提醒", "取消定时", "别提醒了", "停掉"),
+        prerequisites="先用 list_scheduled_tasks 拿到 task_id",
     ),
 )
 
