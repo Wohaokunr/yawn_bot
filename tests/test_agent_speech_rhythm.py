@@ -247,12 +247,48 @@ def test_auto_splits_short_lines() -> None:
     assert len(plan.parts) == 2
 
 
-def test_auto_splits_long_single_paragraph_at_sentence_ends() -> None:
+def test_auto_no_longer_chops_single_paragraph_into_sentences() -> None:
+    """模型没选节奏时系统不替它按句号切：那只是把长话伪装成分条。"""
+
     text = "这个问题我之前也遇到过，原因是缓存没清。你先把浏览器缓存清掉再刷新一次。还不行的话把报错截图发我看看。"
     plan = R.plan_text_rhythm(text)
+    assert not plan.multi
+    assert plan.source == "single"
+
+
+def test_declared_split_without_markers_still_splits_sentences() -> None:
+    text = "这个问题我之前也遇到过，原因是缓存没清。你先把浏览器缓存清掉再刷新一次。还不行的话把报错截图发我看看。"
+    plan = R.plan_text_rhythm(text, declared=R.RHYTHM_SPLIT)
     assert plan.source == "auto_sentence"
     assert 2 <= len(plan.parts) <= 3
     assert "".join(plan.parts).replace("。", "") == text.replace("。", "")
+
+
+def test_declared_burst_with_long_parts_uses_normal_pace() -> None:
+    plan = R.plan_text_rhythm(
+        "", parts=("这个问题我之前也遇到过原因就是缓存没清", "你先清掉"), declared=R.RHYTHM_BURST
+    )
+    assert plan.rhythm == R.RHYTHM_SPLIT
+    short = R.plan_text_rhythm("", parts=("不是吧", "真的假的", "我不信"), declared=R.RHYTHM_BURST)
+    assert short.rhythm == R.RHYTHM_BURST
+
+
+def test_tagged_model_output_round_trip() -> None:
+    plan = speech.speech_plan_from_text("【节奏:连发】不是吧|||真的假的|||我不信")
+    assert plan.rhythm == R.RHYTHM_BURST
+    rhythm = R.plan_text_rhythm(plan.text, parts=plan.parts, declared=plan.rhythm)
+    assert rhythm.parts == ("不是吧", "真的假的", "我不信")
+    assert rhythm.source == "model"
+
+    block = speech.speech_plan_from_text("【节奏:整段】\n这个得先看日志再说")
+    assert block.text == "这个得先看日志再说"
+    assert block.rhythm == R.RHYTHM_BLOCK
+    assert not R.plan_text_rhythm(block.text, declared=block.rhythm).multi
+
+    pop = speech.speech_plan_from_text("【节奏:蹦字】你在干嘛呀")
+    popped = R.plan_text_rhythm(pop.text, declared=pop.rhythm)
+    assert popped.rhythm == R.RHYTHM_POP
+    assert "".join(popped.parts) == "你在干嘛呀"
 
 
 def test_short_text_is_not_auto_split() -> None:
@@ -409,6 +445,49 @@ def test_rhythm_instruction_mentions_marker_and_rhythms() -> None:
     text = R.rhythm_instruction(scene="conversation", act="answer", complexity="normal")
     for word in ("|||", "整段", "连发", "蹦字"):
         assert word in text
+
+
+def test_rhythm_instruction_asks_for_a_choice_every_time_and_caps_length() -> None:
+    text = R.rhythm_instruction(scene="conversation", act="continue", complexity="normal")
+    # 每次都要先选节奏，并且给出可照抄的格式示例。
+    assert "每次都要选" in text
+    assert "【节奏:连发】不是吧|||" in text
+    # 节奏不能变成多说话的理由。
+    assert "加起来的字数也和发一条时一样" in text
+
+
+def test_rhythm_instruction_follows_emotion_state_not_keywords() -> None:
+    calm = R.rhythm_instruction(scene="conversation", act="continue", complexity="normal")
+    amused = R.rhythm_instruction(
+        scene="conversation",
+        act="continue",
+        complexity="normal",
+        emotion={"label": "amused", "expression_intensity": 0.6},
+    )
+    guarded = R.rhythm_instruction(
+        scene="conversation",
+        act="continue",
+        complexity="normal",
+        emotion={"label": "guarded", "expression_intensity": 0.6},
+    )
+    faint = R.rhythm_instruction(
+        scene="conversation",
+        act="continue",
+        complexity="normal",
+        emotion={"label": "amused", "expression_intensity": 0.1},
+    )
+    assert "心情不错" in amused and "心情不错" not in calm
+    assert "别连发也别蹦字" in guarded
+    assert faint == calm
+
+
+def test_speech_instruction_passes_emotion_to_rhythm() -> None:
+    instruction = speech_policy.build_speech_instruction(
+        None,
+        {"trigger": "mention"},
+        context={"emotion_state": {"label": "irritated", "expression_intensity": 0.7}},
+    )
+    assert "短句连发更像你" in instruction
 
 
 def test_rhythm_instruction_adapts_to_scene_and_complexity() -> None:
