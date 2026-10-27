@@ -18,6 +18,7 @@ from .speech_rhythm import (
     parse_rhythm_markup,
     split_segment_markup,
 )
+from .sticker_markup import expand_sticker_segments, has_sticker_markup
 
 SPEECH_SCENE_DIRECT_REPLY = "direct_reply"
 SPEECH_SCENE_REPLY_THREAD = "reply_thread"
@@ -219,6 +220,23 @@ def speech_plan_from_text(
     interaction_plan: dict[str, Any] | None = None,
     rhythm: object = RHYTHM_AUTO,
 ) -> SpeechPlan:
+    if has_sticker_markup(text):
+        # [表情:名字] 要自成一条消息，走结构化消息段路径（sticker 伪段 + break）。
+        return speech_plan_from_segments(
+            [{"type": "text", "text": str(text or "")}],
+            scene=scene,
+            style=style,
+            target=target,
+            reason=reason,
+            confidence=confidence,
+            action=action,
+            act=act,
+            turn_pressure=turn_pressure,
+            topic=topic,
+            topic_action=topic_action,
+            interaction_plan=interaction_plan,
+            rhythm=rhythm,
+        )
     markup = parse_rhythm_markup(text)
     declared = normalize_rhythm(rhythm)
     return SpeechPlan(
@@ -255,9 +273,10 @@ def speech_plan_from_segments(
     interaction_plan: dict[str, Any] | None = None,
     rhythm: object = RHYTHM_AUTO,
 ) -> SpeechPlan:
-    safe_segments, tagged = split_segment_markup(
+    expanded, _stickers = expand_sticker_segments(
         [dict(item) for item in segments if isinstance(item, dict)]
     )
+    safe_segments, tagged = split_segment_markup(list(expanded))
     declared = normalize_rhythm(rhythm)
     return SpeechPlan(
         scene=normalize_speech_scene(scene),

@@ -197,6 +197,16 @@
 - 没有本轮成功的 `web_search`/`web_fetch` 不得声称“搜了一下/搜索结果显示”（`speech_claims.py` 的 `web_search` 族）。
 - 新增 web 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_web_search.py`。
 
+## 表情包
+
+- 模型在正文写 `[表情:名字]`（也认 `[表情包: 名字]`、`【表情：名字】`、`[sticker:xx]`），`sticker_markup.expand_sticker_segments` 把它拆成内部 `sticker` 伪段，前后各插一个带 `around_sticker` 标记的 `break`，让表情包在节奏序列里自成一条；不增加工具回合。伪段只在 SpeechPlan 内部存在，发送前必须经 `sticker_send.resolve_plan_stickers` 换成真正的 `reaction` 段或去掉（去掉时用 `drop_sticker_at` 收回自动 break、把两侧文字接回一条），绝不进 OneBot 校验。
+- 改分条节奏（`speech_rhythm`/`speech_delivery`）时保持 `break` 伪段语义不变；表情包的位置、冷却与选择不属于节奏层。
+- **不按聊天内容的关键词决定发不发表情包**：时机由模型自己判断；系统只做两层门控——提示词层（`sticker_turn_instruction`，开关/本群开放/库存/冷却/每日上限/人设 `allow_spontaneous_reaction`）和发送层（`resolve_plan_stickers` 再查一遍并按 `max_per_message` 截断）。菜单挑选不看聊天内容：优先最近没发过的，按小时稳定洗牌；按情绪标签挑时随机且偏向少用的。
+- 库存储在 `AGENT_FILE_ROOT/reactions/index.json`（`sticker_library.py`，兼容旧 `reactions` 索引）；策略与用量是 JSON（`data/agent_stickers/`，`sticker_policy.py`），不需要迁移。新增提示词文本登记在 `prompt_sections.py`（`speech.sticker`、`proactive.sticker`）。
+- 发送为 `image` 段 + `sub_type=1` + `summary="[名字]"`；历史转述统一写成 `[表情包: 名字]`，与成员发来的表情包同一写法。
+- 收藏走 `save_sticker`（族 `reaction`，state_write）：只认当前消息/引用里的图片或近期附件编号，按 `collect_mode` 决定直接可用还是待审核；成员已退出记忆的不收。没有本轮成功的 `save_sticker` 不得声称“收藏了”（`speech_claims.py` 的 `sticker_save` 族）。
+- `delete_member_memories` 必须同时调 `sticker_library.forget_member`。新增 reaction 族工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_sticker.py`。
+
 ## 定时任务
 
 - 工具族 `schedule`：`schedule_task`（可 `dry_run` 只预览）、`list_scheduled_tasks`、`update_scheduled_task`（edit/pause/resume；改时间必须带 `kind`）、`cancel_scheduled_task`（`task_id` 或 `all_mine`）。成员只能改/取消自己设的任务，群主/管理员可以动本群任意任务；“仅管理员可创建”在 handler 里拒绝，不在发现阶段隐藏（成员仍要能查看、取消自己的）。

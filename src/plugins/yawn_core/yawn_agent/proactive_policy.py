@@ -33,6 +33,8 @@ from .persona import (
     persona_behavior_instruction,
 )
 from .prompt_sections import apply_section
+from .sticker_markup import has_sticker_markup, strip_sticker_markup
+from .sticker_send import sticker_turn_instruction
 
 _ACTIVE_MIN_GAP_SECONDS = 30.0
 _ACTIVE_MIN_MEMBER_MESSAGES = 2
@@ -304,20 +306,35 @@ def apply_persona_behavior_to_decision(
     """
 
     behavior = persona_behavior(config)
-    if behavior.allow_spontaneous_reaction or not decision.segments:
+    if behavior.allow_spontaneous_reaction:
+        return decision
+    # [表情:名字] 标记和 reaction 段一样是表情包，一并拿掉。
+    has_markup = has_sticker_markup(decision.text) or any(
+        has_sticker_markup(item.get("text")) for item in decision.segments
+    )
+    if not decision.segments and not has_markup:
         return decision
     filtered = tuple(
-        item
+        {**item, "text": strip_sticker_markup(item.get("text"))}
+        if str(item.get("type") or "").strip().lower() == "text"
+        and has_sticker_markup(item.get("text"))
+        else item
         for item in decision.segments
         if str(item.get("type") or "").strip().lower() != "reaction"
     )
-    if filtered == decision.segments:
+    filtered = tuple(
+        item
+        for item in filtered
+        if str(item.get("type") or "").strip().lower() != "text"
+        or str(item.get("text") or "").strip()
+    )
+    if filtered == decision.segments and not has_markup:
         return decision
     text = "".join(
         str(item.get("text") or "")
         for item in filtered
         if str(item.get("type") or "").strip().lower() == "text"
-    ).strip() or decision.text
+    ).strip() or strip_sticker_markup(decision.text)
     if not filtered and not text:
         return ProactiveDecision(
             "wait",
@@ -347,6 +364,9 @@ def recent_proactive_lines(config: GroupAgentConfig) -> list[str]:
     return [line for line in lines if line][-4:]
 
 
+_STICKER_SCENES = {"active": "active_interject", "followup": "followup", "warmup": "warmup"}
+
+
 def build_user_prompt_parts(
     scene: str,
     config: GroupAgentConfig,
@@ -369,6 +389,14 @@ def build_user_prompt_parts(
     parts: list[tuple[str, str]] = [
         base,
         ("proactive.behavior", persona_behavior_instruction(resolved_behavior, scene=scene)),
+        (
+            "proactive.sticker",
+            sticker_turn_instruction(
+                gid,
+                scene=_STICKER_SCENES.get(scene, "followup"),
+                allow_reaction=resolved_behavior.allow_spontaneous_reaction,
+            ),
+        ),
         ("proactive.memory_use", _MEMORY_USE_PROMPT),
     ]
     if scene == "warmup" and warmup_state is not None and now is not None:

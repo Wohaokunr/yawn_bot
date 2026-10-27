@@ -1,18 +1,26 @@
-# ruff: noqa: TRY003
-"""轻量表情包索引。
+# ruff: noqa: TRY003,TC003
+"""表情包库的旧接口（``reaction_id`` + ``search_reactions``）。
 
-运行时目录默认位于 ``AGENT_FILE_ROOT/reactions``，索引文件为 ``index.json``。
-模型只接触 reaction_id/tags，不直接接触或猜测本地文件路径。
+真正的存储在 :mod:`sticker_library`：运行时目录默认位于
+``AGENT_FILE_ROOT/reactions``，索引文件为 ``index.json``。模型只接触
+reaction_id/名字/tags，不直接接触或猜测本地文件路径。
 """
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .sticker_library import (
+    StickerError,
+    available_stickers,
+    get_sticker,
+    index_path,
+    library_root,
+    sticker_path,
+)
 
 _MAX_RESULTS = 8
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -27,74 +35,27 @@ class ReactionEntry:
 
 
 def reaction_root() -> Path:
-    root = Path(os.path.realpath(os.environ.get("AGENT_FILE_ROOT", "data/agent_files")))
-    return Path(os.path.realpath(str(root / "reactions")))
+    return library_root()
 
 
 def reaction_index_path() -> Path:
-    return reaction_root() / "index.json"
+    return index_path()
 
 
-def _inside(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
+def search_reactions(
+    query: str, *, limit: int = 5, group_id: int | None = None
+) -> list[dict[str, Any]]:
+    """模型主动查表情包：按它给的词在名字/标签/说明里找（只返回本群可用的）。"""
 
-
-def _load_entries() -> list[ReactionEntry]:
-    index = reaction_index_path()
-    if not index.is_file():
-        return []
-    try:
-        payload = json.loads(index.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return []
-    if isinstance(payload, dict):
-        payload = payload.get("reactions", [])
-    if not isinstance(payload, list):
-        return []
-
-    root = reaction_root()
-    entries: list[ReactionEntry] = []
-    seen: set[str] = set()
-    for raw in payload:
-        if not isinstance(raw, dict):
-            continue
-        reaction_id = str(raw.get("id") or raw.get("reaction_id") or "").strip()
-        file_name = str(raw.get("file") or "").strip()
-        if not _ID_RE.fullmatch(reaction_id) or reaction_id in seen or not file_name:
-            continue
-        candidate = Path(os.path.realpath(str(root / file_name)))
-        if not _inside(candidate, root) or not candidate.is_file():
-            continue
-        raw_tags = raw.get("tags", [])
-        tags = tuple(
-            dict.fromkeys(
-                str(item).strip()
-                for item in (raw_tags if isinstance(raw_tags, list) else [])
-                if str(item).strip()
-            )
-        )
-        description = str(raw.get("description") or "").strip()[:160]
-        entries.append(
-            ReactionEntry(
-                reaction_id=reaction_id,
-                file_name=file_name,
-                tags=tags,
-                description=description,
-            )
-        )
-        seen.add(reaction_id)
-    return entries
-
-
-def search_reactions(query: str, *, limit: int = 5) -> list[dict[str, Any]]:
     needle = " ".join(str(query).casefold().split())
     if not needle:
         return []
     tokens = [item for item in re.split(r"[\s,，/|]+", needle) if item]
-    scored: list[tuple[int, ReactionEntry]] = []
-    for entry in _load_entries():
+    scored: list[tuple[int, Any]] = []
+    for entry in available_stickers(group_id):
         fields = [
-            entry.reaction_id.casefold(),
+            entry.sticker_id.casefold(),
+            entry.name.casefold(),
             *(tag.casefold() for tag in entry.tags),
             entry.description.casefold(),
         ]
@@ -108,11 +69,12 @@ def search_reactions(query: str, *, limit: int = 5) -> list[dict[str, Any]]:
         score += sum(8 for token in tokens if token in fields)
         if score:
             scored.append((score, entry))
-    scored.sort(key=lambda item: (-item[0], item[1].reaction_id))
+    scored.sort(key=lambda item: (-item[0], item[1].sticker_id))
     bounded = max(1, min(int(limit), _MAX_RESULTS))
     return [
         {
-            "reaction_id": entry.reaction_id,
+            "reaction_id": entry.sticker_id,
+            "name": entry.name,
             "tags": list(entry.tags),
             **({"description": entry.description} if entry.description else {}),
         }
@@ -120,19 +82,19 @@ def search_reactions(query: str, *, limit: int = 5) -> list[dict[str, Any]]:
     ]
 
 
-def resolve_reaction(reaction_id: str) -> Path:
+def resolve_reaction(reaction_id: str, *, group_id: int | None = None) -> Path:
     target = str(reaction_id).strip()
     if not _ID_RE.fullmatch(target):
         raise ValueError("reaction_id 格式无效")
-    for entry in _load_entries():
-        if entry.reaction_id != target:
-            continue
-        root = reaction_root()
-        candidate = Path(os.path.realpath(str(root / entry.file_name)))
-        if not _inside(candidate, root) or not candidate.is_file():
-            break
-        return candidate
-    raise ValueError("表情包不存在或已从索引移除")
+    entry = get_sticker(target)
+    if entry is None or not entry.usable:
+        raise ValueError("表情包不存在或已从索引移除")
+    if group_id is not None and not entry.available_in(group_id):
+        raise ValueError("这个表情包没有对本群开放")
+    try:
+        return sticker_path(entry)
+    except StickerError as exc:
+        raise ValueError("表情包不存在或已从索引移除") from exc
 
 
 __all__ = [

@@ -1971,6 +1971,13 @@ async def delete_member_memories(session: Any, group_id: int, user_id: int) -> i
         forget_member_recent(group_id, user_id)
     except Exception:  # noqa: BLE001
         dbg_exc(f"群 {group_id} 清除成员 {user_id} 的搜索记录失败(忽略)")
+    # 他收藏的表情包上记着“谁加的”，抹掉号码（图本身由管理员决定去留）。
+    from .sticker_library import forget_member as forget_sticker_owner
+
+    try:
+        forget_sticker_owner(group_id, user_id)
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {group_id} 清除成员 {user_id} 的表情包收藏记录失败(忽略)")
     return removed
 
 

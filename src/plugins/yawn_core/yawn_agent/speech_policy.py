@@ -46,6 +46,7 @@ from .speech_act import (
 )
 from .speech_native import native_expression_instruction, plan_native_expression
 from .speech_rhythm import rhythm_instruction
+from .sticker_send import sticker_turn_instruction
 from .turn_taking import plan_turn_taking, turn_taking_instruction
 
 if TYPE_CHECKING:
@@ -395,6 +396,15 @@ def build_speech_parts(
                 complexity=complexity,
                 style=style,
                 emotion=(context or {}).get("emotion_state"),
+            ),
+        ),
+        (
+            "speech.sticker",
+            sticker_turn_instruction(
+                group_id,
+                scene=scene,
+                complexity=complexity,
+                allow_reaction=style.allow_spontaneous_reaction,
             ),
         ),
     )
