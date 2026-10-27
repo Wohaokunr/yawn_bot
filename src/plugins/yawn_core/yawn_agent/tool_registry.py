@@ -389,6 +389,20 @@ TOOL_DEFINITIONS = (
         keywords=("表情包", "reaction", "无语", "吃瓜", "震惊"),
     ),
     ToolDefinition(
+        "save_sticker",
+        "把群成员发的一张图收藏进表情包库（成员明确要你收藏/存下某张表情时用）；默认取本条或引用消息里的图",
+        {
+            "name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "几个字说明它表达什么，如“捂脸笑”“狗头”“震惊”；以后用 [表情:名字] 发它"},
+            "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10}, "maxItems": 6, "description": '情绪/场景标签，如 ["无语","尴尬"]'},
+            "description": {"type": "string", "maxLength": 120, "description": "什么时候适合发（可选）"},
+            "id": {"type": "string", "minLength": 1, "maxLength": 32, "description": "图片 id：本条消息的媒体序号或 list_chat_attachments 的 id；省略=本条/引用消息里的图，没有就取群里最近一张"},
+        },
+        required=("name",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="reaction",
+        keywords=("收藏表情", "存表情", "收藏这个", "存下来", "加进表情包", "表情包库"),
+    ),
+    ToolDefinition(
         "send_message",
         "发送当前群的结构化消息；text 里用 ||| 隔开的部分会像真人一样依次发成几条，"
         "rhythm 选节奏（block 整段/split 分条/burst 连发/pop 蹦字）；成功后不要重复发送同样最终文本",

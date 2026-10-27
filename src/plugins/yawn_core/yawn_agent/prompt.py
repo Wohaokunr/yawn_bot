@@ -71,6 +71,7 @@ _SEND_MESSAGE_RULES = (
 )
 _REACTION_RULES = (
     "表情包先用 search_reactions 获取 reaction_id，再交给 send_message；"
+    "发言策略里有表情包菜单时，直接在正文写 [表情:名字] 更省事。"
     "禁止猜本地路径。"
 )
 _FORWARD_RULES = (

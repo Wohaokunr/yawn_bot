@@ -111,6 +111,14 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         ),
         frozenset({"cancel_scheduled_task", "update_scheduled_task"}),
     ),
+    # 表情包收藏：没真的存进库就说“收藏好了/存下来了”，下次根本发不出来。
+    "sticker_save": (
+        re.compile(
+            rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:收藏|存|加)(?:好|进|到|下|了)[^。！？!?\n]{{0,6}}(?:表情包|表情|这张|图)"
+            r"|(?:表情包|表情|这张)(?:已经|已)?(?:收藏|存)(?:好|下|进去)(?:了|啦)"
+        ),
+        frozenset({"save_sticker"}),
+    ),
 }
 
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]*|\n")

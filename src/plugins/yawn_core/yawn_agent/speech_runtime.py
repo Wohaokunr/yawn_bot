@@ -312,6 +312,17 @@ def speech_simulation_payload(
     return payload
 
 
+def _sticker_label(group: list[dict[str, Any]]) -> str:
+    """预览里把表情包那一条写成 [表情包: 名字]（还没按策略解析，只看模型写的名字）。"""
+
+    for item in group:
+        if item.get("type") == "sticker":
+            return f"[表情包: {str(item.get('name') or '').strip()}]"
+        if item.get("type") == "reaction":
+            return f"[表情包: {str(item.get('reaction_id') or '').strip()}]"
+    return ""
+
+
 def rhythm_preview(
     *,
     text: object = "",
@@ -345,6 +356,7 @@ def rhythm_preview(
                     for item in group
                     if item.get("type") == "text"
                 )
+                or _sticker_label(group)
                 or "[消息段]"
                 for group in groups
             ],

@@ -58,6 +58,10 @@ from .speech_rhythm import (
     single_rhythm,
     strip_break_segments,
 )
+from .sticker_library import get_sticker
+from .sticker_markup import has_sticker_markup, sticker_names, strip_sticker_markup
+from .sticker_policy import note_sent as note_stickers_sent
+from .sticker_send import resolve_plan_stickers
 
 MAX_OUTBOUND_SEGMENTS = 12
 MAX_OUTBOUND_TEXT_CHARS = 4_000
@@ -476,6 +480,7 @@ async def prepare_speech_plan(
         recent_texts=recent_speech,
         autofix=speech_autofix,
     )
+    resolved = resolve_plan_stickers(resolved, group_id=group_id)
     trace_payload = resolved.trace_payload()
     if trace_context:
         trace_payload.update(trace_context)
@@ -633,6 +638,8 @@ async def prepare_speech_parts(
         recent_texts=recent_speech,
         autofix=speech_autofix,
     )
+    # [表情:名字] → 真正的表情包段（或按频率/库存去掉），之后它就是分条里的一条。
+    resolved = resolve_plan_stickers(resolved, group_id=group_id)
     trace_payload = resolved.trace_payload()
     if trace_context:
         trace_payload.update(trace_context)
@@ -837,6 +844,10 @@ def prepare_text_message(
 ) -> PreparedOutboundMessage:
     """纯文本也先形成 SpeechPlan，再走统一 outbound 表示。"""
 
+    if has_sticker_markup(text):
+        # 纯文本通道发不了表情包：去掉标记，只剩标记时退回文字表情 [名字]。
+        names = sticker_names(text)
+        text = strip_sticker_markup(text) or (f"[{names[0]}]" if names else "")
     plan = finalize_speech_plan(
         speech_plan_from_text(text, scene=speech_scene, style=speech_style),
         user_text=speech_user_text,
@@ -897,6 +908,7 @@ async def prepare_outbound_message(
         recent_texts=recent_speech,
         autofix=speech_autofix,
     )
+    plan = resolve_plan_stickers(plan, group_id=group_id)
     if trace_speech:
         trace_event(
             "speech",
@@ -1020,14 +1032,22 @@ async def prepare_outbound_message(
                     allowed={"type", "reaction_id"},
                 )
                 reaction_id = str(raw["reaction_id"]).strip()
-                reaction_path = resolve_reaction(reaction_id)
+                reaction_path = resolve_reaction(reaction_id, group_id=group_id)
                 path = await validate_outbound_image_path(
                     reaction_path, group_id=group_id, session=session
                 )
-                message += MessageSegment.image(str(path))
+                sticker = get_sticker(reaction_id)
+                sticker_name = sticker.name if sticker is not None else reaction_id
+                # 以 base64 内联（协议端不一定能读到 Bot 容器的文件），并按 NapCat
+                # 的约定标成表情包（sub_type=1 + summary），客户端显示为表情而不是照片。
+                image = MessageSegment.image(path.read_bytes())
+                image.data["sub_type"] = 1
+                image.data["summary"] = f"[{sticker_name}]"
+                message += image
                 records.append(
                     _segment_record("image", {"file": f"reaction:{reaction_id}"})
                 )
+                text_parts.append(f"[表情包: {sticker_name}]")
                 media_refs.append(
                     {"type": "image", "reaction_id": reaction_id, "source": "reaction"}
                 )
@@ -1201,6 +1221,22 @@ async def prepare_outbound_message(
         speech_scene=plan.scene,
         quality_issues=_quality_codes(plan),
     )
+
+
+def _note_sent_stickers(group_id: int, prepared: PreparedOutboundMessage) -> None:
+    """表情包真发出去了才计入冷却、当日额度和使用次数；统计失败不影响发送。"""
+
+    ids = [
+        str(item.get("reaction_id"))
+        for item in prepared.media_refs
+        if isinstance(item, dict) and item.get("reaction_id")
+    ]
+    if not ids:
+        return
+    try:
+        note_stickers_sent(group_id, ids)
+    except Exception:  # noqa: BLE001
+        dbg(f"群 {group_id} 表情包使用统计写入失败(忽略)")
 
 
 def _is_unsupported_error(error: BaseException) -> bool:
@@ -1434,6 +1470,7 @@ async def send_prepared_outbound(
                     source=source,
                     outcome="success",
                 )
+                _note_sent_stickers(group_id, prepared)
                 return SendResult(
                     sent=True,
                     message_id=extract_message_id(raw_result),

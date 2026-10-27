@@ -17,6 +17,7 @@ from . import (
     notice,
     sandbox,
     schedule,
+    sticker,
     web,
 )
 
@@ -35,6 +36,7 @@ _MODULES = (
     inbox,
     web,
     schedule,
+    sticker,
 )
 for module in _MODULES:
     for tool_name in module.NAMES:

@@ -18,6 +18,7 @@ import "./relations/relations.css";
 import "./environment.css";
 import "./sandbox/sandbox.css";
 import "./web-search/web-search.css";
+import "./stickers/stickers.css";
 import "./schedules/schedules.css";
 import "./theme-anime.css";
 

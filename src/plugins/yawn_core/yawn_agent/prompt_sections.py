@@ -565,6 +565,16 @@ SECTIONS: tuple[PromptSection, ...] = (
         "||| 分条与【节奏:…】标记说明。",
         tasks=_DP,
     ),
+    PromptSection(
+        "speech.sticker",
+        "表情包",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "[表情:名字] 用法、发送频率和本群可用表情包菜单。",
+        when="本群开放表情包、库里有图、不在冷却且人设允许接梗时",
+        tasks=_DP,
+    ),
     # ── 当前回合 ──
     PromptSection(
         "layers.current_turn_header",
@@ -620,6 +630,16 @@ SECTIONS: tuple[PromptSection, ...] = (
         "proactive_user",
         KIND_GENERATED,
         "按人设活跃度/社交性生成的参与分寸。",
+        tasks=_P,
+    ),
+    PromptSection(
+        "proactive.sticker",
+        "表情包",
+        "proactive",
+        "proactive_user",
+        KIND_GENERATED,
+        "主动/续聊里能用的表情包菜单与用法。",
+        when="允许主动发表情包且本群有可用表情时",
         tasks=_P,
     ),
     PromptSection(
