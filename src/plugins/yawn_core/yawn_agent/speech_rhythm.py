@@ -6,11 +6,12 @@
 节奏本身就在表达心情，所以由模型自己选：
 
 - 正文里用 ``|||`` 把要分开发的部分隔开，每部分就是一条消息；
-- 可以在开头写 ``【节奏:整段/分条/连发/蹦字】`` 指定节奏，标签发送前会剥掉。
+- 每次都在开头写 ``【节奏:整段/分条/连发/蹦字】`` 选定节奏，标签发送前会剥掉。
 
-本模块是纯函数、零 AI 成本：只解析模型给的标记，按结构（代码块、列表、段落、
-换行、句末标点）做保守的兜底拆分，再按节奏、情绪和人设算出每条之前的“打字”
-停顿。不按关键词猜意图，也不改写语义。真正的发送在 ``speech_delivery.py``。
+本模块是纯函数、零 AI 成本：只解析模型给的标记，按节奏算出每条之前的“打字”
+停顿（情绪和人设只调快慢）。模型没选节奏时只按它自己写的空行/换行兜底，不再替它
+把一整段按句号切开；模型选了“分条/连发”却没写 ``|||`` 时才按句子/短句拆。
+不按关键词猜意图，也不改写语义。真正的发送在 ``speech_delivery.py``。
 """
 
 from __future__ import annotations
@@ -67,6 +68,8 @@ POP_MAX_PARTS = 8
 POP_MAX_CHARS = 12
 # 三条以上、每条不超过这么多字，就按“连发”的快节奏发。
 BURST_PART_MAX_CHARS = 5
+# 声明连发但有一条超过这么多字，就按“分条”的正常速度发。
+BURST_LONG_PART_CHARS = 16
 DEFAULT_MAX_SPREAD_SECONDS = 10.0
 MAX_SPREAD_SECONDS_LIMIT = 30.0
 AUTO_SENTENCE_MIN_CHARS = 40
@@ -337,8 +340,14 @@ def _balanced_groups(units: list[str], count: int, joiner: str = "") -> list[str
     return [joiner.join(group) for group in groups if group]
 
 
-def _auto_parts(text: str, *, max_parts: int) -> tuple[tuple[str, ...], str]:
-    """模型没写标记时的保守兜底；返回 (parts, source)。"""
+def _auto_parts(
+    text: str, *, max_parts: int, sentences: bool = True
+) -> tuple[tuple[str, ...], str]:
+    """按结构拆分；返回 (parts, source)。
+
+    sentences=False 时只认模型自己写的空行/换行：模型没选节奏时系统不再替它
+    把一整段按句号切开（那样只是把长话伪装成分条，还会鼓励它越写越长）。
+    """
 
     if max_parts < 2 or is_structured_text(text):
         return (), "structured" if is_structured_text(text) else "single"
@@ -354,15 +363,15 @@ def _auto_parts(text: str, *, max_parts: int) -> tuple[tuple[str, ...], str]:
         _visible_len(item) <= AUTO_LINE_MAX_CHARS for item in lines
     ):
         return tuple(lines), "auto_line"
-    if len(lines) > 1 or _visible_len(text) < AUTO_SENTENCE_MIN_CHARS:
+    if not sentences or len(lines) > 1 or _visible_len(text) < AUTO_SENTENCE_MIN_CHARS:
         return (), "single"
-    sentences = _sentences(text)
-    if len(sentences) < 2:
+    units = _sentences(text)
+    if len(units) < 2:
         return (), "single"
     count = 2 if _visible_len(text) < 90 else max_parts
-    groups = _balanced_groups(sentences, count)
+    groups = _balanced_groups(units, count)
     if len(groups) < 2 or any(_visible_len(item) < AUTO_PART_MIN_CHARS for item in groups):
-        groups = _balanced_groups(sentences, 2)
+        groups = _balanced_groups(units, 2)
     if len(groups) < 2 or any(_visible_len(item) < AUTO_PART_MIN_CHARS for item in groups):
         return (), "single"
     return tuple(groups), "auto_sentence"
@@ -659,7 +668,7 @@ def plan_text_rhythm(
         ):
             return single_rhythm(joined, source="single", declared=declared)
         cap = 2 if scene in _SHORT_SCENES else resolved.max_parts
-        auto, source = _auto_parts(joined, max_parts=cap)
+        auto, source = _auto_parts(joined, max_parts=cap, sentences=False)
         if not auto:
             return single_rhythm(joined, source=source, declared=declared)
         candidates = list(auto)
@@ -690,6 +699,9 @@ def _finish(
         return single_rhythm(clean[0] if clean else seed, source=source, declared=declared)
     if rhythm in {RHYTHM_AUTO, RHYTHM_BLOCK}:
         rhythm = _infer_rhythm(list(clean))
+    elif rhythm == RHYTHM_BURST and max(_visible_len(item) for item in clean) > BURST_LONG_PART_CHARS:
+        # 说是连发、每条却是一整句：按正常打字速度发，别像机关枪一样甩长句。
+        rhythm = RHYTHM_SPLIT
     delays = pacing_delays(clean, rhythm, settings=settings, emotion=emotion, style=style, seed=seed)
     return RhythmPlan(rhythm, clean, delays, source, declared)
 
@@ -721,6 +733,35 @@ def plan_group_rhythm(
 # ---------------------------------------------------------------------------
 
 
+# 情绪只给“更像你此刻心情”的倾向，选哪种仍由模型自己定。情绪来自 emotion_state，
+# 不看群消息关键词。
+_EMOTION_RHYTHM_LEAN: dict[str, str] = {
+    "amused": "你现在心情不错，想闹就连发或蹦字",
+    "irritated": "你现在有点不耐，短句连发更像你",
+    "curious": "你现在挺好奇，分条追问很自然",
+    "warm": "你现在挺亲和，分条慢慢说就好",
+    "concerned": "你现在有点担心，整段或分条认真说，别蹦字",
+    "guarded": "你现在比较谨慎，整段说清楚，别连发也别蹦字",
+}
+_EMOTION_LEAN_MIN = 0.3
+
+
+def _emotion_lean(emotion: object) -> str:
+    if not isinstance(emotion, dict):
+        return ""
+    label = str(emotion.get("label") or "neutral")
+    try:
+        strength = float(
+            emotion.get("expression_intensity", emotion.get("intensity", 0.0)) or 0.0
+        )
+    except (TypeError, ValueError):
+        return ""
+    if strength < _EMOTION_LEAN_MIN:
+        return ""
+    lean = _EMOTION_RHYTHM_LEAN.get(label, "")
+    return f"{lean}。" if lean else ""
+
+
 def rhythm_instruction(
     *,
     scene: str,
@@ -728,32 +769,46 @@ def rhythm_instruction(
     complexity: str,
     style: object = None,
     settings: RhythmSettings | None = None,
+    emotion: object = None,
 ) -> str:
-    """放在易变的发言策略层，不进稳定前缀；关闭时返回空串。"""
+    """放在易变的发言策略层，不进稳定前缀；关闭时返回空串。
+
+    要模型每次先写【节奏:…】：节奏是它自己的选择，不再靠系统事后拆句兜底。
+    节奏只决定“怎么发”，不是多说几句的理由，所以总字数口径和一条时一样。
+    """
 
     resolved = settings or rhythm_settings()
     if not resolved.enabled:
         return ""
+    lean = _emotion_lean(emotion)
     if scene in _SHORT_SCENES:
         return (
-            "发送节奏：插话/暖场通常一条就够，最多用 ||| 拆成两条短的；"
-            "情绪到了也可以开头写【节奏:连发】几个短句连着发。"
+            "发送节奏：插话/暖场通常一条就够，开头写【节奏:整段】；"
+            "情绪到了也可以【节奏:连发】两三个几个字的短句用 ||| 隔开。"
+            "标签不会发出去。" + lean
         )
     expressive = int(getattr(style, "expressiveness", 1) or 1) >= 3
     lines = [
-        "发送节奏：像真人一样决定这句话怎么发，节奏本身就是情绪。",
-        f"想分开发时用 ||| 隔开，每段就是一条 QQ 消息（一般 2~{resolved.max_parts} 条）。",
-        "认真讨论、讲步骤或在争论时整段发一条；平常聊天把一句话自然拆成两三条；",
-        "激动、惊讶、吐槽时可以开头写【节奏:连发】，几个短句快速连着发；",
-        "搞怪卖萌时可以写【节奏:蹦字】把一句很短的话一个字一个字蹦出来（偶尔用）。",
-        "不要每次都拆，也不要为拆而拆；代码、列表、链接和要连着看的步骤放在同一条。",
+        "发送节奏（每次都要选）：回复最前面先写【节奏:整段/分条/连发/蹦字】，标签不会发出去，"
+        "||| 隔开的每段是一条 QQ 消息。节奏就是你此刻的心情，像真人一样挑：",
+        "整段=认真讨论、争论、讲道理或给步骤，一条发完；",
+        f"分条=平常闲聊，把同一句话在自然停顿处断成 2~{resolved.max_parts} 条，"
+        "如【节奏:分条】刚看到|||笑死 这也太巧了；",
+        "连发=激动、震惊、急了、强烈吐槽，3~5 条每条几个字的短句，"
+        "如【节奏:连发】不是吧|||真的假的|||我不信；",
+        "蹦字=搞怪卖萌、拖长音，只写一句 8 字以内的话，会一个字一个字蹦出去，"
+        "如【节奏:蹦字】你在干嘛呀。",
+        "节奏不是多说话的理由：分几条，加起来的字数也和发一条时一样，守住上面的字数目标；"
+        "连发和蹦字通常比一条更短。别回回同一种，代码、列表、链接放同一条。",
     ]
     if act in _NO_AUTO_ACTS:
-        lines.append("本轮是短回应，一条或一个短句连发就够。")
+        lines.append("本轮是短回应，整段一句或几个字的连发就够。")
     elif complexity == "complex":
-        lines.append("本轮问题较复杂，优先一条把话说完整。")
+        lines.append("本轮问题较复杂，用【节奏:整段】一条把话说完整。")
+    if lean:
+        lines.append(lean)
     if expressive:
-        lines.append("你的表现力较强，情绪明显时可以更放开地用连发。")
+        lines.append("你的表现力较强，情绪明显时可以更放开地用连发和蹦字。")
     return "".join(lines)
 
 

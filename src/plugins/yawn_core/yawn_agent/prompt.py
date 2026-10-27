@@ -22,7 +22,7 @@ from .prompt_sections import (
 from .speech_policy import build_speech_parts
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v18"
+PROMPT_VERSION = "yawn-agent-v19"
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由

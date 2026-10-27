@@ -394,6 +394,7 @@ def build_speech_parts(
                 act=act_plan.act,
                 complexity=complexity,
                 style=style,
+                emotion=(context or {}).get("emotion_state"),
             ),
         ),
     )
