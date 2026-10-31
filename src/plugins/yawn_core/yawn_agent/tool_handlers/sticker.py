@@ -139,8 +139,12 @@ async def _save(args: dict[str, Any], context: ToolExecutionContext) -> dict[str
         "tags": list(sticker.tags),
         "status": "可用" if sticker.usable else ("待管理员审核" if sticker.status == STATUS_PENDING else "已停用"),
     }
-    if sticker.usable:
+    if sticker.available_in(context.group_id):
         payload["next"] = f"以后可以在正文写 [表情:{sticker.name}] 发它"
+    elif sticker.usable:
+        # 库里已有但只对别的群开放：本群写 [表情:名字] 会被去掉，不能说能用了。
+        payload["status"] = "未对本群开放"
+        payload["next"] = "告诉对方库里已经有这张图，但管理员没把它开放给本群；不要说已经能用了"
     elif sticker.status == STATUS_PENDING:
         payload["next"] = "告诉对方已经交给管理员审核，审核通过后才会用；不要说已经能用了"
     if not created:

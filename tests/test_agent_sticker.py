@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,41 @@ def test_resolve_drops_everything_during_cooldown() -> None:
     plan = speech.speech_plan_from_text("行吧[表情:狗头]")
     resolved = sticker_send.resolve_plan_stickers(plan, group_id=GROUP)
     assert resolved.segments == ({"type": "text", "text": "行吧"},)
+
+
+
+def test_dropping_one_of_two_adjacent_stickers_keeps_the_other_on_its_own() -> None:
+    _add("捂脸")
+    _add("狗头")
+    _save(max_per_message=1)
+    plan = speech.speech_plan_from_text("哈哈[表情:捂脸][表情:狗头]好的")
+    resolved = sticker_send.resolve_plan_stickers(plan, group_id=GROUP)
+    types = [item["type"] for item in resolved.segments]
+    assert types == ["text", "break", "reaction", "break", "text"]
+
+
+def test_resolve_caps_stickers_at_what_is_left_today() -> None:
+    _add("狗头")
+    _add("捂脸")
+    _save(max_per_message=3, group_daily_limit=2, group_cooldown_seconds=0)
+    policy.note_sent(GROUP, ["prev"])
+    plan = speech.speech_plan_from_text("[表情:狗头]|||[表情:捂脸]|||[表情:狗头]")
+    resolved = sticker_send.resolve_plan_stickers(plan, group_id=GROUP)
+    assert sum(item["type"] == "reaction" for item in resolved.segments) == 1
+
+
+def test_resolve_respects_persona_that_forbids_stickers() -> None:
+    _add("狗头")
+    plan = speech.speech_plan_from_text("行吧[表情:狗头]")
+    quiet = replace(plan, style=replace(plan.style, allow_spontaneous_reaction=False))
+    resolved = sticker_send.resolve_plan_stickers(quiet, group_id=GROUP)
+    assert resolved.segments == ({"type": "text", "text": "行吧"},)
+
+
+def test_search_reactions_finds_stickers_scoped_to_this_group() -> None:
+    _add("本群狗头", groups=(GROUP,))
+    found = reactions.search_reactions("本群狗头", group_id=GROUP)
+    assert [item["name"] for item in found] == ["本群狗头"]
 
 
 class _Bot:

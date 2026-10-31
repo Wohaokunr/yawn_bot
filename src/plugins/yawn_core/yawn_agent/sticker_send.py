@@ -27,6 +27,7 @@ from .sticker_library import match_stickers, tag_counts
 from .sticker_markup import STICKER_SEGMENT_TYPE, drop_sticker_at, sticker_instruction
 from .sticker_policy import (
     REASON_TEXT,
+    StickerExposure,
     exposure,
     menu_entries,
     note_dropped,
@@ -48,14 +49,26 @@ def _visible(segments: list[dict[str, Any]]) -> bool:
     )
 
 
+def _send_gate(plan: SpeechPlan, group_id: int | None) -> tuple[StickerExposure, int]:
+    """发送层的闸门与本条最多几张。"""
+
+    gate = exposure(group_id, proactive=plan.scene in _PROACTIVE_SCENES)
+    if gate.open and not plan.style.allow_spontaneous_reaction:
+        # 提示词层因人设不给菜单，模型照着历史写了标记也不发（与主动发言一致）。
+        gate = replace(gate, reason="persona_off")
+    if not gate.open:
+        return gate, 0
+    # 一条里最多几张，同时不超过本群今天剩下的额度。
+    return gate, min(gate.settings.max_per_message, gate.left_today)
+
+
 def resolve_plan_stickers(plan: SpeechPlan, *, group_id: int | None) -> SpeechPlan:
     """把伪段换成 reaction 段或去掉；没有伪段时原样返回。"""
 
     if not has_sticker_segments(plan):
         return plan
     segments = [dict(item) for item in plan.segments]
-    gate = exposure(group_id, proactive=plan.scene in _PROACTIVE_SCENES)
-    max_count = gate.settings.max_per_message
+    gate, max_count = _send_gate(plan, group_id)
     decisions: list[dict[str, Any]] = []
     dropped: set[int] = set()
     chosen = 0
@@ -71,7 +84,7 @@ def resolve_plan_stickers(plan: SpeechPlan, *, group_id: int | None) -> SpeechPl
             dropped.add(index)
             decisions.append({"name": name, "status": "dropped", "reason": "too_many"})
             continue
-        how, candidates = match_stickers(name, group_id)
+        how, candidates = match_stickers(name, group_id, stickers=gate.stickers)
         picked = pick_sticker(int(group_id or 0), candidates) if candidates else None
         if picked is None:
             dropped.add(index)
@@ -142,7 +155,11 @@ def sticker_turn_instruction(
         return ""
     settings = gate.settings
     menu = menu_entries(int(group_id), gate.stickers, size=settings.menu_size)
-    tags = [(tag, count) for tag, count in tag_counts(int(group_id)) if count >= 2][:MAX_MENU_TAGS]
+    tags = [
+        (tag, count)
+        for tag, count in tag_counts(int(group_id), stickers=gate.stickers)
+        if count >= 2
+    ][:MAX_MENU_TAGS]
     return sticker_instruction(
         menu,
         tags,
