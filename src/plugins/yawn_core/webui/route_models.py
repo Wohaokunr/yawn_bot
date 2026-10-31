@@ -33,6 +33,11 @@ class FeatureOverrideBody(BaseModel):
     override: bool | None
 
 
+class AffinityAdjustBody(BaseModel):
+    delta: int = Field(ge=-500, le=500)
+    note: str = Field(default="", max_length=100)
+
+
 class EnvironmentChange(BaseModel):
     key: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$", max_length=128)
     value: str | None = Field(default=None, max_length=16384)

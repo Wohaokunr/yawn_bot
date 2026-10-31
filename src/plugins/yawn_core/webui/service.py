@@ -16,6 +16,7 @@ from nonebot_plugin_orm import get_session
 from sqlalchemy import String, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..affinity import level_for
 from ..data_models.agent_audit import AgentAudit
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.bot_group import BotGroup
@@ -723,6 +724,7 @@ async def list_users(
             "firstInteractionAt": iso(row.first_interaction_at),
             "lastInteractionAt": iso(row.last_interaction_at),
             "affinity": row.affinity,
+            "affinityLevel": level_for(row.affinity).name,
         }
         for row in rows
     ], total

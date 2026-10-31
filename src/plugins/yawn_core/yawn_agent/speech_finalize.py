@@ -14,6 +14,7 @@ from ..data_models.group_agent_config import GroupAgentConfig
 from .context import now_beijing
 from .execution_trace import trace_event
 from .log import dbg, dbg_exc
+from .member_standing import reward_group_interaction
 from .message_parser import NormalizedMessage
 from .outbound import (
     PreparedOutboundMessage,
@@ -68,6 +69,7 @@ async def finalize_reply(  # noqa: PLR0913
     mark_func: MarkFunc,
     duplicate_func: DuplicateFunc,
     emotion_state: object = None,
+    actor_user_id: int | None = None,
 ) -> None:
     if isinstance(content, SpeechPlan):
         recent_speech = tuple(
@@ -189,6 +191,15 @@ async def finalize_reply(  # noqa: PLR0913
         config.last_response_input_fingerprint = input_fingerprint
         config.last_response_at = now
         config.last_agent_at = now
+        if outcome.delivered:
+            await reward_group_interaction(
+                session,
+                group_id=group_id,
+                bot_id=bot_id,
+                actor_user_id=actor_user_id,
+                trigger_source=normalized.trigger_source,
+                now=now,
+            )
         # AsyncSession.commit() may expire ORM attributes. Snapshot values needed
         # by post-commit diagnostics before committing to avoid implicit IO /
         # MissingGreenlet when Trace serialization reads them synchronously.

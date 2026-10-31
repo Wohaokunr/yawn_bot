@@ -298,6 +298,21 @@ TOOL_DEFINITIONS = (
         keywords=("记录关系", "记住关系", "我们是", "是我朋友", "是我对象", "是我同事", "是我同学", "是我搭子", "是我死党", "是我伴侣"),
     ),
     ToolDefinition(
+        "checkin_for_me",
+        "替调用者本人在本群签到（等同他发 /签到）：给积分、群经验和好感，连签有里程碑奖励；今天签过会返回 already。只能签调用者自己",
+        {},
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="checkin",
+        keywords=("签到", "帮我签到", "替我签到", "打卡", "签个到"),
+    ),
+    ToolDefinition(
+        "get_my_checkin",
+        "查调用者本人在本群的签到情况（今天签没签、连签/累计天数、积分、今天第几个签到）和他与你的关系等级",
+        {},
+        family="checkin",
+        keywords=("签到了吗", "连签", "签到几天", "我的积分", "好感度", "我们关系"),
+    ),
+    ToolDefinition(
         "get_my_relationship",
         "查看你（Bot）和某位成员之间的关系：熟悉程度、他怎么叫你、你们的梗、他的边界和共同经历；不传 user_id 时查当前发言人",
         {

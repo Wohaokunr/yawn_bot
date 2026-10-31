@@ -29,3 +29,8 @@ yawn_core 与群聊 Agent 共用的 SQLAlchemy 2.0 模型（`nonebot_plugin_orm.
 
 - WebUI 读写这些表主要经 [webui/service.py](../webui/CLAUDE.md)。
 - 迁移测试：`tests/test_agent_persona_migration.py`、`tests/test_agent_persona_cleanup_migration.py`、`tests/test_agent_persona_library.py`（人设库表）、`tests/test_agent_bot_bond.py`（Bot 关系表）、`tests/test_agent_schedule.py`（定时任务表）。
+
+
+## 好感度流水
+
+`affinity_event.py`：`AffinityEvent` 记录每次好感变化（来源、增减、余额、北京日期），迁移 `e3a5c7e9f1b4`。`BotUser.affinity` 与 `UserGroup.group_affinity` 只能由 `yawn_core/affinity.py` 写，不要在别处直接改。

@@ -65,7 +65,7 @@ _PHASE_LINES: dict[str, tuple[str, ...]] = {
         "嗯…给{self}一点时间",
     ),
 }
-_LOOKUP_FAMILIES = frozenset({"history", "memory", "profile", "member", "group", "essence", "file", "notice"})
+_LOOKUP_FAMILIES = frozenset({"history", "memory", "profile", "member", "group", "essence", "file", "notice", "checkin"})
 _ADMIN_HINT = re.compile(r"mute|kick|recall|notice|essence|card|title|admin|folder|file", re.IGNORECASE)
 _ROTATION: dict[int, int] = {}
 # 只保留像人话的开场白：去掉 Markdown/代码/链接，太长或像在提问的都不用。

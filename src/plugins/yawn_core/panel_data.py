@@ -9,6 +9,7 @@ from nonebot import logger
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
+from .affinity import level_for
 from .data_models.bot_group import BotGroup
 from .data_models.bot_user import BotUser
 from .data_models.chat_message import ChatMessage
@@ -205,7 +206,11 @@ async def build_group_personal_view(
             PanelStat("活跃群", f"{group_count} 个"),
             PanelStat("AI 对话", f"{ai_count} 个", "当前群"),
             PanelStat("群经验", str(user_group.exp if user_group else 0)),
-            PanelStat("金币", str(user_group.coins if user_group else 0)),
+            PanelStat(
+                "连签",
+                f"{checkin.streak_days if checkin else 0} 天",
+                level_for(bot_user.affinity if bot_user else 0).name,
+            ),
         ),
         features=tuple(
             PanelFeature(display, enabled, source)
@@ -257,7 +262,11 @@ async def build_private_personal_view(
             PanelStat("总积分", str(total_points)),
             PanelStat("活跃群", f"{group_count} 个"),
             PanelStat("AI 对话", f"{ai_count} 个"),
-            PanelStat("好感度", str(bot_user.affinity if bot_user else 0)),
+            PanelStat(
+                "好感",
+                level_for(bot_user.affinity if bot_user else 0).name,
+                f"{bot_user.affinity if bot_user else 0} 点",
+            ),
             PanelStat(
                 "首次互动",
                 _format_time(bot_user.first_interaction_at if bot_user else None),

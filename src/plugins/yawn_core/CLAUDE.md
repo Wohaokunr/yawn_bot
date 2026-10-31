@@ -44,7 +44,9 @@ WebUI 后端。全局规则（迁移、权限注入写法、Ruff 约定）见 [�
 | 模块 | 职责 |
 |---|---|
 | `presence.py` | `event_preprocessor`：每条消息 upsert `BotUser`/`BotGroup`/`UserGroup`，其他表的外键都挂在这上面 |
-| `checkin.py` | 签到 |
+| `checkin.py` | 签到命令（群里签当前群、私聊一键签所有群、`/签到状态`），逻辑全在 `checkin_service.py` |
+| `checkin_service.py` | 签到唯一实现：`perform_checkin`（不提交、SAVEPOINT 防重、积分/群经验/好感/里程碑）、`checkin_overview`；命令、群 Agent 工具、私聊 Agent 共用 |
+| `affinity.py` | 全局好感唯一写入口：`grant`（来源日上限、`AffinityEvent` 流水、表未迁移时降级）、等级 `level_for`/`level_words`（给模型只给词语） |
 | `friend_approve.py` | 好友申请审批 |
 | `reminder.py` | 群聊定时提醒（单文件较大，含解析、调度与持久化） |
 
