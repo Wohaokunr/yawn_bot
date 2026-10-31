@@ -20,7 +20,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `service.py` | 查询与写入服务层（最大的文件）；路由尽量薄，逻辑放这里 |
 | `hub.py` | 单进程 WebSocket 状态广播（`/stream`），前端 `api.ts` 订阅 |
 | `overview_routes.py` | 概览与插件摘要（含子插件加载报告） |
-| `groups.py` / `users.py` | 群、群成员、全局用户管理；`users.py` 另有 `/users/{id}/affinity`（好感余额/来源/流水/各群签到，`POST …/adjust` 手动加减，记 `manual` 流水）与 `/users/{id}/private-agent`（私聊 Agent 状态、`PATCH` 暂停/恢复自动回复、`DELETE …/memories[?key=]` 删私聊记忆，不碰群记忆）；后两者只经 `../affinity.py`、`../private_chat_bridge.py`，不导入 `yawn_agent` |
+| `groups.py` / `users.py` / `directory.py` | 群、群成员、用户管理。列表与统计查询在 `directory.py`（群/成员/用户的筛选排序 + 当前页补统计、`/groups/summary`、`/users/summary`、`/groups/{id}/overview`、`/groups/{id}/overrides` 成员覆盖一览、`/users/{id}` 档案与所在群明细）；批量写入 `POST /groups/batch/features`、`/groups/{id}/members/batch/features`、`/users/batch/features`（单事务、上限 100、逐条 hub 通知），`POST /groups/{id}/features/reset` 默认不动 group_agent，`DELETE /groups/{id}/members/{uid}/features` 清成员覆盖。注意 `GlobalUserFeature`（“私聊功能”）只在私聊生效，群聊权限链不查它；`users.py` 另有 `/users/{id}/affinity`（好感余额/来源/流水/各群签到，`POST …/adjust` 手动加减，记 `manual` 流水）与 `/users/{id}/private-agent`（私聊 Agent 状态、`PATCH` 暂停/恢复自动回复、`DELETE …/memories[?key=]` 删私聊记忆，不碰群记忆）；后两者只经 `../affinity.py`、`../private_chat_bridge.py`，不导入 `yawn_agent` |
 | `agent.py` + `agent_*_routes.py` | 群聊 Agent：配置、人设与人设库、记忆、隐私、关系、消息、调试/dry-run；共用过滤在 `agent_route_helpers.py` |
 | `audits.py` | Agent 工具审计与 WebUI 操作审计（`web_admin_audit`） |
 | `games.py` | 狼人杀/跑团对局列表、详情、事件日志与回放 |
@@ -48,7 +48,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `web_search.py` | `yawn_agent/web_search_client.py`、`web_search_policy.py`、`web_search_output.py`、`tool_handlers/web.py` | — |
 | `stickers.py` | `yawn_agent/sticker_library.py`、`sticker_policy.py`、`sticker_send.py` | — |
 | `schedules.py` | `yawn_agent/schedule_store.py`、`schedule_policy.py`、`schedule_runner.py`、`schedule_spec.py` | `schedules/` |
-| `groups.py`、`users.py`、`guest_access*` | `../permission.py`、核心 data_models | `group-workspace.tsx`、`access-pages.tsx`、`guest-*.tsx` |
+| `groups.py`、`users.py`、`directory.py`、`guest_access*` | `../permission.py`、`../checkin_service.py`、核心 data_models | `group-workspace.tsx`、`directory/`、`guest-*.tsx` |
 
 - 新增插件 `Config` 字段时，要登记进 `environment_catalog.dotenv`，`tests/test_webui_environment.py` 会检查。
 - 测试：`tests/test_webui*.py`（`test_webui_spa.py` 需要先构建 `webui/dist`）。改 Agent 部分时另见 [yawn_agent/AGENTS.md](../yawn_agent/AGENTS.md) 的「质量门槛」。

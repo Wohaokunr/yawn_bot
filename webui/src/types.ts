@@ -82,7 +82,7 @@ export interface FeatureState {
   name: string;
   override: boolean | null;
   effective: boolean;
-  source: "default" | "group" | "user" | "global_user";
+  source: "default" | "group" | "user" | "global_user" | "agent_config";
 }
 
 export interface Member {

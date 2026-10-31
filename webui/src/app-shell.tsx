@@ -60,7 +60,7 @@ const BREADCRUMB_LABELS: Record<string, string> = {
   schedules: "定时任务",
   audits: "操作审计",
   groups: "群组",
-  users: "全局用户",
+  users: "用户",
   games: "对局中心",
   modules: "模组库",
   fanqie: "番茄小说",
@@ -84,7 +84,7 @@ function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { tit
   }
   if (segments.length > 1) items.push({ title: `群 ${segments[1]}` });
   if (segments.length > 1 && (root === "agent" || root === "groups")) {
-    items.push({ title: root === "agent" ? "Agent 工作台" : "功能权限" });
+    items.push({ title: root === "agent" ? "Agent 工作台" : "成员与权限" });
   }
   return items;
 }
