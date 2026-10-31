@@ -38,6 +38,7 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 发送与能力 | `outbound.py`（唯一发送通道）、`capabilities.py`（OneBot 能力矩阵与机器人权限）、`safe_download.py`（出站下载白名单与重定向校验） |
 | 主动与短会话 | `proactive.py`、`proactive_policy.py`、`idle_warmup.py`（冷场暖场门槛/退避/骰子）、`conversation.py` |
 | 签到与好感 | `member_standing.py`（发言人层的好感等级/连签投影、群聊互动加好感 `reward_group_interaction`）、`tool_handlers/checkin.py`（`checkin_for_me`/`get_my_checkin`）；业务逻辑在父插件 `../checkin_service.py`、`../affinity.py` |
+| 私聊 Agent | `private_agent.py`（一轮编排：日上限、上下文、工具循环、完成声明核验、分条发送、私聊好感与记忆整理）、`private_context.py`（只读上下文：共同群、好感等级、签到、群里关系与画像，字符预算）、`private_tools.py`（10 个私聊工具，都只作用于本人）、`private_memory.py`（私聊记忆 `scope="private"`）、`private_prompt.py`（提示词文本，登记在 `prompt_sections.py` 的 `private.*`）；入口在父插件 `../private_chat_bridge.py` |
 | 记忆 | `memory.py`（整理、排序、治理）、`memory_hygiene.py`（脱敏/注入/敏感类别/近似去重）、`memory_retrieval.py`（工具检索）、`memory_access.py`（召回计数缓冲）、`memory_consolidation.py`（周摘要）、`memory_self.py`（成员自助记住/忘掉）、`bot_bond.py`（Bot 自己和成员的关系：互动统计、有界推导、注入视图、工具与治理） |
 | 媒体 | `media.py`、`media_fetch.py`（识图取字节链路、失败原因码、取图统计）、`media_context.py`、`media_provider.py`、`media_store.py`、`media_caption.py`、`media_memory.py`（看过的图的短期转述，给历史用）、`turn_media.py`（一轮的图片装载、多模态能力记忆、收图即转述） |
 | 诊断 | `execution_trace.py`、`prompt_capture.py`（每次真实模型请求的完整快照，挂在 Trace 上，脱敏有界） |
