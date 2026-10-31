@@ -56,6 +56,7 @@ TOOLPACK_CATALOG: dict[str, str] = {
     "essence": "精华消息：查看、设为精华、取消精华",
     "reaction": "表情包与表情回应",
     "message": "合并转发等特殊消息",
+    "checkin": "签到：替发消息的人在本群签到，查他的签到天数、连签、积分和与机器人的好感等级",
     "schedule": "定时任务：让 Bot 到某个时间（单次、N 分钟后、每天/每周/每月/每年、固定间隔、cron）提醒某人或自动做一件事；查看、修改、暂停、取消已经设好的定时任务",
 }
 PLANNABLE_SEGMENTS = frozenset(

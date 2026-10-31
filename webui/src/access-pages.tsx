@@ -401,7 +401,11 @@ export function UsersPage(): React.JSX.Element {
                   <Text type="secondary" copyable>{row.userId}</Text>
                 </>,
               },
-              { title: "好感", dataIndex: "affinity" },
+              {
+                title: "好感",
+                dataIndex: "affinity",
+                render: (value: number, row: UserSummary) => row.affinityLevel ? `${row.affinityLevel} · ${value}` : value,
+              },
               { title: "最近互动", dataIndex: "lastInteractionAt", render: formatTime },
               {
                 title: "操作",

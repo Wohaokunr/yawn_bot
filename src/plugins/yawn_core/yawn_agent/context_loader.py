@@ -26,6 +26,7 @@ from .context_history import select_context_messages
 from .context_repository import AgentContextRepository
 from .emotion import emotion_context_state
 from .log import dbg
+from .member_standing import merge_speaker_standing
 from .memory import (
     dedupe_symmetric_relations,
     effective_relation_confidence,
@@ -529,7 +530,13 @@ async def load_context(
     )
     repo.query_count += context_bonds.queries
     record_access(context_bonds.memory_ids, now=now)
-    bot_bonds = context_bonds.views
+    bot_bonds = merge_speaker_standing(
+        context_bonds.views,
+        speaker_id=speaker_id if speaker_id not in opted_out else None,
+        speaker_name=name_by_id.get(speaker_id) if speaker_id is not None else None,
+        standing=repo.member_standing.get(speaker_id) if speaker_id is not None else None,
+        now=context_now,
+    )
     dbg(
         f"群 {group_id} 加载上下文: Bot 关系 {len(bot_bonds)} 条"
         f"(发言人={speaker_id})"

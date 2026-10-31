@@ -22,7 +22,7 @@ from .prompt_sections import (
 from .speech_policy import build_speech_parts
 from .tool_result_speech import TOOL_RESULT_SPEECH_INSTRUCTION
 
-PROMPT_VERSION = "yawn-agent-v19"
+PROMPT_VERSION = "yawn-agent-v20"
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # 不可被 Persona 覆盖的系统策略。角色身份、语气、详略和基础气质全部由
@@ -160,6 +160,8 @@ _SPEAKER_SYSTEM_PREFIX = "当前相关成员资料（半稳定，仅作事实参
 _BOT_BOND_GUIDANCE = (
     "bot_bonds 是你自己和这些成员的关系：按它把握亲疏、称呼和玩笑分寸，"
     "boundaries 里的事不要做；不要报出熟悉度或好感，也不要硬提旧梗和共同经历。"
+    "overall 是你对他的整体好感（签到、私聊、群聊攒下的），checkin_streak 是他在本群"
+    "的连签，合适时可以自然提一句，别每次都说。"
 )
 _REALTIME_SYSTEM_PREFIX = "当前群聊状态（易变）："
 _SPEECH_SYSTEM_PREFIX = "当前发言策略（只约束表达，不改变事实/权限/工具边界）："

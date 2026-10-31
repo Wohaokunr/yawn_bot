@@ -12,9 +12,12 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy, AgentRelation
 from ..data_models.bot_group import BotGroup
+from ..data_models.bot_user import BotUser
+from ..data_models.checkin_user import CheckinUser
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..data_models.user_group import UserGroup
@@ -29,6 +32,15 @@ MIN_MENTION_RELATION_EVIDENCE = 2
 
 
 @dataclass(frozen=True, slots=True)
+class MemberStanding:
+    """成员在签到/好感系统里的现状：随成员查询一起取回，不额外往返。"""
+
+    affinity: int
+    streak_days: int
+    last_checkin_date: Any
+
+
+@dataclass(frozen=True, slots=True)
 class ContextScopeMetadata:
     group: BotGroup | None
     opted_out_user_ids: frozenset[int]
@@ -40,6 +52,8 @@ class AgentContextRepository:
     def __init__(self, session: Any) -> None:
         self.session = session
         self.query_count = 0
+        # load_members 顺带取回的全局好感与本群签到状态，user_id → MemberStanding。
+        self.member_standing: dict[int, MemberStanding] = {}
 
     async def _execute(self, statement: Any) -> Any:
         self.query_count += 1
@@ -113,20 +127,59 @@ class AgentContextRepository:
     ) -> list[UserGroup]:
         if not relevant_member_ids:
             return []
-        return list(
-            (
-                await self._execute(
-                    select(UserGroup)
-                    .where(
-                        UserGroup.group_id == group_id,
-                        UserGroup.user_id.in_(relevant_member_ids),
-                    )
-                    .order_by(UserGroup.last_seen_at.desc())
-                )
+        # 同一次往返顺带取全局好感和本群连签（左连接，没有记录就是 None）。
+        joined = (
+            select(
+                UserGroup,
+                BotUser.affinity,
+                CheckinUser.streak_days,
+                CheckinUser.last_checkin_date,
             )
-            .scalars()
-            .all()
+            .outerjoin(BotUser, BotUser.user_id == UserGroup.user_id)
+            .outerjoin(
+                CheckinUser,
+                and_(
+                    CheckinUser.group_id == UserGroup.group_id,
+                    CheckinUser.user_id == UserGroup.user_id,
+                ),
+            )
+            .where(
+                UserGroup.group_id == group_id,
+                UserGroup.user_id.in_(relevant_member_ids),
+            )
+            .order_by(UserGroup.last_seen_at.desc())
         )
+        try:
+            rows = (await self._execute(joined)).all()
+        except (OperationalError, ProgrammingError) as error:
+            # 只建了部分表的环境（单元测试、半迁移的库）：退回只查成员，
+            # 失败的那次准备语句不算一次数据往返。
+            if "no such table" not in str(error).lower() and "does not exist" not in str(error).lower():
+                raise
+            self.query_count -= 1
+            return list(
+                (
+                    await self._execute(
+                        select(UserGroup)
+                        .where(
+                            UserGroup.group_id == group_id,
+                            UserGroup.user_id.in_(relevant_member_ids),
+                        )
+                        .order_by(UserGroup.last_seen_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        members: list[UserGroup] = []
+        for member, affinity_points, streak, last_date in rows:
+            members.append(member)
+            self.member_standing[int(member.user_id)] = MemberStanding(
+                affinity=int(affinity_points or 0),
+                streak_days=int(streak or 0),
+                last_checkin_date=last_date,
+            )
+        return members
 
     async def load_local_memories(
         self,

@@ -383,6 +383,7 @@ async def _finalize_reply(
         mark_func=mark_bot_reply,
         duplicate_func=_is_recent_duplicate,
         emotion_state=(context or {}).get("emotion_state"),
+        actor_user_id=current_turn.user_id if current_turn is not None else None,
     )
 
 

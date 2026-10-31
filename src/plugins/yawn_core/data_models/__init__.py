@@ -1,4 +1,5 @@
 from . import (
+    affinity_event,
     agent_audit,
     agent_bot_bond,
     agent_media_asset,
@@ -25,6 +26,7 @@ from . import (
 )
 
 __all__ = [
+    "affinity_event",
     "agent_audit",
     "agent_bot_bond",
     "agent_media_asset",

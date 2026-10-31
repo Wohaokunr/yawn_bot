@@ -69,6 +69,14 @@
 - `note_our_bond` 只写调用者本人并锁字段；`forget_about_me` 删关系时保留管理员手工内容并如实告知。隐私退出成员读写都拒绝、WebUI 不展示。
 - 表未迁移时 `prefetch_bonds` 返回 None，整理、上下文、工具全部降级跳过，不能让原有记忆整理失败。
 
+## 签到与好感
+
+- 签到只调 `checkin_service.perform_checkin`，好感只调 `affinity.grant`；Agent 里不要另写一份签到或直接改 `BotUser.affinity` / `UserGroup.group_affinity`。
+- `checkin_for_me` 只签**调用者本人、当前群**，没有 user_id/group_id 参数；没有真实 actor（主动发言、定时唤醒）一律拒绝；功能开关走 `check_feature_permission(..., "checkin", ...)`。
+- 群聊互动好感（`member_standing.reward_group_interaction`）只看结构：真实调用者、Bot 确实发出了回复、不是定时唤醒、成员没有隐私退出；不看说了什么。失败只记日志，不能影响回复后的状态提交。
+- 发言人层 `bot_bonds` 里的 `overall`（好感等级词）和 `checkin_streak`（连签天数）由 `load_members` 同一次查询顺带取回，不加往返；只给词语和天数，不给好感数值。私聊原文和私聊记忆永远不进群 Prompt。
+- 声称“帮你签好了”必须有本轮成功的 `checkin_for_me`（或查过 `get_my_checkin` 如实转述），见 `speech_claims.py` 的 `checkin` 族。
+
 ## 消息发送与 OneBot
 
 - 普通文本、引用、@、face、reaction、图片、语音、视频等复合消息统一通过 `outbound.py`；不要在业务路径重新直接拼 CQ 码或各自实现发送器。

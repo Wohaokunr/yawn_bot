@@ -74,6 +74,7 @@ export interface UserSummary {
   firstInteractionAt: string;
   lastInteractionAt?: string | null;
   affinity: number;
+  affinityLevel?: string;
 }
 
 export interface FeatureState {

@@ -52,6 +52,12 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:忘掉|忘记|删掉|清除)[^。！？!?\n]{{0,8}}(?:记忆|资料|画像)|(?:忘掉|删掉|清除)(?:了|啦)[^。！？!?\n]{{0,6}}(?:记忆|资料)"),
         frozenset({"forget_about_me"}),
     ),
+    # 声称“帮你签好了”却没真签，成员会以为连签保住了。查过状态（get_my_checkin）
+    # 时“你今天已经签到了”是如实转述，也算有据。
+    "checkin": (
+        re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,8}}签(?:好|上|完)?(?:到)?了|签到(?:已经|已)?(?:成功|好了|完成)"),
+        frozenset({"checkin_for_me", "get_my_checkin"}),
+    ),
     "kick": (
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,12}}(?:踢出|踢了|移出群)"),
         frozenset({"kick_member"}),
