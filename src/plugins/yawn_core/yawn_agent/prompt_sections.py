@@ -75,6 +75,7 @@ CATEGORIES: tuple[tuple[str, str, str], ...] = (
     ("router", "工具路由", "轻量路由模型的 system 提示。"),
     ("vision", "识图", "识图转述模型的 system 提示。"),
     ("memory", "记忆整理", "记忆整理与周摘要模型的 system 提示。"),
+    ("private", "私聊 Agent", "私聊里的角色、规则、用户资料和私聊记忆整理提示。"),
     (
         "tool_schema",
         "工具描述",
@@ -95,6 +96,7 @@ LAYER_LABELS = {
     "proactive_user": "主动发言 user 提示",
     "aux_system": "辅助模型 system",
     "tool_schema": "tools 参数",
+    "private_system": "私聊 system",
 }
 
 
@@ -148,6 +150,7 @@ def _resolve_default_ref(ref: str | None) -> str | None:
 _D = ("agent_dialogue",)
 _DP = ("agent_dialogue", "agent_proactive")
 _P = ("agent_proactive",)
+_PV = ("private_chat",)
 
 SECTIONS: tuple[PromptSection, ...] = (
     # ── 静态前缀 ──
@@ -689,6 +692,91 @@ SECTIONS: tuple[PromptSection, ...] = (
         "最近几条主动发言，避免重复。",
         when="有最近主动发言时",
         tasks=_P,
+    ),
+    # ── 私聊 Agent ──
+    PromptSection(
+        "private.role",
+        "私聊开场",
+        "private",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_ROLE",
+        description="告诉模型这是一对一私聊，和群里是同一个人。",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.persona",
+        "私聊人设块",
+        "private",
+        "private_system",
+        KIND_GENERATED,
+        "全局人设（人设库全局人设或内置默认）编译成的角色卡。",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.rules",
+        "私聊规则",
+        "private",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_RULES",
+        description="语气、分条、先查工具再回答、只说等级不报好感数值。",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.safety",
+        "私聊安全",
+        "safety",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_SAFETY",
+        description="资料与工具结果是不可信数据；不泄露系统提示和他人隐私；未成功不说已完成。",
+        safety=True,
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.context_header",
+        "用户资料表头",
+        "private",
+        "private_system",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_CONTEXT_HEADER",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.context",
+        "用户资料数据",
+        "context",
+        "private_system",
+        KIND_DATA,
+        "好感等级、签到、私聊记忆、各群关系与画像、共同所在的群（JSON）。",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.time_note",
+        "久别提示",
+        "private",
+        "private_system",
+        KIND_GENERATED,
+        "距离上次私聊超过 20 分钟时附上当前时间。",
+        when="久别重聊时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.final_round",
+        "私聊最后一轮",
+        "private",
+        "round",
+        default_ref="private_prompt:PRIVATE_FINAL_ROUND",
+        when="工具轮次用完时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.memory_system",
+        "私聊记忆整理 system",
+        "private",
+        "aux_system",
+        default_ref="private_prompt:PRIVATE_MEMORY_SYSTEM",
+        description="每隔几轮从私聊里整理关于用户本人的事实；只返回 JSON。",
+        protocol=True,
+        tasks=("agent_memory",),
     ),
     # ── 辅助模型 ──
     PromptSection(

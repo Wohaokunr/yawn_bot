@@ -375,6 +375,7 @@ def test_bundled_catalog_lists_every_plugin_setting(
 
     config_modules = {
         "src.plugins.yawn_core.llm": ("AIChatConfig",),
+        "src.plugins.yawn_core.private_chat_bridge": ("PrivateAgentConfig",),
         "src.plugins.yawn_core.webui.config": ("WebUIConfig",),
         "src.plugins.yawn_core.yawn_agent.persona": ("AgentPersonaDefaults",),
         "src.plugins.yawn_core.yawn_fanqie.config": ("Config",),

@@ -193,6 +193,23 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 - exe、bat、ps1、vbs、apk、jar、sh 等可执行/脚本类文件一律拒绝发送。
 - 远程链接仍然只允许 `AGENT_FILE_ALLOWED_HOSTS` 里的域名；重定向会逐跳重新校验白名单，跳出白名单的下载直接拒绝。
 
+## 私聊 Agent
+
+好友私聊默认由 Agent 直接回复，不用先发 `/对话`。它用和群里同一套人设，能替本人签到、查签到和好感、记住或忘掉关于本人的事、看看共同群里最近在聊什么、查命令用法。成员发 `/退出` 后不再自动回复他，再发 `/对话` 恢复。Agent 不可用（子插件没加载、模型出错、超过日上限）时自动退回原来的纯对话。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PRIVATE_AGENT_ENABLED` | `true` | 总开关；关掉后私聊只有原来的纯对话 |
+| `PRIVATE_AGENT_AUTO_REPLY` | `true` | 好友私聊不用 `/对话` 直接回复；关掉后只有进入对话模式才回复 |
+| `PRIVATE_AGENT_FRIENDS_ONLY` | `true` | 自动接管只对好友生效，临时会话仍需 `/对话` |
+| `PRIVATE_AGENT_DAILY_TURNS` | `120` | 每人每天最多多少轮（0–10000，0 不限），超出当天退回纯对话 |
+| `PRIVATE_AGENT_MAX_TOOL_ROUNDS` | `4` | 每轮最多调用几轮工具（1–8） |
+| `PRIVATE_AGENT_STATE_PATH` | 空 | 成员暂停自动回复的状态文件，留空为 `data/private_agent/state.json` |
+
+- 私聊里只会读到用户本人所在、且群里 Agent 开着、本人没有退出记忆的群；群里的关系和画像只以词语出现，不给数值。
+- 私聊里记住的事只在私聊里用，不会带进群聊；本人明确要求时才同步到群里。
+- 私聊提示词在 WebUI「提示词」页的“私聊 Agent”分类下，可以查看和覆盖。
+
 ## Agent 代码沙箱
 
 Agent 可以在一个独立、无网络的 Python 容器里运行代码：数据分析、画图、生成表格/文本文件、作曲（WAV/MIDI）。部署和隔离细节见 [sandbox/README.md](../../sandbox/README.md)。
