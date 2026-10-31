@@ -590,6 +590,28 @@ async def test_creator_left_pauses_and_disabled_group_skips(monkeypatch: pytest.
         await engine.dispose()
 
 
+
+@pytest.mark.asyncio
+async def test_closed_group_skips_instead_of_deferring_in_quiet_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, factory = await _session_factory()
+    bot = _Bot()
+    _patch_runtime(monkeypatch, factory, bot)
+    try:
+        async with factory() as session:
+            task, _ = await _create(session, {"kind": "daily", "times": ["08:50"]}, instruction="早报")
+            await session.commit()
+            task_id = task.id
+        policy.save_settings(Settings(group_mode="allowlist", quiet_hours_enabled=True, quiet_start="08:00", quiet_end="10:00"))
+        await runner.run_due_tasks(now=NOW + timedelta(minutes=31))
+        async with factory() as session:
+            row = await store.get_task(session, task_id)
+            assert row.last_result == runner.RESULT_SKIPPED_CLOSED
+            assert row.next_run_at == datetime(2026, 10, 27, 8, 50)
+    finally:
+        policy.save_settings(Settings())
+        await engine.dispose()
+
+
 # ── 工具 ─────────────────────────────────────────────────
 
 

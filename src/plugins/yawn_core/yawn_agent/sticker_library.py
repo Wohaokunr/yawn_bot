@@ -355,18 +355,25 @@ def _fold(text: str) -> str:
     return _SPACE_RE.sub("", str(text or "")).casefold()
 
 
-def match_stickers(query: str, group_id: int | None) -> tuple[str, list[Sticker]]:
+def match_stickers(
+    query: str,
+    group_id: int | None,
+    *,
+    stickers: tuple[Sticker, ...] | list[Sticker] | None = None,
+) -> tuple[str, list[Sticker]]:
     """把模型写的 ``[表情:xxx]`` 解析成候选。
 
     这里只做“模型从菜单里选了哪一项”的对照（编号、名字、情绪标签的精确匹配，
     名字可以省略空格/大小写），不做模糊搜索，更不去猜用户意图。返回
     ``(匹配方式, 候选)``：``id``/``name`` 只会有一张，``tag`` 可能有多张。
+    ``stickers`` 是调用方已算好的本群可用列表，省得每个标记都重新扫一遍库。
     """
 
     folded = _fold(query)
     if not folded:
         return "none", []
-    stickers = available_stickers(group_id)
+    if stickers is None:
+        stickers = available_stickers(group_id)
     for item in stickers:
         if item.sticker_id.casefold() == folded:
             return "id", [item]
@@ -531,10 +538,14 @@ def forget_member(group_id: int, user_id: int) -> int:
     return _library.mutate(change)
 
 
-def tag_counts(group_id: int | None) -> list[tuple[str, int]]:
+def tag_counts(
+    group_id: int | None,
+    *,
+    stickers: tuple[Sticker, ...] | list[Sticker] | None = None,
+) -> list[tuple[str, int]]:
     counts: dict[str, int] = {}
     labels: dict[str, str] = {}
-    for item in available_stickers(group_id):
+    for item in stickers if stickers is not None else available_stickers(group_id):
         for tag in item.tags:
             key = _fold(tag)
             counts[key] = counts.get(key, 0) + 1

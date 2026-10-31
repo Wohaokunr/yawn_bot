@@ -30,7 +30,9 @@ async def handle(
         query = str(args.get("query") or "").strip()
         if not query:
             raise ValueError("query 不能为空")
-        result = search_reactions(query, limit=int(args.get("limit") or 5))
+        result = search_reactions(
+            query, limit=int(args.get("limit") or 5), group_id=group_id
+        )
     elif name == "react_to_message":
         target_message_id = int(args["message_id"])
         emoji_id = str(args.get("emoji_id") or "").strip()

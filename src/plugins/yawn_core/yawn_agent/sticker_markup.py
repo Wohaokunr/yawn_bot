@@ -109,19 +109,25 @@ def drop_sticker_at(
     """去掉指定位置的表情包伪段，收回它两侧自动插的 break，并把因此相邻的
     文字段接回一条（模型自己写的 ||| 留着）。"""
 
+    remaining = [dict(raw) for index, raw in enumerate(segments) if index not in indices]
+    # 自动 break 可能被相邻两张表情包共用（split_segment_markup 会合并连续 break），
+    # 所以不能按位置删：只要它还挨着一张留下来的表情包就保留，让那张继续自成一条。
     kept: list[dict[str, Any]] = []
-    for index, raw in enumerate(segments):
-        item = dict(raw)
-        if index in indices:
-            if kept and kept[-1].get("type") == _BREAK and kept[-1].get("around_sticker"):
-                kept.pop()
-            continue
-        if (
-            item.get("type") == _BREAK
-            and item.get("around_sticker")
-            and index - 1 in indices
-        ):
-            continue
+    for position, item in enumerate(remaining):
+        if item.get("type") == _BREAK:
+            if item.get("around_sticker"):
+                neighbours = (
+                    remaining[position - 1] if position > 0 else None,
+                    remaining[position + 1] if position + 1 < len(remaining) else None,
+                )
+                if not any(
+                    other is not None
+                    and other.get("type") in {STICKER_SEGMENT_TYPE, "reaction"}
+                    for other in neighbours
+                ):
+                    continue
+            if not kept or kept[-1].get("type") == _BREAK:
+                continue
         kept.append(item)
     merged: list[dict[str, Any]] = []
     for item in kept:

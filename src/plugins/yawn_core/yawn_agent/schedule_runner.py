@@ -389,7 +389,8 @@ async def _prepare(task_id: int, settings: ScheduleSettings, now: datetime) -> t
             config = await session.get(GroupAgentConfig, group_id)
             if config is None or not await agent_runtime_enabled(session, group_id, config=config):
                 skip_result = RESULT_SKIPPED_DISABLED
-        if plan.action == "defer":
+        # 定时任务未开放时不能借“推迟”绕过去，照常记跳过。
+        if plan.action == "defer" and skip_result is None:
             task.next_run_at = plan.next_run_at
             task.lease_until = None
             task.status_reason = f"免打扰时段，推迟到 {format_datetime(plan.next_run_at or now)}"

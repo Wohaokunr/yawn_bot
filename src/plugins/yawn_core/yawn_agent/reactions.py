@@ -9,7 +9,6 @@ reaction_id/名字/tags，不直接接触或猜测本地文件路径。
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,14 +23,6 @@ from .sticker_library import (
 
 _MAX_RESULTS = 8
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-
-
-@dataclass(frozen=True, slots=True)
-class ReactionEntry:
-    reaction_id: str
-    file_name: str
-    tags: tuple[str, ...]
-    description: str = ""
 
 
 def reaction_root() -> Path:
@@ -98,7 +89,6 @@ def resolve_reaction(reaction_id: str, *, group_id: int | None = None) -> Path:
 
 
 __all__ = [
-    "ReactionEntry",
     "reaction_index_path",
     "reaction_root",
     "resolve_reaction",
