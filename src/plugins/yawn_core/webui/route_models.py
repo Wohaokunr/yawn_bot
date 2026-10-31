@@ -38,6 +38,12 @@ class AffinityAdjustBody(BaseModel):
     note: str = Field(default="", max_length=100)
 
 
+class PrivateAgentPatchBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    auto_paused: bool = Field(alias="autoPaused")
+
+
 class EnvironmentChange(BaseModel):
     key: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$", max_length=128)
     value: str | None = Field(default=None, max_length=16384)

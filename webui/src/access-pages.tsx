@@ -19,6 +19,7 @@ import { api } from "./api";
 import { GroupWorkspaceSwitch } from "./group-workspace";
 import { AdminEmpty, formatTime, PageHeader, QueryErrorAlert, useApiQuery } from "./shared";
 import type { FeatureState, GroupSummary, Member, UserSummary } from "./types";
+import { AffinityPanel, PrivateAgentPanel } from "./user-insights";
 
 const { Text } = Typography;
 
@@ -342,7 +343,7 @@ export function UsersPage(): React.JSX.Element {
       .then((r) => ({ rows: r.data, total: r.meta.total ?? 0 })),
     [page, search],
   );
-  const query = useApiQuery(load, { resources: ["global_user_feature"] });
+  const query = useApiQuery(load, { resources: ["global_user_feature", "user_affinity"] });
   const [selected, setSelected] = useState<UserSummary | null>(null);
   const [features, setFeatures] = useState<FeatureState[]>([]);
   const [featuresLoading, setFeaturesLoading] = useState(false);
@@ -410,7 +411,7 @@ export function UsersPage(): React.JSX.Element {
               {
                 title: "操作",
                 render: (_, row: UserSummary) => (
-                  <Button type="link" onClick={() => open(row)}>全局功能</Button>
+                  <Button type="link" onClick={() => open(row)}>详情</Button>
                 ),
               },
             ]}
@@ -420,26 +421,54 @@ export function UsersPage(): React.JSX.Element {
     <Drawer
       open={!!selected}
       width={680}
-      title={`${selected?.nickname || selected?.userId} · 全局功能`}
+      title={selected?.nickname || selected?.userId}
       onClose={() => setSelected(null)}
+      destroyOnHidden
     >
-      {featuresLoading
-        ? <Spin />
-        : selected && (
-          <FeatureEditor
-            rows={features}
-            onChange={async (feature, override) => {
-              const result = await api<FeatureState>(`/users/${selected.userId}/features/${feature}`, {
-                method: "PATCH",
-                body: JSON.stringify({ override }),
-              });
-              setFeatures((current) => current.map((row) => (
-                row.key === feature ? result.data : row
-              )));
-              message.success("全局用户功能已更新");
-            }}
-          />
-        )}
+      {selected && (
+        <Tabs
+          items={[
+            {
+              key: "features",
+              label: "全局功能",
+              children: featuresLoading ? <Spin /> : <UserFeatureEditor
+                userId={selected.userId}
+                features={features}
+                setFeatures={setFeatures}
+                onSaved={() => message.success("全局用户功能已更新")}
+              />,
+            },
+            { key: "affinity", label: "好感与签到", children: <AffinityPanel userId={selected.userId} /> },
+            { key: "private", label: "私聊 Agent", children: <PrivateAgentPanel userId={selected.userId} /> },
+          ]}
+        />
+      )}
     </Drawer>
   </>;
+}
+
+function UserFeatureEditor({
+  userId,
+  features,
+  setFeatures,
+  onSaved,
+}: {
+  userId: string;
+  features: FeatureState[];
+  setFeatures: React.Dispatch<React.SetStateAction<FeatureState[]>>;
+  onSaved: () => void;
+}): React.JSX.Element {
+  return <FeatureEditor
+    rows={features}
+    onChange={async (feature, override) => {
+      const result = await api<FeatureState>(`/users/${userId}/features/${feature}`, {
+        method: "PATCH",
+        body: JSON.stringify({ override }),
+      });
+      setFeatures((current) => current.map((row) => (
+        row.key === feature ? result.data : row
+      )));
+      onSaved();
+    }}
+  />;
 }

@@ -16,11 +16,31 @@ import os
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime  # noqa: TC003
 from pathlib import Path
 from typing import Any, Optional
 
 from nonebot import get_plugin_config, logger
 from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select
+
+from .data_models.agent_memory import AgentMemory
+from .data_models.chat_message import ChatMessage
+from .data_models.chat_session import ChatSession
+
+# 私聊记忆在 AgentMemory 里的标记：不挂群、scope=private，永远不进群聊提示词。
+PRIVATE_MEMORY_SCOPE = "private"
+PRIVATE_MEMORY_TYPE = "private_fact"
+# 私聊记忆的类别名（给模型和 WebUI 看的中文）。
+PRIVATE_MEMORY_LABELS: dict[str, str] = {
+    "display_name": "昵称",
+    "preferred_address": "希望的称呼",
+    "hobby": "爱好",
+    "preference": "喜好",
+    "dislike": "讨厌的",
+    "skill": "擅长",
+    "current_status": "近期状态",
+}
 
 
 class PrivateAgentConfig(BaseModel):
@@ -155,6 +175,54 @@ def set_auto_paused(user_id: int, *, paused: bool) -> bool:
         return True
 
 
+# ── 存储查询（Agent 与 WebUI 共用，核心不依赖子插件） ─────────
+
+
+async def turns_today(session: Any, user_id: int, now: datetime) -> int:
+    """今天 Bot 在私聊里回了这个人几次（assistant 消息数）。"""
+
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ChatMessage)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.group_id.is_(None),
+                ChatMessage.role == "assistant",
+                ChatMessage.created_at >= start,
+            )
+        )
+        or 0
+    )
+
+
+def private_memory_query(user_id: int) -> Any:
+    return select(AgentMemory).where(
+        AgentMemory.scope == PRIVATE_MEMORY_SCOPE,
+        AgentMemory.group_id.is_(None),
+        AgentMemory.subject_user_id == user_id,
+        AgentMemory.memory_type == PRIVATE_MEMORY_TYPE,
+    )
+
+
+async def delete_private_memories(
+    session: Any, user_id: int, *, key: str | None = None
+) -> int:
+    """删某人的私聊记忆（可只删一个类别）。不提交。"""
+
+    stmt = delete(AgentMemory).where(
+        AgentMemory.scope == PRIVATE_MEMORY_SCOPE,
+        AgentMemory.group_id.is_(None),
+        AgentMemory.subject_user_id == user_id,
+    )
+    if key:
+        stmt = stmt.where(AgentMemory.memory_key == key)
+    result = await session.execute(stmt)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 def reset_state_for_tests() -> None:
     global _handler, _paused_cache  # noqa: PLW0603
     _handler = None
@@ -162,13 +230,18 @@ def reset_state_for_tests() -> None:
 
 
 __all__ = [
+    "PRIVATE_MEMORY_LABELS",
+    "PRIVATE_MEMORY_SCOPE",
+    "PRIVATE_MEMORY_TYPE",
     "PrivateAgentConfig",
     "PrivateHandler",
     "PrivateTurnRequest",
     "auto_paused",
     "auto_reply_available",
+    "delete_private_memories",
     "get_private_handler",
     "private_agent_config",
+    "private_memory_query",
     "register_private_handler",
     "reset_state_for_tests",
     "set_auto_paused",

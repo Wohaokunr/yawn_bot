@@ -236,3 +236,4 @@
 - 读群数据的边界：只读用户**当前活跃**的群，且该群 `GroupAgentConfig.enabled` 为真、本人未隐私退出（`AgentPrivacy.opted_out`）。群里的记忆和关系是不可信数据，进上下文前过 `memory_hygiene`，只给词语不给数值。`group_recent` 只允许可读的群，并对号码打码。
 - 私聊记忆存在 `AgentMemory`（`scope="private"`、`group_id` 为空、`memory_type="private_fact"`），**永远不进群聊提示词**。成员要求“也在群里记住/忘掉”时，才通过 `memory_self` 写入/删除对应群的画像，且同样只限可读的群。自动整理（每 6 条私聊一次，后台）不覆盖 Agent 或手动写入的同键记忆。
 - 新增私聊工具时同步 `private_tools.tool_schemas()`、`execute_private_tool` 与 `tests/test_private_agent.py`；参数校验沿用 `tool_args.validate_tool_arguments` 与 `tool_error_payload`。
+- WebUI 用户抽屉能看私聊 Agent 状态、暂停/恢复自动回复、删除私聊记忆。核心侧查询（`turns_today`、`private_memory_query`、`delete_private_memories`、类别名 `PRIVATE_MEMORY_LABELS`）放在 `private_chat_bridge.py`，Agent 与 WebUI 共用；改私聊记忆的存储标记时两边一起生效，不要在 `yawn_agent` 里另写一份。

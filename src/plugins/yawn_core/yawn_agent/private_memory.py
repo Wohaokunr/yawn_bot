@@ -20,11 +20,18 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from ..data_models.agent_memory import AgentMemory
 from ..data_models.chat_message import ChatMessage
 from ..data_models.chat_session import ChatSession
+from ..private_chat_bridge import (
+    PRIVATE_MEMORY_LABELS,
+    PRIVATE_MEMORY_SCOPE,
+    PRIVATE_MEMORY_TYPE,
+    delete_private_memories,
+    private_memory_query,
+)
 from .log import dbg, dbg_exc
 from .memory_hygiene import (
     is_near_duplicate,
@@ -36,8 +43,7 @@ from .memory_self import SELF_FACT_KEYS
 from .private_prompt import PRIVATE_MEMORY_SYSTEM
 from .prompt_sections import system_messages
 
-PRIVATE_SCOPE = "private"
-PRIVATE_MEMORY_TYPE = "private_fact"
+PRIVATE_SCOPE = PRIVATE_MEMORY_SCOPE
 LIST_KEYS = frozenset({"hobby", "preference", "dislike", "skill"})
 # 亲口要求记住的：一年；自动整理的：90 天；近期状态：14 天。
 AGENT_TTL_DAYS = 365
@@ -51,15 +57,7 @@ CONSOLIDATE_EVERY = 6
 CONSOLIDATE_WINDOW = 30
 _CONTENT_LIMIT = 100
 
-KEY_LABELS: dict[str, str] = {
-    "display_name": "昵称",
-    "preferred_address": "希望的称呼",
-    "hobby": "爱好",
-    "preference": "喜好",
-    "dislike": "讨厌的",
-    "skill": "擅长",
-    "current_status": "近期状态",
-}
+KEY_LABELS = PRIVATE_MEMORY_LABELS
 
 _REJECT_MESSAGES = {
     "pii_only": "联系方式、证件号或链接我不会记，保护你的隐私",
@@ -76,12 +74,7 @@ def _ttl(key: str, source: str, now: datetime) -> datetime:
 
 
 def _base_query(user_id: int) -> Any:
-    return select(AgentMemory).where(
-        AgentMemory.scope == PRIVATE_SCOPE,
-        AgentMemory.group_id.is_(None),
-        AgentMemory.subject_user_id == user_id,
-        AgentMemory.memory_type == PRIVATE_MEMORY_TYPE,
-    )
+    return private_memory_query(user_id)
 
 
 async def list_facts(session: Any, user_id: int, *, now: datetime) -> list[AgentMemory]:
@@ -228,14 +221,7 @@ async def forget(
 async def purge_user(session: Any, user_id: int) -> int:
     """删掉某人全部私聊记忆（WebUI / 删除对话时用）。不提交。"""
 
-    result = await session.execute(
-        delete(AgentMemory).where(
-            AgentMemory.scope == PRIVATE_SCOPE,
-            AgentMemory.group_id.is_(None),
-            AgentMemory.subject_user_id == user_id,
-        )
-    )
-    return int(getattr(result, "rowcount", 0) or 0)
+    return await delete_private_memories(session, user_id)
 
 
 # ── 自动整理 ────────────────────────────────────────────────

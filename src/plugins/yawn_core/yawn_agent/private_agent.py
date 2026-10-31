@@ -23,12 +23,13 @@ from typing import Any
 
 from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import MessageSegment
-from sqlalchemy import func, select
 
 from .. import affinity, llm
-from ..data_models.chat_message import ChatMessage
-from ..data_models.chat_session import ChatSession
-from ..private_chat_bridge import PrivateTurnRequest, private_agent_config
+from ..private_chat_bridge import (
+    PrivateTurnRequest,
+    private_agent_config,
+    turns_today,
+)
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .persona import prompt_persona, resolve_persona
@@ -64,26 +65,6 @@ _CLAIM_ALIASES = {"checkin": "checkin_for_me"}
 PRIVATE_CHAT_AFFINITY = 1
 
 _background: set[asyncio.Task[Any]] = set()
-
-
-async def turns_today(session: Any, user_id: int, now: datetime) -> int:
-    """今天 Bot 在私聊里回了这个人几次（assistant 消息数）。"""
-
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return int(
-        await session.scalar(
-            select(func.count())
-            .select_from(ChatMessage)
-            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
-            .where(
-                ChatSession.user_id == user_id,
-                ChatSession.group_id.is_(None),
-                ChatMessage.role == "assistant",
-                ChatMessage.created_at >= start,
-            )
-        )
-        or 0
-    )
 
 
 def _trim_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
