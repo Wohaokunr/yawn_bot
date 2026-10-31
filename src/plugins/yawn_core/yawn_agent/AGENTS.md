@@ -225,3 +225,15 @@
 - 不得在没有本轮成功的 `schedule_task`/`update_scheduled_task` 时声称“已经定好了”，没有 `cancel_scheduled_task` 时声称“取消了”（`speech_claims.py` 的 `schedule_set`/`schedule_cancel` 族）。
 - 指令文本创建时过 `persona.text_overrides_policy`，拒绝 CQ 码与 @全体；指令只在到点时作为“创建者当时的请求”交给模型，不提升权限。
 - 不改 `dialogue.py`（已接近 1500 行上限）：唤醒语义全部通过 contextvar + `context_loader` + `prompt.py` + `tools.py` 接入。新增 schedule 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_schedule.py`。
+
+## 私聊 Agent
+
+- 入口只有一个：`ai_chat._process_chat` → `_try_private_agent` → `private_chat_bridge.get_private_handler()` → `private_agent.handle_private_turn`。处理函数返回 `None` 或抛异常时，`ai_chat` 回滚会话并退回原来的流式纯对话；私聊 Agent 不得自己另开发送通道或绕过 `ChatMessage` 落库。
+- 核心插件不导入 `yawn_agent`：处理函数由 `yawn_agent/__init__.py` 在加载时 `register_private_handler` 注册。子插件没加载时私聊照旧可用。
+- 自动接管（`PRIVATE_AGENT_AUTO_REPLY`）只对好友私聊生效（`PRIVATE_AGENT_FRIENDS_ONLY`）；成员发 `/退出` 后写入暂停状态，不再自动回复他，`/对话` 清除暂停。暂停状态是 JSON 文件，不需要迁移。
+- 每轮模型请求走 `llm.complete_with_tools_result(task="agent_dialogue", max_tokens=NO_OUTPUT_LIMIT)`；最后一轮不带工具并追加 `private.final_round`。所有提示词文本都在 `private_prompt.py`，并在 `prompt_sections.py` 登记为 `private.*`（`private.safety` 是安全段）。新增私聊提示词时同步登记，否则 WebUI 看不到也改不了。
+- 私聊工具不收 `user_id`，一律作用于发消息的本人；签到走 `checkin_service.perform_checkin`，好感只经 `affinity.grant`（来源 `private_chat`，有日上限）。写工具成功后先提交再回复，模型后续失败不丢副作用。没有本轮成功的 `checkin` 不得声称“签好了”（`verify_claims`）。
+- 读群数据的边界：只读用户**当前活跃**的群，且该群 `GroupAgentConfig.enabled` 为真、本人未隐私退出（`AgentPrivacy.opted_out`）。群里的记忆和关系是不可信数据，进上下文前过 `memory_hygiene`，只给词语不给数值。`group_recent` 只允许可读的群，并对号码打码。
+- 私聊记忆存在 `AgentMemory`（`scope="private"`、`group_id` 为空、`memory_type="private_fact"`），**永远不进群聊提示词**。成员要求“也在群里记住/忘掉”时，才通过 `memory_self` 写入/删除对应群的画像，且同样只限可读的群。自动整理（每 6 条私聊一次，后台）不覆盖 Agent 或手动写入的同键记忆。
+- 新增私聊工具时同步 `private_tools.tool_schemas()`、`execute_private_tool` 与 `tests/test_private_agent.py`；参数校验沿用 `tool_args.validate_tool_arguments` 与 `tool_error_payload`。
+- WebUI 用户抽屉能看私聊 Agent 状态、暂停/恢复自动回复、删除私聊记忆。核心侧查询（`turns_today`、`private_memory_query`、`delete_private_memories`、类别名 `PRIVATE_MEMORY_LABELS`）放在 `private_chat_bridge.py`，Agent 与 WebUI 共用；改私聊记忆的存储标记时两边一起生效，不要在 `yawn_agent` 里另写一份。

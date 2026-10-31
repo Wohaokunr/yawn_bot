@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -11,14 +12,36 @@ from nonebot_plugin_orm import get_session
 from .. import affinity
 from ..checkin_service import checkin_overview
 from ..permission import FEATURE_REGISTRY
+from ..private_chat_bridge import (
+    PRIVATE_MEMORY_LABELS,
+    auto_paused,
+    delete_private_memories,
+    get_private_handler,
+    private_agent_config,
+    private_memory_query,
+    set_auto_paused,
+    turns_today,
+)
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, ok, page_params
 from .hub import hub
 from .route_helpers import require_user
-from .route_models import AffinityAdjustBody, FeatureOverrideBody
-from .service import list_users, page_meta, set_user_feature, user_feature_rows
+from .route_models import (
+    AffinityAdjustBody,
+    FeatureOverrideBody,
+    PrivateAgentPatchBody,
+)
+from .service import (
+    BEIJING_TZ,
+    iso,
+    list_users,
+    page_meta,
+    set_user_feature,
+    user_feature_rows,
+)
 
 router = APIRouter(prefix=API_PATH)
+
 
 @router.get("/users")
 async def get_users(
@@ -140,3 +163,90 @@ async def adjust_user_affinity(
         payload = await _affinity_payload(db, user_id)
     await hub.notify_change("user_affinity", str(user_id))
     return ok(payload)
+
+
+# ── 私聊 Agent ──────────────────────────────────────────────
+
+_SOURCE_LABELS = {"agent": "本人要求记的", "auto": "聊天里整理的"}
+
+
+async def _private_agent_payload(db: Any, user_id: int) -> dict[str, Any]:
+    now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
+    try:
+        rows = (await db.execute(private_memory_query(user_id))).scalars().all()
+        memory_available = True
+    except Exception:  # noqa: BLE001 - 记忆表未迁移时只读降级
+        rows, memory_available = [], False
+    facts = [
+        {
+            "key": str(row.memory_key),
+            "label": PRIVATE_MEMORY_LABELS.get(
+                str(row.memory_key), str(row.memory_key)
+            ),
+            "content": str(row.content or ""),
+            "source": str(row.source_kind or ""),
+            "sourceLabel": _SOURCE_LABELS.get(str(row.source_kind), "管理员设置的"),
+            "updatedAt": iso(row.updated_at),
+            "expiresAt": iso(row.expires_at),
+            "expired": row.expires_at is not None and row.expires_at < now,
+        }
+        for row in sorted(rows, key=lambda item: str(item.memory_key))
+    ]
+    cfg = private_agent_config
+    return {
+        "userId": str(user_id),
+        "enabled": bool(cfg.private_agent_enabled),
+        "agentLoaded": get_private_handler() is not None,
+        "autoReply": bool(cfg.private_agent_auto_reply),
+        "friendsOnly": bool(cfg.private_agent_friends_only),
+        "dailyTurns": int(cfg.private_agent_daily_turns),
+        "autoPaused": auto_paused(user_id),
+        "turnsToday": await turns_today(db, user_id, now),
+        "memoryAvailable": memory_available,
+        "facts": facts,
+    }
+
+
+@router.get("/users/{user_id}/private-agent")
+async def get_user_private_agent(
+    user_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
+    """私聊 Agent 对这位用户的状态：是否暂停自动回复、今日轮数、私聊记忆。"""
+
+    async with get_session() as db:
+        await require_user(db, user_id)
+        payload = await _private_agent_payload(db, user_id)
+    return ok(payload)
+
+
+@router.patch("/users/{user_id}/private-agent")
+async def patch_user_private_agent(
+    user_id: int, body: PrivateAgentPatchBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """暂停或恢复对这位用户的自动回复（与本人发 /退出、/对话 等价）。"""
+
+    async with get_session() as db:
+        await require_user(db, user_id)
+        set_auto_paused(user_id, paused=body.auto_paused)
+        payload = await _private_agent_payload(db, user_id)
+    await hub.notify_change("user_private_agent", str(user_id))
+    return ok(payload)
+
+
+@router.delete("/users/{user_id}/private-agent/memories")
+async def delete_user_private_memories(
+    user_id: int,
+    _session: AdminWriteSession,
+    key: str = Query(default="", max_length=64),
+) -> dict[str, Any]:
+    """删除这位用户的私聊记忆；带 key 只删一个类别。不影响群里的记忆。"""
+
+    if key and key not in PRIVATE_MEMORY_LABELS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不支持的记忆类别")
+    async with get_session() as db:
+        await require_user(db, user_id)
+        removed = await delete_private_memories(db, user_id, key=key or None)
+        await db.commit()
+        payload = await _private_agent_payload(db, user_id)
+    await hub.notify_change("user_private_agent", str(user_id))
+    return ok({**payload, "removed": removed})

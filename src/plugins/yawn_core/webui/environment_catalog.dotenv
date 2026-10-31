@@ -229,6 +229,21 @@ AGENT_WEB_SEARCH_API_KEY=
 # DeepSeek Search / Fetch API 的 Base URL（一般不用改）
 AGENT_WEB_SEARCH_BASE_URL=https://api.deepseek.com
 
+# ── 私聊 Agent ─────────────────────────────────────────────────────────────────
+
+# 私聊交给 Agent（同一份人设、跨群关系、签到/记忆工具）；关闭后私聊退回原来的纯对话
+PRIVATE_AGENT_ENABLED=true
+# 好友私聊不用先发 /对话，直接由 Agent 回复；成员发 /退出 后不再自动回复他，/对话 恢复
+PRIVATE_AGENT_AUTO_REPLY=true
+# 自动接管只对好友生效；临时会话仍需 /对话
+PRIVATE_AGENT_FRIENDS_ONLY=true
+# 每人每天最多多少轮私聊 Agent（0 到 10000，0 表示不限），超出后当天退回纯对话
+PRIVATE_AGENT_DAILY_TURNS=120
+# 每轮最多调用几轮工具（1 到 8）
+PRIVATE_AGENT_MAX_TOOL_ROUNDS=4
+# 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json
+PRIVATE_AGENT_STATE_PATH=
+
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 
 # RPG 是否启用 AI 叙事/工具流程；false 为确定性模式

@@ -21,6 +21,7 @@ from nonebot.adapters.onebot.v11 import (
     Message,
     MessageEvent,
     MessageSegment,
+    PrivateMessageEvent,
 )
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata, on_command, on_message
@@ -48,6 +49,14 @@ from .llm import ai_config as _ai_config
 from .llm import get_client as _get_client
 from .llm import resolve_llm_request as _resolve_llm_request
 from .permission import check_feature_permission, require_feature
+from .private_chat_bridge import (
+    PrivateTurnRequest,
+    auto_paused,
+    auto_reply_available,
+    get_private_handler,
+    private_agent_config,
+    set_auto_paused,
+)
 from .reply_chain import (
     format_chain_for_prompt,
     resolve_reply_chain,
@@ -476,7 +485,7 @@ async def _stream_and_send_impl(  # noqa: C901, PLR0912, PLR0915
 # ── 核心处理函数 ──────────────────────────────────────────
 
 
-async def _process_chat(
+async def _process_chat(  # noqa: C901
     bot: Bot,
     event: MessageEvent,
     user_id: int,
@@ -545,9 +554,21 @@ async def _process_chat(
     chat_session.updated_at = _now_bj()
     await session.commit()
 
-    # 加载历史并流式调用 AI（边生成边发送）
+    # 加载历史；私聊 Agent 可用时先交给它（人设、工具、跨群关系），
+    # 它返回 None（未配置/出错/超额）再退回流式纯对话。
     history = await _load_history(session, chat_session.id, time_prefix)
-    reply_text = await _stream_and_send(bot, event, history)
+    reply_text = await _try_private_agent(
+        bot,
+        event,
+        user_id,
+        session,
+        enhanced_content=enhanced_content,
+        raw_text=user_input,
+        history=history,
+        time_prefix=time_prefix,
+    )
+    if reply_text is None:
+        reply_text = await _stream_and_send(bot, event, history)
 
     # 仅持久化有效回复；致歉提示不入库，避免污染上下文
     if reply_text:
@@ -559,6 +580,45 @@ async def _process_chat(
         )
         session.add(ai_msg)
         await session.commit()
+
+
+async def _try_private_agent(  # noqa: PLR0913
+    bot: Bot,
+    event: MessageEvent,
+    user_id: int,
+    session: _DbSession,
+    *,
+    enhanced_content: str,
+    raw_text: str,
+    history: list[dict[str, str]],
+    time_prefix: str,
+) -> Optional[str]:
+    """交给私聊 Agent；没有处理函数或它放弃时返回 None。异常一律吞掉降级。"""
+
+    handler = get_private_handler()
+    if handler is None:
+        return None
+    sender = getattr(event, "sender", None)
+    request = PrivateTurnRequest(
+        bot=bot,
+        event=event,
+        user_id=user_id,
+        user_input=enhanced_content,
+        raw_text=raw_text,
+        history=[item for item in history if item.get("role") != "system"],
+        session=session,
+        time_note=time_prefix,
+        nickname=getattr(sender, "nickname", None) or None,
+    )
+    try:
+        return await handler(request)
+    except Exception:  # noqa: BLE001
+        logger.exception(f"私聊 Agent 处理用户 {user_id} 的消息失败，退回纯对话")
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            logger.debug("私聊 Agent 失败后回滚出错", exc_info=True)
+        return None
 
 
 async def _run_user_chat(  # noqa: PLR0913
@@ -649,6 +709,9 @@ async def handle_ai_chat(
     user_id = int(event.get_user_id())
     user_input = args.extract_plain_text().strip()
 
+    # 主动发 /对话 等于重新同意自动接管
+    set_auto_paused(user_id, paused=False)
+
     if not user_input:
         # 无参数 → 进入对话模式
         if is_in_mode(user_id):
@@ -720,10 +783,16 @@ async def handle_exit_mode(
     if isinstance(event, GroupMessageEvent):
         await exit_mode_cmd.finish("群聊对话功能即将上线，请先在私聊中使用~")
     user_id = int(event.get_user_id())
-    if exit_mode(user_id):
-        await exit_mode_cmd.finish(
-            "已退出对话模式~\n对话记录已保存，下次 /对话 继续聊！"
+    exited = exit_mode(user_id)
+    # 自动接管开着时，/退出 也表示“别再自动回我了”，直到下次 /对话
+    paused_now = auto_reply_available() and set_auto_paused(user_id, paused=True)
+    if exited or paused_now:
+        tail = (
+            "\n之后私聊我不会自动回复了，发 /对话 恢复~"
+            if auto_reply_available()
+            else "\n对话记录已保存，下次 /对话 继续聊！"
         )
+        await exit_mode_cmd.finish("已退出对话模式~" + tail)
     await exit_mode_cmd.finish("你当前不在对话模式中哦~")
 
 
@@ -782,5 +851,54 @@ async def _handle_chat_mode_msg(
             event,
             MessageSegment.text("当前对话消息较多，请稍后再试~"),
         )
+        return
+    ensure_worker(user_id, _worker_process_chat)
+
+
+# ── 私聊自动接管 ─────────────────────────────────────────
+
+
+async def _is_auto_reply_msg(event: MessageEvent) -> bool:
+    """好友私聊的普通文本：不在对话模式、不是命令、自动接管开着且本人没暂停。"""
+
+    if not isinstance(event, PrivateMessageEvent):
+        return False
+    if not auto_reply_available():
+        return False
+    if (
+        private_agent_config.private_agent_friends_only
+        and getattr(event, "sub_type", "friend") != "friend"
+    ):
+        return False
+    user_id = int(event.get_user_id())
+    if is_in_mode(user_id) or auto_paused(user_id):
+        return False
+    text = event.get_plaintext().strip()
+    return bool(text) and not text.startswith("/")
+
+
+# priority=9：排在所有命令（priority=5）、对局私聊监听（-1）和多步向导的临时
+# matcher（0）之后；只有没人认领的好友私聊才会落到这里。
+auto_reply_listener = on_message(
+    rule=Rule(_is_auto_reply_msg),
+    priority=9,
+    block=True,
+)
+
+
+@auto_reply_listener.handle()
+async def _handle_auto_reply(
+    bot: Bot,
+    event: MessageEvent,
+    session: async_scoped_session,
+) -> None:
+    """自动进入对话模式并把这条消息交给 worker（与 /对话 后的路径完全一致）。"""
+
+    user_id = int(event.get_user_id())
+    if not await check_feature_permission(user_id, None, "ai_chat", session):
+        return
+    state = enter_mode(user_id)
+    if not enqueue(state, (bot, event, None)):
+        await bot.send(event, MessageSegment.text("当前对话消息较多，请稍后再试~"))
         return
     ensure_worker(user_id, _worker_process_chat)

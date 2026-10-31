@@ -8,6 +8,7 @@
 from nonebot.plugin import PluginMetadata
 
 from ..command_catalog import PluginCommandGroup, register_command_group
+from ..private_chat_bridge import register_private_handler
 from .command_definitions import COMMAND_DEFINITIONS
 from . import (
     agent,
@@ -22,6 +23,7 @@ from . import (
     memory,
     message_parser,
     persona,
+    private_agent,
     proactive,
     prompt,
     prompt_capture,
@@ -31,6 +33,8 @@ from . import (
 
 # 把每次真实发给模型的完整请求挂进执行追踪（AGENT_TRACE_PROMPT_CAPTURE=off 可关）。
 prompt_capture.install()
+# 私聊交给 Agent：ai_chat 每轮先问它，它放弃时退回原来的纯对话。
+register_private_handler(private_agent.handle_private_turn)
 
 COMMAND_GROUP = register_command_group(
     PluginCommandGroup(
@@ -62,6 +66,7 @@ __all__ = [
     "memory",
     "message_parser",
     "persona",
+    "private_agent",
     "proactive",
     "prompt",
     "schedule_runner",
