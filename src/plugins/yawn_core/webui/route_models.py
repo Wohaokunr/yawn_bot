@@ -33,6 +33,22 @@ class FeatureOverrideBody(BaseModel):
     override: bool | None
 
 
+class FeatureBatchBody(BaseModel):
+    """批量设置功能覆盖：ids 是群号或 QQ 号（字符串避免 JS 大数精度问题）。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    ids: list[str] = Field(min_length=1, max_length=100)
+    feature: str = Field(min_length=1, max_length=64)
+    override: bool | None
+
+
+class GroupFeatureResetBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    include_agent: bool = Field(default=False, alias="includeAgent")
+
+
 class AffinityAdjustBody(BaseModel):
     delta: int = Field(ge=-500, le=500)
     note: str = Field(default="", max_length=100)
