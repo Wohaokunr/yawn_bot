@@ -147,12 +147,187 @@ PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
         },
     ),
 )
-TOOLS_BY_NAME: dict[str, PrivateTool] = {tool.name: tool for tool in PRIVATE_TOOLS}
-WRITE_TOOLS = frozenset(tool.name for tool in PRIVATE_TOOLS if tool.writes)
+_ID = {"type": "integer", "minimum": 1, "maximum": 1000000, "description": "条目编号（list 返回的 id）"}
+_LIMIT = {"type": "integer", "minimum": 1, "maximum": 30}
+_CLOCK = {"type": "string", "maxLength": 5, "description": "HH:MM（北京时间），传 off 关闭"}
+
+# 个人助理与扩展工具（private_organizer / private_services）。
+EXTRA_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "notes",
+        "这位用户的私人笔记本：add 记一条、list 列出（置顶在前）、search 按关键词找、delete 删、pin/unpin 置顶。他说“帮我记一下/存一下”且不是关于他本人的长期特征时用这个",
+        {
+            "action": {"type": "string", "enum": ["add", "list", "search", "delete", "pin", "unpin"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": 300},
+            "tag": {"type": "string", "minLength": 1, "maxLength": 12, "description": "可选标签，如 书单/密码提示/灵感"},
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 30},
+            "id": _ID,
+            "limit": _LIMIT,
+        },
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "todos",
+        "这位用户的待办清单：add 加一项（可带截止日期 due 和优先级）、list 列出、done 完成、undo 撤销完成、delete 删除、clear_done 清掉已完成的",
+        {
+            "action": {"type": "string", "enum": ["add", "list", "done", "undo", "delete", "clear_done"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": 120},
+            "due": {"type": "string", "maxLength": 10, "description": "截止日期 YYYY-MM-DD"},
+            "priority": {"type": "string", "enum": ["high", "normal", "low"]},
+            "include_done": {"type": "boolean"},
+            "id": _ID,
+            "limit": _LIMIT,
+        },
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "reminders",
+        "到点在私聊里提醒这位用户：add 设提醒（at 绝对时间或 in_minutes 相对分钟二选一，repeat 可每天/工作日/每周）、list 列出、cancel 取消、snooze 推迟。时间按资料里的 now 推算",
+        {
+            "action": {"type": "string", "enum": ["add", "list", "cancel", "snooze"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": 120, "description": "到时候提醒他的内容"},
+            "at": {"type": "string", "maxLength": 19, "description": "YYYY-MM-DD HH:MM（北京时间）"},
+            "in_minutes": {"type": "integer", "minimum": 1, "maximum": 527040},
+            "repeat": {"type": "string", "enum": ["none", "daily", "weekdays", "weekly"]},
+            "snooze_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+            "id": _ID,
+        },
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "countdowns",
+        "倒数日/纪念日：add 加一个（title + date，notify 当天要不要私聊提醒）、list 看还有几天、delete 删",
+        {
+            "action": {"type": "string", "enum": ["add", "list", "delete"]},
+            "title": {"type": "string", "minLength": 1, "maxLength": 40},
+            "date": {"type": "string", "maxLength": 10, "description": "YYYY-MM-DD"},
+            "notify": {"type": "boolean"},
+            "id": _ID,
+        },
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "mood",
+        "心情记录：log 记下他此刻的心情（score 1很差~5很好，可带一句 note），history 看最近几天的心情和趋势。只在他愿意时记",
+        {
+            "action": {"type": "string", "enum": ["log", "history"]},
+            "score": {"type": "integer", "minimum": 1, "maximum": 5},
+            "note": {"type": "string", "minLength": 1, "maxLength": 60},
+            "days": {"type": "integer", "minimum": 1, "maximum": 90},
+        },
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "chat_prefs",
+        "这位用户和你私聊的偏好：get 查看；set 修改他明确提出的项——回复长短、表情多少、希望你怎么称呼他、免打扰时段、每天早安问候时间、签到提醒时间、生日（月-日）、是否接受你主动发消息",
+        {
+            "action": {"type": "string", "enum": ["get", "set"]},
+            "reply_length": {"type": "string", "enum": ["short", "normal", "long"]},
+            "emoji": {"type": "string", "enum": ["none", "some", "lots"]},
+            "call_me": {"type": "string", "maxLength": 16, "description": "传 off 清除"},
+            "quiet_start": _CLOCK,
+            "quiet_end": _CLOCK,
+            "morning_greeting": _CLOCK,
+            "checkin_nudge": {**_CLOCK, "description": "每天几点还没签到就私聊提醒他；off 关闭"},
+            "birthday": {"type": "string", "maxLength": 5, "description": "MM-DD，传 off 清除"},
+            "proactive": {"type": "boolean", "description": "false 表示除了他自己设的提醒，你都不要主动发消息"},
+        },
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "affinity_detail",
+        "你和他关系的细节：progress 离下一级还有多远（只有词语）、sources 最近 30 天好感主要来自哪里、history 最近的变化记录",
+        {"view": {"type": "string", "enum": ["progress", "sources", "history"]}, "limit": _LIMIT},
+    ),
+    PrivateTool(
+        "checkin_board",
+        "某个群今天的签到顺序（前 10 名）、他今天排第几、连签和下一个里程碑",
+        {"group": {**_GROUP_SCHEMA, "description": "群名（可以只写一部分）或群号"}},
+        ("group",),
+    ),
+    PrivateTool(
+        "toolbox",
+        "小工具：calc 算式计算、convert 单位换算（长度/重量/体积/面积/时间/数据/速度/温度）、date_diff 两个日期差几天、date_add 某天加减几天是哪天星期几、dice 掷骰子、coin 抛硬币、pick 帮他从选项里随机选一个、fortune 今日运势（娱乐）、world_time 某城市现在几点。需要精确数字时用它，别心算",
+        {
+            "op": {"type": "string", "enum": ["calc", "convert", "date_diff", "date_add", "dice", "coin", "pick", "fortune", "world_time"]},
+            "expression": {"type": "string", "maxLength": 200},
+            "value": {"type": "number"},
+            "from_unit": {"type": "string", "maxLength": 10},
+            "to_unit": {"type": "string", "maxLength": 10},
+            "start": {"type": "string", "maxLength": 10, "description": "YYYY-MM-DD 或 今天/明天/昨天"},
+            "end": {"type": "string", "maxLength": 10},
+            "days": {"type": "integer", "minimum": -73000, "maximum": 73000},
+            "sides": {"type": "integer", "minimum": 2, "maximum": 1000},
+            "count": {"type": "integer", "minimum": 1, "maximum": 20},
+            "options": {"type": "array", "minItems": 2, "maxItems": 30, "items": {"type": "string"}},
+            "place": {"type": "string", "maxLength": 40},
+        },
+        ("op",),
+    ),
+    PrivateTool(
+        "chat_history",
+        "你们的私聊记录：search 按关键词找以前聊过的内容（他问“我之前跟你说过的那个…”时用）、stats 聊了多久多少条",
+        {
+            "action": {"type": "string", "enum": ["search", "stats"]},
+            "keyword": {"type": "string", "minLength": 1, "maxLength": 30},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+    ),
+    PrivateTool(
+        "my_data",
+        "他在你这里存了什么：summary 各类数据条数、quota 今天还能和你聊几轮/搜几次、wipe 清空他的全部个人数据和私聊记忆（必须他明确确认后才带 confirm=true）",
+        {"action": {"type": "string", "enum": ["summary", "quota", "wipe"]}, "confirm": {"type": "boolean"}},
+        writes=True,
+    ),
+    PrivateTool(
+        "feedback",
+        "把他对机器人的建议、bug 或投诉转给管理员（每天最多 3 条）。只有他明确想反馈时才用",
+        {
+            "content": {"type": "string", "minLength": 1, "maxLength": 300},
+            "kind": {"type": "string", "enum": ["bug", "suggestion", "complaint", "other"]},
+        },
+        ("content",),
+        writes=True,
+    ),
+    PrivateTool(
+        "web_search",
+        "联网搜索（新闻、实时信息、你不确定的事实）。返回标题、摘要和编号 w1、w2…；需要细节再用 web_fetch",
+        {"query": {"type": "string", "minLength": 1, "maxLength": 100, "description": "几个关键词"}},
+        ("query",),
+    ),
+    PrivateTool(
+        "web_fetch",
+        "打开 web_search 结果（编号如 w1）或网址读正文",
+        {
+            "target": {"type": "string", "minLength": 1, "maxLength": 500},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 200000},
+        },
+        ("target",),
+    ),
+    PrivateTool(
+        "bot_status",
+        "（仅超级管理员）机器人运行状态：运行时长、今天私聊人数和回复数、反馈条数",
+    ),
+)
+# 只给超级管理员的工具：普通用户的 schema 里看不到。
+SUPERUSER_TOOLS = frozenset({"bot_status"})
+ALL_TOOLS: tuple[PrivateTool, ...] = PRIVATE_TOOLS + EXTRA_TOOLS
+TOOLS_BY_NAME: dict[str, PrivateTool] = {tool.name: tool for tool in ALL_TOOLS}
+WRITE_TOOLS = frozenset(tool.name for tool in ALL_TOOLS if tool.writes)
 
 
-def tool_schemas() -> list[dict[str, Any]]:
-    return [tool.schema() for tool in PRIVATE_TOOLS]
+def tool_schemas(*, is_superuser: bool = False) -> list[dict[str, Any]]:
+    return [
+        tool.schema()
+        for tool in ALL_TOOLS
+        if is_superuser or tool.name not in SUPERUSER_TOOLS
+    ]
 
 
 @dataclass(slots=True)
@@ -164,9 +339,14 @@ class PrivateToolContext:
     now: datetime
     nickname: str | None = None
     is_superuser: bool = False
+    # 反馈转发给管理员时用；测试里可以不给
+    bot: Any = None
     # 本轮已经成功的写工具，用于去重与“已完成”声明
     succeeded: set[str] = field(default_factory=set)
     mutated: bool = False
+    # 联网搜索：本轮的结果编号（w1…）和已调用次数
+    web_refs: dict[str, str] = field(default_factory=dict)
+    web_calls: int = 0
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -491,19 +671,69 @@ async def execute_private_tool(
             result = await _relationship(ctx)
         elif name == "group_recent":
             result = await _group_recent(ctx, str(args["group"]))
-        else:
+        elif name == "list_commands":
             result = await _commands(ctx, args)
+        else:
+            result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
         return tool_error_payload(exc)
-    if tool.writes:
-        ctx.succeeded.add(name)
-    else:
-        ctx.succeeded.add(name)
+    ctx.succeeded.add(name)
+    if name in _ORGANIZER_ACTIONS and str(args.get("action") or "") in _ORGANIZER_ACTIONS[name]:
+        # 声明核验按“工具.动作”区分：查了待办不能说“已经帮你加上了”
+        ctx.succeeded.add(f"{name}.{args['action']}")
     return {"ok": True, "result": result}
 
 
+# 会改个人数据的动作（其余动作只读）。
+_ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
+    "notes": frozenset({"add", "delete", "pin", "unpin"}),
+    "todos": frozenset({"add", "done", "undo", "delete", "clear_done"}),
+    "reminders": frozenset({"add", "cancel", "snooze"}),
+    "countdowns": frozenset({"add", "delete"}),
+    "mood": frozenset({"log"}),
+    "chat_prefs": frozenset({"set"}),
+    "my_data": frozenset({"wipe"}),
+}
+
+
+async def _execute_extra(
+    name: str, args: dict[str, Any], ctx: PrivateToolContext
+) -> dict[str, Any]:
+    from . import private_organizer as organizer
+    from . import private_services as services
+
+    simple = {
+        "notes": organizer.notes,
+        "todos": organizer.todos,
+        "reminders": organizer.reminders,
+        "countdowns": organizer.countdowns,
+        "mood": organizer.mood,
+        "chat_prefs": organizer.chat_prefs,
+    }
+    if name in simple:
+        return simple[name](ctx.user_id, args, ctx.now)
+    if name == "toolbox":
+        return services.toolbox(ctx, args)
+    if name == "bot_status" and not ctx.is_superuser:
+        raise ToolError("只有超级管理员能用", code=ERROR_PERMISSION)
+    handlers = {
+        "affinity_detail": services.affinity_detail,
+        "checkin_board": services.checkin_board,
+        "chat_history": services.chat_history,
+        "my_data": services.my_data,
+        "feedback": services.feedback,
+        "web_search": services.web_search,
+        "web_fetch": services.web_fetch,
+        "bot_status": services.bot_status,
+    }
+    return await handlers[name](ctx, args)
+
+
 __all__ = [
+    "ALL_TOOLS",
+    "EXTRA_TOOLS",
     "PRIVATE_TOOLS",
+    "SUPERUSER_TOOLS",
     "TOOLS_BY_NAME",
     "WRITE_TOOLS",
     "PrivateTool",

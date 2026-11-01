@@ -124,7 +124,52 @@ async def stop_worker(user_id: int) -> None:
             await task
 
 
-async def _worker_loop(
+def _merge_window_seconds() -> float:
+    try:
+        from .private_chat_bridge import private_agent_config
+
+        return max(int(private_agent_config.private_agent_merge_window_ms), 0) / 1000
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _plain(event: Any) -> str:
+    try:
+        return str(event.get_plaintext()).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _merge_burst(state: UserChatState, event: Any) -> tuple[Any, str | None, int]:
+    """连发合并：等一个短窗口，把队列里紧跟着的普通消息并成一轮。
+
+    返回 (用于回复的事件, 合并后的文本或 None, 额外取出的条数)。命令消息
+    （带 override_text 的）不合并，留在队列里按原顺序处理。
+    """
+
+    window = _merge_window_seconds()
+    if window <= 0:
+        return event, None, 0
+    await asyncio.sleep(window)
+    texts = [_plain(event)]
+    latest = event
+    taken = 0
+    while not state.queue.empty() and taken < _CHAT_QUEUE_MAX:
+        _bot, nxt, override = state.queue._queue[0]  # type: ignore[attr-defined]
+        if override is not None:
+            break
+        state.queue.get_nowait()
+        taken += 1
+        latest = nxt
+        text = _plain(nxt)
+        if text:
+            texts.append(text)
+    if not taken:
+        return event, None, 0
+    return latest, "\n".join(t for t in texts if t), taken
+
+
+async def _worker_loop(  # noqa: C901
     user_id: int,
     process_fn: Callable[[Bot, MessageEvent, int, str | None], Awaitable[None]],
 ) -> None:
@@ -157,6 +202,9 @@ async def _worker_loop(
                 break
 
             bot_inst, event, override_text = item
+            merged = 0
+            if override_text is None:
+                event, override_text, merged = await _merge_burst(state, event)
             try:
                 await process_fn(bot_inst, event, user_id, override_text)
             except Exception as e:  # noqa: BLE001
@@ -177,7 +225,8 @@ async def _worker_loop(
                         f"向用户 {user_id} 发送处理失败提示时出错", exc_info=True
                     )
             finally:
-                state.queue.task_done()
+                for _ in range(merged + 1):
+                    state.queue.task_done()
     finally:
         # 仅当槽位仍是本任务时摘除，避免覆盖 ensure_worker 新建的任务
         if state.worker is asyncio.current_task():

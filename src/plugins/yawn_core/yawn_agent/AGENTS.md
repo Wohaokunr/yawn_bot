@@ -236,4 +236,10 @@
 - 读群数据的边界：只读用户**当前活跃**的群，且该群 `GroupAgentConfig.enabled` 为真、本人未隐私退出（`AgentPrivacy.opted_out`）。群里的记忆和关系是不可信数据，进上下文前过 `memory_hygiene`，只给词语不给数值。`group_recent` 只允许可读的群，并对号码打码。
 - 私聊记忆存在 `AgentMemory`（`scope="private"`、`group_id` 为空、`memory_type="private_fact"`），**永远不进群聊提示词**。成员要求“也在群里记住/忘掉”时，才通过 `memory_self` 写入/删除对应群的画像，且同样只限可读的群。自动整理（每 6 条私聊一次，后台）不覆盖 Agent 或手动写入的同键记忆。
 - 新增私聊工具时同步 `private_tools.tool_schemas()`、`execute_private_tool` 与 `tests/test_private_agent.py`；参数校验沿用 `tool_args.validate_tool_arguments` 与 `tool_error_payload`。
+- 个人助理数据（笔记、待办、提醒、倒数日、心情、聊天偏好、调度标记）存在 `private_store`：`data/private_agent/users/<QQ>.json`（`PRIVATE_AGENT_DATA_DIR` 可改），**不建表、不需要迁移**；读改写一律走 `private_store.update` 持锁完成。用户文本入库前过 `private_organizer.clean_text`（去控制字符、限长、拒绝像指令的内容），因为它们之后会作为工具结果回到模型。
+- 带 `action` 的工具成功后，`ctx.succeeded` 同时记 `工具名` 和 `工具名.动作`；声明核验靠 `private_agent._CLAIM_ALIASES` 把它们映射到群聊声明族（如 `reminders.add` → `schedule_task`），只查过列表不能说“设好了”。
+- 私聊联网搜索复用群聊的 DeepSeek 客户端、后台总开关、屏蔽域名和全站日预算（`record_admin_call` 记账），但不占任何群/成员配额；私聊另有每人每日次数（`PRIVATE_AGENT_WEB_DAILY`，记在个人数据 `flags`），没搜到结果或失败时退还。
+- `private_scheduler` 只发两类私聊：用户自己设的提醒（不受免打扰/`proactive` 偏好影响，错过 12 小时以上的一次性提醒丢弃）和主动消息（早安、签到提醒、生日、倒数日当天；用户关了 `proactive`、暂停了自动回复、在免打扰时段都不发，每天每类最多一次，标记先写后发）。`PRIVATE_AGENT_PROACTIVE=false` 时全部停发。发出的消息记进最近的私聊会话。
+- 对话 worker 有连发合并（`PRIVATE_AGENT_MERGE_WINDOW_MS`）：等一个短窗口，把队列里紧跟着的普通消息并成一轮，用最后一条事件回复；带 `override_text` 的命令消息不参与合并。
+- `ai_chat._process_chat` 在 commit 前缓存 `chat_session.id`；生产会话 `expire_on_commit=True`，测试里涉及完整回合的要用 `prod_maker`（`tests/test_private_agent.py`）这种生产同款会话。
 - WebUI 用户抽屉能看私聊 Agent 状态、暂停/恢复自动回复、删除私聊记忆。核心侧查询（`turns_today`、`private_memory_query`、`delete_private_memories`、类别名 `PRIVATE_MEMORY_LABELS`）放在 `private_chat_bridge.py`，Agent 与 WebUI 共用；改私聊记忆的存储标记时两边一起生效，不要在 `yawn_agent` 里另写一份。

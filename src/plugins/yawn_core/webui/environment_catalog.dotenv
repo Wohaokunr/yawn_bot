@@ -241,6 +241,14 @@ PRIVATE_AGENT_FRIENDS_ONLY=true
 PRIVATE_AGENT_DAILY_TURNS=120
 # 每轮最多调用几轮工具（1 到 8）
 PRIVATE_AGENT_MAX_TOOL_ROUNDS=4
+# 私聊里每人每天最多联网搜索/读网页几次（0 到 200，0 关闭；仍受「网页搜索」总开关与全站预算约束）
+PRIVATE_AGENT_WEB_DAILY=10
+# 允许私聊 Agent 主动发消息：用户设的提醒、早安、签到提醒、生日、倒数日当天
+PRIVATE_AGENT_PROACTIVE=true
+# 连发合并等待毫秒数（0 到 10000，0 关闭）：几秒内连发的几条私聊合成一轮回复
+PRIVATE_AGENT_MERGE_WINDOW_MS=1500
+# 私聊个人数据目录（笔记、待办、提醒等，每人一个 JSON），留空用 data/private_agent/users
+PRIVATE_AGENT_DATA_DIR=
 # 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json
 PRIVATE_AGENT_STATE_PATH=
 

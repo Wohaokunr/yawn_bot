@@ -56,6 +56,13 @@ class PrivateAgentConfig(BaseModel):
     private_agent_daily_turns: int = Field(default=120, ge=0, le=10000)
     # 每轮最多调用几轮工具
     private_agent_max_tool_rounds: int = Field(default=4, ge=1, le=8)
+    # 私聊里每人每天最多联网搜索/读网页几次（0 关闭）；
+    # 仍受 WebUI 网页搜索总开关与全站预算约束
+    private_agent_web_daily: int = Field(default=10, ge=0, le=200)
+    # 允许私聊 Agent 主动发消息（用户设的提醒、早安、签到提醒、生日、倒数日当天）
+    private_agent_proactive: bool = True
+    # 连发合并：对话队列里攒着的连续几条消息（等这么多毫秒）合成一轮回复；0 关闭
+    private_agent_merge_window_ms: int = Field(default=1500, ge=0, le=10000)
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

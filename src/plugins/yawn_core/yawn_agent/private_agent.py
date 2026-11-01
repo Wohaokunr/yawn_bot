@@ -59,8 +59,32 @@ PART_PAUSE_SECONDS = 0.8
 # 历史最多带多少条（ai_chat 已经按 20 条截断，这里再按字符兜底）。
 HISTORY_CHAR_BUDGET = 6000
 COMPLETION_TIMEOUT = 60.0
-# 私聊工具名 → 声明核验用的工具名（与群聊共用 speech_claims 的声明族）。
-_CLAIM_ALIASES = {"checkin": "checkin_for_me"}
+# 私聊工具名（或“工具.动作”）→ 声明核验用的群聊工具名（共用 speech_claims 的声明族）。
+_CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
+    "checkin": ("checkin_for_me",),
+    "checkin_status": ("get_my_checkin",),
+    "checkin_board": ("get_my_checkin",),
+    "reminders.add": ("schedule_task",),
+    "reminders.snooze": ("update_scheduled_task",),
+    "reminders.cancel": ("cancel_scheduled_task",),
+    "my_data.wipe": ("forget_about_me",),
+}
+# 模型这轮做了写操作却没说话时，用兜底句子告知结果。
+_WRITE_RESULTS = frozenset(
+    {
+        "checkin",
+        "remember_about_me",
+        "forget_about_me",
+        "notes.add",
+        "todos.add",
+        "todos.done",
+        "reminders.add",
+        "reminders.cancel",
+        "countdowns.add",
+        "mood.log",
+        "chat_prefs.set",
+    }
+)
 # 私聊里用户找 Bot 聊一轮给的好感；每日上限见 affinity.SOURCE_RULES。
 PRIVATE_CHAT_AFFINITY = 1
 
@@ -135,9 +159,9 @@ def split_reply(text: str) -> list[str]:
 
 
 def verify_claims(text: str, succeeded: set[str]) -> str:
-    verified = set(succeeded) | {
-        _CLAIM_ALIASES[name] for name in succeeded if name in _CLAIM_ALIASES
-    }
+    verified = set(succeeded)
+    for name in succeeded:
+        verified.update(_CLAIM_ALIASES.get(name, ()))
     check = check_action_claims(text, frozenset(verified))
     if check.changed:
         dbg(f"私聊回复去掉了没有依据的完成声明: {check.families}")
@@ -252,7 +276,8 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
     )
     persona = resolve_persona(None)
     messages = build_messages(persona, context.render(), request)
-    tools = tool_schemas()
+    is_superuser = _is_superuser(user_id)
+    tools = tool_schemas(is_superuser=is_superuser)
     ctx = PrivateToolContext(
         session=session,
         user_id=user_id,
@@ -260,7 +285,8 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
         groups=context.groups,
         now=now,
         nickname=request.nickname,
-        is_superuser=_is_superuser(user_id),
+        is_superuser=is_superuser,
+        bot=request.bot,
     )
     max_rounds = int(private_agent_config.private_agent_max_tool_rounds)
     text = ""
@@ -293,7 +319,7 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
         break
 
     if not text.strip():
-        if ctx.succeeded & {"checkin", "remember_about_me", "forget_about_me"}:
+        if ctx.succeeded & _WRITE_RESULTS:
             text = "好啦，已经帮你处理好了~"
         else:
             return None
