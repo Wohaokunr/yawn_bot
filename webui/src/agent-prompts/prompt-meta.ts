@@ -57,6 +57,8 @@ export interface PromptCatalog {
   categories: Array<{ key: string; label: string; hint: string }>;
   sections: PromptSectionRow[];
   summary: { total: number; globalOverrides: number; groupOverrides: number; disabled: number; safetyDisabled: number };
+  /** 私聊分段数：它们在「私聊 Agent」页管理，这里不列出（旧后端没有这个字段）。 */
+  privateSections?: number;
 }
 
 export interface PromptHistoryEntry {
@@ -154,6 +156,12 @@ export const TASK_LABELS: Record<string, string> = {
   agent_router: "工具路由",
   agent_image: "识图",
   agent_memory: "记忆整理",
+  // 私聊请求按链路标注（「私聊 Agent → 最近请求」把 pipeline 换成这些键）。
+  private_turn: "私聊主回合",
+  private_report: "私聊汇报",
+  private_coordinate: "私聊协调",
+  private_worker: "私聊小助手",
+  private_memory: "私聊记忆整理",
 };
 
 export const SCOPE_LABELS: Record<string, string> = {

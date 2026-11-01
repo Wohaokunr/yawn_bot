@@ -41,6 +41,7 @@ from .groups import router as groups_router
 from .guest_access_routes import router as guest_access_router
 from .hub import hub
 from .overview_routes import router as overview_router
+from .private_agent_routes import router as private_agent_router
 from .rpg_modules import router as rpg_modules_router
 from .sandbox import router as sandbox_router
 from .schedules import router as schedules_router
@@ -130,6 +131,7 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(users_router)
     app.include_router(agent_router)
     app.include_router(agent_prompt_router)
+    app.include_router(private_agent_router)
     app.include_router(audits_router)
     app.include_router(werewolf_admin_router)
     app.include_router(games_router)

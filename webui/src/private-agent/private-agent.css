@@ -1,0 +1,221 @@
+/* 私聊 Agent 页：版式沿用代码沙箱（sbx-*）与提示词工作台（pst-*），这里只放本页特有的块。 */
+
+.pa-block {
+  display: block;
+  margin: 0;
+}
+.pa-subtitle {
+  font-size: 16px;
+}
+.pa-user-search {
+  width: 220px;
+  max-width: 100%;
+}
+.pa-pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pa-pipeline-switch {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.pa-pipeline-desc {
+  margin: 0 !important;
+}
+.pa-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: pa-step;
+}
+.pa-step {
+  counter-increment: pa-step;
+}
+.pa-step-btn {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px 8px 34px;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.pa-step-btn::before {
+  content: counter(pa-step);
+  position: absolute;
+  left: 10px;
+  top: 9px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-tertiary);
+}
+.pa-step-btn:hover,
+.pa-step-btn:focus-visible {
+  border-color: var(--ant-color-primary, #e4558a);
+  box-shadow: 0 0 0 2px rgba(228, 85, 138, 0.12);
+  outline: none;
+}
+.pa-step.is-conditional .pa-step-btn {
+  border-style: dashed;
+  background: transparent;
+}
+.pa-step.is-disabled .pa-step-title {
+  text-decoration: line-through;
+  color: var(--ink-tertiary);
+}
+.pa-step-where {
+  font-size: 11px;
+  color: var(--ink-tertiary);
+}
+.pa-step-title {
+  font-weight: 600;
+  color: var(--ink);
+}
+.pa-step-cond {
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+.pa-step-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.pa-issues {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+.pa-issues li + li {
+  margin-top: 4px;
+}
+.pa-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ant-color-primary, #e4558a);
+  cursor: pointer;
+}
+.pa-users {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pa-user-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pa-user-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+.pa-user-list li.is-active {
+  background: rgba(228, 85, 138, 0.08);
+}
+.pa-user-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ant-color-primary, #e4558a);
+  cursor: pointer;
+}
+.pa-preview-form {
+  margin-bottom: 8px;
+}
+.pa-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pa-policy {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px 20px;
+}
+.pa-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+.pa-switch > span {
+  display: flex;
+  flex-direction: column;
+}
+.pa-switch small {
+  color: var(--ink-tertiary);
+}
+.pa-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pa-field-wide {
+  grid-column: 1 / -1;
+}
+.pa-batch {
+  margin-bottom: 8px;
+}
+.pa-row {
+  cursor: pointer;
+}
+.pa-cell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.pa-cell small {
+  color: var(--ink-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pa-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0 16px;
+}
+.pa-trait .ant-slider {
+  margin: 4px 6px;
+}
+.pa-compiled {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pa-capture-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+@media (max-width: 720px) {
+  .pa-steps {
+    grid-template-columns: 1fr;
+  }
+  .pa-user-search {
+    width: 100%;
+  }
+  .pa-policy {
+    grid-template-columns: 1fr;
+  }
+}

@@ -276,6 +276,34 @@ async def _private_agent_payload(db: Any, user_id: int) -> dict[str, Any]:
         "memoryAvailable": memory_available,
         "facts": facts,
         **_helper_payload(user_id),
+        "persona": _persona_brief(user_id),
+    }
+
+
+def _persona_brief(user_id: int) -> dict[str, Any] | None:
+    """用户抽屉里的私聊人设摘要与本人提示词覆盖数；详情在「私聊 Agent」页。"""
+
+    try:
+        from ..yawn_agent.private_persona import state_payload
+        from ..yawn_agent.prompt_sections import scope_overrides
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        state = state_payload(user_id)
+        overrides = len(scope_overrides(None, user_id=user_id))
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        "mode": state["mode"],
+        "source": state["source"],
+        "sourceLabel": state["sourceLabel"],
+        "personal": state["personal"],
+        "name": state["effectiveCard"].get("name"),
+        "summary": state["summary"],
+        "templateName": state["templateName"],
+        "locked": state["locked"],
+        "updatedAt": state["updatedAt"],
+        "promptOverrides": overrides,
     }
 
 

@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, PLR0911, PLR0912, TID252, TC003, TRY003
+# ruff: noqa: E501, C901, PLR0911, PLR0912, TID252, TC003, TRY003, RUF001
 """私聊 Agent 的工具：全部只作用于**当前私聊的这位用户本人**。
 
 没有任何工具接受 user_id；群相关的工具只能选用户本人活跃所在的群，读 Agent 数据
@@ -35,9 +35,12 @@ from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .memory_self import SELF_FACT_KEYS, forget_member_facts, remember_member_fact
 from .private_computer import COMPUTER_TOOL_SPECS
 from .private_context import SharedGroup, group_bonds, group_profile_facts
+from .prompt_sections import PRIVATE_TOOL_SECTION_PREFIX, apply_section
 from .tool_args import (
+    ERROR_INVALID_ARGS,
     ERROR_NOT_FOUND,
     ERROR_PERMISSION,
+    ERROR_QUOTA,
     ToolError,
     tool_error_payload,
     validate_tool_arguments,
@@ -69,11 +72,14 @@ class PrivateTool:
     writes: bool = False
 
     def schema(self) -> dict[str, Any]:
+        # 描述登记为 ptool.<名字>：WebUI 私聊提示词页可按全局/本人改。
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": apply_section(
+                    f"{PRIVATE_TOOL_SECTION_PREFIX}{self.name}", self.description
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": self.properties,
@@ -427,10 +433,56 @@ TASK_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
 )
+_LEVEL = {"type": "integer", "minimum": 0, "maximum": 4}
+_PERSONA_FIELDS_SCHEMA = {
+    "type": "object",
+    "description": "只写要改的字段。name 名字/self_name 自称/user_title 怎么叫他/identity 一句话身份/personality 性格/speaking_style 说话方式；"
+    "catchphrases 口癖、likes 喜欢的话题、avoid_topics 避开的话题、examples 示例台词 传数组（传 off 清空）；"
+    "warmth 温度/humor 幽默/verbosity 详略/expressiveness 表现力/sociability 活跃度/reaction_tendency 接梗 是 0–4 档",
+    "properties": {
+        "name": {"type": "string", "maxLength": 32},
+        "self_name": {"type": "string", "maxLength": 16},
+        "user_title": {"type": "string", "maxLength": 16},
+        "identity": {"type": "string", "maxLength": 160},
+        "personality": {"type": "string", "maxLength": 400},
+        "speaking_style": {"type": "string", "maxLength": 400},
+        "catchphrases": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+        "likes": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+        "avoid_topics": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+        "examples": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+        "warmth": _LEVEL,
+        "humor": _LEVEL,
+        "verbosity": _LEVEL,
+        "expressiveness": _LEVEL,
+        "sociability": _LEVEL,
+        "reaction_tendency": _LEVEL,
+    },
+    "additionalProperties": False,
+}
+# 私聊每用户人设（private_persona）：他可以在私聊里让你换个样子，只影响你们的私聊。
+PERSONA_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "my_persona",
+        "你在你们私聊里的人设（只在和他的私聊里生效，群里不变）：view 看现在的人设、来源和今天还能改几次；options 看能套的模板；"
+        "set 按他的要求改（fields 只写要改的）；preset 套内置模板（name 写模板名）；template 用人设库里的人设（name 写名字）；"
+        "reset 回到默认人设；undo 撤销上一次修改；history 看改过什么。只有他明确要你换自称、称呼、说话方式、性格时才改，别自作主张；"
+        "改完下一句就按新人设说话",
+        {
+            "action": {
+                "type": "string",
+                "enum": ["view", "options", "set", "preset", "template", "reset", "undo", "history"],
+            },
+            "fields": _PERSONA_FIELDS_SCHEMA,
+            "name": {"type": "string", "minLength": 1, "maxLength": 32, "description": "preset/template 的名字"},
+        },
+        ("action",),
+        writes=True,
+    ),
+)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
-    PRIVATE_TOOLS + EXTRA_TOOLS + COMPUTER_TOOLS + TASK_TOOLS
+    PRIVATE_TOOLS + EXTRA_TOOLS + PERSONA_TOOLS + COMPUTER_TOOLS + TASK_TOOLS
 )
 COMPUTER_NAMES = frozenset(tool.name for tool in COMPUTER_TOOLS)
 TASK_NAMES = frozenset(tool.name for tool in TASK_TOOLS)
@@ -488,6 +540,8 @@ class PrivateToolContext:
     attachment_refs: list[str] = field(default_factory=list)
     # 本轮主智能体自己调用重活工具（联网/读网页/跑代码/能力包）的次数
     heavy_calls: int = 0
+    # 本轮用 my_persona 改了私聊人设：发送前清词要用新的人设名
+    persona_changed: bool = False
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -828,6 +882,8 @@ async def execute_private_tool(
                 ctx.computer_runs += 1
         elif name in TASK_NAMES:
             result = _task_tool(name, args, ctx)
+        elif name == "my_persona":
+            result = _persona_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
@@ -969,8 +1025,57 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "chat_prefs": frozenset({"set"}),
     "my_data": frozenset({"wipe"}),
     "tasks": frozenset({"cancel", "answer", "message"}),
+    "my_persona": frozenset({"set", "preset", "template", "reset", "undo"}),
     "computer_files": frozenset({"delete"}),
 }
+
+
+def _persona_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
+    from . import private_persona as pp
+    from .persona import resolve_preset_id
+
+    action = str(args.get("action") or "view")
+    try:
+        if action == "view":
+            return pp.tool_view(ctx.user_id)
+        if action == "options":
+            return pp.tool_options()
+        if action == "history":
+            state = pp.state_payload(ctx.user_id)
+            return {"history": state["history"][:5], "current": state["sourceLabel"]}
+        if action == "set":
+            fields = args.get("fields")
+            if not isinstance(fields, dict) or not fields:
+                raise ToolError("没给要改的字段", code=ERROR_INVALID_ARGS, hint='fields 里写要改的，如 {"self_name":"本喵"}')
+            result = pp.patch_fields(ctx.user_id, fields, by=pp.BY_SELF)
+        elif action == "preset":
+            preset_id = resolve_preset_id(str(args.get("name") or ""))
+            if preset_id is None:
+                raise ToolError("没有这个模板", code=ERROR_NOT_FOUND, hint="先用 options 看有哪些模板")
+            result = pp.use_preset(ctx.user_id, preset_id, by=pp.BY_SELF)
+        elif action == "template":
+            found = pp.find_library_by_name(str(args.get("name") or ""))
+            if found is None:
+                raise ToolError("人设库里没有这个人设", code=ERROR_NOT_FOUND, hint="先用 options 看人设库里有哪些")
+            result = pp.use_template(ctx.user_id, found[0], by=pp.BY_SELF)
+        elif action == "reset":
+            result = pp.reset(ctx.user_id, by=pp.BY_SELF)
+        else:
+            result = pp.undo(ctx.user_id, by=pp.BY_SELF)
+    except pp.PersonaEditError as exc:
+        code = {
+            "permission": ERROR_PERMISSION,
+            "quota": ERROR_QUOTA,
+            "not_found": ERROR_NOT_FOUND,
+        }.get(exc.code, ERROR_INVALID_ARGS)
+        raise ToolError(str(exc), code=code) from exc
+    ctx.persona_changed = True
+    return {
+        "now": result.get("label"),
+        "changed": result.get("changed") or [],
+        "summary": result.get("summary"),
+        "note": "从下一句开始按新人设说话；只影响你们的私聊",
+    }
 
 
 async def _execute_extra(
@@ -1011,6 +1116,7 @@ __all__ = [
     "COMPUTER_NAMES",
     "COMPUTER_TOOLS",
     "EXTRA_TOOLS",
+    "PERSONA_TOOLS",
     "PRIVATE_TOOLS",
     "SUPERUSER_TOOLS",
     "TASK_NAMES",
