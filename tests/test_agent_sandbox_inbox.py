@@ -541,8 +541,9 @@ class _ApiBot:
 async def test_private_big_file_uses_url_api_and_skips_base64(monkeypatch: pytest.MonkeyPatch) -> None:
     fetched: list[str] = []
 
-    async def fake_download(url: str, max_bytes: int, attempts: Any) -> Any:
+    async def fake_download(url: str, max_bytes: int, attempts: Any, **kwargs: Any) -> Any:
         fetched.append(url)
+        assert kwargs.get("trusted") is True  # 协议端给的链接，不受 QQ 域名白名单限制
         return inbox._Fetch(b"apk-bytes", "url")
 
     monkeypatch.setattr(inbox, "_download", fake_download)

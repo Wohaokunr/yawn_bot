@@ -19,7 +19,10 @@ import asyncio
 import contextlib
 from typing import Any
 
-from .log import dbg, dbg_exc
+from nonebot import logger
+
+from . import private_file_text
+from .log import dbg
 from .sandbox_client import (
     SandboxClient,
     SandboxError,
@@ -680,7 +683,9 @@ async def import_media(
     if not media:
         return []
     settings = load_settings()
-    if not settings.private_inbox or not settings.inbox_enabled:
+    # 私聊只看 private_inbox：群聊的入箱总开关和“允许的附件类型”是给群工作区的，
+    # 以前私聊也套用它们，群里没勾“文件”时私聊发的 docx 会被悄悄跳过。
+    if not settings.private_inbox:
         return []
     ready, _reason = await computer_status()
     if not ready:
@@ -702,7 +707,7 @@ async def import_media(
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(media, start=1):
         media_type = str(item.get("type") or "")
-        if not settings.inbox_allows(media_type):
+        if not media_type:
             continue
         ref = {key: value for key, value in item.items() if key != "type"}
         attachment = Attachment(
@@ -737,7 +742,10 @@ async def import_media(
                     rows.append({**row, "failed": "今天放进电脑的附件总量到上限了"})
                     continue
                 name = inbox_filename(
-                    attachment, fetched.head(64), digest=fetched.sha256()
+                    attachment,
+                    fetched.head(64),
+                    digest=fetched.sha256(),
+                    neutralize=False,
                 )
                 path = f"{INBOX_DIR}/{name}"
                 await client.write_file(
@@ -746,9 +754,17 @@ async def import_media(
                     fetched.upload_source(),
                     quota_mb=settings.private_disk_quota_mb,
                 )
+                if media_type == "file" and size <= private_file_text.MAX_SOURCE_BYTES:
+                    # 文档顺手抽一份文字给模型，不用每次都先跑代码才知道里面写了什么。
+                    text = private_file_text.extract_text(fetched.data, name)
+                    if text:
+                        row["text_excerpt"] = private_file_text.excerpt(text)
             finally:
                 fetched.close()
         except InboxError as exc:
+            logger.warning(
+                f"私聊用户 {user_id} 附件入箱失败: type={media_type} reason={exc.reason}"
+            )
             failure: dict[str, Any] = {**row, "failed": str(exc)}
             if exc.reason == "too_large":
                 failure["limit"] = f"{max_bytes // _MB}MB"
@@ -758,10 +774,13 @@ async def import_media(
             rows.append(failure)
             continue
         except (SandboxError, asyncio.TimeoutError) as exc:
+            logger.warning(
+                f"私聊用户 {user_id} 附件入箱失败: type={media_type} {type(exc).__name__}"
+            )
             rows.append({**row, "failed": f"没能放进电脑：{exc}"})
             continue
         except Exception:  # noqa: BLE001
-            dbg_exc(f"私聊用户 {user_id} 附件入箱异常")
+            logger.exception(f"私聊用户 {user_id} 附件入箱异常: type={media_type}")
             rows.append({**row, "failed": "没能放进电脑"})
             continue
         with contextlib.suppress(Exception):

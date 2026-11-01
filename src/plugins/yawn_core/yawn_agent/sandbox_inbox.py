@@ -206,8 +206,12 @@ def _readable(size: int) -> str:
     return f"{size / _MB:.1f}MB"
 
 
-def clean_name(value: str) -> str:
-    """把成员给的文件名变成安全的工作区文件名：去目录、控制字符、奇怪符号，限长。"""
+def clean_name(value: str, *, neutralize: bool = True) -> str:
+    """把成员给的文件名变成安全的工作区文件名：去目录、控制字符、奇怪符号，限长。
+
+    ``neutralize`` 为真时 .exe/.bat 这类可执行后缀再补一个 .txt（群聊工作区是共用的）；
+    私聊每人一台电脑，保留原后缀（用户要求所有格式原样放进去）。
+    """
 
     name = PurePosixPath(str(value).replace("\\", "/")).name
     name = "".join(char for char in name if ord(char) >= 32 and char != "\x7f")
@@ -218,7 +222,7 @@ def clean_name(value: str) -> str:
     if not dot or not stem:
         return name[:_NAME_LIMIT]
     suffix = suffix[:12]
-    if f".{suffix.lower()}" in _NEUTRALIZE_SUFFIXES:
+    if neutralize and f".{suffix.lower()}" in _NEUTRALIZE_SUFFIXES:
         return f"{stem[: _NAME_LIMIT - 16]}.{suffix}.txt"
     return f"{stem[: _NAME_LIMIT - len(suffix) - 1]}.{suffix}"
 
@@ -243,6 +247,28 @@ def host_allowed(host: str, patterns: tuple[str, ...] | None = None) -> bool:
         elif host == pattern:
             return True
     return False
+
+
+def public_host(host: str) -> bool:
+    """协议端接口返回的下载链接用：任何公网域名/公网 IP 都行，挡住内网、回环和单段主机名。
+
+    QQ 私聊文件（get_private_file_url）常给 IP 直连的 ftn_handler 链接，不在 QQ 域名白名单里。
+    """
+
+    import ipaddress
+
+    host = (host or "").strip().lower().rstrip(".").strip("[]")
+    if not host or host == "localhost" or host.endswith((".local", ".internal", ".localhost")):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "." in host
+    return address.is_global
+
+
+def trusted_host_allowed(host: str) -> bool:
+    return host_allowed(host) or public_host(host)
 
 
 def _local_roots() -> tuple[Path, ...]:
@@ -306,7 +332,9 @@ def sniff_extension(data: bytes, name: str | None = None) -> str | None:
     return named or None
 
 
-def inbox_filename(attachment: Attachment, data: bytes, *, digest: str | None = None) -> str:
+def inbox_filename(
+    attachment: Attachment, data: bytes, *, digest: str | None = None, neutralize: bool = True
+) -> str:
     """图片/语音/视频没有可靠的原名，用“类型_内容哈希”命名，同一内容天然去重。
 
     大文件只传文件头 ``data`` 和事先算好的 ``digest``。
@@ -316,6 +344,9 @@ def inbox_filename(attachment: Attachment, data: bytes, *, digest: str | None = 
     ext = sniff_extension(data, attachment.name) or _DEFAULT_EXT.get(attachment.media_type, ".bin")
     if attachment.media_type == "file" and attachment.name:
         name = attachment.name
+        if not neutralize:
+            raw = attachment.ref.get("name") or attachment.ref.get("file")
+            name = clean_name(str(raw), neutralize=False) or name
         if not Path(name).suffix and ext:
             name = f"{name}{ext}"
         return name
@@ -577,13 +608,18 @@ def _decode_base64(text: str, max_bytes: int, attempts: _Attempts) -> _Fetch | N
     return _Fetch(None, "base64", path=target, size=total)
 
 
-async def _download(url: str, max_bytes: int, attempts: _Attempts) -> _Fetch | None:
+async def _download(
+    url: str, max_bytes: int, attempts: _Attempts, *, trusted: bool = False
+) -> _Fetch | None:
+    """``trusted``：链接是协议端接口返回的（不是消息里别人给的），放宽到任意公网地址。"""
+
     from urllib.parse import urlparse
 
     import httpx
 
+    check = trusted_host_allowed if trusted else host_allowed
     host = (urlparse(url).hostname or "").lower()
-    if not host_allowed(host):
+    if not check(host):
         attempts.host_blocked = True
         dbg(f"附件入箱: 下载域名不在白名单 host={host!r}")
         return None
@@ -591,7 +627,7 @@ async def _download(url: str, max_bytes: int, attempts: _Attempts) -> _Fetch | N
         temporary, _content_type = await stream_download(
             url,
             allowed_hosts=frozenset(),
-            host_check=host_allowed,
+            host_check=check,
             max_bytes=max_bytes,
             suffix=".inbox",
             timeout=_FETCH_TIMEOUT,
@@ -643,8 +679,15 @@ def _tag(result: _Fetch | None, via: str) -> _Fetch | None:
     return result
 
 
+# 这些接口返回的链接由协议端生成，下载时不受 QQ 域名白名单限制（仍挡内网）。
+_TRUSTED_LINK_VIA = frozenset({"private_file", "get_file"})
+
+
 async def _from_payload(payload: Any, max_bytes: int, attempts: _Attempts, via: str) -> _Fetch | None:
     """OneBot 文件接口的返回：可能是字符串链接，也可能是 {base64,url,file,path}。"""
+
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        payload = payload["data"]
 
     if isinstance(payload, str):
         payload = {"url": payload}
@@ -658,7 +701,10 @@ async def _from_payload(payload: Any, max_bytes: int, attempts: _Attempts, via: 
     for key in ("url", "download_url"):
         url = str(payload.get(key) or "")
         if url.startswith(("http://", "https://")):
-            result = await _download(url, max_bytes, attempts)
+            if via in _TRUSTED_LINK_VIA:
+                result = await _download(url, max_bytes, attempts, trusted=True)
+            else:
+                result = await _download(url, max_bytes, attempts)
             if result:
                 return _tag(result, f"{via}:url")
         elif url.startswith("base64://"):
@@ -677,12 +723,26 @@ async def _from_payload(payload: Any, max_bytes: int, attempts: _Attempts, via: 
     return None
 
 
+_UNSUPPORTED_WORDS = ("不支持", "unsupported", "not supported", "unknown action", "api not found", "no such action")
+
+
+def _unsupported_api(exc: Exception, text: str) -> bool:
+    if getattr(exc, "retcode", None) == 1404 or "retcode=1404" in text:
+        return True
+    lowered = text.lower()
+    return any(word in lowered for word in _UNSUPPORTED_WORDS)
+
+
 async def _call(bot: Any, action: str, **params: Any) -> Any:
     try:
         return await asyncio.wait_for(bot.call_api(action, **params), timeout=_API_TIMEOUT)
     except Exception as exc:
         text = str(exc)
         dbg(f"附件入箱: {action} 失败 ({type(exc).__name__})")
+        if _unsupported_api(exc, text):
+            # 老版本协议端没有这个接口（如 get_private_file_url）：换下一种取法，
+            # 不能当成“文件过期”把整条取文件链路掐断。
+            return None
         if any(word in text for word in ("过期", "expired", "不存在", "not found", "已失效")):
             raise InboxError("expired") from exc
         return None
@@ -1163,6 +1223,7 @@ __all__ = [
     "inbox_filename",
     "prepare_turn_inbox",
     "prompt_payload",
+    "public_host",
     "sniff_extension",
     "usage_tip",
 ]
