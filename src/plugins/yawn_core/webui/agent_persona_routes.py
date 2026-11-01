@@ -69,6 +69,7 @@ from ..yawn_agent.persona_library import (
     get_template,
     list_templates,
     refresh_global_persona,
+    refresh_private_library,
     serialize_template,
     template_card,
     update_template,
@@ -244,7 +245,14 @@ async def reset_agent_persona(
 
 async def _library_changed(*, global_changed: bool) -> None:
     # 人设库不属于某个群；人设页同时监听这个资源，全局人设变化时会自动刷新。
+    # 私聊每用户人设按模板 id 引用人设库：任何增删改都要刷新私聊侧的快照。
+    try:
+        async with get_session() as db:
+            await refresh_private_library(db)
+    except Exception:  # noqa: BLE001
+        logger.exception("刷新私聊人设库快照失败(忽略)")
     await hub.notify_change("agent_persona_library", "global" if global_changed else None)
+    await hub.notify_change("private_agent_persona", "library")
 
 
 @router.get("/agent/persona-library")
@@ -257,7 +265,24 @@ async def list_persona_library(_session: AdminReadSession) -> dict[str, Any]:
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "人设库表不可用，请先执行数据库迁移（nb orm upgrade）",
             ) from exc
-        return ok([serialize_template(row) for row in rows])
+        usage = _private_usage()
+        return ok(
+            [
+                {**serialize_template(row), "privateUsers": usage.get(str(row.id), 0)}
+                for row in rows
+            ]
+        )
+
+
+def _private_usage() -> dict[str, int]:
+    """每张模板被多少位私聊用户跟随（删除前提示用）。"""
+
+    try:
+        from ..yawn_agent.private_persona import template_usage
+
+        return template_usage()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 @router.post("/agent/persona-library")
@@ -330,4 +355,12 @@ async def delete_persona_library_item(
         if was_global:
             await refresh_global_persona(db)
     await _library_changed(global_changed=was_global)
-    return ok({"id": str(template_id), "deleted": True, "wasGlobal": was_global})
+    return ok(
+        {
+            "id": str(template_id),
+            "deleted": True,
+            "wasGlobal": was_global,
+            # 跟随这张模板的私聊用户会回退到私聊默认人设（不会报错）。
+            "privateUsersAffected": _private_usage().get(str(template_id), 0),
+        }
+    )

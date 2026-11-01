@@ -488,7 +488,7 @@ async def run_worker(
 
     from .prompt_sections import use_private_user
 
-    with use_private_user(user_id):
+    with use_private_user(user_id, pipeline="worker"):
         return await _run_worker(
             task,
             user_id=user_id,
@@ -525,7 +525,9 @@ async def _run_worker(
             history.append(
                 {
                     "role": "user",
-                    "content": apply_section("private.worker_answer", PRIVATE_WORKER_ANSWER)
+                    "content": apply_section(
+                        "private.worker_answer", PRIVATE_WORKER_ANSWER
+                    )
                     + _clip(answer, 500),
                 }
             )

@@ -309,7 +309,7 @@ async def consolidate(session: Any, user_id: int, *, now: datetime) -> int:
         return 0
     from .prompt_sections import use_private_user
 
-    with use_private_user(user_id):
+    with use_private_user(user_id, pipeline="memory"):
         messages = [
             *system_messages("private.memory_system", PRIVATE_MEMORY_SYSTEM),
             {"role": "user", "content": "\n".join(lines)},

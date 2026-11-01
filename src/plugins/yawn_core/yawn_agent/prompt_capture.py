@@ -32,6 +32,8 @@ from .context import now_beijing
 from .context_budget import estimate_tokens
 from .execution_trace import ExecutionTrace, current_execution_trace
 from .prompt_sections import (
+    current_private_pipeline,
+    current_private_user,
     get_section,
     locate_sections,
     manifest_for,
@@ -43,6 +45,9 @@ MAX_SNAPSHOT_CHARS = 320_000
 MAX_TRACES_WITH_PROMPTS = 48
 MAX_BACKGROUND_SNAPSHOTS = 16
 MAX_RESPONSE_CHARS = 60_000
+# 私聊请求按用户分开保存：每人最近几次、最多几位用户（最久没请求的先丢）。
+MAX_PRIVATE_SNAPSHOTS_PER_USER = 8
+MAX_PRIVATE_USERS = 64
 _URL_RE = re.compile(r"https?://[^\s\]\[\)\(\}\{<>\"'，。、]+", re.IGNORECASE)
 _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:[\\/][^\s\]\[\)\(\}\{<>\"'，。]+")
 _POSIX_PATH_RE = re.compile(
@@ -54,6 +59,8 @@ _MEDIA_KEYS = frozenset({"url", "image_url", "file_data", "data", "input_audio"}
 _lock = threading.Lock()
 _holders: OrderedDict[str, ExecutionTrace] = OrderedDict()
 _background: deque[dict[str, Any]] = deque(maxlen=MAX_BACKGROUND_SNAPSHOTS)
+_private: OrderedDict[int, deque[dict[str, Any]]] = OrderedDict()
+_private_paused = False
 
 
 def capture_enabled() -> bool:
@@ -354,6 +361,10 @@ def observe_request(record: dict[str, Any]) -> None:
         return
     task = str(record.get("task") or "")
     trace = current_execution_trace()
+    private_user = current_private_user()
+    if trace is None and private_user is not None:
+        _observe_private(record, private_user)
+        return
     if trace is None:
         if not task.startswith("agent_"):
             return
@@ -369,6 +380,97 @@ def observe_request(record: dict[str, Any]) -> None:
         build_snapshot(record, round_index=round_index, group_id=trace.group_id)
     )
     _hold(trace)
+
+
+def _persona_source(user_id: int) -> dict[str, Any] | None:
+    try:
+        from .private_persona import resolve_user_persona
+
+        resolved = resolve_user_persona(user_id)
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        "source": resolved.source,
+        "label": resolved.label,
+        "name": resolved.card.name,
+        "templateName": resolved.template_name,
+    }
+
+
+def _observe_private(record: dict[str, Any], user_id: int) -> None:
+    """私聊链路（主回合/汇报/协调/小助手/记忆整理）的请求进这位用户自己的环形缓冲。"""
+
+    if _private_paused:
+        return
+    pipeline = current_private_pipeline()
+    with _lock:
+        ring = _private.get(user_id)
+        round_index = (
+            sum(
+                1
+                for item in list(ring or [])[:6]
+                if item.get("pipeline") == pipeline
+                and item.get("task") == record.get("task")
+            )
+            + 1
+        )
+    snapshot = build_snapshot(record, round_index=round_index)
+    snapshot["userId"] = str(user_id)
+    snapshot["pipeline"] = pipeline
+    snapshot["persona"] = _persona_source(user_id)
+    with _lock:
+        ring = _private.get(user_id)
+        if ring is None:
+            ring = deque(maxlen=MAX_PRIVATE_SNAPSHOTS_PER_USER)
+            _private[user_id] = ring
+        ring.appendleft(snapshot)
+        _private.move_to_end(user_id)
+        while len(_private) > MAX_PRIVATE_USERS:
+            _private.popitem(last=False)
+
+
+def private_capture_paused() -> bool:
+    return _private_paused
+
+
+def set_private_capture_paused(paused: bool) -> bool:  # noqa: FBT001
+    """WebUI 开关：暂停后私聊请求不再抓取（不影响群聊 Trace）。"""
+
+    global _private_paused  # noqa: PLW0603
+    _private_paused = bool(paused)
+    return _private_paused
+
+
+def private_prompt_users() -> list[dict[str, Any]]:
+    """有抓取记录的私聊用户，最近请求的在前。"""
+
+    with _lock:
+        rows = [
+            {
+                "userId": str(uid),
+                "count": len(ring),
+                "lastAt": ring[0].get("capturedAt") if ring else None,
+                "lastPipeline": ring[0].get("pipeline") if ring else None,
+            }
+            for uid, ring in _private.items()
+        ]
+    rows.reverse()
+    return rows
+
+
+def private_prompts(user_id: int) -> list[dict[str, Any]]:
+    with _lock:
+        return list(_private.get(int(user_id)) or [])
+
+
+def clear_private_prompts(user_id: int | None = None) -> int:
+    with _lock:
+        if user_id is None:
+            count = sum(len(ring) for ring in _private.values())
+            _private.clear()
+            return count
+        ring = _private.pop(int(user_id), None)
+        return len(ring or [])
 
 
 def capture_unsent(  # noqa: PLR0913
@@ -435,6 +537,8 @@ def install() -> None:
 
 
 __all__ = [
+    "MAX_PRIVATE_SNAPSHOTS_PER_USER",
+    "MAX_PRIVATE_USERS",
     "MAX_SNAPSHOTS_PER_TRACE",
     "MAX_SNAPSHOT_CHARS",
     "background_prompts",
@@ -442,8 +546,13 @@ __all__ = [
     "capture_enabled",
     "capture_unsent",
     "clear_background_prompts",
+    "clear_private_prompts",
     "install",
     "message_text",
     "observe_request",
+    "private_capture_paused",
+    "private_prompt_users",
+    "private_prompts",
+    "set_private_capture_paused",
     "trace_prompts",
 ]

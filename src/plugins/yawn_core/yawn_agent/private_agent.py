@@ -435,7 +435,7 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
     整轮绑定这位用户：私聊分段按“本人覆盖 → 全局”解析，真实请求按用户抓取。
     """
 
-    with use_private_user(request.user_id):
+    with use_private_user(request.user_id, pipeline="turn"):
         return await _handle_private_turn(request)
 
 
@@ -1077,7 +1077,7 @@ def _already_told(user_id: int, task: dict[str, Any]) -> dict[str, Any] | None:
 async def report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
     """绑定这位用户后执行（本人提示词覆盖、按用户抓取请求）。"""
 
-    with use_private_user(user_id):
+    with use_private_user(user_id, pipeline="report"):
         return await _report_task(bot, user_id, task)
 
 
@@ -1127,13 +1127,14 @@ async def _report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
                     history=[*history, {"role": "user", "content": notice}],
                     session=None,
                 )
+                persona = resolve_private_persona(user_id)
                 messages = build_messages(
-                    resolve_private_persona(user_id),
+                    persona,
                     context.render(),
                     request,
                     computer=computer_ready(),
                     tasks=True,
-                    turn_style=turn_style(user_id, now),
+                    turn_style=turn_style(user_id, now, persona=persona),
                 )
                 messages.insert(
                     -1,
@@ -1203,7 +1204,7 @@ COORDINATE_MAX_ROUNDS = 3
 async def coordinate(bot: Any, user_id: int) -> None:
     """绑定这位用户后执行（本人提示词覆盖、按用户抓取请求）。"""
 
-    with use_private_user(user_id):
+    with use_private_user(user_id, pipeline="coordinate"):
         return await _coordinate(bot, user_id)
 
 
@@ -1246,12 +1247,13 @@ async def _coordinate(bot: Any, user_id: int) -> None:
                 history=[*history, {"role": "user", "content": notice}],
                 session=session,
             )
+            persona = resolve_private_persona(user_id)
             messages = build_messages(
-                resolve_private_persona(user_id),
+                persona,
                 context.render(),
                 request,
                 tasks=True,
-                turn_style=turn_style(user_id, now),
+                turn_style=turn_style(user_id, now, persona=persona),
             )
             messages.insert(
                 -1,

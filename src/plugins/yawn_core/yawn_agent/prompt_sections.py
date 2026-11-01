@@ -1387,9 +1387,7 @@ def _check_scope(section_id: str, group_id: int | None, user_id: int | None) -> 
     if user_id is None:
         return
     if group_id is not None:
-        raise PromptStoreValidationError(
-            "不能同时按群和按用户覆盖", field_name="scope"
-        )
+        raise PromptStoreValidationError("不能同时按群和按用户覆盖", field_name="scope")
     if int(user_id) <= 0:
         raise PromptStoreValidationError("用户 QQ 号无效", field_name="userId")  # noqa: TRY003
     if section_id and not is_private_section(section_id):
@@ -1559,7 +1557,9 @@ def _check_scope_capacity(state: _StoreState, scope: str) -> None:
                 "单独覆盖提示词的私聊用户太多了", field_name="userId"
             )
         return
-    used = sum(1 for key in state.scopes if key != GLOBAL_SCOPE and not is_user_scope(key))
+    used = sum(
+        1 for key in state.scopes if key != GLOBAL_SCOPE and not is_user_scope(key)
+    )
     if used >= MAX_GROUP_SCOPES:
         raise PromptStoreValidationError(
             "单独覆盖提示词的群太多了", field_name="groupId"
@@ -1743,9 +1743,7 @@ def export_scope(group_id: int | None, *, user_id: int | None = None) -> dict[st
         "exportedAt": now_beijing().isoformat(timespec="seconds"),
         "overrides": {
             key: value.as_dict()
-            for key, value in sorted(
-                scope_overrides(group_id, user_id=user_id).items()
-            )
+            for key, value in sorted(scope_overrides(group_id, user_id=user_id).items())
         },
     }
 
@@ -1761,19 +1759,33 @@ _PRIVATE_USER: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 )
 
 
+# 当前私聊链路：turn / report / coordinate / worker / memory（抓取请求时标注用）。
+_PRIVATE_PIPELINE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "yawn_agent_private_prompt_pipeline", default=None
+)
+
+
 @contextlib.contextmanager
-def use_private_user(user_id: int | None) -> Iterator[None]:
-    """私聊回合（主回合、汇报、协调、子智能体、记忆整理）期间绑定用户。"""
+def use_private_user(
+    user_id: int | None, *, pipeline: str | None = None
+) -> Iterator[None]:
+    """私聊回合（主回合、汇报、协调、子智能体、记忆整理）期间绑定用户与链路。"""
 
     token = _PRIVATE_USER.set(int(user_id) if user_id else None)
+    pipe_token = _PRIVATE_PIPELINE.set(pipeline if user_id else None)
     try:
         yield
     finally:
+        _PRIVATE_PIPELINE.reset(pipe_token)
         _PRIVATE_USER.reset(token)
 
 
 def current_private_user() -> int | None:
     return _PRIVATE_USER.get()
+
+
+def current_private_pipeline() -> str | None:
+    return _PRIVATE_PIPELINE.get()
 
 
 @contextlib.contextmanager
@@ -1792,7 +1804,11 @@ def use_draft_overrides(
     if not drafts:
         yield
         return
-    scope = _scope_key(group_id, user_id)
+    with use_draft_scopes({_scope_key(group_id, user_id): drafts}):
+        yield
+
+
+def _draft_layer(drafts: Mapping[str, Mapping[str, Any]]) -> dict[str, Override]:
     layer: dict[str, Override] = {}
     for section_id, raw in drafts.items():
         if str(raw.get("mode") or "") in {"inherit", "default"}:
@@ -1801,7 +1817,20 @@ def use_draft_overrides(
         parsed = Override.from_raw(raw)
         if parsed is not None and get_section(str(section_id)) is not None:
             layer[str(section_id)] = parsed
-    token = _DRAFT.set({scope: layer})
+    return layer
+
+
+@contextlib.contextmanager
+def use_draft_scopes(
+    layers: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> Iterator[None]:
+    """同时叠加多个作用域的草稿（私聊预览：全局草稿 + 本人草稿），``{scope: drafts}``。"""
+
+    merged = {scope: _draft_layer(drafts) for scope, drafts in layers.items() if drafts}
+    if not merged:
+        yield
+        return
+    token = _DRAFT.set(merged)
     try:
         yield
     finally:
@@ -2147,7 +2176,9 @@ def catalog(group_id: int | None) -> dict[str, Any]:
         updated_at = state.updated_at
     rows: list[dict[str, Any]] = []
     # 私聊分段在「私聊 Agent」页按全局/本人管理，群聊工作台不再列出。
-    private_count = sum(1 for section in all_sections() if is_private_section(section.id))
+    private_count = sum(
+        1 for section in all_sections() if is_private_section(section.id)
+    )
     for section in all_sections(include_private=False):
         default = section_default(section)
         sample = section_sample(section.id)
@@ -2236,6 +2267,7 @@ __all__ = [
     "bulk_apply",
     "catalog",
     "clear_override",
+    "current_private_pipeline",
     "current_private_user",
     "export_scope",
     "get_section",
@@ -2254,6 +2286,7 @@ __all__ = [
     "store_snapshot",
     "system_messages",
     "use_draft_overrides",
+    "use_draft_scopes",
     "use_private_user",
     "user_scope_key",
     "user_scopes",
