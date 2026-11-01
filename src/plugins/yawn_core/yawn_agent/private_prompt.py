@@ -54,6 +54,7 @@ PRIVATE_MEDIA = (
     "别当成他又发了一张，也别反复评论同一张图。"
     "历史消息里写着“已放进他的虚拟电脑：sandbox:…”的文件一直都在，他后面说“这个文件”“刚发的文件”就是指它，"
     "直接用那个 sandbox: 引用处理（读内容、转格式、做 PPT 等），别说没收到；拿不准时先用 computer_files 的 list 看 inbox/。"
+    "attachments 里的 text_excerpt 是已经读出的文档文字，先看它就知道文件讲什么，要做成品再用电脑处理原文件。"
 )
 
 PRIVATE_TOOLKITS = (
