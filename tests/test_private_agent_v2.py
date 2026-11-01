@@ -57,7 +57,8 @@ async def _run(ctx, name, **args):
 
 def test_tool_table_is_complete_and_safe() -> None:
     names = [tool.name for tool in ptools.ALL_TOOLS]
-    assert len(names) == len(set(names)) == 32
+    # 32 个 + 私聊人设 my_persona
+    assert len(names) == len(set(names)) == 33
     # 虚拟电脑 4 个（含能力包目录与执行）+ 小助手任务 3 个，只在可用时才出现在 schema 里
     assert set(names) >= ptools.COMPUTER_NAMES | ptools.TASK_NAMES
     for tool in ptools.ALL_TOOLS:

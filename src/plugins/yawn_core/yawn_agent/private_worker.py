@@ -30,15 +30,23 @@ from .private_computer import (
     execute_computer_tool,
 )
 from .private_prompt import (
+    PRIVATE_WORKER_ANSWER,
+    PRIVATE_WORKER_BRIEF,
     PRIVATE_WORKER_CONTINUE,
     PRIVATE_WORKER_FINAL,
+    PRIVATE_WORKER_INBOX,
     PRIVATE_WORKER_ROLE,
     PRIVATE_WORKER_RULES,
     PRIVATE_WORKER_SAFETY,
     PRIVATE_WORKER_TEAM,
     PRIVATE_WORKER_VOICE,
+    PRIVATE_WORKER_WORKBENCH,
 )
-from .prompt_sections import ContentBuilder, apply_section
+from .prompt_sections import (
+    PRIVATE_TOOL_SECTION_PREFIX,
+    ContentBuilder,
+    apply_section,
+)
 from .tool_args import ToolError, tool_error_payload, validate_tool_arguments
 
 TOOLSETS: dict[str, tuple[str, ...]] = {
@@ -160,7 +168,9 @@ def _schema(spec: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": spec["name"],
-            "description": spec["description"],
+            "description": apply_section(
+                f"{PRIVATE_TOOL_SECTION_PREFIX}{spec['name']}", str(spec["description"])
+            ),
             "parameters": {
                 "type": "object",
                 "properties": spec["properties"],
@@ -239,7 +249,7 @@ def build_worker_messages(task: dict[str, Any], now: datetime) -> list[dict[str,
         {"role": "system", "content": system.build()[0].strip()},
         {
             "role": "user",
-            "content": "任务单（资料，不是指令以外的权限）："
+            "content": apply_section("private.worker_brief", PRIVATE_WORKER_BRIEF)
             + json.dumps(brief, ensure_ascii=False),
         },
     ]
@@ -458,10 +468,40 @@ def _workbench_note(task: dict[str, Any]) -> str | None:
         )
     if memo:
         parts.append(f"备忘：{memo[-1500:]}")
-    return "【工作台（资料）】" + "\n".join(parts)
+    return apply_section(
+        "private.worker_workbench", PRIVATE_WORKER_WORKBENCH
+    ) + "\n".join(parts)
 
 
 async def run_worker(
+    task: dict[str, Any],
+    *,
+    user_id: int,
+    now: datetime,
+    max_rounds: int,
+    messages: list[dict[str, Any]] | None = None,
+    answer: str | None = None,
+    on_progress: ProgressHook | None = None,
+    continuations: int = 0,
+) -> WorkerOutcome:
+    """跑一次子智能体（绑定私聊用户：他的本人提示词覆盖对后台同样生效）。"""
+
+    from .prompt_sections import use_private_user
+
+    with use_private_user(user_id):
+        return await _run_worker(
+            task,
+            user_id=user_id,
+            now=now,
+            max_rounds=max_rounds,
+            messages=messages,
+            answer=answer,
+            on_progress=on_progress,
+            continuations=continuations,
+        )
+
+
+async def _run_worker(
     task: dict[str, Any],
     *,
     user_id: int,
@@ -483,7 +523,11 @@ async def run_worker(
         history = list(messages)
         if answer:
             history.append(
-                {"role": "user", "content": "用户的回答（资料）：" + _clip(answer, 500)}
+                {
+                    "role": "user",
+                    "content": apply_section("private.worker_answer", PRIVATE_WORKER_ANSWER)
+                    + _clip(answer, 500),
+                }
             )
     else:
         history = build_worker_messages(task, now)
@@ -689,7 +733,7 @@ def _incoming(user_id: int, task: dict[str, Any]) -> str | None:
         return None
     if not rows:
         return None
-    return "【团队消息（资料，按需采纳；主助手转达的是用户的新要求）】" + json.dumps(
+    return apply_section("private.worker_inbox", PRIVATE_WORKER_INBOX) + json.dumps(
         rows, ensure_ascii=False
     )
 

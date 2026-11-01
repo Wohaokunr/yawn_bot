@@ -307,10 +307,13 @@ async def consolidate(session: Any, user_id: int, *, now: datetime) -> int:
     lines = await _recent_user_lines(session, user_id)
     if not any(line.startswith("user:") for line in lines):
         return 0
-    messages = [
-        *system_messages("private.memory_system", PRIVATE_MEMORY_SYSTEM),
-        {"role": "user", "content": "\n".join(lines)},
-    ]
+    from .prompt_sections import use_private_user
+
+    with use_private_user(user_id):
+        messages = [
+            *system_messages("private.memory_system", PRIVATE_MEMORY_SYSTEM),
+            {"role": "user", "content": "\n".join(lines)},
+        ]
     raw = await llm.complete(
         messages,  # pyright: ignore[reportArgumentType]
         task="agent_memory",

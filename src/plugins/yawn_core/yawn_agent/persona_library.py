@@ -65,11 +65,28 @@ async def refresh_global_persona(session: Any) -> None:
     except SQLAlchemyError:
         dbg("人设库表不可用（可能尚未迁移），全局人设使用内置默认")
         set_global_persona_card(None)
+        from .private_persona import set_library_snapshot
+
+        set_library_snapshot(None)
         return
     if row is None:
         set_global_persona_card(None)
+    else:
+        set_global_persona_card(template_card(row), name=row.name)
+    await refresh_private_library(session)
+
+
+async def refresh_private_library(session: Any) -> None:
+    """私聊每用户人设用的人设库快照（模板 id → 名字、卡片），热路径不查库。"""
+
+    from .private_persona import set_library_snapshot
+
+    try:
+        rows = await list_templates(session)
+    except SQLAlchemyError:
+        set_library_snapshot(None)
         return
-    set_global_persona_card(template_card(row), name=row.name)
+    set_library_snapshot([(int(row.id), row.name, template_card(row)) for row in rows])
 
 
 async def list_templates(session: Any) -> list[AgentPersonaTemplate]:
@@ -224,6 +241,7 @@ __all__ = [
     "get_template",
     "list_templates",
     "refresh_global_persona",
+    "refresh_private_library",
     "serialize_template",
     "template_card",
     "update_template",

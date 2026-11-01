@@ -87,7 +87,21 @@ def private_sticker_left(
         and now_ts - last < settings.private_cooldown_seconds
     ):
         return 0
-    return max(min(settings.private_daily_limit - used, settings.max_per_message), 0)
+    return max(min(_daily_limit(user_id, settings.private_daily_limit) - used, settings.max_per_message), 0)
+
+
+def _daily_limit(user_id: int, limit: int) -> int:
+    """他私聊人设的表现力档位收窄每日额度（低档更少），不会超过后台设的上限。"""
+
+    if limit <= 0:
+        return limit
+    try:
+        from .private_persona import sticker_scale
+
+        scale = sticker_scale(user_id)
+    except Exception:  # noqa: BLE001
+        return limit
+    return min(limit, max(1, round(limit * scale)))
 
 
 def _note_sticker_sent(user_id: int, today: str, count: int) -> None:

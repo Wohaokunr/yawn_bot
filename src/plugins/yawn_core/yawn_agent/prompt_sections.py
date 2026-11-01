@@ -40,7 +40,10 @@ MAX_HISTORY_PER_SECTION = 12
 MAX_SAMPLE_CHARS = 6_000
 MAX_SAMPLES = 256
 MAX_GROUP_SCOPES = 512
+# 私聊“本人”作用域：``user:<QQ>``，只收私聊分段（private.* / ptool.*）。
+MAX_USER_SCOPES = 2000
 GLOBAL_SCOPE = "global"
+USER_SCOPE_PREFIX = "user:"
 
 MODE_REPLACE = "replace"
 MODE_APPEND = "append"
@@ -80,6 +83,11 @@ CATEGORIES: tuple[tuple[str, str, str], ...] = (
         "tool_schema",
         "工具描述",
         "每个工具 schema 里的 description，模型据此决定怎么调用。",
+    ),
+    (
+        "private_tools",
+        "私聊工具描述",
+        "私聊工具与后台子智能体工具 schema 里的 description。",
     ),
 )
 CATEGORY_LABELS = {key: label for key, label, _hint in CATEGORIES}
@@ -709,7 +717,7 @@ SECTIONS: tuple[PromptSection, ...] = (
         "private",
         "private_system",
         KIND_GENERATED,
-        "全局人设（人设库全局人设或内置默认）编译成的角色卡。",
+        "这位用户生效的私聊人设编译成的角色卡：本人专属 → 本人选的人设库模板 → 私聊默认 → 全局人设 → 内置默认。",
         tasks=_PV,
     ),
     PromptSection(
@@ -956,6 +964,143 @@ SECTIONS: tuple[PromptSection, ...] = (
         protocol=True,
         tasks=("agent_memory",),
     ),
+    PromptSection(
+        "private.persona_scope",
+        "专属人设说明",
+        "private",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_PERSONA_SCOPE",
+        description="他有自己的私聊人设（本人专属卡或他选的人设库模板）时附在人设块后：私聊按这张卡，群里另有人设，别混用、别出戏。",
+        when="这位用户有专属私聊人设时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.resumed_note",
+        "等他说完后接话",
+        "private",
+        "round",
+        default_ref="private_prompt:PRIVATE_RESUMED_NOTE",
+        description="上一轮写了【等他说完】、他停下来一会儿后系统自动接话时追加：把连着的几条当一件事回应。",
+        when="【等他说完】计时结束自动接话时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.files_hint",
+        "发文件提示",
+        "private",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_FILES_HINT",
+        description="他这次发了文件且后台可用时，放进本轮发言方式里：要加工文件就放到后台做。",
+        when="他发了文件且小助手任务开启时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.attachments_unread",
+        "文件没进电脑的说明",
+        "private",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_ATTACHMENTS_UNREAD",
+        description="写在用户资料 attachments_note：文件没进虚拟电脑、只读到了文字节选时怎么处理。",
+        when="附件没进虚拟电脑但读出了文字时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.attachments_missing",
+        "附件没能入箱的说明",
+        "private",
+        "private_system",
+        default_ref="private_prompt:PRIVATE_ATTACHMENTS_MISSING",
+        description="写在用户资料 attachments_note：附件完全没能放进虚拟电脑时。",
+        when="附件没能放进虚拟电脑时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.attachment_excerpt",
+        "历史里的文件节选",
+        "private",
+        "round",
+        default_ref="private_prompt:PRIVATE_ATTACHMENT_EXCERPT",
+        description="文件没进电脑时写回他那条历史消息的节选注释；{title} 换成文件名，{text} 换成节选，删掉占位符就不带对应内容。",
+        when="文件没进虚拟电脑但读出了文字时（写进历史）",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.report_notice",
+        "汇报轮通知表头",
+        "private",
+        "round",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_REPORT_NOTICE",
+        description="后台结果汇报轮里，放在结果 JSON 前的 user 消息表头。",
+        when="小助手任务结束时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.coordinate_notice",
+        "协调轮通知表头",
+        "private",
+        "round",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_COORDINATE_NOTICE",
+        description="后台协调轮里，放在 helper_messages JSON 前的 user 消息表头。",
+        when="小助手发来需要回复的消息时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.handoff_findings",
+        "自动转后台的素材表头",
+        "private",
+        "aux_system",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_HANDOFF_FINDINGS",
+        description="工具轮次用完自动放到后台时，任务单 background 里“前台已经查到的结果”的开头。",
+        when="自动转后台时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.worker_brief",
+        "任务单表头",
+        "private",
+        "aux_system",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_WORKER_BRIEF",
+        description="子智能体第一条 user 消息里任务单 JSON 前面的表头。",
+        when="子智能体运行时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.worker_answer",
+        "用户回答前缀",
+        "private",
+        "round",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_WORKER_ANSWER",
+        description="子智能体 ask_user 之后，用户的回答转回去时的前缀。",
+        when="子智能体收到用户回答时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.worker_workbench",
+        "工作台表头",
+        "private",
+        "round",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_WORKER_WORKBENCH",
+        description="上下文压缩或续期后重新附上的计划与备忘的表头。",
+        when="子智能体上下文压缩或续期时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.worker_inbox",
+        "团队消息表头",
+        "private",
+        "round",
+        KIND_HEADER,
+        default_ref="private_prompt:PRIVATE_WORKER_INBOX",
+        description="子智能体每轮开始前收到的未读团队消息的表头。",
+        when="子智能体有未读团队消息时",
+        tasks=_PV,
+    ),
     # ── 辅助模型 ──
     PromptSection(
         "router.system",
@@ -1035,6 +1180,53 @@ def tool_section(name: str) -> PromptSection:
     )
 
 
+# 私聊工具（private_tools.ALL_TOOLS）与后台子智能体的工作台/控制工具的描述。
+PRIVATE_TOOL_SECTION_PREFIX = "ptool."
+# 只有这些前缀的分段可以按单个私聊用户覆盖（作用域 ``user:<QQ>``）。
+PRIVATE_SECTION_PREFIXES = ("private.", PRIVATE_TOOL_SECTION_PREFIX)
+
+
+def is_private_section(section_id: str) -> bool:
+    return str(section_id).startswith(PRIVATE_SECTION_PREFIXES)
+
+
+def _private_tool_definitions() -> dict[str, tuple[str, str]]:
+    """``{name: (description, where)}``；where = main（私聊主回合）/ worker（只给后台）。"""
+
+    found: dict[str, tuple[str, str]] = {}
+    try:
+        from .private_tools import ALL_TOOLS
+
+        for tool in ALL_TOOLS:
+            found[tool.name] = (str(tool.description), "main")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .private_worker import CONTROL_SPECS, WORKBENCH_SPECS
+
+        for spec in (*WORKBENCH_SPECS, *CONTROL_SPECS):
+            name = str(spec.get("name") or "")
+            if name and name not in found:
+                found[name] = (str(spec.get("description") or ""), "worker")
+    except Exception:  # noqa: BLE001
+        pass
+    return found
+
+
+def private_tool_section(name: str, where: str = "main") -> PromptSection:
+    return PromptSection(
+        f"{PRIVATE_TOOL_SECTION_PREFIX}{name}",
+        f"私聊工具 {name}",
+        "private_tools",
+        "tool_schema",
+        description="私聊 tools[].function.description"
+        if where == "main"
+        else "后台子智能体 tools[].function.description",
+        when=f"私聊本轮装载 {name} 时" if where == "main" else "后台子智能体运行时",
+        tasks=_PV,
+    )
+
+
 def get_section(section_id: str) -> PromptSection | None:
     section = _SECTION_INDEX.get(section_id)
     if section is not None:
@@ -1043,14 +1235,29 @@ def get_section(section_id: str) -> PromptSection | None:
         name = section_id[len(TOOL_SECTION_PREFIX) :]
         if any(getattr(item, "name", None) == name for item in _tool_definitions()):
             return tool_section(name)
+    if section_id.startswith(PRIVATE_TOOL_SECTION_PREFIX):
+        name = section_id[len(PRIVATE_TOOL_SECTION_PREFIX) :]
+        found = _private_tool_definitions().get(name)
+        if found is not None:
+            return private_tool_section(name, found[1])
     return None
 
 
-def all_sections() -> list[PromptSection]:
+def private_tool_sections() -> list[PromptSection]:
+    return [
+        private_tool_section(name, where)
+        for name, (_desc, where) in _private_tool_definitions().items()
+    ]
+
+
+def all_sections(*, include_private: bool = True) -> list[PromptSection]:
     tools = sorted(
         {str(getattr(item, "name", "")) for item in _tool_definitions()} - {""}
     )
-    return [*SECTIONS, *(tool_section(name) for name in tools)]
+    sections = [*SECTIONS, *(tool_section(name) for name in tools)]
+    if include_private:
+        return [*sections, *private_tool_sections()]
+    return [section for section in sections if not is_private_section(section.id)]
 
 
 def section_default(section: PromptSection) -> str | None:
@@ -1060,6 +1267,11 @@ def section_default(section: PromptSection) -> str | None:
             if getattr(item, "name", None) == name:
                 return str(getattr(item, "description", "") or "")
         return None
+    if section.category == "private_tools":
+        found = _private_tool_definitions().get(
+            section.id[len(PRIVATE_TOOL_SECTION_PREFIX) :]
+        )
+        return found[0] if found is not None else None
     return section.default_text()
 
 
@@ -1148,8 +1360,42 @@ def set_store_path(path: Path | None) -> None:
         _state = _StoreState()
 
 
-def _scope_key(group_id: int | None) -> str:
+def _scope_key(group_id: int | None, user_id: int | None = None) -> str:
+    if user_id is not None:
+        return f"{USER_SCOPE_PREFIX}{int(user_id)}"
     return GLOBAL_SCOPE if group_id is None else str(int(group_id))
+
+
+def user_scope_key(user_id: int) -> str:
+    return _scope_key(None, user_id)
+
+
+def is_user_scope(scope: str) -> bool:
+    return str(scope).startswith(USER_SCOPE_PREFIX)
+
+
+def scope_user_id(scope: str) -> int | None:
+    if not is_user_scope(scope):
+        return None
+    raw = str(scope)[len(USER_SCOPE_PREFIX) :]
+    return int(raw) if raw.isdigit() else None
+
+
+def _check_scope(section_id: str, group_id: int | None, user_id: int | None) -> None:
+    """本人作用域只收私聊分段；群和用户不能同时指定。"""
+
+    if user_id is None:
+        return
+    if group_id is not None:
+        raise PromptStoreValidationError(
+            "不能同时按群和按用户覆盖", field_name="scope"
+        )
+    if int(user_id) <= 0:
+        raise PromptStoreValidationError("用户 QQ 号无效", field_name="userId")  # noqa: TRY003
+    if section_id and not is_private_section(section_id):
+        raise PromptStoreValidationError(
+            "按用户覆盖只适用于私聊分段", field_name="sectionId"
+        )
 
 
 def _load_locked() -> _StoreState:  # noqa: C901
@@ -1240,16 +1486,35 @@ def store_revision() -> int:
         return _load_locked().revision
 
 
-def scope_overrides(group_id: int | None) -> dict[str, Override]:
+def scope_overrides(
+    group_id: int | None, *, user_id: int | None = None
+) -> dict[str, Override]:
     with _lock:
-        return dict(_load_locked().scopes.get(_scope_key(group_id), {}))
+        return dict(_load_locked().scopes.get(_scope_key(group_id, user_id), {}))
 
 
-def section_history(section_id: str, group_id: int | None) -> list[dict[str, Any]]:
+def user_scopes() -> dict[int, dict[str, Override]]:
+    """所有有本人覆盖的私聊用户：``{QQ: {section_id: Override}}``。"""
+
+    with _lock:
+        state = _load_locked()
+        result: dict[int, dict[str, Override]] = {}
+        for scope, entries in state.scopes.items():
+            uid = scope_user_id(scope)
+            if uid is not None and entries:
+                result[uid] = dict(entries)
+        return result
+
+
+def section_history(
+    section_id: str, group_id: int | None, *, user_id: int | None = None
+) -> list[dict[str, Any]]:
     with _lock:
         state = _load_locked()
         return list(
-            reversed(state.history.get(_scope_key(group_id), {}).get(section_id, []))
+            reversed(
+                state.history.get(_scope_key(group_id, user_id), {}).get(section_id, [])
+            )
         )
 
 
@@ -1282,6 +1547,23 @@ def validate_override(
             "这是安全相关分段，删除或替换前需要确认", field_name="confirmSafety"
         )
     return cleaned
+
+
+def _check_scope_capacity(state: _StoreState, scope: str) -> None:
+    if scope == GLOBAL_SCOPE or scope in state.scopes:
+        return
+    if is_user_scope(scope):
+        used = sum(1 for key in state.scopes if is_user_scope(key))
+        if used >= MAX_USER_SCOPES:
+            raise PromptStoreValidationError(
+                "单独覆盖提示词的私聊用户太多了", field_name="userId"
+            )
+        return
+    used = sum(1 for key in state.scopes if key != GLOBAL_SCOPE and not is_user_scope(key))
+    if used >= MAX_GROUP_SCOPES:
+        raise PromptStoreValidationError(
+            "单独覆盖提示词的群太多了", field_name="groupId"
+        )
 
 
 def _history_entry(
@@ -1318,12 +1600,14 @@ def set_override(
     actor: str = "",
     expected_revision: int | None = None,
     confirm_safety: bool = False,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     section = get_section(section_id)
     if section is None:
         raise PromptStoreValidationError("未知的提示词分段", field_name="sectionId")
+    _check_scope(section_id, group_id, user_id)
     cleaned = validate_override(section, mode, text, confirm_safety=confirm_safety)
-    if mode == MODE_BUILTIN and group_id is None:
+    if mode == MODE_BUILTIN and group_id is None and user_id is None:
         # 全局的“用默认值”就是删除全局覆盖。
         return clear_override(
             section_id, group_id=None, actor=actor, expected_revision=expected_revision
@@ -1331,15 +1615,8 @@ def set_override(
     with _lock:
         state = _load_locked()
         _check_revision(state, expected_revision)
-        scope = _scope_key(group_id)
-        if (
-            scope != GLOBAL_SCOPE
-            and scope not in state.scopes
-            and len(state.scopes) >= MAX_GROUP_SCOPES
-        ):
-            raise PromptStoreValidationError(
-                "单独覆盖提示词的群太多了", field_name="groupId"
-            )
+        scope = _scope_key(group_id, user_id)
+        _check_scope_capacity(state, scope)
         override = Override(
             mode=mode,
             text=cleaned,
@@ -1362,11 +1639,13 @@ def clear_override(
     group_id: int | None,
     actor: str = "",
     expected_revision: int | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
+    _check_scope(section_id, group_id, user_id)
     with _lock:
         state = _load_locked()
         _check_revision(state, expected_revision)
-        scope = _scope_key(group_id)
+        scope = _scope_key(group_id, user_id)
         entries = state.scopes.get(scope, {})
         if section_id not in entries:
             return {"revision": state.revision, "override": None, "changed": False}
@@ -1380,7 +1659,7 @@ def clear_override(
         return {"revision": state.revision, "override": None, "changed": True}
 
 
-def bulk_apply(  # noqa: C901
+def bulk_apply(  # noqa: C901, PLR0912
     changes: list[dict[str, Any]],
     *,
     group_id: int | None,
@@ -1388,9 +1667,11 @@ def bulk_apply(  # noqa: C901
     expected_revision: int | None = None,
     confirm_safety: bool = False,
     replace_scope: bool = False,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """一次提交多处改动（批量删除安全段、导入、整组恢复默认）；全部校验通过才写。"""
 
+    _check_scope("", group_id, user_id)
     prepared: list[tuple[str, Override | None]] = []
     for item in changes:
         section_id = str(item.get("sectionId") or "")
@@ -1399,6 +1680,7 @@ def bulk_apply(  # noqa: C901
             raise PromptStoreValidationError(
                 f"未知的提示词分段：{section_id[:64]}", field_name="sectionId"
             )
+        _check_scope(section_id, group_id, user_id)
         mode = str(item.get("mode") or "")
         if mode in {"", "inherit", "default"}:
             prepared.append((section_id, None))
@@ -1406,7 +1688,7 @@ def bulk_apply(  # noqa: C901
         cleaned = validate_override(
             section, mode, str(item.get("text") or ""), confirm_safety=confirm_safety
         )
-        if mode == MODE_BUILTIN and group_id is None:
+        if mode == MODE_BUILTIN and group_id is None and user_id is None:
             prepared.append((section_id, None))
             continue
         prepared.append(
@@ -1424,7 +1706,9 @@ def bulk_apply(  # noqa: C901
     with _lock:
         state = _load_locked()
         _check_revision(state, expected_revision)
-        scope = _scope_key(group_id)
+        scope = _scope_key(group_id, user_id)
+        if any(override is not None for _sid, override in prepared):
+            _check_scope_capacity(state, scope)
         entries = {} if replace_scope else dict(state.scopes.get(scope, {}))
         revision = state.revision + 1
         touched = 0
@@ -1451,15 +1735,17 @@ def bulk_apply(  # noqa: C901
         return {"revision": state.revision, "changed": touched}
 
 
-def export_scope(group_id: int | None) -> dict[str, Any]:
+def export_scope(group_id: int | None, *, user_id: int | None = None) -> dict[str, Any]:
     return {
         "kind": "yawnbot.prompt-overrides",
         "schemaVersion": STORE_SCHEMA_VERSION,
-        "scope": _scope_key(group_id),
+        "scope": _scope_key(group_id, user_id),
         "exportedAt": now_beijing().isoformat(timespec="seconds"),
         "overrides": {
             key: value.as_dict()
-            for key, value in sorted(scope_overrides(group_id).items())
+            for key, value in sorted(
+                scope_overrides(group_id, user_id=user_id).items()
+            )
         },
     }
 
@@ -1469,6 +1755,25 @@ def export_scope(group_id: int | None) -> dict[str, Any]:
 _DRAFT: contextvars.ContextVar[dict[str, dict[str, Override]] | None] = (
     contextvars.ContextVar("yawn_agent_prompt_draft", default=None)
 )
+# 当前私聊回合的用户：私聊分段按 ``user:<QQ>`` → 全局 解析。
+_PRIVATE_USER: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "yawn_agent_private_prompt_user", default=None
+)
+
+
+@contextlib.contextmanager
+def use_private_user(user_id: int | None) -> Iterator[None]:
+    """私聊回合（主回合、汇报、协调、子智能体、记忆整理）期间绑定用户。"""
+
+    token = _PRIVATE_USER.set(int(user_id) if user_id else None)
+    try:
+        yield
+    finally:
+        _PRIVATE_USER.reset(token)
+
+
+def current_private_user() -> int | None:
+    return _PRIVATE_USER.get()
 
 
 @contextlib.contextmanager
@@ -1476,6 +1781,7 @@ def use_draft_overrides(
     drafts: Mapping[str, Mapping[str, Any]] | None,
     *,
     group_id: int | None,
+    user_id: int | None = None,
 ) -> Iterator[None]:
     """在当前上下文里叠加未保存的草稿（预览用），不落盘。
 
@@ -1486,7 +1792,7 @@ def use_draft_overrides(
     if not drafts:
         yield
         return
-    scope = _scope_key(group_id)
+    scope = _scope_key(group_id, user_id)
     layer: dict[str, Override] = {}
     for section_id, raw in drafts.items():
         if str(raw.get("mode") or "") in {"inherit", "default"}:
@@ -1518,15 +1824,28 @@ class ResolvedOverride:
     scope: str | None  # "draft" / "group" / "global" / None
 
 
-def resolve_override(section_id: str, group_id: int | None = None) -> ResolvedOverride:
-    """本群草稿 → 本群覆盖 → 全局草稿 → 全局覆盖；``builtin``/``inherit`` 停止查找。"""
+def resolve_override(
+    section_id: str, group_id: int | None = None, *, user_id: int | None = None
+) -> ResolvedOverride:
+    """本群（私聊分段：本人）草稿 → 覆盖 → 全局草稿 → 全局覆盖；``builtin``/``inherit`` 停止查找。"""
 
-    gid = group_id if group_id is not None else _current_group_id()
     drafts = _DRAFT.get() or {}
     with _lock:
         state = _load_locked()
-    for scope in ([str(int(gid))] if gid is not None else []) + [GLOBAL_SCOPE]:
-        label = "global" if scope == GLOBAL_SCOPE else "group"
+    if is_private_section(section_id):
+        uid = user_id if user_id is not None else _PRIVATE_USER.get()
+        scopes = ([_scope_key(None, uid)] if uid else []) + [GLOBAL_SCOPE]
+    else:
+        gid = group_id if group_id is not None else _current_group_id()
+        scopes = ([str(int(gid))] if gid is not None else []) + [GLOBAL_SCOPE]
+    for scope in scopes:
+        label = (
+            "global"
+            if scope == GLOBAL_SCOPE
+            else "user"
+            if is_user_scope(scope)
+            else "group"
+        )
         draft = drafts.get(scope, {}).get(section_id)
         if draft is not None:
             if draft.mode == "inherit":
@@ -1610,13 +1929,17 @@ def section_sample(section_id: str) -> dict[str, Any] | None:
 
 
 def apply_section(
-    section_id: str, generated: str, *, group_id: int | None = None
+    section_id: str,
+    generated: str,
+    *,
+    group_id: int | None = None,
+    user_id: int | None = None,
 ) -> str:
     """返回分段的生效文本；任何异常都退回代码默认，绝不影响对话。"""
 
     try:
         gid = group_id if group_id is not None else _current_group_id()
-        resolved = resolve_override(section_id, gid)
+        resolved = resolve_override(section_id, gid, user_id=user_id)
         effective = compose(generated, resolved.override)
         section = _SECTION_INDEX.get(section_id)
         # 数据块（群消息、成员资料）不进进程级样例缓存：它们只该出现在有界的 Trace 里。
@@ -1627,10 +1950,16 @@ def apply_section(
         return generated
 
 
-def section_text(section_id: str, default: str, *, group_id: int | None = None) -> str:
+def section_text(
+    section_id: str,
+    default: str,
+    *,
+    group_id: int | None = None,
+    user_id: int | None = None,
+) -> str:
     """静态分段的便捷入口：``default`` 就是代码常量。"""
 
-    return apply_section(section_id, default, group_id=group_id)
+    return apply_section(section_id, default, group_id=group_id, user_id=user_id)
 
 
 def system_messages(
@@ -1779,12 +2108,18 @@ def locate_sections(  # noqa: C901
 
 
 def apply_section_preview(
-    section_id: str, default: str, *, group_id: int | None = None
+    section_id: str,
+    default: str,
+    *,
+    group_id: int | None = None,
+    user_id: int | None = None,
 ) -> str:
     """和 :func:`apply_section` 同口径，但不记样例（只读查询用）。"""
 
     try:
-        return compose(default, resolve_override(section_id, group_id).override)
+        return compose(
+            default, resolve_override(section_id, group_id, user_id=user_id).override
+        )
     except Exception:  # noqa: BLE001
         return default
 
@@ -1811,7 +2146,9 @@ def catalog(group_id: int | None) -> dict[str, Any]:
         load_error = state.load_error
         updated_at = state.updated_at
     rows: list[dict[str, Any]] = []
-    for section in all_sections():
+    # 私聊分段在「私聊 Agent」页按全局/本人管理，群聊工作台不再列出。
+    private_count = sum(1 for section in all_sections() if is_private_section(section.id))
+    for section in all_sections(include_private=False):
         default = section_default(section)
         sample = section_sample(section.id)
         base = default if default is not None else (sample or {}).get("text") or ""
@@ -1857,11 +2194,15 @@ def catalog(group_id: int | None) -> dict[str, Any]:
         "categories": [
             {"key": key, "label": label, "hint": hint}
             for key, label, hint in CATEGORIES
+            if key not in {"private", "private_tools"}
         ],
+        "privateSections": private_count,
         "sections": rows,
         "summary": {
             "total": len(rows),
-            "globalOverrides": len(global_entries),
+            "globalOverrides": sum(
+                1 for key in global_entries if not is_private_section(key)
+            ),
             "groupOverrides": len(group_entries),
             "disabled": sum(1 for row in rows if row["effectiveMode"] == MODE_DISABLE),
             "safetyDisabled": sum(
@@ -1883,7 +2224,9 @@ __all__ = [
     "MODE_PREPEND",
     "MODE_REPLACE",
     "OVERRIDE_MODES",
+    "PRIVATE_TOOL_SECTION_PREFIX",
     "SECTIONS",
+    "USER_SCOPE_PREFIX",
     "ContentBuilder",
     "Override",
     "PromptSection",
@@ -1893,13 +2236,16 @@ __all__ = [
     "bulk_apply",
     "catalog",
     "clear_override",
+    "current_private_user",
     "export_scope",
     "get_section",
+    "is_private_section",
     "join_builders",
     "locate_sections",
     "manifest_for",
     "remember_manifest",
     "resolve_override",
+    "scope_user_id",
     "section_history",
     "section_text",
     "set_override",
@@ -1908,4 +2254,7 @@ __all__ = [
     "store_snapshot",
     "system_messages",
     "use_draft_overrides",
+    "use_private_user",
+    "user_scope_key",
+    "user_scopes",
 ]

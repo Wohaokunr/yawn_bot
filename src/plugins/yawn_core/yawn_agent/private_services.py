@@ -295,11 +295,12 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
             raise ToolError(
                 "清空前要用户明确确认",
                 code=ERROR_PERMISSION,
-                hint="先把会删掉什么（笔记、待办、提醒、倒数日、心情、偏好、私聊记忆）告诉他，他明确说确定后再带 confirm=true 调用",
+                hint="先把会删掉什么（笔记、待办、提醒、倒数日、心情、偏好、私聊人设、私聊记忆）告诉他，他明确说确定后再带 confirm=true 调用",
             )
         from .private_tasks import cancel_all
 
         cancelled = cancel_all(ctx.user_id)
+        had_persona = bool(store.load(ctx.user_id).get("persona"))
         removed_store = store.delete_all(ctx.user_id)
         removed_memories = await delete_private_memories(ctx.session, ctx.user_id)
         ctx.mutated = True
@@ -307,6 +308,7 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
             "personal_data_deleted": removed_store,
             "tasks_cancelled": cancelled,
             "private_memories_deleted": removed_memories,
+            "private_persona_deleted": had_persona and removed_store,
             "note": "聊天记录本身没删；要清空上下文可以发 /新对话",
         }
     record = store.load(ctx.user_id)
@@ -318,6 +320,7 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
             "tasks": len(record.get("tasks", [])),
         },
         "has_prefs": bool(record.get("prefs")),
+        "has_private_persona": bool(record.get("persona")),
         "auto_reply_paused": auto_paused(ctx.user_id),
         "where": "这些只在私聊里用，不会出现在群里",
     }

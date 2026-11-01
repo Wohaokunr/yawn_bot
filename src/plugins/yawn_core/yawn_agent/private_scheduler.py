@@ -82,6 +82,17 @@ def _late_note(due: datetime, now: datetime) -> str:
     return f"（抱歉晚了 {span}）"
 
 
+def _voice(record: dict[str, Any], text: str) -> str:
+    """主动问候带上他私聊人设的自称和口癖（提醒内容是他自己写的，不改）。"""
+
+    try:
+        from .private_persona import personalize_greeting
+
+        return personalize_greeting(record, text)
+    except Exception:  # noqa: BLE001
+        return text
+
+
 def plan_user(record: dict[str, Any], now: datetime, *, proactive_ok: bool) -> tuple[list[str], list[str]]:
     """原地更新 ``record``，返回 (要发的提醒, 待定的主动消息种类)。
 
@@ -119,14 +130,18 @@ def plan_user(record: dict[str, Any], now: datetime, *, proactive_ok: bool) -> t
     name = _name(prefs)
     if _clock_reached(prefs.get("morning_greeting"), now) and flags.get("greet_day") != today:
         flags["greet_day"] = today
-        messages.append(_pick(_MORNING, int(record.get("user_id") or 0), today).format(name=name))
+        messages.append(
+            _voice(record, _pick(_MORNING, int(record.get("user_id") or 0), today).format(name=name))
+        )
     if _clock_reached(prefs.get("checkin_nudge"), now) and flags.get("nudge_day") != today:
         flags["nudge_day"] = today
         pending.append("checkin_nudge")
     if now.hour >= DAY_EVENT_HOUR:
         if prefs.get("birthday") == f"{now:%m-%d}" and flags.get("birthday_year") != now.year:
             flags["birthday_year"] = now.year
-            messages.append(f"🎂 {name or ''}生日快乐！今天是属于你的日子，愿新的一岁开开心心～".replace("  ", " "))
+            messages.append(
+                _voice(record, f"🎂 {name or ''}生日快乐！今天是属于你的日子，愿新的一岁开开心心～".replace("  ", " "))
+            )
         sent_days = flags.setdefault("countdown_sent", {})
         for item in record.get("countdowns", []):
             if not item.get("notify", True) or item.get("date") != today:
@@ -135,7 +150,7 @@ def plan_user(record: dict[str, Any], now: datetime, *, proactive_ok: bool) -> t
             if sent_days.get(key) == today:
                 continue
             sent_days[key] = today
-            messages.append(f"📅 今天就是「{item['title']}」啦！")
+            messages.append(_voice(record, f"📅 今天就是「{item['title']}」啦！"))
         # 只留今天的标记，避免越积越多
         flags["countdown_sent"] = {k: v for k, v in sent_days.items() if v == today}
     return messages, pending
@@ -205,7 +220,9 @@ async def run_tick(
                 dbg_exc(f"私聊签到提醒查询用户 {user_id} 失败")
                 missing = 0
             if missing:
-                messages.append(f"今天还有 {missing} 个群没签到哦，回我一句“帮我签到”就好～")
+                messages.append(
+                    _voice(store.load(user_id), f"今天还有 {missing} 个群没签到哦，回我一句“帮我签到”就好～")
+                )
         for text in messages:
             if not await send(user_id, text):
                 break

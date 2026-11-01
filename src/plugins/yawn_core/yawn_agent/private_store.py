@@ -60,6 +60,8 @@ def empty_record() -> dict[str, Any]:
         "mail": [],
         # 多成员项目（private_tasks.start_project）：最近几个
         "projects": [],
+        # 私聊每用户人设（private_persona）：模式、卡片、历史、锁定、自助次数
+        "persona": {},
     }
 
 

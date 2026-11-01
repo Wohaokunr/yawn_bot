@@ -896,6 +896,12 @@ def _resolved_from_card(card: PersonaCard, resolved: ResolvedPersona | None) -> 
     }
 
 
+def compile_persona_card(card: PersonaCard, *, source: str) -> dict[str, Any]:
+    """把一张卡编译成提示词用的人设（与 :func:`resolve_persona` 同形状）；私聊每用户人设用。"""
+
+    return _resolved_from_card(card, ResolvedPersona(card, source))
+
+
 def resolve_persona(config: GroupAgentConfig | None) -> dict[str, Any]:
     resolved = resolve_persona_source(config)
     result = _resolved_from_card(resolved.card, resolved)
@@ -942,6 +948,7 @@ __all__ = [
     "ResolvedPersona",
     "apply_persona_card",
     "builtin_default_card",
+    "compile_persona_card",
     "defaults",
     "effective_persona_card",
     "global_persona",
