@@ -615,11 +615,11 @@ def test_password_command_detection_and_log_redaction():
         "font": 0,
         "sender": {"user_id": OWNER},
     }
-    secret = v11.PrivateMessageEvent.model_validate(
+    pw_event = v11.PrivateMessageEvent.model_validate(
         {**base, "message": v11.Message("/网页密码 Abc-12345")}
     )
     with pytest.raises(exception.NoLogException):
-        secret.get_log_string()
+        pw_event.get_log_string()
     normal = v11.PrivateMessageEvent.model_validate(
         {**base, "message": v11.Message("你好")}
     )
