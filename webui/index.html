@@ -3,7 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#ff7fa8" />
+    <meta name="theme-color" content="#f6f6f8" />
+    <script>
+      // 首帧前按偏好设置 data-theme，避免深色用户先看到一闪白屏；逻辑与 src/theme.tsx 一致
+      (function () {
+        var mode = "system";
+        try { mode = localStorage.getItem("yawnbot.theme") || "system"; } catch (e) {}
+        var dark = mode === "dark" || (mode !== "light" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var root = document.documentElement;
+        root.setAttribute("data-theme", dark ? "dark" : "light");
+        root.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
     <title>🌸 YawnBot 管理台</title>
   </head>
   <body>

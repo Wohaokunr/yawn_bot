@@ -1,0 +1,688 @@
+/* ── 深色主题 ─────────────────────────────────────────────
+   由 <html data-theme="dark"> 触发（见 src/theme.tsx；首帧前由 index.html 内联脚本设置）。
+   在 theme-anime.css 之后加载。
+
+   做法：
+   1. 先覆盖 theme-anime.css 的语义变量（--bg / --surface / --ink / --brand-* …），
+      绝大多数页面只用变量，改这里就整体变深；
+   2. 再给仍写死浅色的旧样式逐条补丁（按页面分节）。
+
+   给新页面的约定：颜色只用变量，不写死 #fff；状态色用 --success / --warning / --danger / --info
+   及其 *-bg；确实需要深色专属写法时，在自己的 css 里写 :root[data-theme="dark"] .xxx { … }。
+   浅色取值见 theme-anime.css 的 :root，antd token 见 theme.tsx 的 LIGHT_THEME / DARK_THEME。 */
+
+/* 状态色（浅色取值；theme-anime.css 早于状态色存在，所以放在这里统一声明） */
+:root {
+  --success: #16a34a;
+  --success-bg: #effaf3;
+  --warning: #d97706;
+  --warning-bg: #fff7e8;
+  --danger: #dc2626;
+  --danger-bg: #fef1f1;
+  --info: #3b82f6;
+  --info-bg: #eff5ff;
+  --purple: #6a4fc9;
+  --purple-bg: #f3effd;
+  --overlay: rgba(24, 20, 34, 0.45);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #141318;
+  --surface: #1d1c22;
+  --surface-muted: #222128;
+  --border: #34323c;
+  --border-soft: #2a2930;
+  --ink: #ecebf1;
+  --ink-secondary: #a9a6b4;
+  --ink-tertiary: #7c7987;
+  --brand: #ec6a9a;
+  --brand-hover: #f08cb1;
+  --brand-active: #f6a9c6;
+  --brand-50: #2c1d25;
+  --brand-100: #3a2230;
+  --brand-200: #5a2c42;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+
+  --success: #34c47a;
+  --success-bg: #15281e;
+  --warning: #f0a13a;
+  --warning-bg: #2c2214;
+  --danger: #f06a6a;
+  --danger-bg: #2e1819;
+  --info: #60a5fa;
+  --info-bg: #16213a;
+  --purple: #b39dff;
+  --purple-bg: #231d38;
+  --overlay: rgba(0, 0, 0, 0.6);
+
+  /* 旧样式（styles.css）里仍被引用的浅色令牌 */
+  --sakura-100: #2c1d25;
+  --sakura-200: #3a2230;
+  --sakura-300: #5a2c42;
+  --sakura-400: #c95283;
+  --sakura-500: #e0608f;
+  --tomato-100: #2e1c17;
+  --tomato-200: #3d241c;
+  --tomato-300: #6b3626;
+}
+
+:root[data-theme="dark"] ::selection {
+  background: var(--brand-200);
+  color: #fff;
+}
+
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background-color: #3a3842;
+}
+
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background-color: #4a4753;
+}
+
+:root[data-theme="dark"] img {
+  color-scheme: normal;
+}
+
+/* ═════ 外壳 ═════ */
+:root[data-theme="dark"] .app-header {
+  background: rgba(20, 19, 24, 0.86) !important;
+  border-bottom-color: var(--border-soft);
+}
+
+/* 登录页右下角的樱花水印：浅色版是淡粉，深色下压暗，免得抢眼 */
+:root[data-theme="dark"] .login-page::before {
+  opacity: 0.1;
+}
+
+/* 本仓库旧样式里的浅色玻璃/渐变一律压平成深色实底 */
+:root[data-theme="dark"] .fq-hero {
+  background: linear-gradient(135deg, #2a1d25 0%, var(--surface) 70%);
+}
+
+/* 沙箱图片预览的透明棋盘格 */
+:root[data-theme="dark"] .sbx-run-file img {
+  background: repeating-conic-gradient(#2a2930 0 25%, #222128 0 50%) 0 0 / 16px 16px;
+}
+
+/* 狼人杀：白天卡片与圆桌改成深色；黑夜本来就是深色，保持原样 */
+:root[data-theme="dark"] .ww2-card.is-night {
+  background: linear-gradient(180deg, #221f33 0%, var(--surface) 55%);
+}
+
+:root[data-theme="dark"] .ww2-table:not(.is-night) {
+  background: radial-gradient(circle at 50% 50%, #26252c 0%, #26252c 38%, #222128 39%, var(--surface) 72%);
+}
+
+/* ═════ 以下由脚本按“同选择器、同属性”从各页面样式里找出写死的浅色，逐条换成变量 ═════ */
+/* ── styles.css（旧样式，只保留没被后续样式覆盖的规则） ── */
+:root[data-theme="dark"] .guest-access-one-time-code {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .agent-config-toggle-card-featured {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .agent-config-note-soft {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .persona-paused-alert {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .persona-field-input .ant-input,
+:root[data-theme="dark"] .persona-field-input textarea.ant-input {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .persona-field-resolved strong {
+  color: var(--brand-active);
+}
+
+:root[data-theme="dark"] .persona-note-soft {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .persona-inherit-flow > div {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .persona-trial-run-row {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .persona-trial-result {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .persona-compiled-preview pre {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .persona-library-item {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .agent-studio-page .agent-config-eyebrow,
+:root[data-theme="dark"] .agent-studio-page .persona-config-eyebrow,
+:root[data-theme="dark"] .agent-studio-page .agent-config-section-kicker,
+:root[data-theme="dark"] .agent-studio-page .persona-config-section-kicker {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .agent-studio-page .ant-select-selector,
+:root[data-theme="dark"] .agent-studio-page .ant-input-number,
+:root[data-theme="dark"] .agent-studio-page .persona-field-input .ant-input,
+:root[data-theme="dark"] .agent-studio-page .persona-field-input textarea.ant-input {
+  background: var(--surface) !important;
+}
+
+:root[data-theme="dark"] .agent-studio-page .ant-select-focused .ant-select-selector,
+:root[data-theme="dark"] .agent-studio-page .ant-input-number-focused,
+:root[data-theme="dark"] .agent-studio-page .persona-field-input .ant-input:focus,
+:root[data-theme="dark"] .agent-studio-page .persona-field-input textarea.ant-input:focus {
+  background: var(--surface) !important;
+}
+
+:root[data-theme="dark"] .agent-studio-page .agent-config-toggle-card-featured {
+  background: var(--brand-50);
+}
+
+:root[data-theme="dark"] .agent-studio-page .persona-field-resolved strong {
+  color: var(--purple);
+}
+
+:root[data-theme="dark"] .agent-studio-page .agent-config-note-soft,
+:root[data-theme="dark"] .agent-studio-page .persona-note-soft {
+  background: var(--info-bg);
+}
+
+:root[data-theme="dark"] .agent-studio-page .persona-inherit-flow > div {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .agent-studio-page .persona-paused-alert {
+  border-color: color-mix(in srgb, var(--info) 38%, transparent);
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .fq-chip {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .fq-chip-tomato {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .fq-book-card {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .fq-rank {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .fq-book-head {
+  background: var(--warning-bg);
+}
+
+:root[data-theme="dark"] .fq-status-queued {
+  background: var(--info-bg);
+}
+
+:root[data-theme="dark"] .fq-status-running {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+:root[data-theme="dark"] .fq-status-completed {
+  background: var(--success-bg);
+}
+
+:root[data-theme="dark"] .fq-status-failed {
+  background: var(--surface-muted);
+  color: var(--brand-active);
+}
+
+:root[data-theme="dark"] .fq-status-cancelled {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .fq-status-cancelling {
+  background: var(--warning-bg);
+}
+
+:root[data-theme="dark"] .fq-send-pending {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .fq-send-sent {
+  background: var(--success-bg);
+}
+
+:root[data-theme="dark"] .fq-send-failed {
+  background: var(--surface-muted);
+  color: var(--brand-active);
+}
+
+:root[data-theme="dark"] .env-collapse .ant-collapse-content {
+  border-top-color: var(--border-soft);
+}
+
+:root[data-theme="dark"] .env-count-chip {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .env-search .ant-input,
+:root[data-theme="dark"] .env-search .ant-input-group .ant-btn {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .env-add-provider {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .app-content .ant-table-thead .ant-table-cell {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .agent-studio-page .agent-config-metric,
+:root[data-theme="dark"] .agent-studio-page .persona-config-metric,
+:root[data-theme="dark"] .agent-studio-page .agent-master-card,
+:root[data-theme="dark"] .agent-studio-page .persona-master-card,
+:root[data-theme="dark"] .agent-studio-page .persona-master-card.is-enabled,
+:root[data-theme="dark"] .agent-studio-page .agent-config-toggle-card,
+:root[data-theme="dark"] .agent-studio-page .agent-config-toggle-card-featured,
+:root[data-theme="dark"] .agent-studio-page .persona-field-card,
+:root[data-theme="dark"] .agent-studio-page .persona-field-card:hover,
+:root[data-theme="dark"] .agent-studio-page .persona-field-card:focus-within,
+:root[data-theme="dark"] .agent-studio-page .persona-inherit-flow > div {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .agent-studio-page .ant-select-selector,
+:root[data-theme="dark"] .agent-studio-page .ant-input-number,
+:root[data-theme="dark"] .agent-studio-page .persona-field-input .ant-input,
+:root[data-theme="dark"] .agent-studio-page .persona-field-input textarea.ant-input {
+  background: var(--surface) !important;
+}
+
+/* ── layout.css ── */
+:root[data-theme="dark"] .agent-studio-nav-shell {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .agent-studio-nav-button {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .agent-studio-nav-button:hover {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .section-nav-item:hover,
+:root[data-theme="dark"] .section-nav-item:focus-visible {
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .relations-toolbar {
+  border-bottom-color: var(--border-soft);
+  background: var(--surface);
+}
+
+/* ── design-system.css ── */
+:root[data-theme="dark"] .app-content .ant-card > .ant-card-head {
+  border-bottom-color: var(--border-soft);
+}
+
+/* ── agent-workspace/agent-workspace.css ── */
+:root[data-theme="dark"] .agent-status-bar.is-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .agent-status-error {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .agent-cockpit-kpis strong.is-danger {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .agent-health-score.is-error strong {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .agent-tool-rank-count em {
+  color: var(--danger);
+}
+
+/* ── agent-debug/debug-console.css ── */
+:root[data-theme="dark"] .dbg-insight.is-error {
+  background: var(--surface-muted);
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .dbg-insight.is-warning {
+  background: var(--surface-muted);
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+:root[data-theme="dark"] .dbg-mark {
+  background: var(--warning-bg);
+}
+
+:root[data-theme="dark"] .dbg-ld-add {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .dbg-ld-del {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .dbg .dbg-row-added > td {
+  background: var(--surface-muted) !important;
+}
+
+:root[data-theme="dark"] .dbg .dbg-row-removed > td {
+  background: var(--surface-muted) !important;
+}
+
+:root[data-theme="dark"] .dbg .dbg-row-changed > td {
+  background: var(--surface-muted) !important;
+}
+
+:root[data-theme="dark"] .dbg-behavior.is-changed {
+  background: var(--surface-muted);
+}
+
+/* ── agent-prompts/prompts.css ── */
+:root[data-theme="dark"] .ps-chip.is-safety {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .pst-safety-icon {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .pst-diff-add {
+  background: var(--surface-muted);
+  color: var(--success);
+}
+
+:root[data-theme="dark"] .pst-diff-del {
+  background: var(--surface-muted);
+  color: var(--danger);
+}
+
+/* ── relations/relations.css ── */
+:root[data-theme="dark"] .rel-badge-bridge {
+  color: var(--purple);
+  background: var(--purple-bg);
+}
+
+/* ── environment.css ── */
+:root[data-theme="dark"] .envx-removing {
+  background: var(--warning-bg);
+}
+
+:root[data-theme="dark"] .envx-health.is-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .envx-health.is-warning {
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+/* ── sandbox/sandbox.css ── */
+:root[data-theme="dark"] .sbx-status.is-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .sbx-status.is-warn {
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+:root[data-theme="dark"] .sbx-bar-error {
+  fill: var(--danger);
+}
+
+:root[data-theme="dark"] .sbx-check-bad {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .sbx-active-strip {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .sbx-output.is-error pre {
+  color: var(--danger);
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .sbx-ws-item.is-active {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .sbx-field-error {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .sbx-inbox-reason {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .sbx-bulk-bar {
+  background: var(--surface-muted);
+}
+
+/* ── web-search/web-search.css ── */
+:root[data-theme="dark"] .web-dl dt {
+  color: var(--ink);
+}
+
+/* ── stickers/stickers.css ── */
+:root[data-theme="dark"] .stk-card {
+  background: var(--surface);
+}
+
+/* ── schedules/schedules.css ── */
+:root[data-theme="dark"] .sch-bad {
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .sch-link {
+  color: var(--brand-active);
+}
+
+/* ── private-agent/private-agent.css ── */
+:root[data-theme="dark"] .pa-step-btn {
+  background: var(--surface);
+}
+
+/* ── directory/directory.css ── */
+:root[data-theme="dark"] .dir-batch {
+  border-color: var(--brand-200);
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .dir-row.is-open > td {
+  background: var(--surface-muted) !important;
+}
+
+:root[data-theme="dark"] .dir-row-overridden > td {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .dir-dot {
+  background: var(--border);
+}
+
+:root[data-theme="dark"] .dir-rank-index {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .dir-rank li:nth-child(1) .dir-rank-index {
+  background: var(--brand-50);
+  color: var(--brand-active);
+}
+
+:root[data-theme="dark"] .dir-avatar {
+  background: var(--brand-50);
+  color: var(--brand-active);
+}
+
+/* ── werewolf/werewolf.css ── */
+:root[data-theme="dark"] .ww2-status.is-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-pill.is-blue {
+  background: var(--surface-muted);
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-pill.is-orange {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-pill.is-gold {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-pill.is-green {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-pill.is-red {
+  color: var(--brand-active);
+  border-color: var(--brand-200);
+}
+
+:root[data-theme="dark"] .ww2-role.is-wolf {
+  color: var(--brand-active);
+}
+
+:root[data-theme="dark"] .ww2-role.is-good {
+  color: var(--success);
+}
+
+:root[data-theme="dark"] .ww2-ratio-seg.is-gray,
+:root[data-theme="dark"] .ww2-legend i.is-gray {
+  background: var(--border);
+}
+
+:root[data-theme="dark"] .ww2-metric.is-warn {
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-metric.is-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-card.is-broken {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-mini-seat.is-wolf {
+  border-color: var(--brand-200);
+}
+
+:root[data-theme="dark"] .ww2-mini-seat.is-good {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-seat.is-good .ww2-seat-avatar,
+:root[data-theme="dark"] .ww2-seat-avatar.is-good {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+
+:root[data-theme="dark"] .ww2-seat-votes {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+:root[data-theme="dark"] .ww2-feed-item.is-death {
+  background: var(--surface-muted);
+  border-color: var(--brand-200);
+}
+
+:root[data-theme="dark"] .ww2-feed-item.is-system {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .ww2-type.is-green {
+  color: var(--success);
+}
+
+:root[data-theme="dark"] .ww2-type.is-red {
+  color: var(--brand-active);
+}
+
+:root[data-theme="dark"] .ww2-type.is-gold {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+:root[data-theme="dark"] .ww2-type.is-purple {
+  background: var(--purple-bg);
+  color: var(--purple);
+}
+
+:root[data-theme="dark"] .ww2-type.is-blue {
+  color: var(--info);
+}
+
+:root[data-theme="dark"] .ww2-ai-reply {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .ww2-team.is-wolf {
+  border-color: var(--brand-200);
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .ww2-team.is-good {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .stat-card .stat-badge.tone-tomato {
+  color: var(--danger);
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .login-mode-switch {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .group-workspace-switch.ant-segmented {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="dark"] .ops-ok-banner.ant-alert {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+
+
+/* ── 关系图谱（SVG 节点描边写在属性里，用 CSS 覆盖；导出图片仍保持浅色底） ── */
+:root[data-theme="dark"] .rg-node-core > circle,
+:root[data-theme="dark"] .rg-node-pin {
+  stroke: var(--surface);
+}
