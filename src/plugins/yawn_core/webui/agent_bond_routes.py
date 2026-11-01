@@ -37,7 +37,7 @@ from ..yawn_agent.bot_bond import (
 from ..yawn_agent.context import now_beijing
 from .agent_route_helpers import is_guest_view as _is_guest_view
 from .config import API_PATH
-from .deps import AdminWriteSession, GroupViewSession, ok, page_params
+from .deps import AdminWriteSession, RelationViewSession, ok, page_params
 from .hub import hub
 from .route_helpers import require_group
 from .route_models import BondMomentBody, BondPatchBody
@@ -210,7 +210,7 @@ def _stage_clause(stage: str) -> Any:
 @router.get("/agent/groups/{group_id}/bonds")
 async def list_bonds(
     group_id: int,
-    _session: GroupViewSession,
+    _session: RelationViewSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=24),
@@ -286,7 +286,7 @@ async def list_bonds(
 
 
 @router.get("/agent/groups/{group_id}/bonds/summary")
-async def bond_overview(group_id: int, _session: GroupViewSession) -> dict[str, Any]:
+async def bond_overview(group_id: int, _session: RelationViewSession) -> dict[str, Any]:
     """阶段分布、平均熟悉/好感、近 7 天互动人数与最亲近的几位。"""
 
     now = now_beijing()
@@ -394,7 +394,7 @@ async def _load_bond(
 async def get_bond(
     group_id: int,
     user_id: int,
-    _session: GroupViewSession,
+    _session: RelationViewSession,
     bot_id: int | None = Query(default=None, alias="botId", gt=0),
 ) -> dict[str, Any]:
     guest = _is_guest_view(_session)

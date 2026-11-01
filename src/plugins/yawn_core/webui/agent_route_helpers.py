@@ -11,7 +11,9 @@ from ..data_models.agent_memory import AgentMemory
 
 
 def is_guest_view(session: Any) -> bool:
-    return getattr(session, "role", "admin") == "guest"
+    """访客和个人账号（群管理员）都只看精简投影：没有来源、证据数等治理字段。"""
+
+    return getattr(session, "role", "admin") in {"guest", "user"}
 
 
 def memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:

@@ -6,8 +6,9 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 ## 启用与认证
 
 - `WEBUI_ENABLED=true` 时 `config.validate_enabled_config()` 检查 Token 非空、`webui/dist/index.html` 存在；不满足只记错误日志并**跳过挂载 WebUI，绝不让 Bot 启动失败**。Token 长度不强制，偏弱只告警（`environment_schema.admin_token_warnings`）。会话签名密钥 = `data/webui/session.key` 本地随机密钥 + Token（`auth._secret`）。
-- `auth.py`：单运维 Token 登录 → 签名会话 Cookie（`yawn_webui_session`）+ CSRF + 登录限速。会话角色分 `admin` / `guest`。
+- `auth.py`：单运维 Token 登录 → 签名会话 Cookie（`yawn_webui_session`）+ CSRF + 登录限速。会话角色分 `admin` / `guest` / `user`（QQ 个人账号，会话带 `uid` 与 `cv` 凭据版本，改密码/下线即失效；账号存储与哈希在 `../webui_accounts.py`，私聊命令在 `../webui_account_commands.py`）。`POST /auth/user`、`/auth/user/setup` 按 IP 与账号双重限速。
 - `deps.py`：路由共享依赖与响应信封；访客只能看 allowlist 内的群（`guest_access.py`）。**任何新只读接口都要想清楚访客能不能看、返回字段是否需要裁剪、opt-out 成员是否被过滤。**
+- `user` 角色只能访问 `/me/*`（`self_service_routes.py`）和挂了 `RelationViewSession` 的关系只读接口（自己是群主/管理员的群，`user_scope.ensure_group_manager`：DB 角色候选 + `user_can_manage_group` 实时确认，Bot 离线时只读放行、写 503）。其余接口仍是 `AdminSession`，user 会话打到会 403。`is_guest_view` 对 user 也返回 true，关系数据按访客口径裁剪。
 
 ## 文件地图
 
@@ -31,6 +32,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `environment_schema.py` | 纯函数：从目录默认值/说明推断类型、范围（如“1-168”“最大 120”）、格式（秒/字节/列表），写入校验与 Token 强度提示；前端 `environment-fields.ts` 镜像同一套规则 |
 | `environment_catalog.dotenv` | 「环境配置」页的完整配置项目录（**不是** `.env.example`） |
 | `guest_access.py` / `guest_access_routes.py` | 持久化访客访问策略 |
+| `self_service_routes.py` / `user_account_models.py` / `user_scope.py` | QQ 个人账号的 `/me`：资料、改密码、退出所有设备、我管理的群（详情/功能开关，Agent 开关同步 `agent_config`）、私聊人设（读写/预设/模板/重置/撤销，受私聊人设策略约束，`by=self`）；群管理员身份判定与缓存 |
 | `schedules.py` | 「定时任务」管理页：状态/任务列表与详情/手动新建（以某位群成员名义，不受数量上限）/编辑（`revision` 乐观锁，409）/暂停恢复取消/立即执行（后台）/批量/规则预览/运行记录/策略，全部仅管理员；表未迁移时只读接口返回 `ready:false`，写接口 503 |
 | `sandbox.py` | 「代码沙箱」管理页：状态/统计/运行历史/工作区文件/控制台/策略，全部仅管理员；runner 离线时只读接口降级为 200 + `online:false`，写接口 503；文件下载强制 `nosniff` + CSP sandbox，HTML/SVG 强制附件 |
 | `web_search.py` | 「网页搜索」管理页：状态（密钥只回显来源与掩码）/策略与限额/今日用量与费用/最近调用/试搜试读/清空缓存，全部仅管理员；试搜计入全站计费统计但不占群配额 |

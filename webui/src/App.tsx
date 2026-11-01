@@ -55,6 +55,18 @@ const StickersPage = lazy(() =>
 const GuestGroupsPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupsPage: Page }) => ({ default: Page })),
 );
+const MeHomePage = lazy(() =>
+  import("./me/MeHomePage").then(({ MeHomePage: Page }) => ({ default: Page })),
+);
+const MyGroupPage = lazy(() =>
+  import("./me/MyGroupPage").then(({ MyGroupPage: Page }) => ({ default: Page })),
+);
+const MyPersonaPage = lazy(() =>
+  import("./me/MyPersonaPage").then(({ MyPersonaPage: Page }) => ({ default: Page })),
+);
+const MyAccountPage = lazy(() =>
+  import("./me/MyAccountPage").then(({ MyAccountPage: Page }) => ({ default: Page })),
+);
 const GuestGroupPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupPage: Page }) => ({ default: Page })),
 );
@@ -89,6 +101,24 @@ function App(): React.JSX.Element {
           setSession(nextSession);
         }}
       />
+    );
+  }
+  if (session.role === "user") {
+    // QQ 个人账号：只有“我的空间”，其余路径一律回到 /me（后端同样拒绝越权接口）
+    const logout = () => setSession(null);
+    return (
+      <AntApp>
+        <Routes>
+          <Route element={<Shell session={session} onLogout={logout} />}>
+            <Route index element={<Navigate to="/me" replace />} />
+            <Route path="me" element={<MeHomePage />} />
+            <Route path="me/groups/:groupId" element={<MyGroupPage />} />
+            <Route path="me/persona" element={<MyPersonaPage />} />
+            <Route path="me/account" element={<MyAccountPage onLoggedOut={logout} />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/me" replace />} />
+        </Routes>
+      </AntApp>
     );
   }
   if (session.role === "guest") {

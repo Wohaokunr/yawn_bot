@@ -105,6 +105,10 @@ WEBUI_ADMIN_TOKEN=
 WEBUI_SESSION_TTL_HOURS=12
 # HTTPS 访问时设为 true，会话 Cookie 只经 HTTPS 发送
 WEBUI_COOKIE_SECURE=false
+# 允许 QQ 用户用私聊里设的密码登录 WebUI 自助页面（管理的群、自己的私聊人设）；关闭后个人会话立即失效
+WEBUI_USER_LOGIN_ENABLED=true
+# WebUI 对外访问地址（如 https://bot.example.com/webui），私聊里发登录链接用；留空只提示“打开 WebUI”
+WEBUI_PUBLIC_URL=
 
 # ── 子插件 LLM 任务路由 ─────────────────────────────────────────────────────────
 

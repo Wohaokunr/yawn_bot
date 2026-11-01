@@ -160,6 +160,7 @@ def test_guest_session_is_role_aware_and_cannot_access_admin_routes(  # noqa: C9
         "adminWrite": False,
         "realtimeAdminStream": False,
         "guestGroupRead": True,
+        "selfService": False,
     }
 
     current = client.get("/webui/api/v1/auth/session")

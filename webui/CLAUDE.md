@@ -21,8 +21,8 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | 路径 | 职责 |
 |---|---|
 | `index.html`、`src/main.tsx` | 入口；`dev-preview.html` + `src/dev-preview.tsx` 是无后端的本地预览 |
-| `src/App.tsx` | 路由表：admin 与 guest 两套路由，按会话角色切换 |
-| `src/nav-config.tsx` | 侧栏与命令面板共用的导航表（新增页面要登记这里） |
+| `src/App.tsx` | 路由表：admin、guest、user（QQ 个人账号，只有 `/me/*`）三套路由，按会话角色切换 |
+| `src/nav-config.tsx` | 侧栏与命令面板共用的导航表（新增页面要登记这里；`navForRole`/`homePathForRole` 按角色给导航） |
 | `src/app-shell.tsx`、`src/layout.tsx`、`src/command-palette.tsx` | 外壳、页面框架、⌘K 命令面板 |
 | `src/api.ts`、`src/auth-session.ts`、`src/types.ts` | 统一 `fetch('/webui/api/v1…')`（CSRF、错误信封）、`/stream` WebSocket、会话、共享类型 |
 | `src/shared.tsx` | 通用组件与格式化 helper |
@@ -48,7 +48,8 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | `/guest-access` | `guest-access.tsx` | `guest_access_routes.py` |
 | `/audits` | `audits.tsx` | `audits.py` |
 | `/guest`、`/guest/:groupId`（访客） | `guest-home.tsx` | 访客只读接口（`deps.py` 过滤） |
-| 登录 | `login.tsx` | `auth_routes.py` |
+| `/me`、`/me/groups/:groupId`、`/me/persona`、`/me/account`（QQ 个人账号） | `me/`：`MeHomePage.tsx` 主页与我管理的群；`MyGroupPage.tsx` 群关系洞悉（复用 `RelationsPanel readOnly`，默认洞察视图）/群功能设置（复用 `FeatureTable`），标签在 URL `tab`；`MyPersonaPage.tsx` 私聊人设（复用 `PersonaCardForm`）；`MyAccountPage.tsx` 改密码/退出所有设备；`me-meta.ts` 纯逻辑（密码规则镜像后端 `webui_accounts.password_problem`）；`me-api.ts` 接口 | `self_service_routes.py`、关系只读接口 |
+| 登录 | `login.tsx`（运维/QQ 账号/访客三种；`?login=qq` 或上次用过的方式存在 `localStorage` 的 `yawnbot.login.mode`；QQ 账号含设置码设密码流程） | `auth_routes.py` |
 
 测试与源码同目录（`*.test.ts(x)`）。
 
