@@ -33,7 +33,7 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | 路由 | 文件 | 后端 |
 |---|---|---|
 | `/overview` | `overview.tsx` | `overview_routes.py` |
-| `/groups`、`/groups/:id`、`/users` | `access-pages.tsx`、`group-workspace.tsx`、`user-insights.tsx`（用户抽屉的“好感与签到”“私聊 Agent”标签页） | `groups.py`、`users.py` |
+| `/groups`、`/groups/:id`、`/users` | `directory/`（群组与用户 2.0；`access-pages.tsx` 只是转出口）：`GroupsPage.tsx` 状态条 + 即时搜索/筛选/排序 + 多选批量；`GroupDetailPage.tsx` 概览/群功能/成员/覆盖一览四标签；`UsersPage.tsx`；`UserProfileDrawer.tsx` 两页共用的用户档案（本群/所在群/私聊功能 + `user-insights.tsx` 的好感与签到、私聊 Agent）；`components.tsx` 里 `FeatureTable`（继承/开/关分段，写明继承后的值）、`BatchBar`、状态条；`directory-meta.ts` 纯逻辑；状态在 URL `groups.*`、`members.*`、`users.*`、`group.tab`、`user`、`user.tab`。窄屏覆盖了 theme-anime.css 的表格 640px 最小宽度（列已按断点隐藏） | `groups.py`、`users.py`、`directory.py` |
 | `/agent/:groupId` | `agent.tsx` + `agent-workspace/`（cockpit、状态栏、配置导入导出）+ `agent-panels/`（配置、人设、记忆、关系、隐私、消息、审计）+ `agent-debug/`（执行轨迹、Prompt/上下文/工具检查、模拟工作台）+ `agent-prompts/`（提示词工作台：每段默认/样例/覆盖、编辑抽屉、一键删除安全上下文、导入导出；`PromptSnapshotView` 完整请求视图供 Trace 和调试结果复用；状态在 URL `prompts.*`）；`agent-meta.ts`、`relation-meta.ts`、`relation-graph.tsx`（d3-force）、`relations/`（关系面板 2.0：列表/成员/矩阵/洞察/Bot 视角视图、编辑与详情抽屉、`relation-analysis.ts` 纯图算法；状态在 URL `relations.*`） | `agent*.py`、`audits.py` |
 | `/games` | `games.tsx` | `games.py` |
 | `/modules` | `modules.tsx` | `rpg_modules.py` |

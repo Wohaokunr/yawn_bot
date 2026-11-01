@@ -157,6 +157,12 @@ def auto_paused(user_id: int) -> bool:
         return int(user_id) in _load_paused()
 
 
+def auto_paused_user_ids() -> frozenset[int]:
+    """当前暂停了自动回复的用户（WebUI 状态条计数用）。"""
+
+    return frozenset(_load_paused())
+
+
 def set_auto_paused(user_id: int, *, paused: bool) -> bool:
     """记录成员是否暂停自动接管；返回状态是否有变化。"""
 

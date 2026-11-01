@@ -20,6 +20,7 @@ import "./sandbox/sandbox.css";
 import "./web-search/web-search.css";
 import "./stickers/stickers.css";
 import "./schedules/schedules.css";
+import "./directory/directory.css";
 import "./theme-anime.css";
 
 installGlassGlow();

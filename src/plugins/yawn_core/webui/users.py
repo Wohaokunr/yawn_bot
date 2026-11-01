@@ -1,4 +1,4 @@
-# ruff: noqa: FAST002,TC001,TID252
+# ruff: noqa: FAST002,TC001,TID252,PLR0913,PLR0917
 """Global user administration endpoints."""
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from ..permission import FEATURE_REGISTRY
 from ..private_chat_bridge import (
     PRIVATE_MEMORY_LABELS,
     auto_paused,
+    auto_paused_user_ids,
     delete_private_memories,
     get_private_handler,
     private_agent_config,
@@ -24,17 +25,25 @@ from ..private_chat_bridge import (
 )
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, ok, page_params
+from .directory import (
+    BATCH_LIMIT,
+    USER_SORTS,
+    existing_users,
+    list_users_v2,
+    user_profile,
+    users_summary,
+)
 from .hub import hub
 from .route_helpers import require_user
 from .route_models import (
     AffinityAdjustBody,
+    FeatureBatchBody,
     FeatureOverrideBody,
     PrivateAgentPatchBody,
 )
 from .service import (
     BEIJING_TZ,
     iso,
-    list_users,
     page_meta,
     set_user_feature,
     user_feature_rows,
@@ -49,13 +58,75 @@ async def get_users(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=120),
+    overrides: str = Query(default="", pattern="^(|private|member|any)$"),
+    activity: str = Query(default="", pattern="^(|24h|7d|30d|dormant)$"),
+    sort: str = Query(default="recent", max_length=20),
 ) -> dict[str, Any]:
     page, page_size = page_params(page, page_size)
     async with get_session() as db:
-        rows, total = await list_users(
-            db, page=page, page_size=page_size, search=search.strip()
+        rows, total = await list_users_v2(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search.strip(),
+            overrides=overrides,
+            activity=activity,
+            sort=sort if sort in USER_SORTS else "recent",
         )
     return ok(rows, page_meta(page, page_size, total))
+
+
+@router.get("/users/summary")
+async def get_users_summary(_session: AdminReadSession) -> dict[str, Any]:
+    """用户页状态条：总数、活跃、有覆盖、今日签到、私聊 Agent 暂停人数。"""
+
+    async with get_session() as db:
+        return ok(await users_summary(db, len(auto_paused_user_ids())))
+
+
+@router.post("/users/batch/features")
+async def batch_user_feature(
+    body: FeatureBatchBody, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """给多位用户同时设置同一个私聊功能覆盖（单事务）。"""
+
+    if body.feature not in FEATURE_REGISTRY:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "功能不存在")
+    user_ids: list[int] = []
+    for item in body.ids:
+        text = str(item).strip()
+        if not text.isdigit():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"QQ 号格式不对：{text}")
+        if int(text) not in user_ids:
+            user_ids.append(int(text))
+    if len(user_ids) > BATCH_LIMIT:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"一次最多处理 {BATCH_LIMIT} 个"
+        )
+    async with get_session() as db:
+        found = await existing_users(db, user_ids)
+        missing = [str(item) for item in user_ids if item not in found]
+        if missing:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"用户不存在：{'、'.join(missing[:5])}"
+            )
+        for user_id in user_ids:
+            await set_user_feature(
+                db, user_id, body.feature, body.override, group_id=None
+            )
+        await db.commit()
+    for user_id in user_ids:
+        await hub.notify_change("global_user_feature", f"{user_id}:{body.feature}")
+    return ok({"updated": len(user_ids), "feature": body.feature})
+
+
+@router.get("/users/{user_id}")
+async def get_user_profile(user_id: int, _session: AdminReadSession) -> dict[str, Any]:
+    """用户档案：好感等级、所在各群的身份/签到/群好感/本群覆盖数、私聊覆盖数。"""
+
+    async with get_session() as db:
+        user = await require_user(db, user_id)
+        return ok(await user_profile(db, user))
 
 
 @router.get("/users/{user_id}/features")
