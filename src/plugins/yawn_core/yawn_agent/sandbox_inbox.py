@@ -1,8 +1,8 @@
 # ruff: noqa: E501, PLR0911, PLR0912, PLR0913, PLR0917, PLR2004, C901, TID252
 """群聊附件入箱：把群里发的图片、文件、语音、视频放进本群沙箱工作区 ``inbox/``。
 
-NapCat 和 Bot 不共享文件系统，沙箱容器又没有网络，所以附件只能由 Bot 取到字节
-再经 runner 的 ``PUT /workspaces/{id}/file`` 写进工作区。取字节按这个顺序尝试，
+NapCat 和 Bot 不共享文件系统，沙箱容器也碰不到 QQ 的附件，所以附件由 Bot 取到本机
+临时文件，再经 runner 的 ``PUT /workspaces/{id}/file`` 流式写进工作区（单个最大 1GB）。取字节按这个顺序尝试，
 任何一步失败都换下一步，全部失败才算入箱失败：
 
 1. 消息段里自带的 ``base64://``；
@@ -72,7 +72,7 @@ _SOURCE_LABEL = {"current": "本条消息", "reply": "引用的消息", "forward
 FAILURE_HINTS: dict[str, tuple[str, str]] = {
     "disabled": ("管理员关闭了附件入箱", "如实告诉对方现在不能把附件放进电脑"),
     "type_disabled": ("管理员没有开放这类附件入箱", "如实说明，可以请对方换成别的格式"),
-    "too_large": ("附件超过入箱大小上限", "告诉对方文件太大，请压缩或拆分后再发"),
+    "too_large": ("附件超过入箱大小上限", "如实告诉对方文件超过了上限（管理员可以在 WebUI 调大）；电脑能联网的话，也可以请对方给下载链接让你自己下"),
     "daily_limit": ("本群今天的附件入箱总量用完了", "如实说明，明天再试或请管理员调大额度"),
     "quota": ("本群沙箱工作区空间不够了", "先用 delete_sandbox_file 删掉不需要的旧文件再试"),
     "expired": ("QQ 那边的附件已经过期或被撤回，取不到了", "请对方重新发一次"),
@@ -306,10 +306,13 @@ def sniff_extension(data: bytes, name: str | None = None) -> str | None:
     return named or None
 
 
-def inbox_filename(attachment: Attachment, data: bytes) -> str:
-    """图片/语音/视频没有可靠的原名，用“类型_内容哈希”命名，同一内容天然去重。"""
+def inbox_filename(attachment: Attachment, data: bytes, *, digest: str | None = None) -> str:
+    """图片/语音/视频没有可靠的原名，用“类型_内容哈希”命名，同一内容天然去重。
 
-    digest = hashlib.sha256(data).hexdigest()
+    大文件只传文件头 ``data`` 和事先算好的 ``digest``。
+    """
+
+    digest = digest or hashlib.sha256(data).hexdigest()
     ext = sniff_extension(data, attachment.name) or _DEFAULT_EXT.get(attachment.media_type, ".bin")
     if attachment.media_type == "file" and attachment.name:
         name = attachment.name
@@ -320,8 +323,8 @@ def inbox_filename(attachment: Attachment, data: bytes) -> str:
     return f"{label}_{digest[:10]}{ext}"
 
 
-def _with_hash(name: str, data: bytes) -> str:
-    digest = hashlib.sha256(data).hexdigest()[:6]
+def _with_hash(name: str, data: bytes, *, digest: str | None = None) -> str:
+    digest = (digest or hashlib.sha256(data).hexdigest())[:6]
     path = PurePosixPath(name)
     return f"{path.stem}_{digest}{''.join(path.suffixes) or ''}"
 
@@ -460,12 +463,66 @@ async def collect_recent(
 
 
 # ── 取字节 ────────────────────────────────────────────────────────────────
+#
+# 取到的内容一律先落到 Bot 本机的临时文件（``_Fetch.path``），再流式写进工作区：
+# 私聊单个附件可以到 1GB，不能整块读进内存。``fetch_bytes`` 给只要小文件字节的
+# 调用方（表情包收藏、测试），``fetch_file`` 给入箱，用完必须 ``close()``。
+
+# 超过这个大小的附件不再走会返回 base64 的协议端接口（get_file/get_image）：
+# 几十 MB 的 base64 塞进一条 WebSocket 消息会超过 uvicorn 默认 16MB 上限，
+# 直接把 NapCat 连接打断。大文件只走下载链接（get_*_file_url / 消息段 url）。
+BASE64_SAFE_BYTES = 8 * _MB
+_B64_SLICE = 4 * 1024 * 1024  # 4 的倍数，切片解码不会跨组
 
 
 @dataclass(slots=True)
 class _Fetch:
-    data: bytes
+    _data: bytes | None
     via: str
+    path: Path | None = None
+    size: int = 0
+    owned: bool = True
+
+    def __post_init__(self) -> None:
+        if self._data is not None and not self.size:
+            self.size = len(self._data)
+
+    @property
+    def data(self) -> bytes:
+        if self._data is None:
+            self._data = self.path.read_bytes() if self.path is not None else b""
+        return self._data
+
+    def head(self, limit: int = 64) -> bytes:
+        if self._data is not None:
+            return self._data[:limit]
+        if self.path is None:
+            return b""
+        with self.path.open("rb") as handle:
+            return handle.read(limit)
+
+    def sha256(self) -> str:
+        if self._data is not None:
+            return hashlib.sha256(self._data).hexdigest()
+        digest = hashlib.sha256()
+        if self.path is not None:
+            with self.path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    def upload_source(self) -> bytes | Path:
+        """交给 ``SandboxClient.write_file``：小内容直接给字节，大文件给路径流式传。"""
+
+        if self._data is not None or self.path is None:
+            return self.data
+        return self.path
+
+    def close(self) -> None:
+        if self.owned and self.path is not None:
+            with contextlib.suppress(OSError):
+                self.path.unlink()
+        self.path = None
 
 
 @dataclass(slots=True)
@@ -476,22 +533,51 @@ class _Attempts:
     notes: list[str] = field(default_factory=list)
 
 
-def _decode_base64(text: str, max_bytes: int, attempts: _Attempts) -> bytes | None:
+def _temporary(suffix: str = ".inbox") -> Path:
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)  # noqa: SIM115
+    handle.close()
+    return Path(handle.name)
+
+
+def _decode_base64(text: str, max_bytes: int, attempts: _Attempts) -> _Fetch | None:
     payload = text.split("base64://", 1)[-1].strip()
     if len(payload) * 3 // 4 > max_bytes + 4:
         attempts.too_large = True
         return None
+    if len(payload) <= _B64_SLICE:
+        try:
+            data = base64.b64decode(payload, validate=False)
+        except (binascii.Error, ValueError):
+            return None
+        if len(data) > max_bytes:
+            attempts.too_large = True
+            return None
+        return _Fetch(data, "base64") if data else None
+    # 大块 base64：切片解码直接写盘，不在内存里再复制一份解码结果。
+    compact = "".join(payload.split())
+    target = _temporary()
+    total = 0
     try:
-        data = base64.b64decode(payload, validate=False)
+        with target.open("wb") as handle:
+            for offset in range(0, len(compact), _B64_SLICE):
+                chunk = base64.b64decode(compact[offset : offset + _B64_SLICE], validate=False)
+                total += len(chunk)
+                if total > max_bytes:
+                    attempts.too_large = True
+                    raise ValueError("too_large")  # noqa: TRY301
+                handle.write(chunk)
     except (binascii.Error, ValueError):
+        target.unlink(missing_ok=True)
         return None
-    if len(data) > max_bytes:
-        attempts.too_large = True
+    if not total:
+        target.unlink(missing_ok=True)
         return None
-    return data or None
+    return _Fetch(None, "base64", path=target, size=total)
 
 
-async def _download(url: str, max_bytes: int, attempts: _Attempts) -> bytes | None:
+async def _download(url: str, max_bytes: int, attempts: _Attempts) -> _Fetch | None:
     from urllib.parse import urlparse
 
     import httpx
@@ -501,7 +587,6 @@ async def _download(url: str, max_bytes: int, attempts: _Attempts) -> bytes | No
         attempts.host_blocked = True
         dbg(f"附件入箱: 下载域名不在白名单 host={host!r}")
         return None
-    temporary: Path | None = None
     try:
         temporary, _content_type = await stream_download(
             url,
@@ -511,7 +596,6 @@ async def _download(url: str, max_bytes: int, attempts: _Attempts) -> bytes | No
             suffix=".inbox",
             timeout=_FETCH_TIMEOUT,
         )
-        return temporary.read_bytes()
     except PermissionError:
         attempts.host_blocked = True
     except ValueError as exc:
@@ -523,14 +607,15 @@ async def _download(url: str, max_bytes: int, attempts: _Attempts) -> bytes | No
         dbg(f"附件入箱: 下载失败 HTTP {exc.response.status_code} host={host!r}")
     except (httpx.HTTPError, OSError) as exc:
         dbg(f"附件入箱: 下载失败 {type(exc).__name__} host={host!r}")
-    finally:
-        if temporary is not None:
-            with contextlib.suppress(OSError):
-                temporary.unlink()
+    else:
+        size = temporary.stat().st_size
+        if size:
+            return _Fetch(None, "url", path=temporary, size=size)
+        temporary.unlink(missing_ok=True)
     return None
 
 
-def _read_local(candidate: str, max_bytes: int, attempts: _Attempts) -> bytes | None:
+def _read_local(candidate: str, max_bytes: int, attempts: _Attempts) -> _Fetch | None:
     roots = _local_roots()
     if not roots or not candidate:
         return None
@@ -540,16 +625,22 @@ def _read_local(candidate: str, max_bytes: int, attempts: _Attempts) -> bytes | 
     try:
         if not path.is_file():
             return None
-        if path.stat().st_size > max_bytes:
-            attempts.too_large = True
-            return None
-        data = path.read_bytes()
+        size = path.stat().st_size
     except OSError:
         return None
-    if len(data) > max_bytes:
+    if size > max_bytes:
         attempts.too_large = True
         return None
-    return data
+    if not size:
+        return None
+    # 共享目录里的文件不是我们的，用完不删。
+    return _Fetch(None, "shared_dir", path=path, size=size, owned=False)
+
+
+def _tag(result: _Fetch | None, via: str) -> _Fetch | None:
+    if result is not None:
+        result.via = via
+    return result
 
 
 async def _from_payload(payload: Any, max_bytes: int, attempts: _Attempts, via: str) -> _Fetch | None:
@@ -561,28 +652,28 @@ async def _from_payload(payload: Any, max_bytes: int, attempts: _Attempts, via: 
         return None
     encoded = payload.get("base64")
     if isinstance(encoded, str) and encoded:
-        data = _decode_base64(encoded, max_bytes, attempts)
-        if data:
-            return _Fetch(data, f"{via}:base64")
+        result = _decode_base64(encoded, max_bytes, attempts)
+        if result:
+            return _tag(result, f"{via}:base64")
     for key in ("url", "download_url"):
         url = str(payload.get(key) or "")
         if url.startswith(("http://", "https://")):
-            data = await _download(url, max_bytes, attempts)
-            if data:
-                return _Fetch(data, f"{via}:url")
+            result = await _download(url, max_bytes, attempts)
+            if result:
+                return _tag(result, f"{via}:url")
         elif url.startswith("base64://"):
-            data = _decode_base64(url, max_bytes, attempts)
-            if data:
-                return _Fetch(data, f"{via}:base64")
+            result = _decode_base64(url, max_bytes, attempts)
+            if result:
+                return _tag(result, f"{via}:base64")
     for key in ("file", "path"):
         text = str(payload.get(key) or "")
         if text.startswith("base64://"):
-            data = _decode_base64(text, max_bytes, attempts)
-            if data:
-                return _Fetch(data, f"{via}:base64")
-        data = _read_local(text, max_bytes, attempts)
-        if data:
-            return _Fetch(data, f"{via}:shared_dir")
+            result = _decode_base64(text, max_bytes, attempts)
+            if result:
+                return _tag(result, f"{via}:base64")
+        result = _read_local(text, max_bytes, attempts)
+        if result:
+            return _tag(result, f"{via}:shared_dir")
     return None
 
 
@@ -616,7 +707,24 @@ async def _refresh_ref(bot: Any, attachment: Attachment) -> dict[str, Any] | Non
 
 
 async def fetch_bytes(bot: Any, group_id: int, attachment: Attachment, *, max_bytes: int) -> _Fetch:
-    """按文件开头说明的顺序取附件字节；全部失败时抛 ``InboxError``。"""
+    """取附件内容并读进内存（小文件用：表情包收藏等）。全部失败时抛 ``InboxError``。"""
+
+    fetched = await fetch_file(bot, group_id, attachment, max_bytes=max_bytes)
+    try:
+        _ = fetched.data
+    finally:
+        if fetched.owned and fetched.path is not None:
+            with contextlib.suppress(OSError):
+                fetched.path.unlink()
+        fetched.path = None
+    return fetched
+
+
+async def fetch_file(bot: Any, group_id: int, attachment: Attachment, *, max_bytes: int) -> _Fetch:
+    """按文件开头说明的顺序取附件到本机临时文件；调用方用完要 ``close()``。
+
+    ``group_id=0`` 表示私聊：文件走 NapCat 的 ``get_private_file_url``。
+    """
 
     attempts = _Attempts()
     declared = attachment.declared_size
@@ -628,25 +736,26 @@ async def fetch_bytes(bot: Any, group_id: int, attachment: Attachment, *, max_by
             fresh = await _refresh_ref(bot, attachment)
             if fresh:
                 refs.insert(0, fresh)
+    big = declared is not None and declared > BASE64_SAFE_BYTES
     for ref in refs:
         file_value = str(ref.get("file") or "")
         if file_value.startswith("base64://"):
-            data = _decode_base64(file_value, max_bytes, attempts)
-            if data:
-                return _Fetch(data, "segment:base64")
+            result = _decode_base64(file_value, max_bytes, attempts)
+            if result:
+                return _tag(result, "segment:base64")  # type: ignore[return-value]
         if bot is not None:
-            result = await _fetch_via_api(bot, group_id, attachment.media_type, ref, max_bytes, attempts)
+            result = await _fetch_via_api(bot, group_id, attachment.media_type, ref, max_bytes, attempts, big=big)
             if result is not None:
                 return result
         url = str(ref.get("url") or "")
         if url.startswith(("http://", "https://")):
-            data = await _download(url, max_bytes, attempts)
-            if data:
-                return _Fetch(data, "segment:url")
+            result = await _download(url, max_bytes, attempts)
+            if result:
+                return _tag(result, "segment:url")  # type: ignore[return-value]
         for key in ("path", "file"):
-            data = _read_local(str(ref.get(key) or ""), max_bytes, attempts)
-            if data:
-                return _Fetch(data, "segment:shared_dir")
+            result = _read_local(str(ref.get(key) or ""), max_bytes, attempts)
+            if result:
+                return _tag(result, "segment:shared_dir")  # type: ignore[return-value]
     if attempts.too_large:
         raise InboxError("too_large")
     if attempts.expired:
@@ -656,6 +765,14 @@ async def fetch_bytes(bot: Any, group_id: int, attachment: Attachment, *, max_by
     raise InboxError("unavailable")
 
 
+def fetch_deadline(declared: int | None) -> float:
+    """整次取附件的总时限：60 秒起，按声明大小每 MB 加 1.5 秒，最多 1 小时。"""
+
+    if not declared:
+        return _FETCH_TIMEOUT + 15
+    return min(60.0 + declared / _MB * 1.5, 3600.0)
+
+
 async def _fetch_via_api(
     bot: Any,
     group_id: int,
@@ -663,10 +780,12 @@ async def _fetch_via_api(
     ref: dict[str, Any],
     max_bytes: int,
     attempts: _Attempts,
+    *,
+    big: bool = False,
 ) -> _Fetch | None:
     file_value = str(ref.get("file") or "")
     file_id = str(ref.get("file_id") or "")
-    if media_type == "record" and (file_value or file_id):
+    if media_type == "record" and (file_value or file_id) and not big:
         # 让协议端把 silk/amr 转成 mp3，沙箱里就能直接用 soundfile 读。
         for out_format in ("mp3", None):
             params: dict[str, Any] = {"file": file_value or file_id}
@@ -678,11 +797,20 @@ async def _fetch_via_api(
             if result is not None:
                 return result
     if media_type == "file" and file_id:
-        busid = _as_int(ref.get("busid")) or 102
-        link = await _call(bot, "get_group_file_url", group_id=group_id, file_id=file_id, busid=busid)
-        result = await _from_payload(link, max_bytes, attempts, "group_file")
+        if group_id:
+            busid = _as_int(ref.get("busid")) or 102
+            link = await _call(bot, "get_group_file_url", group_id=group_id, file_id=file_id, busid=busid)
+            via = "group_file"
+        else:
+            # NapCat 扩展接口：私聊文件的下载链接（不返回 base64，大文件安全）。
+            link = await _call(bot, "get_private_file_url", file_id=file_id)
+            via = "private_file"
+        result = await _from_payload(link, max_bytes, attempts, via)
         if result is not None:
             return result
+    if big:
+        # 大文件不走会回 base64 的接口，见 BASE64_SAFE_BYTES。
+        return None
     if media_type == "image" and file_value and not file_value.startswith(("http://", "https://")):
         result = await _from_payload(await _call(bot, "get_image", file=file_value), max_bytes, attempts, "get_image")
         if result is not None:
@@ -698,8 +826,12 @@ async def _fetch_via_api(
 # ── 入箱 ──────────────────────────────────────────────────────────────────
 
 
-def effective_max_bytes(settings: SandboxSettings, health: dict[str, Any] | None) -> int:
-    limit = settings.inbox_max_file_mb
+def effective_max_bytes(
+    settings: SandboxSettings, health: dict[str, Any] | None, *, private: bool = False
+) -> int:
+    """单个附件入箱上限：设置值（群/私聊各一个）再夹到 runner 的上传上限。"""
+
+    limit = settings.private_inbox_max_file_mb if private else settings.inbox_max_file_mb
     runner_limit = (health or {}).get("max_upload_mb")
     if isinstance(runner_limit, int) and runner_limit > 0:
         limit = min(limit, runner_limit)
@@ -807,8 +939,8 @@ async def _import_one(
             return ImportOutcome(attachment, "failed", reason="daily_limit")
         try:
             fetched = await asyncio.wait_for(
-                fetch_bytes(bot, group_id, attachment, max_bytes=max_bytes),
-                timeout=_FETCH_TIMEOUT + 15,
+                fetch_file(bot, group_id, attachment, max_bytes=max_bytes),
+                timeout=fetch_deadline(attachment.declared_size),
             )
         except InboxError as exc:
             return ImportOutcome(attachment, "failed", reason=exc.reason)
@@ -817,42 +949,74 @@ async def _import_one(
         except Exception:  # noqa: BLE001
             dbg_exc(f"群 {group_id} 附件入箱异常")
             return ImportOutcome(attachment, "failed", reason="error")
-        data = fetched.data
-        if settings.inbox_group_daily_mb and inbox_usage(group_id)["bytes"] + len(data) > daily_cap:
-            return ImportOutcome(attachment, "failed", reason="daily_limit")
-        async with lock:
-            name = inbox_filename(attachment, data)
-            path = f"{INBOX_DIR}/{name}"
-            if existing.get(path) == len(data) and attachment.media_type != "file":
-                return ImportOutcome(attachment, "reused", path=path, size=len(data), via=fetched.via)
-            if path in existing or path in claimed:
-                if existing.get(path) == len(data):
-                    return ImportOutcome(attachment, "reused", path=path, size=len(data), via=fetched.via)
-                path = f"{INBOX_DIR}/{_with_hash(name, data)}"
-            claimed.add(path)
         try:
-            result = await client.write_file(workspace, path, data)
-        except SandboxError as exc:
-            reason = {
-                "quota_exceeded": "quota",
-                "too_large": "too_large",
-                "workspace_limit": "quota",
-                "offline": "offline",
-                "timeout": "offline",
-                "disabled": "offline",
-            }.get(exc.code, "error")
-            return ImportOutcome(attachment, "failed", reason=reason, via=fetched.via)
-        entry = (result or {}).get("file") or {}
-        existing[path] = len(data)
-        return ImportOutcome(
-            attachment,
-            "imported",
-            path=str(entry.get("path") or path),
-            size=len(data),
-            kind=str(entry.get("kind") or "") or None,
-            via=fetched.via,
-            note=_type_note(path),
-        )
+            return await _store_fetched(
+                fetched,
+                attachment,
+                group_id=group_id,
+                settings=settings,
+                client=client,
+                workspace=workspace,
+                existing=existing,
+                claimed=claimed,
+                lock=lock,
+                daily_cap=daily_cap,
+            )
+        finally:
+            fetched.close()
+
+
+async def _store_fetched(
+    fetched: _Fetch,
+    attachment: Attachment,
+    *,
+    group_id: int,
+    settings: SandboxSettings,
+    client: SandboxClient,
+    workspace: str,
+    existing: dict[str, int],
+    claimed: set[str],
+    lock: asyncio.Lock,
+    daily_cap: int,
+) -> ImportOutcome:
+    size = fetched.size or len(fetched.data)
+    if settings.inbox_group_daily_mb and inbox_usage(group_id)["bytes"] + size > daily_cap:
+        return ImportOutcome(attachment, "failed", reason="daily_limit")
+    digest = fetched.sha256()
+    head = fetched.head(64)
+    async with lock:
+        name = inbox_filename(attachment, head, digest=digest)
+        path = f"{INBOX_DIR}/{name}"
+        if existing.get(path) == size and attachment.media_type != "file":
+            return ImportOutcome(attachment, "reused", path=path, size=size, via=fetched.via)
+        if path in existing or path in claimed:
+            if existing.get(path) == size:
+                return ImportOutcome(attachment, "reused", path=path, size=size, via=fetched.via)
+            path = f"{INBOX_DIR}/{_with_hash(name, head, digest=digest)}"
+        claimed.add(path)
+    try:
+        result = await client.write_file(workspace, path, fetched.upload_source())
+    except SandboxError as exc:
+        reason = {
+            "quota_exceeded": "quota",
+            "too_large": "too_large",
+            "workspace_limit": "quota",
+            "offline": "offline",
+            "timeout": "offline",
+            "disabled": "offline",
+        }.get(exc.code, "error")
+        return ImportOutcome(attachment, "failed", reason=reason, via=fetched.via)
+    entry = (result or {}).get("file") or {}
+    existing[path] = size
+    return ImportOutcome(
+        attachment,
+        "imported",
+        path=str(entry.get("path") or path),
+        size=size,
+        kind=str(entry.get("kind") or "") or None,
+        via=fetched.via,
+        note=_type_note(path),
+    )
 
 
 def _type_note(path: str) -> str | None:
@@ -992,6 +1156,8 @@ __all__ = [
     "collect_recent",
     "effective_max_bytes",
     "fetch_bytes",
+    "fetch_deadline",
+    "fetch_file",
     "host_allowed",
     "import_attachments",
     "inbox_filename",

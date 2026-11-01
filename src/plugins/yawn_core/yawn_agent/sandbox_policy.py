@@ -53,7 +53,7 @@ class SandboxSettings(BaseModel):
     member_cooldown_seconds: int = Field(default=5, ge=0, le=600)
     timeout_seconds: int = Field(default=30, ge=5, le=90)
     memory_mb: int = Field(default=1024, ge=128, le=4096)
-    disk_quota_mb: int = Field(default=200, ge=10, le=4096)
+    disk_quota_mb: int = Field(default=200, ge=10, le=65536)
     max_output_chars: int = Field(default=6000, ge=500, le=12000)
     max_share_mb: int = Field(default=20, ge=1, le=32)
     allow_unisolated: bool = False
@@ -65,7 +65,7 @@ class SandboxSettings(BaseModel):
     inbox_types: list[Literal["image", "file", "record", "video"]] = Field(
         default_factory=lambda: list(INBOX_MEDIA_TYPES)
     )
-    inbox_max_file_mb: int = Field(default=20, ge=1, le=64)
+    inbox_max_file_mb: int = Field(default=20, ge=1, le=4096)
     inbox_max_per_turn: int = Field(default=6, ge=1, le=20)
     inbox_history_minutes: int = Field(default=180, ge=0, le=2880)
     inbox_group_daily_mb: int = Field(default=500, ge=0, le=20000)
@@ -74,7 +74,16 @@ class SandboxSettings(BaseModel):
     private_daily_runs: int = Field(default=500, ge=0, le=10000)
     # 私聊发来的图片/文件自动放进他的电脑 inbox/
     private_inbox: bool = True
-    private_inbox_daily_mb: int = Field(default=200, ge=0, le=20000)
+    private_inbox_daily_mb: int = Field(default=4096, ge=0, le=100000)
+    # 私聊单个附件入箱上限（MB）：APK、安装包、压缩包这类大文件也能放进去。
+    private_inbox_max_file_mb: int = Field(default=1024, ge=1, le=4096)
+    # 每人工作区总空间（MB）与用户代码能写出的单个文件大小（MB）。
+    private_disk_quota_mb: int = Field(default=5120, ge=50, le=65536)
+    private_file_mb: int = Field(default=1024, ge=16, le=4096)
+    # ── 虚拟电脑联网（容器接了出网网络时生效；内网地址始终挡住）──────────────
+    # 私聊每人的电脑默认能上网下载文件；群聊工作区是群成员共用的，默认不放开。
+    private_network: bool = True
+    group_network: bool = False
 
     def limits(self, *, timeout_seconds: int | None = None) -> dict[str, int]:
         timeout = self.timeout_seconds
@@ -85,6 +94,12 @@ class SandboxSettings(BaseModel):
             "memory_mb": self.memory_mb,
             "disk_quota_mb": self.disk_quota_mb,
         }
+
+    def private_limits(self, *, timeout_seconds: int | None = None) -> dict[str, int]:
+        limits = self.limits(timeout_seconds=timeout_seconds)
+        limits["disk_quota_mb"] = self.private_disk_quota_mb
+        limits["file_mb"] = self.private_file_mb
+        return limits
 
     def inbox_allows(self, media_type: str) -> bool:
         return self.inbox_enabled and media_type in self.inbox_types

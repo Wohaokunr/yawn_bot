@@ -181,7 +181,21 @@ export function OverviewTab({
         <Card size="small" title="隔离自检">
           {isolation ? (
             <ul className="sbx-checks">
-              <CheckRow ok={isolation.checks.networkDisabled} label="无网络" detail={isolation.checks.networkDisabled ? "容器内没有网卡" : `发现网卡 ${isolation.networkInterfaces.join(", ")}`} />
+              {isolation.checks.networkGuarded === undefined ? (
+                <CheckRow ok={isolation.checks.networkDisabled} label="无网络" detail={isolation.checks.networkDisabled ? "容器内没有网卡" : `发现网卡 ${isolation.networkInterfaces.join(", ")}`} />
+              ) : (
+                <CheckRow
+                  ok={isolation.checks.networkGuarded}
+                  label={isolation.checks.networkDisabled ? "无网络" : "出网受控"}
+                  detail={
+                    isolation.checks.networkDisabled
+                      ? "容器内没有网卡"
+                      : isolation.checks.networkGuarded
+                        ? "可以上外网；内网地址被防火墙挡住，按设置给每个工作区开关"
+                        : `有网卡 ${isolation.networkInterfaces.join(", ")} 但 runner 管不住防火墙${health?.network?.error ? `：${health.network.error}` : ""}`
+                  }
+                />
+              )}
               <CheckRow ok={isolation.checks.privilegeDrop} label="按群降权" detail="每个群一个独立 uid，文件互不可见" />
               <CheckRow ok={isolation.checks.readonlyRoot} label="只读根文件系统" detail="镜像文件不可被代码改写" />
               <CheckRow ok={isolation.checks.noNewPrivileges} label="no-new-privileges" detail="setuid 程序无法提权" />

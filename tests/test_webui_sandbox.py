@@ -178,7 +178,7 @@ def test_settings_accepts_inbox_fields_and_old_payloads(api: TestClient) -> None
     old = {key: value for key, value in _settings().items() if not key.startswith("inbox")}
     assert api.put(f"{BASE}/settings", json=old).status_code == 200
     assert policy.load_settings().inbox_auto_import == "sandbox_turns"
-    assert api.put(f"{BASE}/settings", json=_settings(inboxMaxFileMb=999)).status_code == 422
+    assert api.put(f"{BASE}/settings", json=_settings(inboxMaxFileMb=99999)).status_code == 422
     assert api.put(f"{BASE}/settings", json=_settings(inboxTypes=["exe"])).status_code == 422
 
 

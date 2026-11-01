@@ -34,6 +34,7 @@ from .workspace import (
 
 if TYPE_CHECKING:
     from .config import RunnerConfig
+    from .netpolicy import NetPolicy
 
 MAX_CODE_CHARS = 64 * 1024
 # python：经 bootstrap 运行（notebook 式回显、自动存图）；shell：bash 脚本，
@@ -84,6 +85,9 @@ _BASE_CHILD_ENV = {
     "MKL_NUM_THREADS": "1",
     "NUMEXPR_NUM_THREADS": "1",
     "PATH": "/usr/local/bin:/usr/bin:/bin",
+    # 联网时 pip 只往工作区的 .pylib 装（根文件系统只读），不留缓存、不查新版本。
+    "PIP_NO_CACHE_DIR": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
 }
 
 _MATPLOTLIBRC = """\
@@ -106,6 +110,8 @@ class RunRequest:
     meta: dict[str, Any] = field(default_factory=dict)
     run_id: str = field(default_factory=lambda: secrets.token_hex(8))
     language: str = "python"
+    # 是否允许这次执行访问外网；None 表示按 runner 默认（SANDBOX_NETWORK_DEFAULT）。
+    network: bool | None = None
 
 
 @dataclass(slots=True)
@@ -131,6 +137,7 @@ class RunResult:
     meta: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=dict)
     language: str = "python"
+    network: dict[str, bool] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +162,7 @@ class RunResult:
             "meta": self.meta,
             "usage": self.usage,
             "language": self.language,
+            "network": self.network,
         }
 
 
@@ -260,9 +268,12 @@ def _signal_name(number: int) -> str:
 
 
 class Executor:
-    def __init__(self, config: RunnerConfig, store: WorkspaceStore) -> None:
+    def __init__(
+        self, config: RunnerConfig, store: WorkspaceStore, netpolicy: NetPolicy | None = None
+    ) -> None:
         self.config = config
         self.store = store
+        self.netpolicy = netpolicy
         self.drop_privileges = store.drop_privileges
         self._slots = threading.BoundedSemaphore(config.concurrency)
         self._state_lock = threading.Lock()
@@ -420,6 +431,14 @@ class Executor:
             result.message = "工作区空间或文件数已满，请先删除不需要的文件"
             result.usage = usage
             return result
+        if self.netpolicy is not None:
+            allowed = (
+                self.netpolicy.default_allowed if request.network is None else bool(request.network)
+            )
+            enforced = self.netpolicy.apply(
+                workspace.uid if self.drop_privileges else None, request.network
+            )
+            result.network = {"allowed": allowed, "enforced": enforced}
         before = self.store.snapshot(workspace, limit=limits.max_files + 100)
         job_dir = self._prepare_job_dir(workspace, request)
         if request.language == "shell":

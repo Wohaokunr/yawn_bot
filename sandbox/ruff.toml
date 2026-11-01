@@ -15,3 +15,8 @@ extend-ignore = [
     "PLR0917",
     "PLR2004",
 ]
+
+[lint.per-file-ignores]
+# 能力包函数只经 call(name, args) 以关键字参数调用，布尔位置参数不存在歧义；
+# 能力是“一个函数一件事”的扁平脚本，分支与循环内 try 是逐项容错的写法。
+"yawnkit/caps/*" = ["FBT001", "FBT002", "PERF203", "PERF401", "PLR0912"]

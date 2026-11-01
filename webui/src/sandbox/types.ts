@@ -31,6 +31,8 @@ export interface SandboxIsolation {
   isolated: boolean;
   checks: {
     networkDisabled: boolean;
+    /** 1.2 起：容器没网，或有网但内网被防火墙挡住。 */
+    networkGuarded?: boolean;
     privilegeDrop: boolean;
     readonlyRoot: boolean | null;
     noNewPrivileges: boolean | null;
@@ -60,6 +62,19 @@ export interface SandboxHealth {
   maxUploadMb: number;
   /** runner 声明的可选能力（1.1.0 起）：rename、mkdir、upload_guard…；旧 runner 没有。 */
   features?: string[];
+  /** 1.2 起：出网策略状态（netpolicy.report）。 */
+  network?: SandboxNetwork;
+}
+
+export interface SandboxNetwork {
+  attached: boolean;
+  control: boolean;
+  blockPrivate: boolean;
+  defaultAllowed: boolean;
+  guarded: boolean;
+  ipv6: boolean;
+  blockedWorkspaces: number;
+  error: string | null;
 }
 
 export interface SandboxSettings {
@@ -89,6 +104,12 @@ export interface SandboxSettings {
   privateDailyRuns: number;
   privateInbox: boolean;
   privateInboxDailyMb: number;
+  privateInboxMaxFileMb: number;
+  privateDiskQuotaMb: number;
+  privateFileMb: number;
+  /** 私聊虚拟电脑能否上外网（默认开）；群聊默认关。 */
+  privateNetwork: boolean;
+  groupNetwork: boolean;
 }
 
 export type SandboxInboxMode = "always" | "sandbox_turns" | "off";

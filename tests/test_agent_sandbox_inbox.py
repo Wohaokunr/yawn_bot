@@ -219,9 +219,9 @@ async def test_fetch_record_asks_onebot_for_mp3() -> None:
 async def test_fetch_group_file_uses_file_url(monkeypatch: pytest.MonkeyPatch) -> None:
     downloads: list[str] = []
 
-    async def fake_download(url: str, max_bytes: int, attempts: Any) -> bytes:
+    async def fake_download(url: str, max_bytes: int, attempts: Any) -> Any:
         downloads.append(url)
-        return b"a,b\n1,2\n"
+        return inbox._Fetch(b"a,b\n1,2\n", "url")
 
     monkeypatch.setattr(inbox, "_download", fake_download)
     bot = FakeBot({"get_group_file_url": {"url": "https://njc-download.ftn.qq.com/x"}})
@@ -472,8 +472,8 @@ async def test_run_python_auto_imports_pending_attachments(fake_client: type[Fak
 
 @pytest.mark.asyncio
 async def test_import_group_file_tool(fake_client: type[FakeClient], monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_download(url: str, max_bytes: int, attempts: Any) -> bytes:
-        return b"name,score\n"
+    async def fake_download(url: str, max_bytes: int, attempts: Any) -> Any:
+        return inbox._Fetch(b"name,score\n", "url")
 
     monkeypatch.setattr(inbox, "_download", fake_download)
     bot = FakeBot({"get_group_file_url": {"url": "https://njc-download.ftn.qq.com/x"}})
@@ -522,3 +522,46 @@ def test_router_signals_report_attachment_types_only() -> None:
         media_refs=[{"type": "image", "url": "https://x"}, {"type": "record"}, {"type": "file", "name": "秘密.xlsx"}],
     )
     assert signals == {"reply": False, "media": True, "mentions_others": False, "image": True, "audio": True, "file": True}
+
+
+# ── 1GB 级大文件：私聊走下载链接，不碰会回 base64 的接口 ──────────────
+
+
+class _ApiBot:
+    def __init__(self, replies: dict[str, Any]) -> None:
+        self.replies = replies
+        self.calls: list[str] = []
+
+    async def call_api(self, action: str, **params: Any) -> Any:
+        self.calls.append(action)
+        return self.replies.get(action)
+
+
+@pytest.mark.asyncio
+async def test_private_big_file_uses_url_api_and_skips_base64(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetched: list[str] = []
+
+    async def fake_download(url: str, max_bytes: int, attempts: Any) -> Any:
+        fetched.append(url)
+        return inbox._Fetch(b"apk-bytes", "url")
+
+    monkeypatch.setattr(inbox, "_download", fake_download)
+    bot = _ApiBot({"get_private_file_url": {"url": "https://example.com/a.apk"}})
+    result = await inbox._fetch_via_api(
+        bot, 0, "file", {"file_id": "f1", "file": "a.apk"}, 2 * 1024**3, inbox._Attempts(), big=True
+    )
+    assert result is not None and result.data == b"apk-bytes"
+    assert bot.calls == ["get_private_file_url"] and fetched == ["https://example.com/a.apk"]
+
+    empty = _ApiBot({})
+    assert await inbox._fetch_via_api(
+        empty, 0, "file", {"file_id": "f1", "file": "a.apk"}, 2 * 1024**3, inbox._Attempts(), big=True
+    ) is None
+    assert "get_file" not in empty.calls
+
+
+def test_private_inbox_limit_defaults_to_1gb_and_clamps_to_runner() -> None:
+    settings = policy.SandboxSettings()
+    assert inbox.effective_max_bytes(settings, {"max_upload_mb": 4096}, private=True) == 1024 * 1024 * 1024
+    assert inbox.effective_max_bytes(settings, {"max_upload_mb": 64}, private=True) == 64 * 1024 * 1024
+    assert inbox.effective_max_bytes(settings, None) == settings.inbox_max_file_mb * 1024 * 1024

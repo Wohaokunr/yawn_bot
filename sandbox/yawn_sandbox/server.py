@@ -27,6 +27,7 @@ from .config import RunnerConfig, load_config
 from .executor import LANGUAGES, RUN_STATUSES, Executor, RunRequest
 from .history import RunHistory
 from .limits import resolve_limits
+from .netpolicy import NetPolicy
 from .system import installed_packages, isolation_report, resource_report
 from .workspace import (
     TEXT_KINDS,
@@ -90,7 +91,10 @@ class RunnerService:
             uid_span=config.uid_span,
             drop_privileges=drop_privileges,
         )
-        self.executor = Executor(config, self.store)
+        self.netpolicy = NetPolicy(uid_base=config.uid_base, uid_span=config.uid_span)
+        if self.store.drop_privileges:
+            self.netpolicy.setup()
+        self.executor = Executor(config, self.store, self.netpolicy)
         self.history = RunHistory(config.meta_dir / "history.jsonl", limit=config.history_limit)
         self.transport = "unix" if config.socket_path else "tcp"
         self.last_prune: dict[str, Any] = {}
@@ -99,7 +103,9 @@ class RunnerService:
 
     def isolation(self) -> dict[str, Any]:
         return isolation_report(
-            drop_privileges=self.store.drop_privileges, socket_mode=self.transport
+            drop_privileges=self.store.drop_privileges,
+            socket_mode=self.transport,
+            network_guarded=self.netpolicy.guarded(),
         )
 
     def health(self) -> dict[str, Any]:
@@ -126,6 +132,7 @@ class RunnerService:
             "waiting": max(self.executor.waiting - len(self.executor.active), 0),
             "retention_days": self.config.retention_days,
             "max_upload_mb": self.config.max_upload_mb,
+            "network": self.netpolicy.report(),
         }
 
     def stats(self) -> dict[str, Any]:
@@ -166,7 +173,7 @@ class RunnerService:
             raise ApiError(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "not_isolated",
-                "沙箱容器的隔离检查未通过（仍有网络或无法降权），已拒绝执行",
+                "沙箱容器的隔离检查未通过（无法降权，或接了网络却挡不住内网），已拒绝执行",
             )
         language = str(body.get("language") or "python")
         if language not in LANGUAGES:
@@ -177,6 +184,7 @@ class RunnerService:
             language=language,
             limits=resolve_limits(body.get("limits"), self.config.ceilings),
             meta=_clean_meta(body.get("meta")),
+            network=body["network"] if isinstance(body.get("network"), bool) else None,
         )
         result = self.executor.run(request).to_dict()
         if result["status"] != "busy":
@@ -286,8 +294,7 @@ class RunnerService:
             raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", "上传文件过大")
         workspace = self._workspace(validate_workspace_id(workspace_id), create=True)
         usage = self.store.usage(workspace)
-        quota = self.config.ceilings.disk_quota_mb * 1024 * 1024
-        if usage["bytes"] + len(data) > quota:
+        if usage["bytes"] + len(data) > self._upload_quota(query):
             raise ApiError(HTTPStatus.INSUFFICIENT_STORAGE, "quota_exceeded", "工作区空间不足")
         if usage["files"] >= self.config.ceilings.max_files:
             raise ApiError(
@@ -298,6 +305,48 @@ class RunnerService:
             workspace, str(query.get("path") or ""), data, overwrite=overwrite
         )
         return {"file": entry.to_dict()}
+
+    def _upload_quota(self, query: dict[str, str]) -> int:
+        """本次上传可用的工作区总空间（字节）：请求里的 quota_mb 只能更小。"""
+
+        ceiling = self.config.ceilings.disk_quota_mb
+        with contextlib.suppress(ValueError):
+            if query.get("quota_mb"):
+                ceiling = max(1, min(int(query["quota_mb"]), ceiling))
+        return ceiling * 1024 * 1024
+
+    def write_file_stream(
+        self, workspace_id: str, query: dict[str, str], length: int, chunks: Any
+    ) -> dict[str, Any]:
+        """大文件上传：边收边写，不在内存里攒整个文件（1GB 级别的附件）。"""
+
+        limit = self.config.max_upload_mb * 1024 * 1024
+        if length > limit:
+            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", "上传文件过大")
+        workspace = self._workspace(validate_workspace_id(workspace_id), create=True)
+        usage = self.store.usage(workspace)
+        if usage["bytes"] + length > self._upload_quota(query):
+            raise ApiError(HTTPStatus.INSUFFICIENT_STORAGE, "quota_exceeded", "工作区空间不足")
+        if usage["files"] >= self.config.ceilings.max_files:
+            raise ApiError(
+                HTTPStatus.INSUFFICIENT_STORAGE, "quota_exceeded", "工作区文件数已达上限"
+            )
+        overwrite = query.get("overwrite") not in {"0", "false"}
+        entry = self.store.write_stream(
+            workspace,
+            str(query.get("path") or ""),
+            chunks,
+            overwrite=overwrite,
+            max_bytes=length,
+        )
+        if entry.size != length:
+            with contextlib.suppress(WorkspaceError, OSError):
+                self.store.delete_path(workspace, entry.path)
+            raise ApiError(HTTPStatus.BAD_REQUEST, "incomplete", "上传中断，文件不完整")
+        return {"file": entry.to_dict()}
+
+    def network(self) -> dict[str, Any]:
+        return self.netpolicy.report()
 
     def rename_file(self, workspace_id: str, body: dict[str, Any]) -> dict[str, Any]:
         workspace = self._workspace(validate_workspace_id(workspace_id))
@@ -375,6 +424,8 @@ def _dispatch(  # noqa: PLR0912
             return service.stats()
         case ("GET", ["packages"]):
             return service.packages()
+        case ("GET", ["network"]):
+            return service.network()
         case ("POST", ["run"]):
             return service.run(_json())
         case ("GET", ["runs"]):
@@ -406,9 +457,22 @@ def _dispatch(  # noqa: PLR0912
     raise ApiError(HTTPStatus.NOT_FOUND, "not_found", "未知接口")
 
 
+_UPLOAD_CHUNK = 1024 * 1024
+
+
+def _body_chunks(stream: Any, length: int) -> Any:
+    remaining = length
+    while remaining > 0:
+        chunk = stream.read(min(_UPLOAD_CHUNK, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        yield chunk
+
+
 def make_handler(service: RunnerService) -> type[BaseHTTPRequestHandler]:
     token = service.config.token
-    max_body = max(service.config.max_upload_mb * 1024 * 1024, MAX_JSON_BODY)
+    max_body = MAX_JSON_BODY
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"yawn-sandbox/{RUNNER_VERSION}"
@@ -439,11 +503,21 @@ def make_handler(service: RunnerService) -> type[BaseHTTPRequestHandler]:
                 if not self._authorized():
                     raise ApiError(HTTPStatus.UNAUTHORIZED, "unauthorized", "缺少或错误的 token")  # noqa: TRY301
                 length = int(self.headers.get("Content-Length") or 0)
-                if length < 0 or length > max_body:
-                    raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", "请求体过大")  # noqa: TRY301
-                body = self.rfile.read(length) if length else b""
                 segments, query = _query(self.path)
-                result = _dispatch(service, self.command, segments, query, body)
+                if self.command == "PUT" and len(segments) == 4 and segments[0] == "v1" and segments[1] == "workspaces" and segments[3] == "file":
+                    # 文件上传走流式：大附件（最大 SANDBOX_MAX_UPLOAD_MB）不整块读进内存。
+                    # 中途拒绝时请求体没读完，这条连接不能再复用。
+                    self.close_connection = True
+                    if length < 0:
+                        raise ApiError(HTTPStatus.LENGTH_REQUIRED, "length_required", "缺少 Content-Length")  # noqa: TRY301
+                    result = service.write_file_stream(
+                        segments[2], query, length, _body_chunks(self.rfile, length)
+                    )
+                else:
+                    if length < 0 or length > max_body:
+                        raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", "请求体过大")  # noqa: TRY301
+                    body = self.rfile.read(length) if length else b""
+                    result = _dispatch(service, self.command, segments, query, body)
             except ApiError as exc:
                 self._send(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
                 return

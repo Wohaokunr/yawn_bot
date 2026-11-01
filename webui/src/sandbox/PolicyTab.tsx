@@ -13,7 +13,7 @@ import {
   settingsEqual,
   validateSettings,
 } from "./sandbox-meta";
-import type { SandboxInboxMode, SandboxInboxType, SandboxSettings, SandboxStatus, SandboxUsage } from "./types";
+import type { SandboxInboxMode, SandboxInboxType, SandboxNetwork, SandboxSettings, SandboxStatus, SandboxUsage } from "./types";
 
 type NumericKey = keyof typeof SETTING_RANGES;
 
@@ -143,19 +143,30 @@ export function InboxPolicyCard({
   );
 }
 
+/** runner 联网状态的提醒；正常或旧版 runner（没报告）时返回 null。 */
+export function networkWarning(network?: SandboxNetwork): string | null {
+  if (!network) return null;
+  if (!network.attached) return "sandbox 服务现在没有网络（还是 network_mode: none），开了也上不了网";
+  if (!network.control) return `runner 管不住防火墙${network.error ? `（${network.error}）` : ""}：内网没被挡住，隔离自检会失败`;
+  return null;
+}
+
 /** 「私聊里的虚拟电脑」：每位好友一个独立工作区 p<QQ>，不占群配额。 */
 export function PrivateComputerCard({
   draft,
   server,
   errors,
+  network,
   onChange,
 }: {
   draft: SandboxSettings;
   server: SandboxSettings;
   errors: Record<string, string>;
+  network?: SandboxNetwork;
   onChange: <K extends keyof SandboxSettings>(key: K, value: SandboxSettings[K]) => void;
 }): React.JSX.Element {
   const off = !draft.enabled || !draft.privateEnabled;
+  const networkNote = networkWarning(network);
   return (
     <Card size="small" title="私聊里的虚拟电脑" className="sbx-card-wide">
       <div className="sbx-switch-row">
@@ -182,11 +193,26 @@ export function PrivateComputerCard({
         />
         <div>
           <strong>私聊发来的附件自动放进他的电脑</strong>
-          <span className="sbx-muted">图片、文件等放进他工作区的 inbox/，类型和单个大小沿用上面「群聊附件入箱」的设置。</span>
+          <span className="sbx-muted">图片、文件等放进他工作区的 inbox/，类型沿用上面「群聊附件入箱」的设置，单个大小看下面的「私聊单个附件上限」。</span>
         </div>
       </div>
-      <div className="sbx-field-grid">
-        {(["privateDailyRuns", "privateInboxDailyMb"] as NumericKey[]).map((key) => (
+      <div className="sbx-switch-row">
+        <Switch
+          checked={draft.privateNetwork}
+          disabled={off}
+          onChange={(value) => onChange("privateNetwork", value)}
+          aria-label="私聊虚拟电脑联网"
+        />
+        <div>
+          <strong>允许私聊的虚拟电脑上外网</strong>
+          <span className="sbx-muted">
+            可以下载链接里的文件、pip 安装库、git 克隆；宿主机、局域网和云元数据等内网地址始终被 runner 的防火墙挡住。需要 sandbox 服务接入 sandbox-egress 网络。
+          </span>
+        </div>
+      </div>
+      {draft.privateNetwork && networkNote && <Alert type="warning" showIcon message={networkNote} />}
+      <div className="sbx-field-grid sbx-field-grid-4">
+        {(["privateDailyRuns", "privateInboxDailyMb", "privateInboxMaxFileMb", "privateDiskQuotaMb", "privateFileMb"] as NumericKey[]).map((key) => (
           <NumericField key={key} field={key} draft={draft} server={server} errors={errors} disabled={off} onChange={(field, value) => onChange(field, value)} />
         ))}
       </div>
@@ -406,7 +432,7 @@ export function PolicyTab({ status }: { status: SandboxStatus }): React.JSX.Elem
 
         <InboxPolicyCard draft={draft} server={server} errors={errors} runnerUploadMb={status.health?.maxUploadMb} onChange={update} />
 
-        <PrivateComputerCard draft={draft} server={server} errors={errors} onChange={update} />
+        <PrivateComputerCard draft={draft} server={server} errors={errors} network={status.health?.network} onChange={update} />
 
         {LIMIT_SECTIONS.map((section) => (
           <Card size="small" title={section.title} key={section.title}>
@@ -426,6 +452,13 @@ export function PolicyTab({ status }: { status: SandboxStatus }): React.JSX.Elem
             </div>
           </div>
           {draft.allowUnisolated && <Alert type="error" showIcon message="危险：已允许在未隔离的环境里执行群成员的代码" />}
+          <div className="sbx-switch-row">
+            <Switch checked={draft.groupNetwork} onChange={(value) => update("groupNetwork", value)} aria-label="群聊沙箱联网" />
+            <div>
+              <strong>允许群聊沙箱上外网</strong>
+              <span className="sbx-muted">默认关：群里任何成员都能让 Agent 跑代码，联网后可能被用来下载大文件或访问外部服务。内网地址始终被挡住。</span>
+            </div>
+          </div>
         </Card>
 
         <Card size="small" title="维护">

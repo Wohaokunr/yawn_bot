@@ -56,6 +56,11 @@ const defaults: SandboxSettings = {
   privateDailyRuns: 500,
   privateInbox: true,
   privateInboxDailyMb: 200,
+  privateInboxMaxFileMb: 1024,
+  privateDiskQuotaMb: 5120,
+  privateFileMb: 1024,
+  privateNetwork: true,
+  groupNetwork: false,
 };
 
 describe("格式化", () => {

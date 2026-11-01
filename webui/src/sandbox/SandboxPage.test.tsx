@@ -48,6 +48,11 @@ const settings: SandboxSettings = {
   privateDailyRuns: 500,
   privateInbox: true,
   privateInboxDailyMb: 200,
+  privateInboxMaxFileMb: 1024,
+  privateDiskQuotaMb: 5120,
+  privateFileMb: 1024,
+  privateNetwork: true,
+  groupNetwork: false,
 };
 
 function status(overrides: Partial<SandboxStatus> = {}): SandboxStatus {

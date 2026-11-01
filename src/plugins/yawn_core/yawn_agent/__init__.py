@@ -27,6 +27,8 @@ from . import (
     private_agent,
     private_scheduler,
     private_tasks,
+    private_team,
+    private_turn_taking,
     proactive,
     prompt,
     prompt_capture,
@@ -41,6 +43,10 @@ register_private_handler(private_agent.handle_private_turn)
 private_tasks.register_reporter(
     private_agent.report_task, private_agent.notify_progress
 )
+# 私聊“等他说完”：等到时间他没再说话，Agent 自己接上话。
+private_turn_taking.register_resume(private_agent.resume_after_wait)
+# 小助手问主助手（team to=main need_reply）：主智能体后台协调，能答就直接回它。
+private_team.register_coordinator(private_agent.coordinate)
 
 
 @get_driver().on_startup

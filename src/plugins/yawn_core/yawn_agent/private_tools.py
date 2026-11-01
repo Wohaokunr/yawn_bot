@@ -367,16 +367,54 @@ TASK_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
     PrivateTool(
-        "tasks",
-        "后台小助手任务：list 看最近的任务和进度、cancel 取消（他说不要了）、answer 把他的回答转交给正在等回答的任务",
+        "delegate_project",
+        "大活组队做：拆成 2~6 个成员分头干，成员之间能互相发消息、共用他的虚拟电脑，依赖别人结果的成员用 depends_on 等对方做完再开工"
+        "（比如 调研A、调研B 并行，汇总 depends_on 两者）。全部做完后你会收到合并的结果再转述。一个人能做完的用 delegate_task",
         {
-            "action": {"type": "string", "enum": ["list", "cancel", "answer"]},
+            "title": {"type": "string", "minLength": 1, "maxLength": 20, "description": "给他看的项目名"},
+            "goal": {"type": "string", "minLength": 1, "maxLength": 600, "description": "整个项目要交付什么"},
+            "brief": {"type": "string", "maxLength": 1500, "description": "所有成员都需要的背景"},
+            "members": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 6,
+                "description": "成员列表",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "maxLength": 12, "description": "成员名，如 调研员/写手/程序员"},
+                        "goal": {"type": "string", "maxLength": 600, "description": "这个成员负责交付什么"},
+                        "tools": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["web", "computer", "toolbox"]},
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "要等哪些成员（写 name）做完才开工",
+                        },
+                    },
+                    "required": ["name", "goal", "tools"],
+                },
+            },
+            "save_to_notes": {"type": "boolean"},
+        },
+        ("title", "goal", "members"),
+        writes=True,
+    ),
+    PrivateTool(
+        "tasks",
+        "后台小助手任务：list 看最近的任务、项目和进度；cancel 取消（他说不要了）；answer 把他的回答转交给正在等回答的任务；"
+        "message 给正在做的小助手发消息（补充要求、改方向、回答它在 helper_messages 里问你的事；id 写任务编号/成员名，all 发给所有在做的）",
+        {
+            "action": {"type": "string", "enum": ["list", "cancel", "answer", "message"]},
             "id": {
                 "type": "string",
                 "maxLength": 12,
-                "description": "任务编号，如 t12",
+                "description": "任务编号（如 t12）、项目成员名，message 时也可以写 all",
             },
             "answer": {"type": "string", "minLength": 1, "maxLength": 500},
+            "text": {"type": "string", "minLength": 1, "maxLength": 600, "description": "message 的内容"},
         },
         ("action",),
         writes=True,
@@ -760,7 +798,7 @@ async def execute_private_tool(
             result = await execute_computer_tool(
                 name, args, ctx.user_id, rerun=ctx.computer_runs > 0
             )
-            if name == "run_code":
+            if name in {"run_code", "computer_do"}:
                 ctx.computer_runs += 1
         elif name in TASK_NAMES:
             result = _task_tool(name, args, ctx)
@@ -814,9 +852,34 @@ def _task_tool(
         )
         ctx.delegated += 1
         return result
+    if name == "delegate_project":
+        if ctx.delegated >= MAX_DELEGATIONS_PER_TURN:
+            raise ToolError("这一轮已经派了好几个任务了", code=ERROR_PERMISSION, hint="先告诉他已经安排的，别再派")
+        result = private_tasks.start_project(
+            ctx.bot,
+            ctx.user_id,
+            title=clean_text(args.get("title"), limit=20, field="标题"),
+            goal=clean_text(args.get("goal"), limit=600, field="目标"),
+            brief=str(args.get("brief") or "").strip()[:1500],
+            members=args.get("members"),
+            save_to_notes=bool(args.get("save_to_notes")),
+            now=ctx.now,
+        )
+        ctx.delegated += 1
+        return result
     action = str(args.get("action") or "list")
     if action == "list":
-        return {"tasks": private_tasks.list_tasks(ctx.user_id)}
+        payload: dict[str, Any] = {"tasks": private_tasks.list_tasks(ctx.user_id)}
+        projects = private_tasks.list_projects(ctx.user_id)
+        if projects:
+            payload["projects"] = projects[:3]
+        return payload
+    if action == "message":
+        target = str(args.get("id") or "").strip()
+        text = str(args.get("text") or args.get("answer") or "").strip()
+        if not target or not text:
+            raise ToolError("message 要写 id（任务编号/成员名/all）和 text", code=ERROR_NOT_FOUND, hint="先用 tasks list 看编号")
+        return private_tasks.message_task(ctx.bot, ctx.user_id, target, text)
     task_id = str(args.get("id") or "").strip()
     if not task_id:
         raise ToolError(
@@ -839,7 +902,7 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "mood": frozenset({"log"}),
     "chat_prefs": frozenset({"set"}),
     "my_data": frozenset({"wipe"}),
-    "tasks": frozenset({"cancel", "answer"}),
+    "tasks": frozenset({"cancel", "answer", "message"}),
     "computer_files": frozenset({"delete"}),
 }
 

@@ -77,15 +77,20 @@ def network_interfaces() -> list[str]:
     return sorted(item.name for item in root.iterdir() if item.name != "lo")
 
 
-def isolation_report(*, drop_privileges: bool, socket_mode: str) -> dict[str, Any]:
+def isolation_report(
+    *, drop_privileges: bool, socket_mode: str, network_guarded: bool | None = None
+) -> dict[str, Any]:
     interfaces = network_interfaces()
     readonly_root = False
     with contextlib.suppress(OSError):
         readonly_root = bool(os.statvfs("/").f_flag & os.ST_RDONLY)
     cap_eff = _proc_status_field("CapEff") or ""
     no_new_privs = _proc_status_field("NoNewPrivs") == "1"
+    # 容器接了网（允许下载外网文件）时，要求 runner 管得住防火墙、挡住内网地址。
+    guarded = (not interfaces) if network_guarded is None else bool(network_guarded)
     checks = {
         "network_disabled": not interfaces,
+        "network_guarded": guarded,
         "privilege_drop": drop_privileges,
         "readonly_root": readonly_root,
         "no_new_privileges": no_new_privs,
@@ -94,7 +99,7 @@ def isolation_report(*, drop_privileges: bool, socket_mode: str) -> dict[str, An
         "child_reaper": os.getpid() != 1,
     }
     return {
-        "isolated": checks["network_disabled"] and checks["privilege_drop"],
+        "isolated": checks["network_guarded"] and checks["privilege_drop"],
         "checks": checks,
         "network_interfaces": interfaces,
         "capabilities": cap_eff,

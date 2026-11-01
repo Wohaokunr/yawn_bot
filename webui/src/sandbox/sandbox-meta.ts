@@ -173,7 +173,10 @@ export type NumericSettingKey =
   | "inboxHistoryMinutes"
   | "inboxGroupDailyMb"
   | "privateDailyRuns"
-  | "privateInboxDailyMb";
+  | "privateInboxDailyMb"
+  | "privateInboxMaxFileMb"
+  | "privateDiskQuotaMb"
+  | "privateFileMb";
 
 export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: number; unit: string; label: string }> = {
   memberDailyRuns: { min: 0, max: 1000, unit: "次/天", label: "每位成员每日次数" },
@@ -181,15 +184,18 @@ export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: numbe
   memberCooldownSeconds: { min: 0, max: 600, unit: "秒", label: "成员冷却" },
   timeoutSeconds: { min: 5, max: 90, unit: "秒", label: "单次时限" },
   memoryMb: { min: 128, max: 4096, unit: "MB", label: "内存上限" },
-  diskQuotaMb: { min: 10, max: 4096, unit: "MB", label: "每群工作区空间" },
+  diskQuotaMb: { min: 10, max: 65536, unit: "MB", label: "每群工作区空间" },
   maxOutputChars: { min: 500, max: 12000, unit: "字", label: "回给模型的输出" },
   maxShareMb: { min: 1, max: 32, unit: "MB", label: "单个产物发送上限" },
-  inboxMaxFileMb: { min: 1, max: 64, unit: "MB", label: "单个附件上限" },
+  inboxMaxFileMb: { min: 1, max: 4096, unit: "MB", label: "单个附件上限" },
   inboxMaxPerTurn: { min: 1, max: 20, unit: "个/轮", label: "每轮最多入箱" },
   inboxHistoryMinutes: { min: 0, max: 2880, unit: "分钟", label: "可回溯的历史附件" },
   inboxGroupDailyMb: { min: 0, max: 20000, unit: "MB/天", label: "每群每日入箱总量" },
   privateDailyRuns: { min: 0, max: 10000, unit: "次/天", label: "每人每日运行次数" },
-  privateInboxDailyMb: { min: 0, max: 20000, unit: "MB/天", label: "每人每日入箱总量" },
+  privateInboxDailyMb: { min: 0, max: 100000, unit: "MB/天", label: "每人每日入箱总量" },
+  privateInboxMaxFileMb: { min: 1, max: 4096, unit: "MB", label: "私聊单个附件上限" },
+  privateDiskQuotaMb: { min: 50, max: 65536, unit: "MB", label: "每人电脑空间" },
+  privateFileMb: { min: 16, max: 4096, unit: "MB", label: "代码可写的单个文件" },
 };
 
 const GROUP_ID_RE = /^\d{4,12}$/;

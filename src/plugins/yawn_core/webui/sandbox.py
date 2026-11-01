@@ -636,9 +636,24 @@ class SettingsBody(BaseModel):
     private_daily_runs: int | None = None
     private_inbox: bool | None = None
     private_inbox_daily_mb: int | None = None
+    private_inbox_max_file_mb: int | None = None
+    private_disk_quota_mb: int | None = None
+    private_file_mb: int | None = None
+    private_network: bool | None = None
+    group_network: bool | None = None
 
 
-_PRIVATE_FIELDS = ("private_enabled", "private_daily_runs", "private_inbox", "private_inbox_daily_mb")
+_PRIVATE_FIELDS = (
+    "private_enabled",
+    "private_daily_runs",
+    "private_inbox",
+    "private_inbox_daily_mb",
+    "private_inbox_max_file_mb",
+    "private_disk_quota_mb",
+    "private_file_mb",
+    "private_network",
+    "group_network",
+)
 
 
 def _group_list(values: list[str], field: str) -> list[int]:

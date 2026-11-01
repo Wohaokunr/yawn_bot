@@ -1,7 +1,7 @@
 # ruff: noqa: E501,PLR0913
 """代码沙箱 runner 的异步客户端（Bot 与 WebUI 共用）。
 
-runner 跑在独立的无网络容器里，默认经 Unix socket 通信
+runner 跑在独立容器里（只接一张挡住内网的出网网络，或完全无网络），默认经 Unix socket 通信
 （``AGENT_SANDBOX_URL=unix:///run/yawnbot-sandbox/runner.sock``）；开发时也可以
 指向带 token 的 ``http://127.0.0.1:8790``。地址为空表示不启用沙箱。
 
@@ -14,10 +14,14 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse
 
 import httpx
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 DEFAULT_SANDBOX_URL = "unix:///run/yawnbot-sandbox/runner.sock"
 _HEALTH_TTL_SECONDS = 15.0
@@ -83,6 +87,26 @@ def _client(endpoint: SandboxEndpoint, timeout: float) -> httpx.AsyncClient:
     )
 
 
+_UPLOAD_CHUNK = 1024 * 1024
+
+
+def upload_timeout(size: int) -> float:
+    """上传的 HTTP 超时：60 秒起，每 MB 再加 1 秒（本机 socket，1GB 也就十几秒）。"""
+
+    return 60.0 + size / (1024 * 1024)
+
+
+async def _file_chunks(path: Path) -> AsyncIterator[bytes]:
+    import asyncio
+
+    with path.open("rb") as handle:
+        while True:
+            chunk = await asyncio.to_thread(handle.read, _UPLOAD_CHUNK)
+            if not chunk:
+                break
+            yield chunk
+
+
 class SandboxClient:
     def __init__(self, endpoint: SandboxEndpoint | None = None) -> None:
         self.endpoint = endpoint or sandbox_endpoint()
@@ -93,7 +117,8 @@ class SandboxClient:
         path: str,
         *,
         json_body: Any = None,
-        content: bytes | None = None,
+        content: Any = None,
+        headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
         raw: bool = False,
@@ -107,6 +132,7 @@ class SandboxClient:
                     f"/v1{path}",
                     json=json_body,
                     content=content,
+                    headers=headers,
                     params={key: value for key, value in (params or {}).items() if value is not None},
                 )
         except SandboxError:
@@ -154,12 +180,16 @@ class SandboxClient:
         limits: dict[str, int] | None = None,
         meta: dict[str, Any] | None = None,
         language: str = "python",
+        network: bool | None = None,
     ) -> dict[str, Any]:
         timeout = float((limits or {}).get("timeout_seconds") or 30) + _RUN_TIMEOUT_GRACE
         body: dict[str, Any] = {"workspace": workspace, "code": code, "limits": limits or {}, "meta": meta or {}}
         if language != "python":
             # 旧 runner 不认识 language 字段；Python 运行不带它，保持向后兼容。
             body["language"] = language
+        if network is not None:
+            # 1.2 起 runner 按工作区放行/拦截外网；旧 runner 忽略这个字段。
+            body["network"] = network
         return await self._request(
             "POST",
             "/run",
@@ -205,16 +235,40 @@ class SandboxClient:
         )
 
     async def write_file(
-        self, workspace: str, path: str, data: bytes, *, overwrite: bool = True
+        self,
+        workspace: str,
+        path: str,
+        data: bytes | Path,
+        *,
+        overwrite: bool = True,
+        quota_mb: int | None = None,
     ) -> dict[str, Any]:
-        # 旧 runner 不认识 overwrite 参数（总是覆盖）；只在需要保护时才带上。
+        """写文件进工作区。``data`` 给 ``Path`` 时边读边传（大附件不整块进内存）。
+
+        旧 runner 不认识 overwrite/quota_mb 参数；只在需要时才带上。
+        """
+
+        params = {"path": path, "overwrite": None if overwrite else "0", "quota_mb": quota_mb}
+        if isinstance(data, Path):
+            size = data.stat().st_size  # noqa: ASYNC240 - 只取一次元数据
+            return await self._request(
+                "PUT",
+                f"/workspaces/{quote(workspace, safe='')}/file",
+                params=params,
+                content=_file_chunks(data),
+                headers={"Content-Length": str(size)},
+                timeout=upload_timeout(size),
+            )
         return await self._request(
             "PUT",
             f"/workspaces/{quote(workspace, safe='')}/file",
-            params={"path": path, "overwrite": None if overwrite else "0"},
+            params=params,
             content=data,
-            timeout=60.0,
+            timeout=upload_timeout(len(data)),
         )
+
+    async def network(self) -> dict[str, Any]:
+        return await self._request("GET", "/network")
 
     async def rename_file(
         self, workspace: str, source: str, target: str, *, overwrite: bool = False

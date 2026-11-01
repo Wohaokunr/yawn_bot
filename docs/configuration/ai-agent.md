@@ -205,7 +205,9 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 | `PRIVATE_AGENT_AUTO_REPLY` | `true` | 好友私聊不用 `/对话` 直接回复；关掉后只有进入对话模式才回复 |
 | `PRIVATE_AGENT_FRIENDS_ONLY` | `true` | 自动接管只对好友生效，临时会话仍需 `/对话` |
 | `PRIVATE_AGENT_DAILY_TURNS` | `120` | 每人每天最多多少轮（0–10000，0 不限），超出当天退回纯对话 |
-| `PRIVATE_AGENT_MAX_TOOL_ROUNDS` | `4` | 每轮最多调用几轮工具（1–8） |
+| `PRIVATE_AGENT_MAX_TOOL_ROUNDS` | `8` | 每轮最多调用几轮工具（1–20） |
+| `PRIVATE_AGENT_TURN_TAKING` | `true` | 发言判断：Agent 可以只回 `【不回】` 或 `【等他说完】`，他刚开口又发来新消息时把这轮让给下一轮，避免连发几条换来几段回复；`false` 恢复每条必回 |
+| `PRIVATE_AGENT_WAIT_SECONDS` | `25` | 选择“等他说完”后最多等几秒（5–600），期间没有新消息就自己接上话 |
 | `PRIVATE_AGENT_STATE_PATH` | 空 | 成员暂停自动回复的状态文件，留空为 `data/private_agent/state.json` |
 | `PRIVATE_AGENT_WEB_DAILY` | `10` | 私聊里每人每天联网搜索/读网页次数（0 关闭）；仍受「网页搜索」总开关、屏蔽域名和全站预算约束 |
 | `PRIVATE_AGENT_PROACTIVE` | `true` | 允许私聊主动发消息（用户设的提醒、早安、签到提醒、生日、倒数日）；关掉后全部不发 |
@@ -217,6 +219,7 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 | `PRIVATE_AGENT_TASK_SLOTS` | `30` | 全站同时运行的小助手任务数（1–200），多的排队 |
 | `PRIVATE_AGENT_TASK_DAILY` | `90` | 每人每天最多派几个小助手任务（0 不限） |
 | `PRIVATE_AGENT_TASK_MAX_ROUNDS` | `30` | 每个小助手任务最多几轮工具（2–100），最后一轮只能交付 |
+| `PRIVATE_AGENT_TASK_CONTINUATIONS` | `2` | 轮次用完还没交付时最多再续几段（0–10），续跑前先自查计划与备忘 |
 | `PRIVATE_AGENT_TASK_TIMEOUT_SECONDS` | `1800` | 每个小助手任务最长运行秒数（30–7200，不含排队），超时按没做成汇报 |
 
 - 私聊里只会读到用户本人所在、且群里 Agent 开着、本人没有退出记忆的群；群里的关系和画像只以词语出现，不给数值。
