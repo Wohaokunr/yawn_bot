@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 WORKSPACE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 MAX_PATH_DEPTH = 16
@@ -371,6 +371,69 @@ class WorkspaceStore:
                 info = os.fstat(fd)
             finally:
                 os.close(fd)
+        name = "/".join(parts)
+        return FileEntry(name, info.st_size, info.st_mtime, file_kind(name), file_mime(name))
+
+    def write_stream(
+        self,
+        workspace: Workspace,
+        path: str,
+        chunks: Iterable[bytes],
+        *,
+        overwrite: bool = True,
+        max_bytes: int | None = None,
+    ) -> FileEntry:
+        """边收边写大文件：先写同目录下的隐藏临时文件，收完再改名，半截上传不留垃圾。
+
+        ``max_bytes`` 是写入上限（声明长度不可信，实际写到超出就中止）。
+        """
+
+        parts = split_relative_path(path)
+        temporary = f".upload-{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}"
+        with self._walk(workspace, parts, create=True) as parent:
+            with contextlib.suppress(FileNotFoundError):
+                info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise WorkspaceError("invalid_path", "目标已存在且不是普通文件")
+                if not overwrite:
+                    raise WorkspaceError("exists", "同名文件已存在")
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent,
+            )
+            done = False
+            try:
+                total = 0
+                for chunk in chunks:
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        raise WorkspaceError("too_large", "上传文件过大")
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(fd, view)
+                        view = view[written:]
+                if self.drop_privileges:
+                    os.fchown(fd, workspace.uid, workspace.gid)
+                info = os.fstat(fd)
+                os.close(fd)
+                fd = -1
+                if not overwrite:
+                    try:
+                        os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise WorkspaceError("exists", "同名文件已存在")
+                os.rename(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+                done = True
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                if not done:
+                    with contextlib.suppress(OSError):
+                        os.unlink(temporary, dir_fd=parent)
         name = "/".join(parts)
         return FileEntry(name, info.st_size, info.st_mtime, file_kind(name), file_mime(name))
 

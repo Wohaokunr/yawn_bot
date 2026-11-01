@@ -41,10 +41,10 @@ class Ceilings:
     cpu_seconds: int = 120
     memory_mb: int = 2048
     output_bytes: int = 256 * 1024
-    file_mb: int = 64
+    file_mb: int = 1024
     processes: int = 64
     open_files: int = 256
-    disk_quota_mb: int = 1024
+    disk_quota_mb: int = 8192
     max_files: int = 5000
 
 
@@ -99,10 +99,10 @@ def load_config() -> RunnerConfig:
         output_bytes=_env_int(
             "SANDBOX_MAX_OUTPUT_BYTES", 256 * 1024, minimum=4096, maximum=4 * 1024 * 1024
         ),
-        file_mb=_env_int("SANDBOX_MAX_FILE_MB", 64, minimum=1, maximum=1024),
+        file_mb=_env_int("SANDBOX_MAX_FILE_MB", 1024, minimum=1, maximum=8192),
         processes=_env_int("SANDBOX_MAX_PROCESSES", 64, minimum=4, maximum=512),
         open_files=_env_int("SANDBOX_MAX_OPEN_FILES", 256, minimum=32, maximum=4096),
-        disk_quota_mb=_env_int("SANDBOX_DISK_QUOTA_MB", 1024, minimum=8, maximum=65536),
+        disk_quota_mb=_env_int("SANDBOX_DISK_QUOTA_MB", 8192, minimum=8, maximum=262144),
         max_files=_env_int("SANDBOX_MAX_FILES", 5000, minimum=50, maximum=200000),
     )
     return RunnerConfig(
@@ -122,7 +122,7 @@ def load_config() -> RunnerConfig:
         retention_days=_env_int("SANDBOX_RETENTION_DAYS", 14, minimum=0, maximum=3650),
         uid_base=_env_int("SANDBOX_UID_BASE", 20000, minimum=1000, maximum=2_000_000_000),
         uid_span=_env_int("SANDBOX_UID_SPAN", 10000, minimum=16, maximum=1_000_000),
-        max_upload_mb=_env_int("SANDBOX_MAX_UPLOAD_MB", 20, minimum=1, maximum=512),
+        max_upload_mb=_env_int("SANDBOX_MAX_UPLOAD_MB", 1024, minimum=1, maximum=8192),
         ceilings=ceilings,
         require_isolation=_env_bool("SANDBOX_REQUIRE_ISOLATION", default=False),
     )

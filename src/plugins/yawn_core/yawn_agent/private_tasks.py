@@ -1,4 +1,4 @@
-# ruff: noqa: TID252, C901, DTZ007, PLR2004, PLR0913, TRY003
+# ruff: noqa: TID252, C901, DTZ007, PLR2004, PLR0912, PLR0913, PLR0915, TRY003, E501
 """私聊主从多智能体的任务管理器：主智能体派活，子智能体在后台做，做完汇报。
 
 借鉴 dsh-superagent 的做法：主会话只负责路由和对话，每件事一个独立的执行会话
@@ -169,6 +169,20 @@ def view(task: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
             if seconds >= 60
             else f"{seconds} 秒"
         )
+    if task.get("member"):
+        row["member"] = task.get("member")
+    if task.get("project"):
+        row["project"] = task.get("project")
+    if (
+        task.get("depends_on")
+        and task.get("status") == "queued"
+        and not task.get("spawned")
+    ):
+        row["waiting_for_teammates"] = task.get("depends_on")
+    plan = task.get("plan") or []
+    if plan:
+        done = sum(1 for step in plan if step.get("done"))
+        row["plan"] = f"{done}/{len(plan)} 步"
     progress = task.get("progress") or []
     if progress:
         row["last_progress"] = progress[-1].get("note")
@@ -341,6 +355,9 @@ async def _drive(user_id: int, task_id: str, *, answer: str | None = None) -> No
                         messages=messages,
                         answer=answer if messages is not None else None,
                         on_progress=progress,
+                        continuations=int(
+                            private_agent_config.private_agent_task_continuations
+                        ),
                     ),
                     timeout=timeout,
                 )
@@ -382,6 +399,12 @@ async def _drive(user_id: int, task_id: str, *, answer: str | None = None) -> No
         _finish(user_id, task_id, status="failed", error="小助手出了点问题")
     final = get_task(user_id, task_id)
     if final is None or final.get("status") == "cancelled":
+        if final is not None and final.get("project"):
+            await _advance_project(user_id, str(final["project"]))
+        return
+    if final.get("project") and final.get("status") in {"done", "failed"}:
+        # 项目成员不单独汇报：推进依赖它的队友，全部结束后整体汇报一次。
+        await _advance_project(user_id, str(final["project"]))
         return
     if final.get("status") == "done" and final.get("save_to_notes"):
         _save_note(user_id, final)
@@ -416,6 +439,359 @@ def _save_note(user_id: int, task: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001
         dbg(f"私聊用户 {user_id} 子任务结果存笔记失败: {exc}")
         _update_task(user_id, task["id"], saved_note=False)
+
+
+# ── 多成员项目：分工、依赖、整体汇报 ─────────────────────────────────────
+
+MAX_MEMBERS = 6
+MAX_PROJECTS = 10
+TERMINAL = frozenset({"done", "failed", "cancelled"})
+
+
+def _find_project(record: dict[str, Any], project_id: str) -> dict[str, Any] | None:
+    for item in record.get("projects", []):
+        if item.get("id") == project_id:
+            return item
+    return None
+
+
+def _clean_members(raw: Any) -> list[dict[str, Any]]:
+    from .private_organizer import clean_text
+
+    if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_MEMBERS:
+        raise ToolError(
+            f"members 要有 2~{MAX_MEMBERS} 个成员",
+            code=ERROR_INVALID_ARGS,
+            hint="一个人就能做完的用 delegate_task",
+        )
+    members: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ToolError(f"第 {index} 个成员格式不对", code=ERROR_INVALID_ARGS)
+        name = clean_text(item.get("name") or f"成员{index}", limit=12, field="成员名")
+        if name in names or name.lower() in {"main", "all"}:
+            raise ToolError(f"成员名 {name} 重复或不能用", code=ERROR_INVALID_ARGS)
+        names.add(name)
+        tools = sorted(
+            {
+                str(t)
+                for t in item.get("tools") or []
+                if str(t) in {"web", "computer", "toolbox"}
+            }
+        )
+        if not tools:
+            raise ToolError(
+                f"成员 {name} 的 tools 只能选 web/computer/toolbox",
+                code=ERROR_INVALID_ARGS,
+            )
+        members.append(
+            {
+                "name": name,
+                "goal": clean_text(item.get("goal"), limit=600, field=f"{name} 的目标"),
+                "tools": tools,
+                "depends_on": [
+                    str(dep).strip()
+                    for dep in item.get("depends_on") or []
+                    if str(dep).strip()
+                ],
+            }
+        )
+    for member in members:
+        unknown = [
+            dep
+            for dep in member["depends_on"]
+            if dep not in names or dep == member["name"]
+        ]
+        if unknown:
+            raise ToolError(
+                f"{member['name']} 依赖的 {'、'.join(unknown)} 不是别的成员",
+                code=ERROR_INVALID_ARGS,
+                hint="depends_on 写其他成员的 name",
+            )
+    # 有环就没人能开工。
+    order: list[str] = []
+    pending = {m["name"]: set(m["depends_on"]) for m in members}
+    while pending:
+        ready = [name for name, deps in pending.items() if deps <= set(order)]
+        if not ready:
+            raise ToolError(
+                "成员之间的依赖成了环",
+                code=ERROR_INVALID_ARGS,
+                hint="去掉互相等待的依赖",
+            )
+        order.extend(sorted(ready))
+        for name in ready:
+            pending.pop(name)
+    return members
+
+
+def start_project(
+    bot: Any,
+    user_id: int,
+    *,
+    title: str,
+    goal: str,
+    brief: str,
+    members: Any,
+    save_to_notes: bool,
+    now: datetime,
+) -> dict[str, Any]:
+    """登记一个多成员项目：每个成员一个任务，没有依赖的先开工。"""
+
+    if not tasks_enabled():
+        raise ToolError(
+            "管理员没有开放小助手任务",
+            code=ERROR_PERMISSION,
+            hint="自己尽力回答，或如实说做不了",
+        )
+    cleaned = _clean_members(members)
+    per_user = int(private_agent_config.private_agent_task_per_user)
+    daily = int(private_agent_config.private_agent_task_daily)
+    today = now.date().isoformat()
+
+    def create(record: dict[str, Any]) -> dict[str, Any]:
+        tasks = record["tasks"]
+        active = [item for item in tasks if item.get("status") in ACTIVE]
+        if len(active) + len(cleaned) > per_user * 2:
+            raise ToolError(
+                f"他已经有 {len(active)} 个任务在做或在排队了，装不下 {len(cleaned)} 个成员",
+                code=ERROR_QUOTA,
+                hint="先等前面的做完，或把项目拆小",
+            )
+        flags = record["flags"]
+        used = int(flags.get("task_used") or 0) if flags.get("task_day") == today else 0
+        if daily and used + len(cleaned) > daily:
+            raise ToolError(
+                f"今天的小助手任务额度不够了（每天 {daily} 个）",
+                code=ERROR_QUOTA,
+                hint="如实说明",
+            )
+        flags["task_day"] = today
+        flags["task_used"] = used + len(cleaned)
+        project_id = f"P{store.next_id(record)}"
+        ids: dict[str, str] = {}
+        for member in cleaned:
+            ids[member["name"]] = f"t{store.next_id(record)}"
+        roster = "、".join(
+            f"{m['name']}（{ids[m['name']]}）：{m['goal'][:40]}" for m in cleaned
+        )
+        for member in cleaned:
+            tasks.append(
+                {
+                    "id": ids[member["name"]],
+                    "title": f"{title}·{member['name']}"[:24],
+                    "goal": member["goal"],
+                    "brief": (
+                        f"{brief}\n这是项目「{title}」（总目标：{goal}）里你负责的部分。"
+                        f"团队成员：{roster}。"
+                    ).strip()[:2000],
+                    "toolsets": member["tools"],
+                    "save_to_notes": False,
+                    "status": "queued",
+                    "created_at": _fmt(now),
+                    "progress": [],
+                    "project": project_id,
+                    "member": member["name"],
+                    "depends_on": [ids[dep] for dep in member["depends_on"]],
+                }
+            )
+        projects = record.setdefault("projects", [])
+        projects.append(
+            {
+                "id": project_id,
+                "title": title,
+                "goal": goal,
+                "members": [ids[m["name"]] for m in cleaned],
+                "status": "running",
+                "created_at": _fmt(now),
+                "save_to_notes": bool(save_to_notes),
+            }
+        )
+        del projects[:-MAX_PROJECTS]
+        _trim(record)
+        return {"project_id": project_id, "ids": ids}
+
+    created = store.update(user_id, create)
+    _bots[user_id] = bot
+    started = []
+    for member in cleaned:
+        if not member["depends_on"]:
+            task_id = created["ids"][member["name"]]
+            _update_task(user_id, task_id, spawned=True)
+            _spawn(user_id, task_id)
+            started.append(member["name"])
+    dbg(
+        f"私聊用户 {user_id} 开了项目 {created['project_id']} 「{title}」 成员 {list(created['ids'])}"
+    )
+    return {
+        "project_id": created["project_id"],
+        "title": title,
+        "members": [
+            {
+                "name": name,
+                "task_id": task_id,
+                "status": "已开工" if name in started else "等队友",
+            }
+            for name, task_id in created["ids"].items()
+        ],
+        "next": "简短告诉他已经组了个小队分头去做，做完会一起汇报；中途他补充要求就用 tasks message 转给对应成员",
+    }
+
+
+def _dependency_brief(record: dict[str, Any], task: dict[str, Any]) -> str:
+    parts = []
+    for dep_id in task.get("depends_on") or []:
+        dep = _find(record, dep_id)
+        if dep is None:
+            continue
+        name = dep.get("member") or dep_id
+        if dep.get("status") == "done":
+            files = " ".join(dep.get("files") or [])
+            parts.append(
+                f"【{name} 的成果】{dep.get('summary') or ''}\n{(dep.get('details') or '')[:1500]}"
+                + (f"\n文件：{files}" if files else "")
+            )
+        else:
+            parts.append(
+                f"【{name} 没做成】{dep.get('error') or dep.get('status')}；你自己想办法补上缺的部分"
+            )
+    return "\n".join(parts)
+
+
+async def _advance_project(user_id: int, project_id: str) -> None:
+    """有成员结束：依赖都结束了的成员开工；全部结束就整体汇报一次。"""
+
+    def plan(record: dict[str, Any]) -> tuple[list[str], bool]:
+        project = _find_project(record, project_id)
+        if project is None:
+            return [], False
+        members = [
+            item
+            for item in record.get("tasks", [])
+            if item.get("project") == project_id
+        ]
+        ready: list[str] = []
+        for item in members:
+            if item.get("status") != "queued" or item.get("spawned"):
+                continue
+            deps = [_find(record, dep) for dep in item.get("depends_on") or []]
+            if all(dep is None or dep.get("status") in TERMINAL for dep in deps):
+                extra = _dependency_brief(record, item)
+                if extra:
+                    item["brief"] = f"{item.get('brief') or ''}\n{extra}".strip()[:6000]
+                item["spawned"] = True
+                ready.append(str(item["id"]))
+        finished = bool(members) and all(
+            item.get("status") in TERMINAL for item in members
+        )
+        if finished and project.get("status") == "running":
+            project["status"] = "finished"
+            project["finished_at"] = _fmt(now_beijing())
+        else:
+            finished = False
+        return ready, finished
+
+    ready, finished = store.update(user_id, plan)
+    for task_id in ready:
+        _spawn(user_id, task_id)
+    if finished:
+        await deliver_project_report(user_id, project_id)
+
+
+def project_summary(user_id: int, project_id: str) -> dict[str, Any] | None:
+    """把项目各成员的结果合成一个“任务”，交给主智能体汇报。"""
+
+    record = store.load(user_id)
+    project = _find_project(record, project_id)
+    if project is None:
+        return None
+    members = [
+        item for item in record.get("tasks", []) if item.get("project") == project_id
+    ]
+    done = [item for item in members if item.get("status") == "done"]
+    files: list[str] = []
+    for item in done:
+        for ref in item.get("files") or []:
+            if ref not in files:
+                files.append(ref)
+    lines = []
+    for item in members:
+        label = item.get("member") or item.get("id")
+        if item.get("status") == "done":
+            lines.append(f"{label}：{item.get('summary') or ''}")
+        else:
+            lines.append(
+                f"{label}：没做成（{item.get('error') or STATUS_LABELS.get(str(item.get('status')))}）"
+            )
+    # 有依赖关系时，最后一个完成的成员通常是负责汇总的那个。
+    lead = done[-1] if done else None
+    return {
+        "id": project_id,
+        "title": project.get("title"),
+        "status": "done" if done else "failed",
+        "summary": (lead or {}).get("summary") or "；".join(lines)[:600],
+        "details": (
+            "\n".join(lines) + ("\n" + (lead or {}).get("details", "") if lead else "")
+        )[:2500],
+        "files": files[:6],
+        "error": "成员都没做成" if not done else "",
+        "project": True,
+        "save_to_notes": project.get("save_to_notes"),
+    }
+
+
+async def deliver_project_report(user_id: int, project_id: str) -> bool:
+    summary = project_summary(user_id, project_id)
+    if summary is None or _reporter is None:
+        return False
+    if summary["status"] == "done" and summary.get("save_to_notes"):
+        with contextlib.suppress(Exception):
+            from .private_organizer import notes
+
+            notes(
+                user_id,
+                {
+                    "action": "add",
+                    "content": f"「{summary['title']}」{summary['summary']}"[:300],
+                    "tag": "小助手",
+                },
+                now_beijing(),
+            )
+    try:
+        return bool(await _reporter(_bots.get(user_id), user_id, summary))
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"私聊用户 {user_id} 项目 {project_id} 汇报失败")
+        return False
+
+
+def list_projects(user_id: int) -> list[dict[str, Any]]:
+    record = store.load(user_id)
+    rows = []
+    for project in reversed(record.get("projects", [])):
+        members = [
+            view(item)
+            for item in record.get("tasks", [])
+            if item.get("project") == project.get("id")
+        ]
+        rows.append(
+            {
+                "id": project.get("id"),
+                "title": project.get("title"),
+                "status": project.get("status"),
+                "members": members,
+            }
+        )
+    return rows
+
+
+def message_task(bot: Any, user_id: int, target: str, text: str) -> dict[str, Any]:
+    """主智能体给小助手发消息（target 是任务编号、成员名或 all）。"""
+
+    from . import private_team
+
+    result = private_team.post(user_id, private_team.MAIN, target, text, bot=bot)
+    return {**result, "note": "它下一步就能看到；要它回话时它会发到 helper_messages"}
 
 
 # ── 进度与汇报 ────────────────────────────────────────────────────────────
@@ -543,6 +919,12 @@ def cancel_task(user_id: int, task_id: str) -> dict[str, Any]:
     _finish(user_id, task_id, status="cancelled")
     if runner is not None and not runner.done():
         runner.cancel()
+    if task.get("project"):
+        # 项目成员被取消：等它的队友照常开工（会被告知它没做成），全部结束后整体汇报。
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(
+                _advance_project(user_id, str(task["project"]))
+            )
     return {"task_id": task_id, "status": "已取消"}
 
 
@@ -640,18 +1022,24 @@ def reset_state_for_tests() -> None:
 
 
 __all__ = [
+    "MAX_MEMBERS",
     "STATUS_LABELS",
     "answer_task",
     "cancel_all",
     "cancel_task",
     "context_digest",
+    "deliver_project_report",
     "deliver_report",
     "flush_held",
     "get_task",
+    "list_projects",
     "list_tasks",
+    "message_task",
     "progress_text",
+    "project_summary",
     "recover_on_startup",
     "register_reporter",
+    "start_project",
     "start_task",
     "stats_today",
     "tasks_enabled",

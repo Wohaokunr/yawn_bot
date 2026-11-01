@@ -33,7 +33,7 @@ ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
 COPY sandbox/requirements.txt /tmp/sandbox-requirements.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv venv /opt/yawnbot-sandbox/venv --python /usr/local/bin/python3.12 \
+    uv venv --seed /opt/yawnbot-sandbox/venv --python /usr/local/bin/python3.12 \
     && uv pip install --python /opt/yawnbot-sandbox/venv/bin/python \
         --require-hashes --no-deps -r /tmp/sandbox-requirements.txt \
     && find /opt/yawnbot-sandbox/venv/lib -type d -name tests -prune -exec rm -rf {} + \
@@ -54,7 +54,9 @@ WORKDIR /app
 # visual cards such as /help would render Chinese text as missing glyphs.
 # WenQuanYi Micro Hei keeps the added image layer small while covering CJK.
 # file/jq/tree/zip/unzip/bc 给代码沙箱终端（run_shell）用；bash、grep、sed、
-# find、coreutils 基础镜像自带。
+# find、coreutils 基础镜像自带。curl/wget/git/ca-certificates 让联网的虚拟电脑能
+# 下载文件；iptables 给沙箱 runner 挡内网、按工作区开关外网（见 netpolicy.py）；
+# xz-utils 给能力包处理 .xz。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fontconfig \
@@ -65,6 +67,12 @@ RUN apt-get update \
         unzip \
         zip \
         bc \
+        ca-certificates \
+        curl \
+        wget \
+        git \
+        iptables \
+        xz-utils \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 

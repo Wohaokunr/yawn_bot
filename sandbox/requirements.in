@@ -1,4 +1,5 @@
-# 沙箱 venv 的顶层依赖（纯 wheel，运行时无网络，不能临时安装）。改完重新生成 requirements.txt。
+# 沙箱 venv 的顶层依赖（纯 wheel）。联网时用户还能 pip install --target .pylib 临时装包。
+# 改完重新生成 requirements.txt。
 numpy
 pandas
 scipy
@@ -15,3 +16,8 @@ soundfile
 jieba
 wordcloud
 qrcode
+# 1.2 能力包（yawnkit.caps）：PDF（cryptography 给 AES 加解密）、Word、Markdown
+pypdf
+python-docx
+markdown
+cryptography

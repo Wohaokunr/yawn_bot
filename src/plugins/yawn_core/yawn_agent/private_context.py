@@ -25,6 +25,8 @@ from ..data_models.agent_bot_bond import AgentBotBond
 from ..data_models.agent_memory import AgentMemory, AgentPrivacy
 from ..data_models.bot_group import BotGroup
 from ..data_models.bot_user import BotUser
+from ..data_models.chat_message import ChatMessage
+from ..data_models.chat_session import ChatSession
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.user_group import UserGroup
 from .bot_bond import bond_summary
@@ -227,7 +229,48 @@ def _fit(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-async def build_private_context(
+LAST_CHAT_GAP_MINUTES = 30
+
+
+def _ago(minutes: float) -> str:
+    if minutes < 60:  # noqa: PLR2004
+        return f"{int(minutes)} 分钟前"
+    hours = minutes / 60
+    if hours < 48:  # noqa: PLR2004
+        return f"{int(hours)} 小时前"
+    return f"{int(hours // 24)} 天前"
+
+
+async def last_chat(session: Any, user_id: int, now: datetime) -> dict[str, Any] | None:
+    """上次私聊里 Bot 说的话和距今多久；隔得不久（同一段对话里）就不给。"""
+
+    row = (
+        await session.execute(
+            select(ChatMessage.content, ChatMessage.created_at)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.group_id.is_(None),
+                ChatMessage.role == "assistant",
+                ChatMessage.is_deleted.is_(False),
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None or row.created_at is None:
+        return None
+    minutes = (now - row.created_at).total_seconds() / 60
+    if minutes < LAST_CHAT_GAP_MINUTES:
+        return None
+    said = _safe_text(row.content, 60)
+    payload: dict[str, Any] = {"ago": _ago(minutes)}
+    if said:
+        payload["you_said"] = said
+    return payload
+
+
+async def build_private_context(  # noqa: C901
     session: Any,
     user_id: int,
     *,
@@ -288,6 +331,9 @@ async def build_private_context(
     if groups:
         payload["groups"] = [item.name for item in groups[:MAX_GROUPS]]
     payload["time_of_day"] = time_of_day(now)
+    previous = await last_chat(session, user_id, now)
+    if previous:
+        payload["last_chat"] = previous
     tasks = _tasks_digest(user_id, now)
     if tasks:
         payload["tasks"] = tasks
@@ -297,7 +343,7 @@ async def build_private_context(
         if style.get("call_me"):
             payload["user"]["call_them"] = style["call_me"]
         payload["assistant"] = [assistant]
-    return PrivateContext(payload=_fit(payload), groups=groups, queries=7)
+    return PrivateContext(payload=_fit(payload), groups=groups, queries=8)
 
 
 def time_of_day(now: datetime) -> str:  # noqa: PLR0911

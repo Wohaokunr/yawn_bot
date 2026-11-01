@@ -56,6 +56,10 @@ def empty_record() -> dict[str, Any]:
         "flags": {},
         # 子智能体任务（private_tasks）：最近 MAX_TASKS 个，旧的自动丢弃
         "tasks": [],
+        # 团队留言板（private_team）：主智能体 ↔ 小助手、小助手 ↔ 小助手
+        "mail": [],
+        # 多成员项目（private_tasks.start_project）：最近几个
+        "projects": [],
     }
 
 

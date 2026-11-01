@@ -191,7 +191,9 @@ def _finish(tag: str) -> None:
 def _prepare_environment(tag: str) -> None:
     workspace = os.getcwd()
     lib_dir = os.environ.get("YAWN_SANDBOX_LIB", "")
-    sys.path[:0] = [workspace, *([lib_dir] if lib_dir else [])]
+    # 联网后用 pip install --target .pylib 装的包放在工作区里，下次运行也能 import。
+    extra = os.path.join(workspace, ".pylib")
+    sys.path[:0] = [workspace, *([lib_dir] if lib_dir else []), *([extra] if os.path.isdir(extra) else [])]
     sys.meta_path.insert(0, _PostImportFinder(tag))
 
 

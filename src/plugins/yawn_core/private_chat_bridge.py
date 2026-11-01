@@ -55,8 +55,8 @@ class PrivateAgentConfig(BaseModel):
     private_agent_friends_only: bool = True
     # 每人每天最多多少轮私聊 Agent（0 表示不限），超出后退回纯对话
     private_agent_daily_turns: int = Field(default=120, ge=0, le=10000)
-    # 每轮最多调用几轮工具
-    private_agent_max_tool_rounds: int = Field(default=4, ge=1, le=8)
+    # 每轮最多调用几轮工具（大活交给小助手，主智能体也能多走几步）
+    private_agent_max_tool_rounds: int = Field(default=8, ge=1, le=20)
     # 私聊里每人每天最多联网搜索/读网页几次（0 关闭）；
     # 仍受 WebUI 网页搜索总开关与全站预算约束
     private_agent_web_daily: int = Field(default=10, ge=0, le=200)
@@ -64,6 +64,11 @@ class PrivateAgentConfig(BaseModel):
     private_agent_proactive: bool = True
     # 连发合并：对话队列里攒着的连续几条消息（等这么多毫秒）合成一轮回复；0 关闭
     private_agent_merge_window_ms: int = Field(default=1500, ge=0, le=10000)
+    # 发言判断：Agent 可以选择这轮不说话（他话没说完 / 不需要回），想回复时
+    # 他又发了新消息就把这条让给下一轮一起回，避免连发几条就刷屏。
+    private_agent_turn_taking: bool = True
+    # 选择“等他说完”后最多等几秒；这期间他没再发消息就自己接上话。
+    private_agent_wait_seconds: int = Field(default=25, ge=5, le=600)
     # 私聊里收图片/文件/语音：交给 Agent（可放进他的虚拟电脑），关闭后仍只收文字
     private_agent_accept_media: bool = True
     # 主从多智能体：主 Agent 可以把耗时任务派给隔离上下文的子智能体在后台做
@@ -76,6 +81,8 @@ class PrivateAgentConfig(BaseModel):
     private_agent_task_daily: int = Field(default=90, ge=0, le=5000)
     # 每个子任务最多调用几轮工具
     private_agent_task_max_rounds: int = Field(default=30, ge=2, le=100)
+    # 子任务轮次用完还没交付时最多再续几段（每段同样多轮，仍受总时限约束）
+    private_agent_task_continuations: int = Field(default=2, ge=0, le=10)
     # 每个子任务最长运行多少秒（不含排队），超时按失败汇报
     private_agent_task_timeout_seconds: int = Field(default=1800, ge=30, le=7200)
 

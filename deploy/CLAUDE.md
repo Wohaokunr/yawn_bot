@@ -24,7 +24,7 @@ YawnBot 按**单实例**设计（SQLite + 进程内对局状态），边界与�
 
 ## 代码沙箱服务
 
-三个 Compose 都带 `sandbox` 服务：与 bot 同一镜像，入口 `python3 -s -m yawn_sandbox serve`，`network_mode: none`、只读根、`init: true`、`cap_drop: ALL` 后只加回降权所需的 SETUID/SETGID/CHOWN/FOWNER/DAC_OVERRIDE/KILL，`no-new-privileges`，内存/CPU/pids 上限。bot 与它只共享 `sandbox-run` 卷里的 Unix socket（`/run/yawnbot-sandbox/runner.sock`），**不要**给它开端口或网络、不要挂 `.env`。生产发布脚本先在旧 bot 运行时拉起沙箱并等健康，失败只告警不阻断发布。
+三个 Compose 都带 `sandbox` 服务：与 bot 同一镜像，入口 `python3 -s -m yawn_sandbox serve`，只接独立的 `sandbox-egress` bridge 网络（Compose 名 `yawnbot-sandbox-egress`，不与 bot/NapCat 同网；runner 用 iptables 挡内网、按工作区开关外网）、只读根、`init: true`、`cap_drop: ALL` 后只加回降权所需的 SETUID/SETGID/CHOWN/FOWNER/DAC_OVERRIDE/KILL 和管防火墙的 NET_ADMIN，`no-new-privileges`，内存/CPU/pids 上限。bot 与它只共享 `sandbox-run` 卷里的 Unix socket（`/run/yawnbot-sandbox/runner.sock`），**不要**给它开端口、不要把它接到 bot/NapCat 的网络、不要挂 `.env`。生产发布脚本先在旧 bot 运行时拉起沙箱并等健康，失败只告警不阻断发布。
 
 ## 规则
 

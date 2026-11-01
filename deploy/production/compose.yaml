@@ -50,7 +50,11 @@ services:
     init: true
     entrypoint: ["python3", "-s", "-m", "yawn_sandbox"]
     command: ["serve"]
-    network_mode: none
+    # 只接一张专用的出网网络（不和 Bot/NapCat 同网），用户代码可以下载外网文件；
+    # runner 用 NET_ADMIN 在容器自己的网络命名空间里挡住内网地址，并按 WebUI
+    # 开关逐个工作区放行/拦截外网。想彻底断网就把这里改回 network_mode: none。
+    networks:
+      - sandbox-egress
     read_only: true
     tmpfs:
       - /tmp:size=512m,mode=1777
@@ -63,6 +67,7 @@ services:
       - FOWNER
       - DAC_OVERRIDE
       - KILL
+      - NET_ADMIN
     security_opt:
       - no-new-privileges:true
     mem_limit: 1536m
@@ -72,6 +77,12 @@ services:
       PYTHONPATH: /opt/yawnbot-sandbox/runner
       SANDBOX_SOCKET_GID: "10001"
       SANDBOX_REQUIRE_ISOLATION: "true"
+      # 单个附件最大 1GB 入箱；工作区总空间上限由 WebUI 在这之内再收紧。
+      SANDBOX_MAX_UPLOAD_MB: "1024"
+      SANDBOX_MAX_FILE_MB: "1024"
+      SANDBOX_DISK_QUOTA_MB: "8192"
+      # 只读根文件系统：iptables 的锁文件放到 tmpfs。
+      XTABLES_LOCKFILE: /tmp/xtables.lock
     volumes:
       - ./sandbox:/var/lib/yawnbot-sandbox
       - sandbox-run:/run/yawnbot-sandbox
@@ -124,3 +135,5 @@ networks:
   yawnbot-internal:
     external: true
     name: yawnbot-internal
+  sandbox-egress:
+    name: yawnbot-sandbox-egress

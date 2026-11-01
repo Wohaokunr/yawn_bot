@@ -222,13 +222,16 @@ async def _submit(
     language: str,
     limits: dict[str, int],
     meta: dict[str, Any],
+    network: bool | None = None,
 ) -> dict[str, Any]:
     """提交一次运行；runner 忙或刚好离线时各自重试一次。超时不重试（代码可能已经跑了）。"""
 
     retried_offline = False
     for attempt in range(2):
         try:
-            result = await client.run(workspace, code, limits=limits, meta=meta, language=language)
+            result = await client.run(
+                workspace, code, limits=limits, meta=meta, language=language, network=network
+            )
         except SandboxError as exc:
             if exc.code == "offline" and not retried_offline and attempt == 0:
                 retried_offline = True
@@ -298,6 +301,7 @@ async def _execute(
             language=language,
             limits=limits,
             meta=meta,
+            network=reservation.settings.group_network,
         )
     except SandboxError as exc:
         reservation.refund()

@@ -89,7 +89,29 @@ def enqueue(
     except asyncio.QueueFull:
         record_queue_rejection("chat_queue", "chat", "queue_full")
         return False
+    user_id = _event_user(item[1])
+    if user_id is not None:
+        _arrivals[user_id] = _arrivals.get(user_id, 0) + 1
     return True
+
+
+# 每位用户收到过多少条排队消息（只增不减）。私聊 Agent 用它判断“我刚才在想的时候，
+# 他是不是又发了新消息”：前后两个读数不同就说明有新消息。
+_arrivals: dict[int, int] = {}
+
+
+def arrival_count(user_id: int) -> int:
+    return _arrivals.get(int(user_id), 0)
+
+
+def pending_messages(user_id: int) -> int:
+    """队列里还没处理的普通消息条数（不含命令消息）。"""
+
+    state = _states.get(int(user_id))
+    if state is None:
+        return 0
+    items = list(getattr(state.queue, "_queue", ()))
+    return sum(1 for item in items if len(item) > 2 and item[2] is None)  # noqa: PLR2004
 
 
 def ensure_worker(

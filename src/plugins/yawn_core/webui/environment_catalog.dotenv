@@ -239,8 +239,12 @@ PRIVATE_AGENT_AUTO_REPLY=true
 PRIVATE_AGENT_FRIENDS_ONLY=true
 # 每人每天最多多少轮私聊 Agent（0 到 10000，0 表示不限），超出后当天退回纯对话
 PRIVATE_AGENT_DAILY_TURNS=120
-# 每轮最多调用几轮工具（1 到 8）
-PRIVATE_AGENT_MAX_TOOL_ROUNDS=4
+# 每轮最多调用几轮工具（1 到 20）
+PRIVATE_AGENT_MAX_TOOL_ROUNDS=8
+# 发言判断：Agent 可以选择不回或“等他说完”，他连发几条时只回一次（false 恢复每条必回）
+PRIVATE_AGENT_TURN_TAKING=true
+# 选择“等他说完”后最多等几秒（5 到 600），期间他没再发消息就自己接上话
+PRIVATE_AGENT_WAIT_SECONDS=25
 # 私聊里每人每天最多联网搜索/读网页几次（0 到 200，0 关闭；仍受「网页搜索」总开关与全站预算约束）
 PRIVATE_AGENT_WEB_DAILY=10
 # 允许私聊 Agent 主动发消息：用户设的提醒、早安、签到提醒、生日、倒数日当天
@@ -259,6 +263,8 @@ PRIVATE_AGENT_TASK_SLOTS=30
 PRIVATE_AGENT_TASK_DAILY=90
 # 每个小助手任务最多调用几轮工具（2 到 100）
 PRIVATE_AGENT_TASK_MAX_ROUNDS=30
+# 小助手轮次用完还没交付时最多再续几段（0 到 10，每段同样多轮，仍受总时限约束）
+PRIVATE_AGENT_TASK_CONTINUATIONS=2
 # 每个小助手任务最长运行多少秒（30 到 7200，不含排队），超时按没做成汇报
 PRIVATE_AGENT_TASK_TIMEOUT_SECONDS=1800
 # 私聊个人数据目录（笔记、待办、提醒等，每人一个 JSON），留空用 data/private_agent/users
