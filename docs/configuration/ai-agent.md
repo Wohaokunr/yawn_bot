@@ -33,7 +33,9 @@ AI_LIGHT_REASONING_EFFORT=auto
 AI_VISION_REASONING_EFFORT=auto
 ```
 
-`*_THINKING` 可用 `auto / enabled / disabled`。`*_REASONING_EFFORT`（推理等级）可用 `auto / none / minimal / low / medium / high / xhigh`：`auto` 不发送参数，其余作为 `reasoning_effort` 发送给服务商，端点不认识该参数时请保持 `auto`。多模态可用 `auto / supported / unsupported`。light 模型留空时继承 default；vision 留空表示没有独立视觉降级档位。
+`*_THINKING` 可用 `auto / enabled / disabled`。`*_REASONING_EFFORT`（推理等级）可用 `auto / none / minimal / low / medium / high / xhigh`：`auto` 不发送参数，其余作为 `reasoning_effort` 发送给服务商，端点不认识该参数时请保持 `auto`。多模态可用 `auto / supported / unsupported`。light 模型留空时继承 default；vision 留空表示没有独立视觉降级档位（对话模型是 mimo-v2/2.5 的 pro/flash 时会自动用同一服务商的 `mimo-v2.5` 识图）。
+
+已知只收文字的对话模型（deepseek-chat / deepseek-reasoner、mimo-v2/2.5 的 pro/flash）在 `AI_DEFAULT_MULTIMODAL=auto` 下不会直接收图片，群聊和私聊都先让识图模型转述再回答；如果你的端点其实支持图片，把 `AI_DEFAULT_MULTIMODAL` 设为 `supported`。
 
 Agent 的所有模型请求（对话、主动发言、记忆整理、图片描述）都不再传 `max_tokens` 限制输出长度：推理模型常把输出预算耗在思考上，导致空回复或工具参数（例如沙箱代码）被截断。需要控制推理深浅和成本时调整推理等级；`inherit` 沿用所选档位的设置。`AI_MAX_TOKENS` 只影响私聊对话等其他功能。
 

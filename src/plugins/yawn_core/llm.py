@@ -341,7 +341,8 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
         multimodal = ai_config.ai_light_multimodal
     elif profile == "vision":
         configured_model = _configured_text("ai_vision_model")
-        model = configured_model or ai_config.ai_model
+        implied = "" if configured_model else implied_vision_model()
+        model = configured_model or implied or ai_config.ai_model
         provider = (
             ai_config.ai_vision_provider
             if configured_model
@@ -369,12 +370,32 @@ def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
     )
 
 
+# 同一服务商里只收文字的对话模型 → 同家的看图模型。没填 AI_VISION_MODEL 时用它当识图模型，
+# 免得换成这类对话模型后群聊/私聊一起“看不到图”。填了 AI_VISION_MODEL 就以填的为准。
+_IMPLIED_VISION_MODELS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(?:xiaomi/)?mimo-v2(?:\.5)?-(?:pro|flash)\b", re.IGNORECASE), "mimo-v2.5"),
+)
+
+
+def implied_vision_model() -> str:
+    """没配识图模型时，按对话模型推断的同家识图模型；推断不出返回空串。"""
+
+    model = str(ai_config.ai_model or "").strip()
+    for pattern, vision in _IMPLIED_VISION_MODELS:
+        if pattern.match(model):
+            prefix = "xiaomi/" if model.lower().startswith("xiaomi/") else ""
+            return prefix + vision
+    return ""
+
+
 def vision_model_configured() -> bool:
     """识图任务所选档位是否有可用且未声明不支持图片的模型。"""
 
     request = resolve_llm_request("agent_image")
     if request.profile == "vision":
-        return bool(_configured_text("ai_vision_model")) and get_client(
+        return bool(
+            _configured_text("ai_vision_model") or implied_vision_model()
+        ) and get_client(
             request.provider
         ) is not None
     return (
@@ -870,6 +891,8 @@ def _looks_like_multimodal_unsupported(error: BaseException) -> bool:
         "image_url",
         "image input",
         "does not support image",
+        "not support image",
+        "images are not supported",
         "unsupported content type",
     )
     return any(marker in text for marker in markers)

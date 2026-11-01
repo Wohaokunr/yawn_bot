@@ -1229,3 +1229,85 @@ def test_rhythm_env_keys_are_in_catalog() -> None:
         "AGENT_REPLY_MAX_SPREAD_SECONDS",
     ):
         assert f"\n{key}=" in catalog
+
+
+# ── 2026-11 分条失灵修复：短回复不拆、长回复按段落分 ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [("在", "吗"), ("这题我会", "略略略～"), ("好", "的", "呀"), ("哼", "不理你了")],  # noqa: RUF001
+)
+def test_model_written_parts_are_kept_as_is(parts: tuple[str, ...]) -> None:
+    # 语气由模型决定：它自己写的 |||（一字一条、话尾补一句）一条都不合并。
+    plan = R.plan_text_rhythm("", parts=parts, declared=R.RHYTHM_SPLIT)
+    assert plan.parts == parts
+
+
+def test_pop_follows_the_model_even_when_short() -> None:
+    assert R.plan_text_rhythm("在吗", declared=R.RHYTHM_POP).parts == ("在", "吗")
+
+
+@pytest.mark.parametrize("declared", [R.RHYTHM_SPLIT, R.RHYTHM_BURST])
+def test_system_does_not_invent_splits_for_short_text(declared: str) -> None:
+    plan = R.plan_text_rhythm("嗯，好吧。", declared=declared)
+    assert not plan.multi
+    assert plan.source == "short"
+
+
+def test_burst_without_markers_still_splits_longer_text() -> None:
+    plan = R.plan_text_rhythm("不是吧，真的假的，我不信，你骗我的吧", declared=R.RHYTHM_BURST)
+    assert plan.multi
+
+
+LONG_REPLY = (
+    "因为之前那些活都不值得派，签到画爱心看图查记录这种两三步就办完了。\n\n"
+    "签到、画爱心、看图、查记录，都是两三步就能办完的，派出去反而绕远路，还得等它回来。\n\n"
+    "小助手适合耗时的、多步骤的，比如联网查一堆资料整理、处理你发来的大文件、写长东西。\n\n"
+    "你要是有什么这种活，我随时可以派给它去做，做完了它会一步一步给你报进度的。"
+)
+
+
+def test_long_block_reply_is_split_by_paragraph() -> None:
+    plan = R.plan_text_rhythm(LONG_REPLY, declared=R.RHYTHM_BLOCK)
+    assert plan.multi
+    assert plan.source == "long_paragraph"
+    assert len(plan.parts) <= R.rhythm_settings().max_parts
+    assert "".join(plan.parts).replace("\n", "") == LONG_REPLY.replace("\n", "")
+
+
+def test_long_auto_reply_with_more_paragraphs_than_cap_is_grouped() -> None:
+    plan = R.plan_text_rhythm(LONG_REPLY)
+    assert plan.multi
+    assert 2 <= len(plan.parts) <= R.rhythm_settings().max_parts
+
+
+def test_long_reply_lines_are_grouped() -> None:
+    text = "\n".join(
+        [
+            "说句实话我只能读到文件信息，看不到图里画的是什么",
+            "这张是七百乘七百的粉色系图，主色是浅粉白，其他就读不出来了",
+            "你要不跟我说说画的是啥，或者你想要我拿它做点什么",
+            "真要看内容你可以直接跟我说画的是啥，或者我用代码跑一下看颜色尺寸这类",
+            "但是说实话意义不大，还是你直接告诉我比较快，我们省点时间",
+        ]
+    )
+    plan = R.plan_text_rhythm(text, declared=R.RHYTHM_BLOCK)
+    assert plan.multi
+
+
+def test_short_block_reply_stays_one_message() -> None:
+    plan = R.plan_text_rhythm("先说结论：能用。\n\n不过要先重启一下", declared=R.RHYTHM_BLOCK)
+    assert not plan.multi
+
+
+def test_long_structured_block_reply_is_not_split() -> None:
+    text = "步骤如下：\n" + "\n".join(f"{i}. 这是第{i}步要做的事情，写得长一点免得太短" for i in range(1, 9))
+    plan = R.plan_text_rhythm(text, declared=R.RHYTHM_BLOCK)
+    assert not plan.multi
+
+
+def test_instruction_lets_model_own_the_tone() -> None:
+    text = R.rhythm_instruction(scene="private", act="continue", complexity="normal")
+    assert "略略略" in text and "不会替你硬拆" in text
+    assert "别回回同一种" not in text

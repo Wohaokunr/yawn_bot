@@ -1,4 +1,4 @@
-# ruff: noqa: E501,RUF001,PLR2004,C901,PLR0911,PLR0912,PLR0913,PLR0917
+# ruff: noqa: E501, RUF001, PLR2004, C901, PLR0911, PLR0912, PLR0913, PLR0917
 """发言节奏：把一次想说的话规划成 1~N 条 QQ 消息，以及每条之前的停顿。
 
 真人在群里很少把想说的话憋成一大段再发：平常聊天会顺手拆成两三条，激动时
@@ -76,6 +76,11 @@ AUTO_SENTENCE_MIN_CHARS = 40
 AUTO_PART_MIN_CHARS = 8
 AUTO_PARAGRAPH_MAX_CHARS = 160
 AUTO_LINE_MAX_CHARS = 80
+# 模型选了分条/连发却没写 |||、正文又只有这么几个字时，系统不替它按句子/短句硬拆。
+# 模型自己写的 |||（一字一条、话尾补一句“略略略~”）永远照它写的发。
+SHORT_REPLY_MAX_CHARS = 6
+# 选了整段、但正文超过这个字数且自己分了段（空行/换行）时，按段落分几条发，不甩一大坨。
+LONG_REPLY_MIN_CHARS = 120
 
 # 标记：||| / 全角 ｜｜｜ / 【分条】 等，前后的空白一并吃掉。
 _MARKER_RE = re.compile(r"[ \t]*(?:\|{3,}|｜{3,}|【分条】|\[分条\]|<分条>)[ \t]*\n?")
@@ -340,6 +345,30 @@ def _balanced_groups(units: list[str], count: int, joiner: str = "") -> list[str
     return [joiner.join(group) for group in groups if group]
 
 
+def _paragraphs(text: str) -> list[str]:
+    return [item.strip() for item in re.split(r"\n[ \t]*\n", text) if item.strip()]
+
+
+def long_reply_parts(text: str, *, max_parts: int) -> tuple[str, ...]:
+    """长回复（≥ LONG_REPLY_MIN_CHARS）按模型自己写的空行/换行分成至多 max_parts 条。
+
+    只看结构，不看内容：代码、列表这类结构化内容、没有分段的一整段都不拆。
+    """
+
+    if (
+        max_parts < 2
+        or _visible_len(text) < LONG_REPLY_MIN_CHARS
+        or is_structured_text(text)
+    ):
+        return ()
+    units = _paragraphs(text)
+    if len(units) < 2:
+        units = [item.strip() for item in text.split("\n") if item.strip()]
+    if len(units) < 2:
+        return ()
+    return tuple(_balanced_groups(units, max_parts, "\n"))
+
+
 def _auto_parts(
     text: str, *, max_parts: int, sentences: bool = True
 ) -> tuple[tuple[str, ...], str]:
@@ -351,18 +380,19 @@ def _auto_parts(
 
     if max_parts < 2 or is_structured_text(text):
         return (), "structured" if is_structured_text(text) else "single"
-    paragraphs = [item.strip() for item in re.split(r"\n[ \t]*\n", text) if item.strip()]
-    if 2 <= len(paragraphs) <= max_parts and all(
+    paragraphs = _paragraphs(text)
+    if len(paragraphs) >= 2 and all(
         _visible_len(item) <= AUTO_PARAGRAPH_MAX_CHARS for item in paragraphs
     ):
-        return tuple(paragraphs), "auto_paragraph"
+        # 段落比条数上限多时按字数均匀并成 max_parts 条，而不是整篇塞进一条。
+        return tuple(_balanced_groups(paragraphs, max_parts, "\n")), "auto_paragraph"
     if len(paragraphs) > 1:
         return (), "single"
     lines = [item.strip() for item in text.split("\n") if item.strip()]
-    if 2 <= len(lines) <= max_parts and all(
+    if len(lines) >= 2 and all(
         _visible_len(item) <= AUTO_LINE_MAX_CHARS for item in lines
     ):
-        return tuple(lines), "auto_line"
+        return tuple(_balanced_groups(lines, max_parts, "\n")), "auto_line"
     if not sentences or len(lines) > 1 or _visible_len(text) < AUTO_SENTENCE_MIN_CHARS:
         return (), "single"
     units = _sentences(text)
@@ -630,7 +660,11 @@ def plan_text_rhythm(
         return single_rhythm(joined, source="disabled", declared=declared)
     if _CODE_FENCE in joined:
         return single_rhythm(joined, source="structured", declared=declared)
+    short = len(parts) < 2 and _visible_len(joined) <= SHORT_REPLY_MAX_CHARS
     if declared == RHYTHM_BLOCK:
+        long_parts = long_reply_parts(joined, max_parts=resolved.max_parts)
+        if long_parts:
+            return _finish(list(long_parts), RHYTHM_SPLIT, "long_paragraph", declared, resolved, emotion, style, joined)
         return single_rhythm(joined, source="model", declared=declared)
 
     candidates: list[str]
@@ -653,6 +687,9 @@ def plan_text_rhythm(
     elif len(parts) >= 2:
         candidates = [item.strip() for item in parts if item.strip()]
         source = "model"
+    elif short and declared in {RHYTHM_BURST, RHYTHM_SPLIT}:
+        # 没写 ||| 的几个字：系统不替它拆。
+        return single_rhythm(joined, source="short", declared=declared)
     elif declared == RHYTHM_BURST:
         candidates = _balanced_groups(_clauses(joined), _rhythm_cap(RHYTHM_BURST, resolved))
         source = "model_clauses"
@@ -670,7 +707,10 @@ def plan_text_rhythm(
         cap = 2 if scene in _SHORT_SCENES else resolved.max_parts
         auto, source = _auto_parts(joined, max_parts=cap, sentences=False)
         if not auto:
-            return single_rhythm(joined, source=source, declared=declared)
+            long_parts = long_reply_parts(joined, max_parts=cap)
+            if not long_parts:
+                return single_rhythm(joined, source=source, declared=declared)
+            auto, source = long_parts, "long_paragraph"
         candidates = list(auto)
 
     rhythm = declared if declared != RHYTHM_AUTO else RHYTHM_AUTO
@@ -791,7 +831,9 @@ def rhythm_instruction(
     lines = [
         "发送节奏（每次都要选）：回复最前面先写【节奏:整段/分条/连发/蹦字】，标签不会发出去，"
         "||| 隔开的每段是一条 QQ 消息。节奏就是你此刻的心情，像真人一样挑：",
-        "整段=认真讨论、争论、讲道理或给步骤，一条发完；",
+        "分条照你的语气来，系统按你写的 ||| 原样发：想一个字一个字蹦，或者话说完再补一句俏皮的，"
+        "就自己用 ||| 隔开，如【节奏:分条】这题我会|||略略略～；几个字又没想好怎么断就【节奏:整段】，系统不会替你硬拆；",
+        "整段=认真讨论、争论、讲道理或给步骤，一条发完；内容长（一百多字以上）时用空行分好段，会按段落分成几条发；",
         f"分条=平常闲聊，把同一句话在自然停顿处断成 2~{resolved.max_parts} 条，"
         "如【节奏:分条】刚看到|||笑死 这也太巧了；",
         "连发=激动、震惊、急了、强烈吐槽，3~5 条每条几个字的短句，"
@@ -799,7 +841,7 @@ def rhythm_instruction(
         "蹦字=搞怪卖萌、拖长音，只写一句 8 字以内的话，会一个字一个字蹦出去，"
         "如【节奏:蹦字】你在干嘛呀。",
         "节奏不是多说话的理由：分几条，加起来的字数也和发一条时一样，守住上面的字数目标；"
-        "连发和蹦字通常比一条更短。别回回同一种，代码、列表、链接放同一条。",
+        "连发和蹦字通常比一条更短。按内容和心情挑，不必每次换花样；代码、列表、链接放同一条。",
     ]
     if act in _NO_AUTO_ACTS:
         lines.append("本轮是短回应，整段一句或几个字的连发就够。")
@@ -832,6 +874,7 @@ __all__ = [
     "emotion_pace_factor",
     "has_rhythm_markup",
     "is_structured_text",
+    "long_reply_parts",
     "normalize_rhythm",
     "pacing_delays",
     "parse_rhythm_markup",

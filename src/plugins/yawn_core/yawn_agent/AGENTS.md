@@ -130,6 +130,7 @@
 - 一次发言拆成几条、什么节奏由模型决定：正文用 `|||` 分条，开头可写 `【节奏:整段/分条/连发/蹦字】`。解析、兜底拆分、停顿计算全部在 `speech_rhythm.py`（纯函数）；依次发送、催促合并、失败停止在 `speech_delivery.py`。不要在别处另写分条逻辑。
 - 提示词要求模型**每次**先写 `【节奏:…】` 自己选节奏，并带可照抄的示例；节奏只决定“怎么发”，不是多说话的理由，提示里必须说明分条总字数和一条时一致。情绪倾向只读 `emotion_state`（强度 ≥0.3 才提示），选哪种仍由模型定。
 - 模型没选节奏时只按它自己写的空行/换行兜底，**不再把一整段按句号切开**（那会把长话伪装成分条、助长变长）；只有模型声明了“分条/连发”却没写 `|||` 时才按句子/短句拆。声明连发但某条超过 `BURST_LONG_PART_CHARS` 字时按分条速度发。
+- 分条跟着模型的语气走（2026-11 用户明确）：模型自己写的 `|||`（一字一条、话尾补一句“略略略～”）和【节奏:蹦字】一律照写的发，**不得按字数合并**。系统只在“声明分条/连发却没写 `|||`、正文 ≤ `SHORT_REPLY_MAX_CHARS` 字”时不替它硬拆。声明整段或没声明、但正文 ≥ `LONG_REPLY_MIN_CHARS` 且模型自己用空行/换行分了段的（非代码/列表）按段落均匀并成至多 `max_parts` 条；段落比条数上限多时合并而不是退回一整条。
 - 兜底拆分只看结构（代码块、列表、空行段落、换行、句末标点），**不按关键词猜情绪或意图**；代码块里的 `|||` 不拆。复杂问题（complexity=complex）和短回应（ping_ack/acknowledge/react/close）不兜底拆，`AGENT_REPLY_SPLIT=marked` 时只认模型标记，`off` 时一律一条。
 - 清洗按条做：开场类清洗只看第一条、结尾类只看最后一条（`_polish_text(position=...)`），长度修剪和撞重在整句层面做；近似重复的后续分条直接去掉。声明核验对整句做。
 - 只有第一条带自动引用、只有第一条检查触发过期；模型自己写的 reply/at 段留在它所在的那一条。任何一条准备失败都整体退回单条发送。
@@ -243,6 +244,8 @@
 - 对话 worker 有连发合并（`PRIVATE_AGENT_MERGE_WINDOW_MS`）：等一个短窗口，把队列里紧跟着的普通消息并成一轮，用最后一条事件回复；带 `override_text` 的命令消息不参与合并。
 - `ai_chat._process_chat` 在 commit 前缓存 `chat_session.id`；生产会话 `expire_on_commit=True`，测试里涉及完整回合的要用 `prod_maker`（`tests/test_private_agent.py`）这种生产同款会话。
 - 私聊回复统一经 `private_delivery.deliver` 发出：先按 `speech_rhythm` 的 【节奏:…】/`|||` 分条，再把 `[表情:名字]`、`[图片:sandbox:路径]`、`[文件:sandbox:路径]` 拆成单独的消息。媒体发不出去时换成一句文字说明，不得静默吞掉；某条发送失败就停，只把已送达的部分落库。私聊表情包只用通用表情（scope 0），额度按人记在个人数据 `flags`（`sticker_*`），本人 `emoji` 偏好为 `none` 时不给菜单。
+- 私聊识图在 `private_vision.py`：图片段复用群聊的 `media.prepare_media_inputs`（伪群号 0、不落库）和 `turn_media.vision_route`；`direct` 把 image 块附在最后一条 user 消息上（追问时 5 分钟内重附最近的图），`caption` 用识图模型转述（转述按人进程内记 30 分钟，放资料 `recent_images`），`none` 附一句看不到。对话模型拒收图片（`LLMMultimodalUnsupportedError`）时同一轮改走转述重试。图片仍会照常放进虚拟电脑，但看图不能靠 run_code 读文件信息。
+- 已知只收文字的对话模型（`turn_media.known_text_only`：deepseek-chat/reasoner、mimo-v2/2.5-pro/flash）在 `AI_DEFAULT_MULTIMODAL=auto` 下当作不支持图片，群聊和私聊都改走识图模型转述；没配 `AI_VISION_MODEL` 时由 `llm.implied_vision_model` 推断同家识图模型（mimo-v2/2.5-pro/flash → mimo-v2.5，走默认服务商）；推断不出时识图路线是 none，WebUI 识图卡会给出改法。
 - 私聊虚拟电脑（`private_computer`）每人一个工作区 `p<QQ>`，只能读写/发送本人工作区的文件；策略看 `SandboxSettings.private_*`，次数按人计（`reserve_private_run`），不占群/成员配额。私聊发来的媒体经 `import_media` 放进 `inbox/`（`PRIVATE_AGENT_ACCEPT_MEDIA` 和 `private_inbox` 都开着才放）；只发图片/文件的好友消息也会交给 Agent（`event_media` 里 `type` 必须放在 `**data` 之后，图片段 data 自带 `type` 字段）。
 - 后台小助手（主从多智能体）：主智能体用 `delegate_task` 派活，`private_tasks` 管理队列与并发（每人 `PRIVATE_AGENT_TASK_PER_USER`、全站 `…_TASK_SLOTS`、每日 `…_TASK_DAILY`、单个 `…_TASK_TIMEOUT_SECONDS`），`private_worker` 跑子智能体。子智能体**只看任务单**（不带聊天记录、记忆或个人数据），工具只有 web/computer/toolbox 三族 + `finish`/`ask_user`/`report_progress`，不能写个人数据、不能发消息；`finish.files` 只保留本任务工具结果里出现过的 `sandbox:` 引用。
 - 子任务每完成一步调 `report_progress`，`private_tasks` 直接发模板进度（不过模型、不进会话历史，免打扰不发，每个任务最多 20 条）。结束后的汇报轮（`private_agent.report_task`）与普通回合共用 `user_turn_lock`，不带工具，由主智能体按人设转述；没做成或在等回答时过 `verify_claims` 不许说“弄好了”。免打扰时段完成的汇报压着，由 `private_scheduler` 的 `flush_held` 补发。

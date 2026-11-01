@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -74,10 +75,26 @@ def learned_unsupported(request: LLMRequestConfig) -> bool:
     return True
 
 
-def effective_multimodal_mode(request: LLMRequestConfig) -> str:
-    """配置的多模态模式；``auto`` 且最近被服务商明确拒收过图片时当作 unsupported。"""
+# 已知只收文字的对话模型：``auto`` 档位下直接当作不支持图片，交给识图模型转述。
+# 有些服务商收到图片不报错、只是悄悄丢掉，模型就会说“我只能看到文件信息”。
+# 真支持图片的话把 AI_DEFAULT_MULTIMODAL 设成 supported 即可绕过。
+_TEXT_ONLY_MODEL_RE = re.compile(
+    r"^(?:.*/)?(?:deepseek-(?:chat|reasoner|coder)|mimo-v2(?:\.5)?-(?:pro|flash))(?:[-_:.].*)?$",
+    re.IGNORECASE,
+)
 
-    if request.multimodal == "auto" and learned_unsupported(request):
+
+def known_text_only(model: str) -> bool:
+    return bool(_TEXT_ONLY_MODEL_RE.match(str(model or "").strip()))
+
+
+def effective_multimodal_mode(request: LLMRequestConfig) -> str:
+    """配置的多模态模式；``auto`` 且模型已知只收文字、或最近被服务商明确拒收过图片时
+    当作 unsupported。"""
+
+    if request.multimodal == "auto" and (
+        learned_unsupported(request) or known_text_only(request.model)
+    ):
         return "unsupported"
     return request.multimodal
 
@@ -102,6 +119,8 @@ def vision_route() -> dict[str, Any]:
         "dialogue_model": dialogue.model,
         "dialogue_multimodal": dialogue.multimodal,
         "learned_unsupported": learned_unsupported(dialogue),
+        "known_text_only": dialogue.multimodal == "auto"
+        and known_text_only(dialogue.model),
         "vision_configured": dedicated,
         "vision_provider": vision.provider,
         "vision_model": vision.model,
@@ -237,6 +256,7 @@ def reset_for_tests() -> None:
 __all__ = [
     "caption_media",
     "effective_multimodal_mode",
+    "known_text_only",
     "learned_unsupported",
     "load_turn_media",
     "remember_multimodal_unsupported",
