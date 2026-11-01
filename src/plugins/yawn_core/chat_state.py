@@ -160,7 +160,10 @@ async def _worker_loop(
             try:
                 await process_fn(bot_inst, event, user_id, override_text)
             except Exception as e:  # noqa: BLE001
-                logger.error(f"对话 worker 处理消息异常: 用户 {user_id}, 错误 {e!r}")
+                # 带完整堆栈：只记 repr 时生产日志看不出是哪一行出的错
+                logger.opt(exception=e).error(
+                    f"对话 worker 处理消息异常: 用户 {user_id}, 错误 {e!r}"
+                )
                 # 尝试通知用户
                 try:
                     from nonebot.adapters.onebot.v11 import MessageSegment

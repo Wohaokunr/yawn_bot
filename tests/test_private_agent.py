@@ -715,3 +715,80 @@ def test_private_prompt_sections_registered() -> None:
     } <= ids
     assert sections.get_section("private.safety").safety is True
     assert sections.get_section("private.context").kind == sections.KIND_DATA
+
+
+# ── 端到端：生产同款 expire_on_commit=True 会话 ──────────────
+
+
+@pytest_asyncio.fixture
+async def prod_maker():
+    affinity.reset_ledger_state()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Model.metadata.create_all)
+    factory = async_sessionmaker(engine)  # 生产默认 expire_on_commit=True
+    async with factory() as session:
+        session.add(BotUser(user_id=USER, nickname="小明", affinity=0))
+        await session.commit()
+    yield factory
+    await engine.dispose()
+    affinity.reset_ledger_state()
+
+
+@pytest.mark.asyncio
+async def test_process_chat_with_agent_on_expiring_session(prod_maker, monkeypatch) -> None:
+    _script(monkeypatch, [_message("你好呀~")])
+    original = bridge._handler
+    bridge.register_private_handler(pagent.handle_private_turn)
+    try:
+        async with prod_maker() as session:
+            bot = _Bot()
+            await ai_chat._process_chat(bot, _private_event("你好"), USER, session, "你好")
+    finally:
+        bridge.register_private_handler(original)
+    assert bot.sent == ["你好呀~"]
+    async with prod_maker() as session:
+        rows = (await session.execute(select(ChatMessage.role, ChatMessage.content))).all()
+    assert [tuple(r) for r in rows] == [("user", "你好"), ("assistant", "你好呀~")]
+
+
+@pytest.mark.asyncio
+async def test_all_tools_survive_expiring_session(maker, monkeypatch) -> None:
+    """写工具每轮都会 commit；之后的工具与好感结算不能读到过期属性。"""
+
+    expiring = async_sessionmaker(maker.kw["bind"])  # expire_on_commit=True
+    _script(
+        monkeypatch,
+        [
+            _message(calls=[("checkin", {})]),
+            _message(calls=[("my_overview", {}), ("checkin_status", {})]),
+            _message(calls=[("remember_about_me", {"key": "hobby", "content": "撸猫"})]),
+            _message(
+                calls=[
+                    ("what_you_remember", {}),
+                    ("our_relationship", {}),
+                    ("list_my_groups", {}),
+                ]
+            ),
+            _message(calls=[("forget_about_me", {"key": "hobby"})]),
+            _message(calls=[("group_recent", {"group": "开着的群"}), ("list_commands", {})]),
+            _message("都弄好啦"),
+        ],
+    )
+    monkeypatch.setattr(bridge.private_agent_config, "private_agent_max_tool_rounds", 8)
+    monkeypatch.setattr(pagent, "now_beijing", lambda: NOW)
+    seen: list[dict] = []
+    original = pagent.execute_private_tool
+
+    async def spy(name, args, ctx):
+        payload = await original(name, args, ctx)
+        seen.append({"name": name, **payload})
+        return payload
+
+    monkeypatch.setattr(pagent, "execute_private_tool", spy)
+    async with expiring() as session:
+        bot = _Bot()
+        text = await pagent.handle_private_turn(_request(session, bot, "帮我把事都办了"))
+    failures = [item for item in seen if not item.get("ok")]
+    assert failures == []
+    assert text == "都弄好啦"
