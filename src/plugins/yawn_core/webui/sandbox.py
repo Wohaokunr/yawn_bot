@@ -191,6 +191,19 @@ def _usage_payload(settings: SandboxSettings) -> dict[str, Any]:
         "members": members[:50],
         "groupLimit": settings.group_daily_runs,
         "memberLimit": settings.member_daily_runs,
+        "private": sorted(
+            (
+                {
+                    "userId": str(key),
+                    "runs": int(value),
+                    "inboxBytes": int((usage.get("private_inbox") or {}).get(key, 0)),
+                }
+                for key, value in (usage.get("private") or {}).items()
+                if int(value) > 0
+            ),
+            key=lambda row: -row["runs"],
+        )[:50],
+        "privateLimit": settings.private_daily_runs,
     }
 
 
@@ -618,6 +631,14 @@ class SettingsBody(BaseModel):
     inbox_max_per_turn: int = 6
     inbox_history_minutes: int = 180
     inbox_group_daily_mb: int = 500
+    # 私聊虚拟电脑：不带时沿用当前值（旧页面保存不会把它们重置成默认）。
+    private_enabled: bool | None = None
+    private_daily_runs: int | None = None
+    private_inbox: bool | None = None
+    private_inbox_daily_mb: int | None = None
+
+
+_PRIVATE_FIELDS = ("private_enabled", "private_daily_runs", "private_inbox", "private_inbox_daily_mb")
 
 
 def _group_list(values: list[str], field: str) -> list[int]:
@@ -644,10 +665,15 @@ async def sandbox_settings(_session: AdminReadSession) -> dict[str, Any]:
 
 @router.put("/settings")
 async def sandbox_update_settings(body: SettingsBody, _session: AdminWriteSession) -> dict[str, Any]:
+    current = load_settings()
+    values = body.model_dump()
+    for key in _PRIVATE_FIELDS:
+        if values.get(key) is None:
+            values[key] = getattr(current, key)
     try:
         settings = SandboxSettings.model_validate(
             {
-                **body.model_dump(),
+                **values,
                 "allowed_groups": _group_list(body.allowed_groups, "允许的群"),
                 "blocked_groups": _group_list(body.blocked_groups, "禁用的群"),
             }

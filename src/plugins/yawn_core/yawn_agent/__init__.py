@@ -5,6 +5,7 @@
 子插件；所有持久化仍使用 yawn_core 的 ORM bind。
 """
 
+from nonebot import get_driver, logger
 from nonebot.plugin import PluginMetadata
 
 from ..command_catalog import PluginCommandGroup, register_command_group
@@ -25,6 +26,7 @@ from . import (
     persona,
     private_agent,
     private_scheduler,
+    private_tasks,
     proactive,
     prompt,
     prompt_capture,
@@ -36,6 +38,26 @@ from . import (
 prompt_capture.install()
 # 私聊交给 Agent：ai_chat 每轮先问它，它放弃时退回原来的纯对话。
 register_private_handler(private_agent.handle_private_turn)
+private_tasks.register_reporter(
+    private_agent.report_task, private_agent.notify_progress
+)
+
+
+@get_driver().on_startup
+async def _recover_private_tasks() -> None:
+    try:
+        count = private_tasks.recover_on_startup()
+    except Exception:  # noqa: BLE001
+        logger.exception("私聊子任务恢复失败")
+        return
+    if count:
+        logger.info(f"私聊子任务：{count} 个因重启中断，已记为失败")
+
+
+@get_driver().on_shutdown
+async def _stop_private_tasks() -> None:
+    await private_tasks.shutdown()
+
 
 COMMAND_GROUP = register_command_group(
     PluginCommandGroup(
@@ -69,6 +91,7 @@ __all__ = [
     "persona",
     "private_agent",
     "private_scheduler",
+    "private_tasks",
     "proactive",
     "prompt",
     "schedule_runner",

@@ -294,6 +294,13 @@ class SettingsBody(BaseModel):
     collect_admin_only: bool
     member_daily_collect: int
     max_bytes: int
+    # 私聊表情包：不带时沿用当前值。
+    private_enabled: bool | None = None
+    private_daily_limit: int | None = None
+    private_cooldown_seconds: int | None = None
+
+
+_PRIVATE_FIELDS = ("private_enabled", "private_daily_limit", "private_cooldown_seconds")
 
 
 def _group_list(values: list[str], field: str) -> list[int]:
@@ -312,10 +319,15 @@ def _group_list(values: list[str], field: str) -> list[int]:
 
 @router.put("/settings")
 async def sticker_update_settings(body: SettingsBody, _session: AdminWriteSession) -> dict[str, Any]:
+    current = load_settings()
+    values = body.model_dump()
+    for key in _PRIVATE_FIELDS:
+        if values.get(key) is None:
+            values[key] = getattr(current, key)
     try:
         settings = StickerSettings.model_validate(
             {
-                **body.model_dump(),
+                **values,
                 "allowed_groups": _group_list(body.allowed_groups, "允许的群"),
                 "blocked_groups": _group_list(body.blocked_groups, "禁用的群"),
             }

@@ -288,6 +288,9 @@ async def build_private_context(
     if groups:
         payload["groups"] = [item.name for item in groups[:MAX_GROUPS]]
     payload["time_of_day"] = time_of_day(now)
+    tasks = _tasks_digest(user_id, now)
+    if tasks:
+        payload["tasks"] = tasks
     assistant = _assistant_digest(user_id, now)
     if assistant:
         style = assistant.get("chat_style") or {}
@@ -312,6 +315,17 @@ def time_of_day(now: datetime) -> str:  # noqa: PLR0911
     if hour < 23:  # noqa: PLR2004
         return "晚上"
     return "深夜"
+
+
+def _tasks_digest(user_id: int, now: datetime) -> list[dict[str, Any]]:
+    """后台小助手任务：没结束的 + 最近结束的；读失败不影响本轮。"""
+
+    from .private_tasks import context_digest
+
+    try:
+        return context_digest(user_id, now)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _assistant_digest(user_id: int, now: datetime) -> dict[str, Any]:

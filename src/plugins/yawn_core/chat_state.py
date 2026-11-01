@@ -133,6 +133,25 @@ def _merge_window_seconds() -> float:
         return 0.0
 
 
+# 连发合并时，被并掉的前几条消息里的图片/文件段先放这里，处理这一轮时取走。
+_burst_media: dict[int, list[dict[str, Any]]] = {}
+
+
+def take_burst_media(user_id: int) -> list[dict[str, Any]]:
+    """取走（并清空）连发合并留下的媒体段。"""
+
+    return _burst_media.pop(int(user_id), [])
+
+
+def _event_media(event: Any) -> list[dict[str, Any]]:
+    try:
+        from .private_chat_bridge import event_media, media_accepted
+
+        return event_media(event) if media_accepted() else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _plain(event: Any) -> str:
     try:
         return str(event.get_plaintext()).strip()
@@ -154,19 +173,32 @@ async def _merge_burst(state: UserChatState, event: Any) -> tuple[Any, str | Non
     texts = [_plain(event)]
     latest = event
     taken = 0
+    earlier_media: list[dict[str, Any]] = []
     while not state.queue.empty() and taken < _CHAT_QUEUE_MAX:
         _bot, nxt, override = state.queue._queue[0]  # type: ignore[attr-defined]
         if override is not None:
             break
         state.queue.get_nowait()
         taken += 1
+        # 被并掉的上一条里的图片/文件不能丢：留给这一轮取走。
+        earlier_media.extend(_event_media(latest))
         latest = nxt
         text = _plain(nxt)
         if text:
             texts.append(text)
     if not taken:
         return event, None, 0
+    user_id = _event_user(latest)
+    if earlier_media and user_id is not None:
+        _burst_media[user_id] = earlier_media
     return latest, "\n".join(t for t in texts if t), taken
+
+
+def _event_user(event: Any) -> int | None:
+    try:
+        return int(event.get_user_id())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _worker_loop(  # noqa: C901

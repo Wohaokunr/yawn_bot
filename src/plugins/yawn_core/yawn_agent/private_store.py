@@ -54,6 +54,8 @@ def empty_record() -> dict[str, Any]:
         "countdowns": [],
         "moods": [],
         "flags": {},
+        # 子智能体任务（private_tasks）：最近 MAX_TASKS 个，旧的自动丢弃
+        "tasks": [],
     }
 
 

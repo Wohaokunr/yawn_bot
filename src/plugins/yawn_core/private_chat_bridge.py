@@ -11,6 +11,7 @@ Agent，Agent 返回 None（没配模型、出错、超额）时再退回原来�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -63,6 +64,20 @@ class PrivateAgentConfig(BaseModel):
     private_agent_proactive: bool = True
     # 连发合并：对话队列里攒着的连续几条消息（等这么多毫秒）合成一轮回复；0 关闭
     private_agent_merge_window_ms: int = Field(default=1500, ge=0, le=10000)
+    # 私聊里收图片/文件/语音：交给 Agent（可放进他的虚拟电脑），关闭后仍只收文字
+    private_agent_accept_media: bool = True
+    # 主从多智能体：主 Agent 可以把耗时任务派给隔离上下文的子智能体在后台做
+    private_agent_tasks_enabled: bool = True
+    # 每人同时最多几个子任务在跑（排队的不算）
+    private_agent_task_per_user: int = Field(default=6, ge=1, le=50)
+    # 全站同时最多几个子任务在跑；其余排队
+    private_agent_task_slots: int = Field(default=30, ge=1, le=200)
+    # 每人每天最多派几个子任务（0 表示不限）
+    private_agent_task_daily: int = Field(default=90, ge=0, le=5000)
+    # 每个子任务最多调用几轮工具
+    private_agent_task_max_rounds: int = Field(default=30, ge=2, le=100)
+    # 每个子任务最长运行多少秒（不含排队），超时按失败汇报
+    private_agent_task_timeout_seconds: int = Field(default=1800, ge=30, le=7200)
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)
@@ -82,6 +97,8 @@ class PrivateTurnRequest:
     time_note: str = ""
     nickname: Optional[str] = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # 本轮（含连发合并进来的）消息里的图片/文件/语音/视频段：{"type", **data}
+    media: list[dict[str, Any]] = field(default_factory=list)
 
 
 # 返回实际送达的文本；None 表示没处理，调用方退回纯对话。
@@ -113,6 +130,71 @@ def auto_reply_available() -> bool:
         and private_agent_config.private_agent_auto_reply
         and _handler is not None
     )
+
+
+# ── 私聊媒体 ─────────────────────────────────────────────────
+
+PRIVATE_MEDIA_TYPES = ("image", "file", "record", "video")
+_MEDIA_LABELS = {"image": "图片", "file": "文件", "record": "语音", "video": "视频"}
+MAX_MEDIA_PER_TURN = 8
+
+
+def event_media(event: Any) -> list[dict[str, Any]]:
+    """事件里的图片/文件/语音/视频段（``{"type": ..., **data}``）；没有返回空列表。"""
+
+    try:
+        message = event.get_message()
+    except Exception:  # noqa: BLE001
+        return []
+    media: list[dict[str, Any]] = []
+    for segment in message:
+        kind = str(getattr(segment, "type", "") or "")
+        if kind not in PRIVATE_MEDIA_TYPES:
+            continue
+        data = dict(getattr(segment, "data", None) or {})
+        media.append({**data, "type": kind})
+        if len(media) >= MAX_MEDIA_PER_TURN:
+            break
+    return media
+
+
+def media_accepted() -> bool:
+    """私聊 Agent 开着、有处理函数且允许收媒体。"""
+
+    return (
+        private_agent_config.private_agent_enabled
+        and private_agent_config.private_agent_accept_media
+        and _handler is not None
+    )
+
+
+def describe_media(media: list[dict[str, Any]]) -> str:
+    """给历史和模型看的占位：[图片] [文件: 报表.xlsx]。"""
+
+    labels = []
+    for item in media:
+        label = _MEDIA_LABELS.get(str(item.get("type")), "附件")
+        name = str(item.get("name") or "") if item.get("type") == "file" else ""
+        labels.append(f"[{label}: {name[:40]}]" if name else f"[{label}]")
+    return " ".join(labels)
+
+
+# ── 每位用户的回合锁 ─────────────────────────────────────────
+# 对话 worker 的一轮和子任务完成后的汇报轮都要持有它，保证同一个人的私聊里
+# 不会两轮交错发消息、交错写会话。
+
+_turn_locks: dict[int, asyncio.Lock] = {}
+
+
+def user_turn_lock(user_id: int) -> asyncio.Lock:
+    lock = _turn_locks.get(int(user_id))
+    if lock is None:
+        if len(_turn_locks) > 4096:  # noqa: PLR2004
+            for key in [k for k, v in _turn_locks.items() if not v.locked()]:
+                _turn_locks.pop(key, None)
+        lock = asyncio.Lock()
+        _turn_locks[int(user_id)] = lock
+    return lock
 
 
 # ── 成员对自动接管的选择 ─────────────────────────────────────
@@ -243,6 +325,8 @@ def reset_state_for_tests() -> None:
 
 
 __all__ = [
+    "MAX_MEDIA_PER_TURN",
+    "PRIVATE_MEDIA_TYPES",
     "PRIVATE_MEMORY_LABELS",
     "PRIVATE_MEMORY_SCOPE",
     "PRIVATE_MEMORY_TYPE",
@@ -252,10 +336,14 @@ __all__ = [
     "auto_paused",
     "auto_reply_available",
     "delete_private_memories",
+    "describe_media",
+    "event_media",
     "get_private_handler",
+    "media_accepted",
     "private_agent_config",
     "private_memory_query",
     "register_private_handler",
     "reset_state_for_tests",
     "set_auto_paused",
+    "user_turn_lock",
 ]

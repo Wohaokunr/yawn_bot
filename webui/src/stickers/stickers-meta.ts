@@ -74,7 +74,7 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export const STICKER_NUMERIC_KEYS = ["groupCooldownSeconds", "groupDailyLimit", "maxPerMessage", "menuSize", "memberDailyCollect"] as const;
+export const STICKER_NUMERIC_KEYS = ["groupCooldownSeconds", "groupDailyLimit", "maxPerMessage", "menuSize", "memberDailyCollect", "privateDailyLimit", "privateCooldownSeconds"] as const;
 export type StickerNumericKey = (typeof STICKER_NUMERIC_KEYS)[number];
 
 export const STICKER_SETTING_RANGES: Record<StickerNumericKey, { label: string; min: number; max: number; unit?: string }> = {
@@ -83,6 +83,8 @@ export const STICKER_SETTING_RANGES: Record<StickerNumericKey, { label: string; 
   maxPerMessage: { label: "一次发言最多带", min: 1, max: 3, unit: "张" },
   menuSize: { label: "每轮给模型看的菜单", min: 3, max: 40, unit: "项" },
   memberDailyCollect: { label: "每个成员每天最多收藏", min: 0, max: 200, unit: "张" },
+  privateDailyLimit: { label: "私聊里每人每天最多发", min: 0, max: 1000, unit: "张" },
+  privateCooldownSeconds: { label: "私聊里两次表情包至少间隔", min: 0, max: 86400, unit: "秒" },
 };
 
 export function validateStickerSettings(settings: StickerSettings): Record<string, string> {

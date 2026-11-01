@@ -143,6 +143,57 @@ export function InboxPolicyCard({
   );
 }
 
+/** 「私聊里的虚拟电脑」：每位好友一个独立工作区 p<QQ>，不占群配额。 */
+export function PrivateComputerCard({
+  draft,
+  server,
+  errors,
+  onChange,
+}: {
+  draft: SandboxSettings;
+  server: SandboxSettings;
+  errors: Record<string, string>;
+  onChange: <K extends keyof SandboxSettings>(key: K, value: SandboxSettings[K]) => void;
+}): React.JSX.Element {
+  const off = !draft.enabled || !draft.privateEnabled;
+  return (
+    <Card size="small" title="私聊里的虚拟电脑" className="sbx-card-wide">
+      <div className="sbx-switch-row">
+        <Switch
+          checked={draft.privateEnabled}
+          disabled={!draft.enabled}
+          onChange={(value) => onChange("privateEnabled", value)}
+          aria-label="私聊里的虚拟电脑"
+        />
+        <div>
+          <strong>私聊 Agent 和它的后台小助手可以用虚拟电脑</strong>
+          <span className="sbx-muted">
+            每位好友一个独立工作区 p&lt;QQ&gt;，群里和其他人都看不到；不占群和成员的次数。产物由私聊 Agent 直接发图片或文件给本人。
+            {!draft.enabled && " 上面的总开关关着，私聊也用不了。"}
+          </span>
+        </div>
+      </div>
+      <div className="sbx-switch-row">
+        <Switch
+          checked={draft.privateInbox}
+          disabled={off || !draft.inboxEnabled}
+          onChange={(value) => onChange("privateInbox", value)}
+          aria-label="私聊附件入箱"
+        />
+        <div>
+          <strong>私聊发来的附件自动放进他的电脑</strong>
+          <span className="sbx-muted">图片、文件等放进他工作区的 inbox/，类型和单个大小沿用上面「群聊附件入箱」的设置。</span>
+        </div>
+      </div>
+      <div className="sbx-field-grid">
+        {(["privateDailyRuns", "privateInboxDailyMb"] as NumericKey[]).map((key) => (
+          <NumericField key={key} field={key} draft={draft} server={server} errors={errors} disabled={off} onChange={(field, value) => onChange(field, value)} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function GroupListField({
   label,
   value,
@@ -222,6 +273,26 @@ function UsageTables({ usage }: { usage: SandboxUsage }): React.JSX.Element {
           },
         ]}
       />
+      {usage.private && (
+        <Table
+          size="small"
+          rowKey="userId"
+          title={() => "今日私聊用量（前 50）"}
+          dataSource={usage.private}
+          pagination={false}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="今天还没有人在私聊里用过" /> }}
+          columns={[
+            { title: "用户", dataIndex: "userId", render: (value: string) => `${value}（p${value}）` },
+            {
+              title: "次数",
+              dataIndex: "runs",
+              width: 120,
+              render: (value: number) => <Tag color={usage.privateLimit && value >= usage.privateLimit ? "red" : undefined}>{value} / {usage.privateLimit ?? "—"}</Tag>,
+            },
+            { title: "入箱", dataIndex: "inboxBytes", width: 110, render: (value: number) => `${(value / 1024 / 1024).toFixed(1)} MB` },
+          ]}
+        />
+      )}
     </div>
   );
 }
@@ -334,6 +405,8 @@ export function PolicyTab({ status }: { status: SandboxStatus }): React.JSX.Elem
         </Card>
 
         <InboxPolicyCard draft={draft} server={server} errors={errors} runnerUploadMb={status.health?.maxUploadMb} onChange={update} />
+
+        <PrivateComputerCard draft={draft} server={server} errors={errors} onChange={update} />
 
         {LIMIT_SECTIONS.map((section) => (
           <Card size="small" title={section.title} key={section.title}>

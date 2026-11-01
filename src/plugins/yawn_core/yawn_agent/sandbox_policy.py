@@ -69,6 +69,12 @@ class SandboxSettings(BaseModel):
     inbox_max_per_turn: int = Field(default=6, ge=1, le=20)
     inbox_history_minutes: int = Field(default=180, ge=0, le=2880)
     inbox_group_daily_mb: int = Field(default=500, ge=0, le=20000)
+    # ── 私聊虚拟电脑（每位用户一个独立工作区 p<QQ>）──────────────────────────
+    private_enabled: bool = True
+    private_daily_runs: int = Field(default=500, ge=0, le=10000)
+    # 私聊发来的图片/文件自动放进他的电脑 inbox/
+    private_inbox: bool = True
+    private_inbox_daily_mb: int = Field(default=200, ge=0, le=20000)
 
     def limits(self, *, timeout_seconds: int | None = None) -> dict[str, int]:
         timeout = self.timeout_seconds
@@ -148,9 +154,19 @@ class _Store:
         except (OSError, ValueError):
             data = {}
         if not isinstance(data, dict) or data.get("day") != today:
-            return {"day": today, "groups": {}, "members": {}, "inbox": {}}
+            return {
+                "day": today,
+                "groups": {},
+                "members": {},
+                "inbox": {},
+                "private": {},
+                "private_inbox": {},
+            }
         data.setdefault("groups", {})
         data.setdefault("members", {})
+        for key in ("private", "private_inbox"):
+            if not isinstance(data.get(key), dict):
+                data[key] = {}
         if not isinstance(data.get("inbox"), dict):
             data["inbox"] = {}
         return data
@@ -186,6 +202,26 @@ class _Store:
             with contextlib.suppress(OSError):
                 self._write_json(self.usage_path(), data)
             return data
+
+    def adjust_private(self, user_id: int, delta: int) -> int:
+        with self._lock:
+            data = self._load_usage()
+            key = str(int(user_id))
+            data["private"][key] = max(int(data["private"].get(key, 0)) + delta, 0)
+            with contextlib.suppress(OSError):
+                self._write_json(self.usage_path(), data)
+            return int(data["private"][key])
+
+    def add_private_inbox(self, user_id: int, size: int) -> int:
+        with self._lock:
+            data = self._load_usage()
+            key = str(int(user_id))
+            data["private_inbox"][key] = max(
+                int(data["private_inbox"].get(key, 0)) + size, 0
+            )
+            with contextlib.suppress(OSError):
+                self._write_json(self.usage_path(), data)
+            return int(data["private_inbox"][key])
 
     def cooldown_remaining(self, key: str, seconds: int) -> float:
         if seconds <= 0:
@@ -386,6 +422,102 @@ def quota_status(group_id: int, user_id: int | None) -> dict[str, Any]:
     return status
 
 
+# ── 私聊虚拟电脑 ────────────────────────────────────────────────────────
+
+
+def private_exposure_reason(
+    health: dict[str, Any] | None, health_error: SandboxError | None
+) -> str | None:
+    """私聊里虚拟电脑当前能不能用；None 表示可用。"""
+
+    settings = load_settings()
+    if (
+        not settings.enabled
+        or not settings.private_enabled
+        or settings.private_daily_runs <= 0
+    ):
+        return "sandbox_closed"
+    if health_error is not None or health is None:
+        return "sandbox_offline"
+    if not settings.allow_unisolated and not _isolated(health):
+        return "sandbox_unsafe"
+    return None
+
+
+@dataclass(slots=True)
+class PrivateRunReservation:
+    user_id: int
+    settings: SandboxSettings
+    refunded: bool = False
+    previous_run: float | None = None
+
+    def refund(self) -> None:
+        if self.refunded:
+            return
+        self.refunded = True
+        _store.adjust_private(self.user_id, -1)
+        _store.restore_run(f"p:{self.user_id}", self.previous_run)
+
+
+async def reserve_private_run(
+    user_id: int, *, skip_cooldown: bool = False
+) -> PrivateRunReservation:
+    """私聊运行一次代码：总开关 → 私聊开关 → 在线与隔离 → 冷却 → 每人每日次数。"""
+
+    settings = load_settings()
+    if not settings.enabled or not settings.private_enabled:
+        raise SandboxPolicyError("sandbox_closed", "管理员没有开放私聊里的虚拟电脑")
+    health, error = await cached_health()
+    if error is not None or health is None:
+        raise SandboxPolicyError(
+            "sandbox_offline", f"代码沙箱当前不可用：{error or '未知原因'}"
+        )
+    if not settings.allow_unisolated and not _isolated(health):
+        raise SandboxPolicyError(
+            "sandbox_unsafe", "代码沙箱的隔离自检没有通过，管理员需要先检查部署"
+        )
+    if not health.get("accepting_runs", True):
+        raise SandboxPolicyError("sandbox_unsafe", "代码沙箱当前拒绝执行，请联系管理员")
+    key = f"p:{user_id}"
+    remaining = (
+        0.0
+        if skip_cooldown
+        else _store.cooldown_remaining(key, settings.member_cooldown_seconds)
+    )
+    if 0 < remaining <= MAX_COOLDOWN_WAIT:
+        await asyncio.sleep(remaining)
+        remaining = 0.0
+    if remaining > 0:
+        raise SandboxPolicyError(
+            "cooldown", f"运行得太频繁了，请 {remaining:.0f} 秒后再试（配额冷却）"
+        )
+    used = int(_store.usage()["private"].get(str(int(user_id)), 0))
+    if used >= settings.private_daily_runs:
+        raise SandboxPolicyError(
+            "member_quota",
+            f"你今天在私聊里的虚拟电脑次数已用完（配额 {settings.private_daily_runs} 次）",
+        )
+    _store.adjust_private(user_id, 1)
+    previous = _store.mark_run(key)
+    return PrivateRunReservation(int(user_id), settings, previous_run=previous)
+
+
+def private_usage(user_id: int) -> dict[str, int]:
+    settings = load_settings()
+    usage = _store.usage()
+    used = int(usage["private"].get(str(int(user_id)), 0))
+    return {
+        "used": used,
+        "limit": settings.private_daily_runs,
+        "left": max(settings.private_daily_runs - used, 0),
+        "inbox_bytes": int(usage["private_inbox"].get(str(int(user_id)), 0)),
+    }
+
+
+def record_private_inbox(user_id: int, size: int) -> int:
+    return _store.add_private_inbox(user_id, size)
+
+
 def reset_state_for_tests() -> None:
     global _store  # noqa: PLW0603
     _store = _Store()
@@ -395,6 +527,7 @@ __all__ = [
     "INBOX_MEDIA_TYPES",
     "MAX_COOLDOWN_WAIT",
     "STATE_DIR",
+    "PrivateRunReservation",
     "RunReservation",
     "SandboxPolicyError",
     "SandboxSettings",
@@ -403,8 +536,12 @@ __all__ = [
     "inbox_usage",
     "load_settings",
     "member_usage",
+    "private_exposure_reason",
+    "private_usage",
     "quota_status",
     "record_inbox_usage",
+    "record_private_inbox",
+    "reserve_private_run",
     "reserve_run",
     "save_settings",
     "usage_snapshot",

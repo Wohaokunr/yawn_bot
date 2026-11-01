@@ -35,6 +35,9 @@ const settings: StickerSettings = {
   collectAdminOnly: false,
   memberDailyCollect: 10,
   maxBytes: 3145728,
+  privateEnabled: true,
+  privateDailyLimit: 20,
+  privateCooldownSeconds: 20,
 };
 
 function sticker(overrides: Partial<Sticker>): Sticker {

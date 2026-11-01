@@ -52,6 +52,10 @@ const defaults: SandboxSettings = {
   inboxMaxPerTurn: 6,
   inboxHistoryMinutes: 180,
   inboxGroupDailyMb: 500,
+  privateEnabled: true,
+  privateDailyRuns: 500,
+  privateInbox: true,
+  privateInboxDailyMb: 200,
 };
 
 describe("格式化", () => {

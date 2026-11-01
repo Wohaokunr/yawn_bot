@@ -84,6 +84,11 @@ export interface SandboxSettings {
   inboxMaxPerTurn: number;
   inboxHistoryMinutes: number;
   inboxGroupDailyMb: number;
+  /** 私聊虚拟电脑（每人一个工作区 p<QQ>）。 */
+  privateEnabled: boolean;
+  privateDailyRuns: number;
+  privateInbox: boolean;
+  privateInboxDailyMb: number;
 }
 
 export type SandboxInboxMode = "always" | "sandbox_turns" | "off";
@@ -158,6 +163,9 @@ export interface SandboxUsage {
   members: SandboxUsageRow[];
   groupLimit: number;
   memberLimit: number;
+  /** 私聊虚拟电脑今日用量（旧后端没有）。 */
+  private?: Array<{ userId: string; runs: number; inboxBytes: number }>;
+  privateLimit?: number;
 }
 
 export interface SandboxStatus {

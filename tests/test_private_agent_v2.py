@@ -57,7 +57,9 @@ async def _run(ctx, name, **args):
 
 def test_tool_table_is_complete_and_safe() -> None:
     names = [tool.name for tool in ptools.ALL_TOOLS]
-    assert len(names) == len(set(names)) == 25
+    assert len(names) == len(set(names)) == 29
+    # 虚拟电脑 2 个 + 小助手任务 2 个，只在可用时才出现在 schema 里
+    assert set(names) >= ptools.COMPUTER_NAMES | ptools.TASK_NAMES
     for tool in ptools.ALL_TOOLS:
         assert "user_id" not in tool.properties
         assert tool.schema()["function"]["parameters"]["additionalProperties"] is False

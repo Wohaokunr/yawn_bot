@@ -89,6 +89,61 @@ export interface UserPrivateAgent {
   memoryAvailable: boolean;
   facts: PrivateFact[];
   removed?: number;
+  /** 后台小助手与私聊虚拟电脑（旧后端没有这些字段）。 */
+  tasksEnabled?: boolean;
+  taskLimits?: { perUser: number; daily: number; timeoutSeconds: number };
+  tasks?: PrivateHelperTask[];
+  tasksToday?: number;
+  computer?: { workspace: string; runsToday: number; dailyLimit: number; inboxBytes: number } | null;
+  cancelled?: boolean;
+}
+
+export type PrivateTaskState = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
+
+export interface PrivateHelperTask {
+  id: string;
+  title: string;
+  goal?: string;
+  state: PrivateTaskState;
+  status: string;
+  toolsets: string[];
+  createdAt?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  progress: Array<{ at?: string; note: string; step?: number | null; total?: number | null }>;
+  summary?: string | null;
+  error?: string | null;
+  question?: string | null;
+  files: string[];
+  reported: boolean;
+  held: boolean;
+}
+
+export const TASK_STATE_COLORS: Record<PrivateTaskState, string> = {
+  queued: "default",
+  running: "processing",
+  blocked: "gold",
+  done: "green",
+  failed: "red",
+  cancelled: "default",
+};
+
+const TOOLSET_LABELS: Record<string, string> = { web: "联网", computer: "虚拟电脑", toolbox: "小工具箱" };
+
+/** 任务还能不能取消（排队、进行中、等回答）。 */
+export function taskCancellable(task: Pick<PrivateHelperTask, "state">): boolean {
+  return task.state === "queued" || task.state === "running" || task.state === "blocked";
+}
+
+/** 一行任务的“结果/进度”文字。 */
+export function taskOutcomeText(task: PrivateHelperTask): string {
+  if (task.state === "done") return task.summary || "已完成";
+  if (task.state === "failed") return task.error || "没做成";
+  if (task.state === "blocked") return `等回答：${task.question ?? ""}`;
+  const last = task.progress[task.progress.length - 1];
+  if (!last) return task.state === "queued" ? "排队中" : "刚开始";
+  const counter = last.step && last.total ? ` ${last.step}/${last.total}` : last.step ? ` 第${last.step}步` : "";
+  return `${counter.trim() ? `${counter.trim()}：` : ""}${last.note}`;
 }
 
 // ── 纯函数（便于测试） ─────────────────────────────────────────
@@ -316,6 +371,65 @@ export function PrivateAgentPanel({ userId }: { userId: string }): React.JSX.Ele
         </Descriptions.Item>
       </Descriptions>
     </Card>
+    {data.tasks && <Card
+      size="small"
+      title="后台小助手"
+      extra={data.taskLimits && <Text type="secondary">
+        今日 {data.tasksToday ?? 0} / {data.taskLimits.daily} 个 · 同时 {data.taskLimits.perUser} 个 · 每个 {Math.round(data.taskLimits.timeoutSeconds / 60)} 分钟
+      </Text>}
+    >
+      {data.tasksEnabled === false && <Alert type="info" showIcon message="后台小助手已关闭（PRIVATE_AGENT_TASKS_ENABLED）" style={{ marginBottom: 8 }} />}
+      <Table
+        size="small"
+        rowKey="id"
+        pagination={false}
+        dataSource={data.tasks}
+        locale={{ emptyText: "还没有派过任务" }}
+        expandable={{
+          rowExpandable: (row) => row.progress.length > 0 || row.files.length > 0,
+          expandedRowRender: (row) => <Space direction="vertical" size={2}>
+            {row.goal && <Text type="secondary">目标：{row.goal}</Text>}
+            {row.progress.map((item, index) => <Text key={index}>
+              {item.step ? `${item.step}${item.total ? `/${item.total}` : ""} ` : "· "}{item.note}
+              {item.at && <Text type="secondary"> （{item.at}）</Text>}
+            </Text>)}
+            {row.files.map((ref) => <Text key={ref} code>{ref}</Text>)}
+          </Space>,
+        }}
+        columns={[
+          { title: "编号", dataIndex: "id", width: 64 },
+          { title: "任务", dataIndex: "title" },
+          {
+            title: "状态",
+            width: 120,
+            render: (_, row) => <Space size={4} wrap>
+              <Tag color={TASK_STATE_COLORS[row.state]}>{row.status}</Tag>
+              {row.held && <Tag>免打扰中待汇报</Tag>}
+            </Space>,
+          },
+          { title: "工具", dataIndex: "toolsets", render: (value: string[]) => value.map((key) => TOOLSET_LABELS[key] ?? key).join("、") },
+          { title: "进度 / 结果", render: (_, row) => taskOutcomeText(row) },
+          { title: "派出", dataIndex: "createdAt", width: 150 },
+          {
+            title: "",
+            width: 64,
+            render: (_, row) => taskCancellable(row) && (
+              <Popconfirm
+                title={`取消「${row.title}」？`}
+                description="小助手会立刻停下，不会再汇报。"
+                onConfirm={() => run(`${base}/tasks/${encodeURIComponent(row.id)}`, { method: "DELETE" }, "已取消")}
+              >
+                <Button type="link" danger size="small">取消</Button>
+              </Popconfirm>
+            ),
+          },
+        ]}
+      />
+      {data.computer && <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
+        虚拟电脑（工作区 {data.computer.workspace}）：今日运行 {data.computer.runsToday} / {data.computer.dailyLimit} 次，
+        附件入箱 {(data.computer.inboxBytes / 1024 / 1024).toFixed(1)} MB
+      </Text>}
+    </Card>}
     <Card
       size="small"
       title="私聊记忆"
