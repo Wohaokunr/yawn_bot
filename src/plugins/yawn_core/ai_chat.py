@@ -536,10 +536,14 @@ async def _process_chat(  # noqa: C901
     if reply_context:
         enhanced_content = f"{reply_context}\n\n[用户当前消息]: {user_input}"
 
+    # commit 会让 ORM 对象过期（expire_on_commit=True），之后再读 chat_session.id
+    # 会在异步会话里触发 MissingGreenlet，导致整轮失败：先把 id 缓存下来。
+    chat_session_id = chat_session.id
+
     # 保存用户消息并先行提交：
     # 即使后续 AI 调用失败或被取消，用户消息也不丢失
     user_msg = ChatMessage(
-        session_id=chat_session.id,
+        session_id=chat_session_id,
         role="user",
         content=enhanced_content,
         created_at=_now_bj(),
@@ -556,7 +560,7 @@ async def _process_chat(  # noqa: C901
 
     # 加载历史；私聊 Agent 可用时先交给它（人设、工具、跨群关系），
     # 它返回 None（未配置/出错/超额）再退回流式纯对话。
-    history = await _load_history(session, chat_session.id, time_prefix)
+    history = await _load_history(session, chat_session_id, time_prefix)
     reply_text = await _try_private_agent(
         bot,
         event,
@@ -573,7 +577,7 @@ async def _process_chat(  # noqa: C901
     # 仅持久化有效回复；致歉提示不入库，避免污染上下文
     if reply_text:
         ai_msg = ChatMessage(
-            session_id=chat_session.id,
+            session_id=chat_session_id,
             role="assistant",
             content=reply_text,
             created_at=_now_bj(),
