@@ -18,6 +18,7 @@ import { CommandPalette } from "./command-palette";
 import { ScrollRegion } from "./layout";
 import { ADMIN_NAV, GUEST_NAV, homePathForRole, type NavEntry, navForRole, selectedNavKey, USER_NAV } from "./nav-config";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
+import { ThemeToggle } from "./theme";
 
 const { Header, Sider, Content } = Layout;
 type MenuItem = Required<MenuProps>["items"][number];
@@ -308,6 +309,7 @@ export function Shell({
               </Tag>
             )}
             {!limited && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
+            <ThemeToggle />
             <Tooltip title={isGuest ? "退出访客" : "退出登录"}>
               <Button
                 className="logout-button"

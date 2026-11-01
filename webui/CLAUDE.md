@@ -26,7 +26,8 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | `src/app-shell.tsx`、`src/layout.tsx`、`src/command-palette.tsx` | 外壳、页面框架、⌘K 命令面板 |
 | `src/api.ts`、`src/auth-session.ts`、`src/types.ts` | 统一 `fetch('/webui/api/v1…')`（CSRF、错误信封）、`/stream` WebSocket、会话、共享类型 |
 | `src/shared.tsx` | 通用组件与格式化 helper |
-| 样式 | `design-system.css`（设计 token）、`layout.css`、`interaction.css`、`theme-anime.css`、`styles.css`、`glass.ts` |
+| 样式 | `design-system.css`（设计 token）、`layout.css`、`interaction.css`、`theme-anime.css`（浅色语义变量 `--bg/--surface/--ink/--brand-*`）、`theme-dark.css`（深色覆盖 + 状态色 `--success/--warning/--danger/--info/--purple` 及 `*-bg`）、`styles.css`、`glass.ts` |
+| 主题 | `src/theme.tsx`：`ThemeProvider`（含 antd `ConfigProvider`，浅/深两套 token）、`useThemeMode()`、顶栏 `ThemeToggle`；偏好存 `localStorage` 的 `yawnbot.theme`（缺省跟随系统），生效值写 `<html data-theme>`，`index.html` 内联脚本在首帧前同步设置防闪白 |
 
 **页面**（路由 → 文件 → 后端模块）
 
@@ -51,6 +52,8 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | 登录 | `login.tsx`（运维/QQ 账号/访客三种；`?login=qq` 或上次用过的方式存在 `localStorage` 的 `yawnbot.login.mode`；QQ 账号含设置码设密码流程） | `auth_routes.py` |
 
 测试与源码同目录（`*.test.ts(x)`）。
+
+**深色模式约定**：新页面颜色只用 CSS 变量或 antd token，不写死 `#fff`/浅色；需要深色专属写法时在自己的 css 里用 `:root[data-theme="dark"] .xxx {…}`；TSX 里按主题分支用 `useThemeMode().resolved`。导出的图片（如关系图谱 SVG/PNG）保持浅色底。
 
 ## 关联位置（跨目录）
 
