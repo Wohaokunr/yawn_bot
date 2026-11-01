@@ -188,6 +188,10 @@ async def _merge_burst(state: UserChatState, event: Any) -> tuple[Any, str | Non
     （带 override_text 的）不合并，留在队列里按原顺序处理。
     """
 
+    # 上一轮没取走的媒体段（那一轮提前返回等）不能留给这一轮，否则旧图会被当成新发的。
+    stale_user = _event_user(event)
+    if stale_user is not None:
+        _burst_media.pop(stale_user, None)
     window = _merge_window_seconds()
     if window <= 0:
         return event, None, 0

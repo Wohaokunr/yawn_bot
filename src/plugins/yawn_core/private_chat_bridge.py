@@ -175,11 +175,25 @@ def media_accepted() -> bool:
     )
 
 
+def is_sticker_media(item: dict[str, Any]) -> bool:
+    """NapCat 用 sub_type=1 标记表情包图片（与 message_parser._is_sticker 一致）。"""
+
+    if str(item.get("type") or "") != "image":
+        return False
+    sub_type = item.get("sub_type")
+    if sub_type is None:
+        sub_type = item.get("subType")
+    return str(sub_type or "") == "1"
+
+
 def describe_media(media: list[dict[str, Any]]) -> str:
-    """给历史和模型看的占位：[图片] [文件: 报表.xlsx]。"""
+    """给历史和模型看的占位：[图片] [表情包] [文件: 报表.xlsx]。"""
 
     labels = []
     for item in media:
+        if is_sticker_media(item):
+            labels.append("[表情包]")
+            continue
         label = _MEDIA_LABELS.get(str(item.get("type")), "附件")
         name = str(item.get("name") or "") if item.get("type") == "file" else ""
         labels.append(f"[{label}: {name[:40]}]" if name else f"[{label}]")
@@ -346,6 +360,7 @@ __all__ = [
     "describe_media",
     "event_media",
     "get_private_handler",
+    "is_sticker_media",
     "media_accepted",
     "private_agent_config",
     "private_memory_query",

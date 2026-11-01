@@ -102,6 +102,7 @@ async def test_caption_route_attaches_description_and_remembers(monkeypatch) -> 
     vision = await pvision.prepare_private_vision(None, 42, [{"type": "image", "file": "x"}], load=load, route="caption")
     assert any("橘猫" in note for note in vision.notes)
     assert pvision.recent_captions(42) == ["一只趴在键盘上的橘猫"]
+    assert pvision.history_notes(vision) == [n for n in vision.notes if "橘猫" in n]
     messages = [{"role": "user", "content": "[图片] 你看这是啥"}]
     pvision.attach_to_messages(messages, vision)
     assert "橘猫" in messages[0]["content"] and "你看这是啥" in messages[0]["content"]
@@ -122,6 +123,16 @@ async def test_direct_route_attaches_image_and_replays_on_follow_up(monkeypatch)
     assert messages[0]["content"] == [{"type": "text", "text": "看图"}, IMAGE_BLOCK]
     follow = await pvision.prepare_private_vision(None, 42, [], route="direct")
     assert follow.replayed and follow.blocks == [IMAGE_BLOCK]
+    # 重附的旧图回到当初发图的那条历史消息上，本条只注明没有新图片。
+    later = [
+        {"role": "user", "content": "[图片]"},
+        {"role": "assistant", "content": "哈哈"},
+        {"role": "user", "content": "..."},
+    ]
+    pvision.attach_to_messages(later, follow)
+    assert later[0]["content"] == [{"type": "text", "text": "[图片]"}, IMAGE_BLOCK]
+    assert isinstance(later[2]["content"], str)
+    assert pvision.NO_NEW_IMAGE_NOTE in later[2]["content"]
 
 
 @pytest.mark.asyncio
