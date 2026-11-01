@@ -418,7 +418,14 @@ def test_werewolf_availability_tracks_role_and_action_window(
     host_context = catalog.CommandContext(
         user_id=1, group_id=20, is_room_host=True, is_player=True
     )
-    assert context_module.get_available_commands(host_context) == {"狼人杀", "战绩"}
+    assert context_module.get_available_commands(host_context) == {
+        "狼人杀",
+        "战绩",
+        "狼人规则",
+        "狼人复盘",
+        "再来一局",
+        "狼人排行",
+    }
     assert "创建房间后" in context_module.get_help_hint(host_context)
 
     current_game = game

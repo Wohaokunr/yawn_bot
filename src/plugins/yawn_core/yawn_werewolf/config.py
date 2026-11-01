@@ -10,8 +10,9 @@ from pydantic import BaseModel
 class Config(BaseModel):
     """狼人杀玩法与超时配置。"""
 
-    # 最小开局人数
-    ww_min_players: int = 9
+    # 最小开局人数（实际门槛取它与当前板子最少人数的较大者；
+    # 默认 6 让「新手局」6-8 人小板子可用，标准板子仍从 9 人起）
+    ww_min_players: int = 6
     # 满员自动开局人数
     ww_max_players: int = 12
 
