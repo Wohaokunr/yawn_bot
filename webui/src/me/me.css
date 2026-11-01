@@ -1,0 +1,343 @@
+/* QQ 个人账号的自助页面（我的主页 / 群 / 私聊人设 / 账号安全）。
+   颜色只用主题变量，深色模式由 theme-dark.css 切换变量值；状态色带浅色回退。 */
+
+.me-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.me-hint {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.me-tab-hint {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.me-banner {
+  margin-bottom: 4px;
+}
+
+/* 概览卡片 */
+.me-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.me-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  color: var(--ink);
+  min-width: 0;
+}
+
+.me-card-link {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.me-card-link:hover,
+.me-card-link:focus-visible {
+  border-color: var(--brand-200);
+  box-shadow: var(--shadow-sm);
+  color: var(--ink);
+}
+
+.me-card-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--brand-50);
+  color: var(--brand);
+  font-size: 18px;
+}
+
+.me-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.me-card-main {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.me-card-sub {
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.me-card-arrow {
+  flex: none;
+  color: var(--ink-tertiary);
+}
+
+.me-inline-tag {
+  margin-inline-start: 6px;
+}
+
+/* 我管理的群 */
+.me-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.me-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin-bottom: 10px;
+  color: var(--ink);
+}
+
+.me-group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.me-group-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  min-width: 0;
+}
+
+.me-group-row:hover,
+.me-group-row:focus-visible {
+  border-color: var(--brand-200);
+  color: var(--ink);
+}
+
+.me-group-avatar {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--brand-100);
+  color: var(--brand-active);
+  font-weight: 700;
+}
+
+.me-group-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.me-group-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.me-group-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.me-group-actions {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ink-tertiary);
+}
+
+.me-role-tag {
+  margin: 0;
+}
+
+.me-role-tag.is-owner {
+  color: var(--warning, #d97706);
+  background: var(--warning-bg, #fff7e6);
+  border-color: transparent;
+}
+
+.me-role-tag.is-admin {
+  color: var(--info, #3b82f6);
+  background: var(--info-bg, #eef4ff);
+  border-color: transparent;
+}
+
+.me-safety-note .ant-alert-description {
+  font-size: 13px;
+}
+
+/* 群功能 */
+.me-feature-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+/* 私聊人设 */
+.me-persona-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.me-persona-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.me-quick-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.me-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.me-fieldset:disabled {
+  opacity: 0.75;
+}
+
+.me-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.me-summary {
+  color: var(--ink);
+  margin-bottom: 6px !important;
+}
+
+.me-compiled {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.me-compiled summary {
+  cursor: pointer;
+}
+
+.me-compiled pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.me-history {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 账号安全 */
+.me-account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.me-account-grid .ant-descriptions {
+  margin-bottom: 12px;
+}
+
+.me-strength {
+  margin: -12px 0 12px;
+}
+
+.me-tip-list ul {
+  margin: 0 0 8px;
+  padding-inline-start: 18px;
+  color: var(--ink-secondary);
+}
+
+.me-tip-list li {
+  margin-bottom: 4px;
+}
+
+.me-header-tag {
+  margin: 0;
+  color: var(--brand-active);
+  background: var(--brand-50);
+  border-color: var(--brand-100);
+}
+
+@media (max-width: 900px) {
+  .me-persona-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .me-group-actions {
+    display: none;
+  }
+
+  .me-section,
+  .me-feature-card {
+    padding: 12px;
+  }
+
+  .me-actions {
+    flex-direction: column;
+  }
+}

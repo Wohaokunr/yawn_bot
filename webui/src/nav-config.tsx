@@ -7,15 +7,18 @@ import {
   EyeOutlined,
   GlobalOutlined,
   FieldTimeOutlined,
+  HomeOutlined,
   KeyOutlined,
   MessageOutlined,
   ReadOutlined,
+  LockOutlined,
   SettingOutlined,
   SmileOutlined,
   TeamOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import type { ReactNode } from "react";
+import type { SessionRole } from "./auth-session";
 
 // 侧栏与命令面板共用同一份导航表，避免两处入口不同步。
 export interface NavEntry {
@@ -48,10 +51,36 @@ export const GUEST_NAV: NavEntry[] = [
   { key: "/guest", label: "可查看群聊", icon: <EyeOutlined />, group: "访客视图", description: "被授权查看的群聊" },
 ];
 
+// QQ 个人账号（群管理员 / 普通用户）只看自己的东西：管理的群、私聊人设、账号安全。
+export const USER_NAV: NavEntry[] = [
+  { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "我的空间", description: "我管理的群与账号概况", keywords: "home 主页 群 管理" },
+  { key: "/me/persona", label: "私聊人设", icon: <SmileOutlined />, group: "我的空间", description: "调整 Bot 和我私聊时的人设", keywords: "persona 人设 私聊 自称 称呼 性格" },
+  { key: "/me/account", label: "账号安全", icon: <LockOutlined />, group: "我的空间", description: "改密码、退出所有设备", keywords: "password 密码 安全 退出 设备" },
+];
+
+export function navForRole(role: SessionRole): NavEntry[] {
+  if (role === "guest") return GUEST_NAV;
+  if (role === "user") return USER_NAV;
+  return ADMIN_NAV;
+}
+
+export function homePathForRole(role: SessionRole): string {
+  if (role === "guest") return "/guest";
+  if (role === "user") return "/me";
+  return "/overview";
+}
+
 // Agent 工作台属于“群组”这个入口，侧栏高亮跟随群组。
 const NAV_ALIASES: Record<string, string> = { "/agent": "/groups" };
 
-export function selectedNavKey(pathname: string, isGuest: boolean): string {
-  const root = `/${pathname.split("/")[1] || (isGuest ? "guest" : "overview")}`;
+/** 第二个参数兼容旧的 isGuest 布尔值。 */
+export function selectedNavKey(pathname: string, role: boolean | SessionRole): string {
+  const resolved: SessionRole = role === true ? "guest" : role === false ? "admin" : role;
+  if (resolved === "user") {
+    // /me/groups/… 属于“我的主页”；/me/persona、/me/account 各自高亮
+    const second = pathname.split("/")[2] ?? "";
+    return second === "persona" || second === "account" ? `/me/${second}` : "/me";
+  }
+  const root = `/${pathname.split("/")[1] || homePathForRole(resolved).slice(1)}`;
   return NAV_ALIASES[root] ?? root;
 }

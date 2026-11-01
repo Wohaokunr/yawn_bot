@@ -17,6 +17,10 @@ class WebUIConfig(BaseModel):
     webui_admin_token: SecretStr = SecretStr("")
     webui_session_ttl_hours: int = SESSION_TTL_DEFAULT_HOURS
     webui_cookie_secure: bool = False
+    # QQ 用户用私聊里设的密码登录 WebUI 的自助页面（管理的群、自己的私聊人设）
+    webui_user_login_enabled: bool = True
+    # 对外访问地址（如 https://bot.example.com/webui），私聊里发登录链接用
+    webui_public_url: str = ""
 
     @field_validator("webui_session_ttl_hours", mode="before")
     @classmethod

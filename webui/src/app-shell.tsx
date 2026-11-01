@@ -6,6 +6,7 @@ import {
   MenuUnfoldOutlined,
   RobotOutlined,
   SearchOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
 import { Breadcrumb, Button, Drawer, Layout, Menu, Spin, Tag, Tooltip } from "antd";
 import type { MenuProps } from "antd";
@@ -15,7 +16,7 @@ import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
 import { CommandPalette } from "./command-palette";
 import { ScrollRegion } from "./layout";
-import { ADMIN_NAV, GUEST_NAV, type NavEntry, selectedNavKey } from "./nav-config";
+import { ADMIN_NAV, GUEST_NAV, homePathForRole, type NavEntry, navForRole, selectedNavKey, USER_NAV } from "./nav-config";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 
 const { Header, Sider, Content } = Layout;
@@ -35,6 +36,7 @@ function menuItems(entries: NavEntry[]): MenuItem[] {
 
 const ADMIN_NAV_ITEMS = menuItems(ADMIN_NAV);
 const GUEST_NAV_ITEMS = menuItems(GUEST_NAV);
+const USER_NAV_ITEMS = menuItems(USER_NAV);
 
 function readCollapsed(): boolean {
   try {
@@ -68,12 +70,28 @@ const BREADCRUMB_LABELS: Record<string, string> = {
   "guest-access": "访客访问",
   environment: "环境配置",
   guest: "可查看群聊",
+  me: "我的空间",
+};
+
+const USER_BREADCRUMB_LABELS: Record<string, string> = {
+  groups: "我管理的群",
+  persona: "私聊人设",
+  account: "账号安全",
 };
 
 function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { title: React.ReactNode }[] {
   const segments = pathname.split("/").filter(Boolean);
-  const rootPath = role === "guest" ? "/guest" : "/overview";
-  const rootTitle = role === "guest" ? "访客视图" : "管理台";
+  const rootPath = homePathForRole(role);
+  const rootTitle = role === "guest" ? "访客视图" : role === "user" ? "我的空间" : "管理台";
+  if (role === "user") {
+    const items: { title: React.ReactNode }[] = [{ title: <Link to={rootPath}>{rootTitle}</Link> }];
+    const sub = segments[1];
+    if (sub && USER_BREADCRUMB_LABELS[sub]) {
+      items.push({ title: USER_BREADCRUMB_LABELS[sub] });
+      if (sub === "groups" && segments[2]) items.push({ title: `群 ${segments[2]}` });
+    }
+    return items;
+  }
   const items: { title: React.ReactNode }[] = [{ title: <Link to={rootPath}>{rootTitle}</Link> }];
   if (segments.length === 0) return items;
   const root = segments[0];
@@ -99,7 +117,10 @@ export function Shell({
   const navigate = useNavigate();
   const location = useLocation();
   const isGuest = session.role === "guest";
-  const canUseAdminStream = !isGuest && session.capabilities.realtimeAdminStream;
+  const isUser = session.role === "user";
+  // 访客和个人账号都没有管理员实时流、群组搜索与“未保存”跟踪
+  const limited = isGuest || isUser;
+  const canUseAdminStream = !limited && session.capabilities.realtimeAdminStream;
   const [stream, setStream] = useState<"connecting" | "open" | "closed">(
     canUseAdminStream ? "connecting" : "closed",
   );
@@ -108,7 +129,7 @@ export function Shell({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dirtyCount, setDirtyCount] = useState(0);
   const scrollPositions = useRef(new Map<string, number>());
-  const selected = selectedNavKey(location.pathname, isGuest);
+  const selected = selectedNavKey(location.pathname, session.role);
   const crumbs = useMemo(
     () => breadcrumbItems(location.pathname, session.role),
     [location.pathname, session.role],
@@ -117,8 +138,8 @@ export function Shell({
     const tab = new URLSearchParams(location.search).get("tab") ?? "";
     return `${location.pathname}?tab=${tab}`;
   }, [location.pathname, location.search]);
-  const navItems = isGuest ? GUEST_NAV_ITEMS : ADMIN_NAV_ITEMS;
-  const navEntries = isGuest ? GUEST_NAV : ADMIN_NAV;
+  const navItems = isGuest ? GUEST_NAV_ITEMS : isUser ? USER_NAV_ITEMS : ADMIN_NAV_ITEMS;
+  const navEntries: NavEntry[] = navForRole(session.role);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((current) => {
@@ -215,8 +236,8 @@ export function Shell({
     <div className="sider-mascot" aria-hidden="true">
       <span className="sider-mascot-face">=ω=</span>
       <span className="sider-mascot-text">
-        <strong>{isGuest ? "只读巡视中" : "今日也在值班"}</strong>
-        <span>{isGuest ? "访客视图" : stream === "open" ? "实时连接已就绪" : "等待实时连接"}</span>
+        <strong>{isGuest ? "只读巡视中" : isUser ? "欢迎回来" : "今日也在值班"}</strong>
+        <span>{isGuest ? "访客视图" : isUser ? `QQ ${session.userId ?? ""}` : stream === "open" ? "实时连接已就绪" : "等待实时连接"}</span>
       </span>
     </div>
   );
@@ -273,18 +294,20 @@ export function Shell({
               aria-label="搜索页面或群组"
             >
               <SearchOutlined />
-              <span className="palette-trigger-text">{isGuest ? "搜索页面" : "搜索页面或群组"}</span>
+              <span className="palette-trigger-text">{limited ? "搜索页面" : "搜索页面或群组"}</span>
               <kbd className="palette-kbd">Ctrl K</kbd>
             </button>
             {isGuest ? (
               <Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>
+            ) : isUser ? (
+              <Tag className="me-header-tag" icon={<UserOutlined />}>QQ {session.userId}</Tag>
             ) : (
               <Tag className="status-tag" color={stream === "open" ? "green" : "orange"}>
                 <span className="live-dot" />
                 {stream === "open" ? "实时连接" : "正在重连"}
               </Tag>
             )}
-            {!isGuest && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
+            {!limited && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
             <Tooltip title={isGuest ? "退出访客" : "退出登录"}>
               <Button
                 className="logout-button"
@@ -310,7 +333,7 @@ export function Shell({
       <CommandPalette
         open={paletteOpen}
         entries={navEntries}
-        searchGroups={!isGuest}
+        searchGroups={!limited}
         onClose={() => setPaletteOpen(false)}
         onNavigate={go}
       />

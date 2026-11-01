@@ -479,10 +479,30 @@ PERSONA_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
 )
+# 网页个人账号：他想登录 WebUI（管理自己的群、调私聊人设）时用。故意没有“密码”参数，
+# 密码只能他自己发 /网页密码，或者在网页上用设置码设，绝不经过你。
+ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "webui_account",
+        "他的网页（WebUI）个人账号：登录后能看自己当群主/管理员的群的关系图、开关群功能、调你们私聊的人设。"
+        "view 看有没有开通、能管哪些群、怎么登录；setup_code 把一次性设置码直接私聊发给他（你看不到码），"
+        "他去登录页“用设置码设密码”；logout_all 让他的网页账号在所有设备退出。"
+        "你不能替他设密码，也绝不要让他把密码发给你；他说想设密码/忘了密码就用 setup_code，"
+        "或告诉他自己发 /网页密码 新密码。他已经把密码发在聊天里了就提醒他撤回并换一个",
+        {"action": {"type": "string", "enum": ["view", "setup_code", "logout_all"]}},
+        ("action",),
+        writes=True,
+    ),
+)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
-    PRIVATE_TOOLS + EXTRA_TOOLS + PERSONA_TOOLS + COMPUTER_TOOLS + TASK_TOOLS
+    PRIVATE_TOOLS
+    + EXTRA_TOOLS
+    + PERSONA_TOOLS
+    + ACCOUNT_TOOLS
+    + COMPUTER_TOOLS
+    + TASK_TOOLS
 )
 COMPUTER_NAMES = frozenset(tool.name for tool in COMPUTER_TOOLS)
 TASK_NAMES = frozenset(tool.name for tool in TASK_TOOLS)
@@ -884,6 +904,8 @@ async def execute_private_tool(
             result = _task_tool(name, args, ctx)
         elif name == "my_persona":
             result = _persona_tool(args, ctx)
+        elif name == "webui_account":
+            result = await _webui_account_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
@@ -1026,8 +1048,53 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "my_data": frozenset({"wipe"}),
     "tasks": frozenset({"cancel", "answer", "message"}),
     "my_persona": frozenset({"set", "preset", "template", "reset", "undo"}),
+    "webui_account": frozenset({"setup_code", "logout_all"}),
     "computer_files": frozenset({"delete"}),
 }
+
+
+async def _webui_account_tool(
+    args: dict[str, Any], ctx: PrivateToolContext
+) -> dict[str, Any]:
+    """网页个人账号。设置码由 Bot 直接私聊发出，不回给模型，免得进上下文和记录。"""
+
+    from .. import webui_account_commands as wac
+    from .. import webui_accounts
+
+    blocked = wac.feature_blocked_reason()
+    if blocked:
+        raise ToolError(blocked, code=ERROR_PERMISSION, hint="照实告诉他现在用不了")
+    action = str(args.get("action") or "view")
+    if action == "view":
+        account = webui_accounts.get_account(ctx.user_id)
+        groups = await wac.managed_group_names(ctx.user_id)
+        return {
+            "opened": bool(account and account.has_password and not account.disabled),
+            "disabled": bool(account and account.disabled),
+            "password_set_at": account.password_changed_at if account else None,
+            "last_login_at": account.last_login_at if account else None,
+            "how_to_login": f"{wac.login_hint()}，用他的 QQ 号和密码",
+            "managed_groups": groups[:10],
+            "how_to_set_password": "用 setup_code 给他发设置码，或让他自己发 /网页密码 新密码",
+        }
+    if action == "setup_code":
+        if ctx.bot is None:
+            raise ToolError("现在发不了私聊消息", code=ERROR_PERMISSION, hint="让他自己发 /网页密码")
+        try:
+            code = webui_accounts.issue_setup_code(ctx.user_id)
+        except webui_accounts.AccountError as exc:
+            raise ToolError(str(exc), code=ERROR_PERMISSION, hint="照实告诉他") from exc
+        await ctx.bot.send_private_msg(
+            user_id=ctx.user_id, message=wac.setup_code_text(code)
+        )
+        return {
+            "sent": True,
+            "note": "设置码已经单独私聊发给他了（你看不到），10 分钟内有效；别复述设置码",
+        }
+    if action == "logout_all":
+        done = webui_accounts.revoke_sessions(ctx.user_id)
+        return {"done": done, "note": "所有设备已退出" if done else "他还没有网页账号"}
+    raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS, hint="action 用 view/setup_code/logout_all")
 
 
 def _persona_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:

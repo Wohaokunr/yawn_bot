@@ -69,7 +69,14 @@ from ..yawn_agent.tools import (
 from .agent_route_helpers import is_guest_view as _is_guest_view
 from .agent_route_helpers import memory_privacy_clauses as _memory_privacy_clauses
 from .config import API_PATH
-from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
+from .deps import (
+    AdminReadSession,
+    AdminWriteSession,
+    GroupViewSession,
+    RelationViewSession,
+    ok,
+    page_params,
+)
 from .hub import hub
 from .route_helpers import check_version, require_group
 from .route_models import (
@@ -239,7 +246,7 @@ async def _relation_page_mutual(
 @router.get("/agent/groups/{group_id}/relations")
 async def get_relations(  # noqa: PLR0913, PLR0917
     group_id: int,
-    _session: GroupViewSession,
+    _session: RelationViewSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
     search: str = Query(default="", max_length=24),
@@ -331,7 +338,7 @@ async def get_relations(  # noqa: PLR0913, PLR0917
 
 @router.get("/agent/groups/{group_id}/relations/summary")
 async def get_relation_summary(
-    group_id: int, _session: GroupViewSession
+    group_id: int, _session: RelationViewSession
 ) -> dict[str, Any]:
     """Small aggregate used by the table view without loading the full graph."""
 
@@ -439,7 +446,7 @@ async def get_relation_summary(
 
 @router.get("/agent/groups/{group_id}/relations/graph")
 async def get_relation_graph(
-    group_id: int, _session: GroupViewSession
+    group_id: int, _session: RelationViewSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -450,7 +457,7 @@ async def get_relation_graph(
 
 @router.get("/agent/groups/{group_id}/relations/types")
 async def get_relation_types(
-    group_id: int, _session: GroupViewSession
+    group_id: int, _session: RelationViewSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)

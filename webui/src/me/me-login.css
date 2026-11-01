@@ -1,0 +1,24 @@
+/* 登录页里“QQ 账号”模式新增的元素；原有 login-* 类不动。只用主题变量。 */
+.login-setup-hint {
+  margin-bottom: 14px;
+}
+
+.login-code-input input {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+.login-user-switch {
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+}
+
+.login-user-switch .ant-btn-link {
+  color: var(--brand);
+}
+
+.login-user-switch .ant-btn-link:hover {
+  color: var(--brand-hover);
+}

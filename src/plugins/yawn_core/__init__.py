@@ -22,6 +22,7 @@ from . import (
     reminder,
     replay,
     replay_commands,
+    webui_account_commands,
 )
 from .command_catalog import unregister_command_group
 
@@ -44,6 +45,7 @@ __all__ = [
     "replay",
     "replay_commands",
     "webui",
+    "webui_account_commands",
 ]
 
 
