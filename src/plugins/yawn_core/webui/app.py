@@ -48,6 +48,7 @@ from .service import BEIJING_TZ, overview
 from .stickers import router as stickers_router
 from .users import router as users_router
 from .web_search import router as web_search_router
+from .werewolf_admin import router as werewolf_admin_router
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -130,6 +131,7 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(agent_router)
     app.include_router(agent_prompt_router)
     app.include_router(audits_router)
+    app.include_router(werewolf_admin_router)
     app.include_router(games_router)
     app.include_router(fanqie_router)
     app.include_router(rpg_modules_router)

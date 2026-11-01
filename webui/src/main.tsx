@@ -21,6 +21,7 @@ import "./web-search/web-search.css";
 import "./stickers/stickers.css";
 import "./schedules/schedules.css";
 import "./directory/directory.css";
+import "./werewolf/werewolf.css";
 import "./theme-anime.css";
 
 installGlassGlow();

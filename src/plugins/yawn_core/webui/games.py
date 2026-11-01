@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+from enum import Enum
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -144,9 +146,11 @@ _WW_PHASE_LABELS: dict[str, str] = {
     "NIGHT_WITCH": "夜晚",
     "NIGHT_SEER": "夜晚",
     "NIGHT_ELDER": "夜晚",
+    "NIGHT_GUARD": "夜晚",
+    "NIGHT_GRAVEKEEPER": "夜晚",
     "DAY_ANNOUNCE": "天亮结算",
     "LAST_WORDS": "遗言环节",
-    "HUNTER_SHOT": "猎人开枪决策",
+    "HUNTER_SHOT": "死亡技能",
     "BADGE_TRANSFER": "警徽移交",
     "SHERIFF_REGISTER": "警长竞选报名",
     "SHERIFF_SPEECH": "竞选发言",
@@ -194,7 +198,13 @@ def _worker_alive(game: Any) -> bool:
 
 
 def _ww_live_game(state: Any, game: Any) -> dict[str, Any]:
-    """狼人杀单局快照：完整信息（含身份），前端负责默认遮蔽。"""
+    """狼人杀单局快照：完整信息（含身份），前端负责默认遮蔽。
+
+    新字段一律 ``getattr`` 容错读取：玩法子插件演进（房规、阶段截止时间等）
+    与管理台各自合并时，任一方先上线都不应让快照报错。
+    """
+    silenced_seat = getattr(game, "silenced_seat", None)
+    role_requests = getattr(game, "role_requests", None) or {}
     players = [
         {
             "seat": player.seat,
@@ -207,6 +217,17 @@ def _ww_live_game(state: Any, game: Any) -> dict[str, Any]:
             "faction": _enum_value(player.faction),
             "deathRound": player.death_round,
             "deathCause": _enum_value(player.death_cause),
+            # 以下为管理员上帝视角的细节状态，前端在“显示身份”关闭时遮蔽
+            "dmOk": getattr(player, "dm_ok", True),
+            "canVote": getattr(player, "can_vote", True),
+            "idiotRevealed": getattr(player, "idiot_revealed", False),
+            "sheriffCandidate": getattr(player, "sheriff_candidate", False),
+            "ownerSeat": getattr(player, "owner_seat", None),
+            "saveUsed": getattr(player, "save_used", False),
+            "poisonUsed": getattr(player, "poison_used", False),
+            "silenced": silenced_seat is not None and player.seat == silenced_seat,
+            "requestedRole": _enum_value(role_requests.get(player.user_id)),
+            "pendingAction": _ww_pending_kind(game, player.user_id),
         }
         for player in sorted(game.players, key=lambda p: p.seat)
     ]
@@ -215,6 +236,7 @@ def _ww_live_game(state: Any, game: Any) -> dict[str, Any]:
             "userId": user_id,
             "name": state.display_name_of(game, user_id),
             "isAi": user_id < 0,
+            "requestedRole": _enum_value(role_requests.get(user_id)),
         }
         for user_id in game.signup_user_ids
     ]
@@ -235,6 +257,79 @@ def _ww_live_game(state: Any, game: Any) -> dict[str, Any]:
         "workerAlive": _worker_alive(game),
         "players": players,
         "signup": signup,
+        "phaseToken": getattr(game, "phase_token", 0),
+        "silencedSeat": silenced_seat,
+        "sheriffCampaignRound": getattr(game, "sheriff_campaign_round", None),
+        "voteTargets": list(getattr(game, "vote_targets", None) or []),
+        "voteExclude": list(getattr(game, "vote_exclude", None) or []),
+        "eventLogId": getattr(game, "event_log_id", None),
+        "phaseRemaining": _ww_phase_remaining(state, game),
+        "phaseStartedAt": _ww_phase_started_at(game.group_id),
+        "rules": _ww_rules(game),
+    }
+
+
+def _ww_pending_kind(game: Any, user_id: int) -> str | None:
+    """该玩家仍在队列中的行动类型（只读 pending 索引，不出队）。"""
+    pending = getattr(game, "pending_actions", None) or {}
+    for action in pending.values():
+        if getattr(action, "actor_user_id", None) == user_id:
+            return _enum_value(getattr(action, "kind", None))
+    return None
+
+
+def _ww_phase_remaining(state: Any, game: Any) -> float | None:
+    """当前阶段剩余秒数；玩法子插件提供 ``phase_remaining`` 时才有值。"""
+    func = getattr(state, "phase_remaining", None)
+    if not callable(func):
+        return None
+    try:
+        value: Any = func(game)
+    except Exception:  # noqa: BLE001
+        return None
+    if value is None:
+        return None
+    try:
+        return max(0.0, round(float(value), 1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ww_phase_started_at(group_id: int) -> str | None:
+    """最近一次阶段切换的时间（取可视化事件日志里最后一条 phase 事件）。"""
+    game_log = _werewolf_game_log()
+    if game_log is None:
+        return None
+    try:
+        events = game_log.events(group_id)
+    except Exception:  # noqa: BLE001
+        return None
+    for event in reversed(events):
+        if event.type == "phase":
+            return event.ts
+    return None
+
+
+def _ww_rules(game: Any) -> dict[str, Any] | None:
+    """房规快照（玩法子插件新增 ``Game.rules`` 后可用）；只保留标量字段。"""
+    rules: Any = getattr(game, "rules", None)
+    if rules is None:
+        return None
+    try:
+        raw: dict[str, Any]
+        if dataclasses.is_dataclass(rules) and not isinstance(rules, type):
+            raw = dataclasses.asdict(rules)
+        elif callable(dump := getattr(rules, "model_dump", None)):
+            dumped: Any = dump()
+            raw = dict(dumped)
+        else:
+            raw = dict(vars(rules))
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        str(key): _enum_value(value) if not isinstance(value, (bool, int, float)) and value is not None else value
+        for key, value in raw.items()
+        if isinstance(value, (bool, int, float, str, Enum)) or value is None
     }
 
 
@@ -604,9 +699,10 @@ async def _paged_history(
     page_size: int,
     search: str,
     status_filter: str,
+    extra_conditions: list[Any] | None = None,
 ) -> tuple[list[Any], int]:
     """两种战绩表结构一致，共用分页 + 筛选查询。"""
-    conditions = []
+    conditions = list(extra_conditions or [])
     if search:
         pattern = f"%{search}%"
         conditions.append(
@@ -642,21 +738,40 @@ async def werewolf_history(
     status_filter: Literal["all", "running", "finished"] = Query(
         default="all", alias="status"
     ),
+    board: str = Query(default="", max_length=32),
+    winner: Literal["", "wolf", "good"] = Query(default=""),
+    group_id: int | None = Query(default=None, alias="groupId"),
+    user_id: int | None = Query(default=None, alias="userId"),
 ) -> dict[str, Any]:
     if _werewolf_state() is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "狼人杀子插件未加载")
+    from ..data_models.bot_user import BotUser
     from ..yawn_werewolf.models import (  # pyright: ignore[reportMissingImports]
         WerewolfGame,
         WerewolfPlayer,
     )
 
     page, page_size = page_params(page, page_size)
+    extra: list[Any] = []
+    if board:
+        extra.append(WerewolfGame.board == board)
+    if winner:
+        extra.append(WerewolfGame.winner_faction == winner)
+    if group_id is not None:
+        extra.append(WerewolfGame.group_id == group_id)
+    if user_id is not None:
+        extra.append(
+            WerewolfGame.id.in_(
+                select(WerewolfPlayer.game_id).where(WerewolfPlayer.user_id == user_id)
+            )
+        )
     rows, total = await _paged_history(
         WerewolfGame,
         page=page,
         page_size=page_size,
         search=search.strip(),
         status_filter=status_filter,
+        extra_conditions=extra,
     )
     game_ids = [row.id for row in rows]
     players: dict[int, list[Any]] = {}
@@ -676,12 +791,30 @@ async def werewolf_history(
         for player in player_rows:
             players.setdefault(player.game_id, []).append(player)
     names = await _group_names({row.group_id for row in rows})
+    human_ids = {
+        player.user_id
+        for group in players.values()
+        for player in group
+        if player.user_id > 0
+    } | {row.host_user_id for row in rows}
+    nicknames: dict[int, str | None] = {}
+    if human_ids:
+        async with get_session() as db:
+            nick_rows = (
+                await db.execute(
+                    select(BotUser.user_id, BotUser.nickname).where(
+                        BotUser.user_id.in_(human_ids)
+                    )
+                )
+            ).all()
+        nicknames = {uid: nick for uid, nick in nick_rows}  # noqa: C416
     data = [
         {
             "id": row.id,
             "groupId": row.group_id,
             "groupName": names.get(row.group_id),
             "hostUserId": row.host_user_id,
+            "hostName": nicknames.get(row.host_user_id),
             "board": row.board,
             "playerCount": row.player_count,
             "startedAt": iso(row.started_at),
@@ -693,6 +826,7 @@ async def werewolf_history(
                 {
                     "seat": player.seat,
                     "userId": player.user_id,
+                    "name": nicknames.get(player.user_id),
                     "isAi": player.is_ai,
                     "role": player.role,
                     "faction": player.faction,

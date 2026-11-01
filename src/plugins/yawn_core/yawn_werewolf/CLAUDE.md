@@ -169,6 +169,6 @@ OneBot 调用的 wait_for 上限）、`WW_AI_ENABLED` /
 
 - **上级与共享模块**：[yawn_core/CLAUDE.md](../CLAUDE.md)；AI 玩家用 `../llm.py` 的 `complete()`；一群一局的占用登记在 `../game_registry.py`，同名短命令路由在 `../game_command_routing.py`，对局事件写 `../event_log.py`、指标写 `../metrics.py`（见 [docs/game-event-log.md](../../../../docs/game-event-log.md)），局后回放在 `../replay.py`（见 [docs/game-replay.md](../../../../docs/game-replay.md)）。
 - **迁移正本**：`data/nonebot_plugin_orm/migrations/yawn_core/yawn_werewolf/` 与迁移根目录下的 werewolf 修订，见 [data/CLAUDE.md](../../../../data/CLAUDE.md)。
-- **WebUI**：后端 [../webui/games.py](../webui/CLAUDE.md) 读取 `game_log.py`，前端 `webui/src/games.tsx`（[webui/CLAUDE.md](../../../../webui/CLAUDE.md)）。
+- **WebUI**：后端 [../webui/games.py](../webui/CLAUDE.md) 读取 `game_log.py` 与 `Game`/`PlayerState` 状态（新字段 `getattr` 容错），[../webui/werewolf_admin.py](../webui/CLAUDE.md) 读 `roles.BOARDS`/`ROLE_FACTION`/`GOD_ROLES`/`ROLE_SKILL_TEXT`、`Config`、`COMMAND_DEFINITIONS`——改这些名字要同步；前端 `webui/src/werewolf/`（[webui/CLAUDE.md](../../../../webui/CLAUDE.md)），新增角色/阶段/死因时在 `ww-meta.ts` 补中文与配色（未知值会原样兜底显示）。
 - **测试**：仓库根 `tests/test_werewolf_*.py`（[tests/CLAUDE.md](../../../../tests/CLAUDE.md)）。
 - **配置说明**：[docs/configuration/fanqie-games.md](../../../../docs/configuration/fanqie-games.md)。

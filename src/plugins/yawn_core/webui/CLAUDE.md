@@ -23,7 +23,8 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `groups.py` / `users.py` / `directory.py` | 群、群成员、用户管理。列表与统计查询在 `directory.py`（群/成员/用户的筛选排序 + 当前页补统计、`/groups/summary`、`/users/summary`、`/groups/{id}/overview`、`/groups/{id}/overrides` 成员覆盖一览、`/users/{id}` 档案与所在群明细）；批量写入 `POST /groups/batch/features`、`/groups/{id}/members/batch/features`、`/users/batch/features`（单事务、上限 100、逐条 hub 通知），`POST /groups/{id}/features/reset` 默认不动 group_agent，`DELETE /groups/{id}/members/{uid}/features` 清成员覆盖。注意 `GlobalUserFeature`（“私聊功能”）只在私聊生效，群聊权限链不查它；`users.py` 另有 `/users/{id}/affinity`（好感余额/来源/流水/各群签到，`POST …/adjust` 手动加减，记 `manual` 流水）与 `/users/{id}/private-agent`（私聊 Agent 状态、`PATCH` 暂停/恢复自动回复、`DELETE …/memories[?key=]` 删私聊记忆，不碰群记忆）；后两者只经 `../affinity.py`、`../private_chat_bridge.py`，不导入 `yawn_agent` |
 | `agent.py` + `agent_*_routes.py` | 群聊 Agent：配置、人设与人设库、记忆、隐私、关系、消息、调试/dry-run；共用过滤在 `agent_route_helpers.py` |
 | `audits.py` | Agent 工具审计与 WebUI 操作审计（`web_admin_audit`） |
-| `games.py` | 狼人杀/跑团对局列表、详情、事件日志与回放 |
+| `games.py` | 狼人杀/跑团对局列表、详情、事件日志与回放（狼人杀快照的新字段一律 `getattr` 容错，玩法子插件先后上线都不报错） |
+| `werewolf_admin.py` | 狼人杀管理台只读端点：`/games/werewolf/meta`（板子/角色/配置/命令）、`/stats`（战绩聚合，纯函数 `compute_stats`）、`/history/{id}`、`/replay/{回放编号}` |
 | `rpg_modules.py` | 跑团模组库只读投影 |
 | `fanqie.py` | 番茄下载任务管理 |
 | `environment.py` / `environment_routes.py` | 根 `.env` 脱敏读取与原子写入、配置体检（`diagnostics`）、锁门保护、LLM 连通性测试、`/system/status` 与 `/system/restart`（仅 `YAWNBOT_SUPERVISED=1` 时可用：SIGTERM 后由容器 restart 策略拉起） |
@@ -40,7 +41,8 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | 后端 | 依赖的业务模块 | 前端页面（`webui/src/`） |
 |---|---|---|
 | `agent*.py`（`agent_prompt_routes.py`：提示词分段目录、覆盖读写/批量/导出、Trace 完整提示词） | [yawn_agent/](../yawn_agent/CLAUDE.md)（`execution_trace.py`、`prompt_sections.py`、`prompt_capture.py`、`speech_runtime.py` 等）、Agent 相关 [data_models](../data_models/CLAUDE.md) | `agent.tsx`、`agent-panels/`、`agent-workspace/`、`agent-debug/`、`agent-prompts/` |
-| `games.py` | [yawn_werewolf/](../yawn_werewolf/CLAUDE.md)（`game_log.py`）、[yawn_rpg/](../yawn_rpg/CLAUDE.md)、`../event_log.py`、`../replay.py` | `games.tsx` |
+| `games.py` | [yawn_werewolf/](../yawn_werewolf/CLAUDE.md)（`game_log.py`）、[yawn_rpg/](../yawn_rpg/CLAUDE.md)、`../event_log.py`、`../replay.py` | `games.tsx`、`werewolf/` |
+| `werewolf_admin.py` | `yawn_werewolf/roles.py`（`BOARDS`/`ROLE_FACTION`/`GOD_ROLES`/`ROLE_SKILL_TEXT`）、`config.py`、`command_definitions.py`、`models.py`、`../replay.py` | `werewolf/` |
 | `rpg_modules.py` | `yawn_rpg/module_schema.py`、`yawn_rpg/modules/` | `modules.tsx` |
 | `fanqie.py` | [yawn_fanqie/](../yawn_fanqie/CLAUDE.md) | `fanqie.tsx` |
 | `environment*.py`、`environment_catalog.dotenv` | 各插件 `config.py`；文档 [docs/configuration/](../../../../docs/configuration/README.md) | `environment.tsx`、`environment-config.ts` |
