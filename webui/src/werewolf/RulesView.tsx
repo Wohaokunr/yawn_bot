@@ -170,4 +170,3 @@ function CommandsPanel({ meta }: { meta: WwMeta }): React.JSX.Element {
     </section>
   );
 }
-
