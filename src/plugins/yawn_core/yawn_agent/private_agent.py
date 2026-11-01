@@ -196,13 +196,6 @@ def build_messages(
     return messages
 
 
-def _last_user_index(messages: list[dict[str, Any]]) -> int | None:
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].get("role") == "user":
-            return index
-    return None
-
-
 def split_reply(text: str) -> list[str]:
     """按 ||| 分条，清洗每条；空条丢弃，最多 MAX_PARTS 条（多的并进最后一条）。"""
 
@@ -379,9 +372,8 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
     )
     from . import private_vision
 
-    earlier_images = private_vision.recent_captions(user_id)
-    if earlier_images:
-        context.payload["recent_images"] = earlier_images
+    # 之前的图片转述已经写回发图那条历史消息（见 _annotate_turn_message），这里不再放进
+    # 资料：放在资料里模型分不清新旧，会把一张旧表情包当成每轮新发的。
     vision = await private_vision.prepare_private_vision(
         request.bot, user_id, request.media
     )
@@ -395,6 +387,7 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
         if helper_messages:
             context.payload["helper_messages"] = helper_messages
     if attachments:
+        # 本条消息新发的附件。之前发过的附件写在历史消息里（“已放进他的虚拟电脑：sandbox:…”）。
         context.payload["attachments"] = attachments
     elif request.media:
         context.payload["attachments_note"] = (
@@ -421,8 +414,11 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
                 "content": "（他停下来有一会儿没再发消息了。把他刚才连着说的几条当成一件事回应；真的不需要回就只写【不回】。）",
             }
         )
-    user_index = _last_user_index(messages)
-    original_user = messages[user_index]["content"] if user_index is not None else None
+    original_users = {
+        index: message["content"]
+        for index, message in enumerate(messages)
+        if message.get("role") == "user"
+    }
     private_vision.attach_to_messages(messages, vision)
     is_superuser = _is_superuser(user_id)
     tools = tool_schemas(is_superuser=is_superuser, computer=computer, tasks=tasks)
@@ -463,8 +459,9 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
             # 对话模型拒收图片：改走识图转述，同一轮再请求一次。
             dbg(f"私聊用户 {user_id} 对话模型不收图片，改用识图转述")
             vision = await private_vision.fallback_to_captions(user_id, vision)
-            if user_index is not None:
-                messages[user_index]["content"] = original_user
+            # 重附的旧图挂在更早的历史消息上，也要一起还原。
+            for index, content in original_users.items():
+                messages[index]["content"] = content
             private_vision.attach_to_messages(messages, vision)
             result = await llm.complete_with_tools_result(
                 messages,  # pyright: ignore[reportArgumentType]
@@ -483,6 +480,12 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
         text = str(getattr(message, "content", "") or "")
         break
 
+    if not resumed:
+        await _annotate_turn_message(
+            session,
+            user_id,
+            [*private_vision.history_notes(vision), *attachment_notes(attachments)],
+        )
     wrote = bool(ctx.succeeded & (_WRITE_RESULTS | WRITE_TOOLS))
     silence = turn_taking.parse_silence(text)
     text = silence.text
@@ -614,13 +617,12 @@ def _any_bot() -> Any:
     return bots[0] if bots else None
 
 
-async def _recent_history(session: Any, user_id: int) -> list[dict[str, str]]:
+async def _private_session_id(session: Any, user_id: int) -> int | None:
     from sqlalchemy import select
 
-    from ..data_models.chat_message import ChatMessage
     from ..data_models.chat_session import ChatSession
 
-    session_id = await session.scalar(
+    return await session.scalar(
         select(ChatSession.id)
         .where(
             ChatSession.user_id == user_id,
@@ -630,6 +632,82 @@ async def _recent_history(session: Any, user_id: int) -> list[dict[str, str]]:
         .order_by(ChatSession.updated_at.desc().nullslast())
         .limit(1)
     )
+
+
+def attachment_notes(attachments: list[dict[str, Any]]) -> list[str]:
+    """本轮附件入箱结果写进历史的一句话：后几轮他说“这个文件”时模型知道它在哪。"""
+
+    notes: list[str] = []
+    for row in attachments or []:
+        label = {"image": "图片", "file": "文件", "record": "语音", "video": "视频"}.get(
+            str(row.get("type")), "附件"
+        )
+        name = str(row.get("name") or "").strip()
+        title = f"{label}「{name[:60]}」" if name else label
+        if row.get("ref"):
+            size = f"，{row['size']}" if row.get("size") else ""
+            notes.append(f"（这条里的{title}已放进他的虚拟电脑：{row['ref']}{size}）")
+        elif row.get("failed"):
+            notes.append(f"（这条里的{title}没能放进虚拟电脑：{row['failed']}）")
+    return notes
+
+
+async def _annotate_turn_message(session: Any, user_id: int, notes: list[str]) -> None:
+    """把识图转述、附件位置追加到他这条消息的入库内容上（历史里原位可见）。
+
+    出错只记日志：不能影响这一轮回复。
+    """
+
+    notes = [note for note in notes if note]
+    if not notes:
+        return
+    from sqlalchemy import select, update
+
+    from ..data_models.chat_message import ChatMessage
+
+    try:
+        session_id = await _private_session_id(session, user_id)
+        if session_id is None:
+            return
+        row = (
+            await session.execute(
+                select(ChatMessage.id, ChatMessage.content)
+                .where(
+                    ChatMessage.session_id == session_id,
+                    ChatMessage.role == "user",
+                    ChatMessage.is_deleted.is_(False),
+                )
+                .order_by(ChatMessage.id.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return
+        message_id, content = row
+        content = str(content or "")
+        extra = [note for note in notes if note not in content]
+        if not extra:
+            return
+        await session.execute(
+            update(ChatMessage)
+            .where(ChatMessage.id == message_id)
+            .values(content="\n".join([content, *extra]).strip())
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"私聊用户 {user_id} 写回识图/附件说明失败(忽略)")
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            dbg_exc("私聊写回说明回滚失败(忽略)")
+
+
+async def _recent_history(session: Any, user_id: int) -> list[dict[str, str]]:
+    from sqlalchemy import select
+
+    from ..data_models.chat_message import ChatMessage
+
+    session_id = await _private_session_id(session, user_id)
     if session_id is None:
         return []
     rows = (
