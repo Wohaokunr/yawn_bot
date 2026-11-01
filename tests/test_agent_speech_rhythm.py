@@ -192,7 +192,7 @@ def test_short_model_parts_are_inferred_as_burst() -> None:
 
 
 def test_single_char_parts_are_inferred_as_pop() -> None:
-    plan = R.plan_text_rhythm("", parts=("哈", "哈", "笑", "死", "我", "了", "啦"))
+    plan = R.plan_text_rhythm("", parts=("你", "好", "呀"))
     assert plan.rhythm == R.RHYTHM_POP
 
 
@@ -316,7 +316,7 @@ def test_lists_and_code_are_not_auto_split() -> None:
 def test_marked_mode_only_splits_model_markers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_REPLY_SPLIT", "marked")
     assert not R.plan_text_rhythm("先说结论：能用。\n\n不过要先重启一下").multi
-    assert R.plan_text_rhythm("", parts=("这是一条", "这是两条")).multi
+    assert R.plan_text_rhythm("", parts=("一条", "两条")).multi
 
 
 def test_off_mode_never_splits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,8 +357,8 @@ def test_ellipsis_is_kept_when_dropping_trailing_period() -> None:
 
 
 def test_repeated_parts_are_kept_for_burst_but_not_split() -> None:
-    burst = R.plan_text_rhythm("", parts=("啊啊啊", "啊啊啊", "啊啊啊"), declared=R.RHYTHM_BURST)
-    assert burst.parts == ("啊啊啊", "啊啊啊", "啊啊啊")
+    burst = R.plan_text_rhythm("", parts=("啊", "啊", "啊"), declared=R.RHYTHM_BURST)
+    assert burst.parts == ("啊", "啊", "啊")
     split = R.plan_text_rhythm("", parts=("这个可以用", "这个可以用"))
     assert split.parts == ("这个可以用",)
 
@@ -429,13 +429,13 @@ def test_split_delay_bounds() -> None:
 
 
 def test_trace_payload_and_preview() -> None:
-    plan = R.plan_text_rhythm("", parts=("第一条在这", "第二条在这"))
+    plan = R.plan_text_rhythm("", parts=("一", "二"))
     payload = plan.trace_payload()
     assert payload["parts"] == 2
     assert payload["rhythm_label"]
     preview = plan.preview()
     assert preview[0]["delayMs"] == 0
-    assert preview[1]["text"] == "第二条在这"
+    assert preview[1]["text"] == "二"
 
 
 # ── 提示词 ─────────────────────────────────────────────────
@@ -1235,34 +1235,29 @@ def test_rhythm_env_keys_are_in_catalog() -> None:
 
 
 @pytest.mark.parametrize(
-    ("parts", "declared"),
-    [
-        (("好", "的"), R.RHYTHM_SPLIT),
-        (("嗯", "嗯", "嗯"), R.RHYTHM_BURST),
-        (("在",), R.RHYTHM_POP),
-        (("哈哈", "行吧"), R.RHYTHM_AUTO),
-    ],
+    "parts",
+    [("在", "吗"), ("这题我会", "略略略～"), ("好", "的", "呀"), ("哼", "不理你了")],  # noqa: RUF001
 )
-def test_tiny_replies_are_never_split(parts: tuple[str, ...], declared: str) -> None:
-    plan = R.plan_text_rhythm("", parts=parts, declared=declared)
+def test_model_written_parts_are_kept_as_is(parts: tuple[str, ...]) -> None:
+    # 语气由模型决定：它自己写的 |||（一字一条、话尾补一句）一条都不合并。
+    plan = R.plan_text_rhythm("", parts=parts, declared=R.RHYTHM_SPLIT)
+    assert plan.parts == parts
+
+
+def test_pop_follows_the_model_even_when_short() -> None:
+    assert R.plan_text_rhythm("在吗", declared=R.RHYTHM_POP).parts == ("在", "吗")
+
+
+@pytest.mark.parametrize("declared", [R.RHYTHM_SPLIT, R.RHYTHM_BURST])
+def test_system_does_not_invent_splits_for_short_text(declared: str) -> None:
+    plan = R.plan_text_rhythm("嗯，好吧。", declared=declared)
     assert not plan.multi
     assert plan.source == "short"
 
 
-def test_tiny_split_without_markers_stays_single() -> None:
-    plan = R.plan_text_rhythm("好的。收到！", declared=R.RHYTHM_SPLIT)
-    assert not plan.multi
-
-
-def test_pop_needs_a_few_characters() -> None:
-    assert not R.plan_text_rhythm("在吗", declared=R.RHYTHM_POP).multi
-    assert R.plan_text_rhythm("你在干嘛呀", declared=R.RHYTHM_POP).multi
-
-
-def test_fragment_count_shrinks_with_total_length() -> None:
-    plan = R.plan_text_rhythm("", parts=("好", "啊", "那", "就", "这样吧"), declared=R.RHYTHM_SPLIT)
-    # 7 个字最多 2 条；单字碎片并进相邻一条
-    assert len(plan.parts) <= 2
+def test_burst_without_markers_still_splits_longer_text() -> None:
+    plan = R.plan_text_rhythm("不是吧，真的假的，我不信，你骗我的吧", declared=R.RHYTHM_BURST)
+    assert plan.multi
 
 
 LONG_REPLY = (
@@ -1312,7 +1307,7 @@ def test_long_structured_block_reply_is_not_split() -> None:
     assert not plan.multi
 
 
-def test_instruction_says_tiny_replies_stay_whole() -> None:
+def test_instruction_lets_model_own_the_tone() -> None:
     text = R.rhythm_instruction(scene="private", act="continue", complexity="normal")
-    assert "不要拆" in text
+    assert "略略略" in text and "不会替你硬拆" in text
     assert "别回回同一种" not in text

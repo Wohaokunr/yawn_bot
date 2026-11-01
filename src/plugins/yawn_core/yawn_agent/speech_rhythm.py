@@ -1,4 +1,4 @@
-# ruff: noqa: E501,RUF001,PLR2004,C901,PLR0911,PLR0912,PLR0913,PLR0917,PLR0915
+# ruff: noqa: E501, RUF001, PLR2004, C901, PLR0911, PLR0912, PLR0913, PLR0917
 """发言节奏：把一次想说的话规划成 1~N 条 QQ 消息，以及每条之前的停顿。
 
 真人在群里很少把想说的话憋成一大段再发：平常聊天会顺手拆成两三条，激动时
@@ -76,16 +76,11 @@ AUTO_SENTENCE_MIN_CHARS = 40
 AUTO_PART_MIN_CHARS = 8
 AUTO_PARAGRAPH_MAX_CHARS = 160
 AUTO_LINE_MAX_CHARS = 80
-# 这么短的回复（可见字数）不管模型选了什么节奏都一条发完：一两个字拆成几条只会显得怪。
+# 模型选了分条/连发却没写 |||、正文又只有这么几个字时，系统不替它按句子/短句硬拆。
+# 模型自己写的 |||（一字一条、话尾补一句“略略略~”）永远照它写的发。
 SHORT_REPLY_MAX_CHARS = 6
-# 蹦字至少要有这么多字，太短的蹦出来只是两三个孤零零的字。
-POP_MIN_CHARS = 4
 # 选了整段、但正文超过这个字数且自己分了段（空行/换行）时，按段落分几条发，不甩一大坨。
 LONG_REPLY_MIN_CHARS = 120
-# 分条/连发时每条至少几个字；更碎的并进相邻一条。
-_MIN_PART_CHARS = {"split": 2, "burst": 1}
-# 分条/连发总条数不超过 总字数 // 这个数（10 个字最多 3 条）。
-_CHARS_PER_PART = 3
 
 # 标记：||| / 全角 ｜｜｜ / 【分条】 等，前后的空白一并吃掉。
 _MARKER_RE = re.compile(r"[ \t]*(?:\|{3,}|｜{3,}|【分条】|\[分条\]|<分条>)[ \t]*\n?")
@@ -665,13 +660,7 @@ def plan_text_rhythm(
         return single_rhythm(joined, source="disabled", declared=declared)
     if _CODE_FENCE in joined:
         return single_rhythm(joined, source="structured", declared=declared)
-    total = _visible_len(joined)
-    if total <= SHORT_REPLY_MAX_CHARS and not (
-        declared == RHYTHM_POP and total >= POP_MIN_CHARS
-    ):
-        # 一两个字的回复：模型写了 ||| 也并回一条。
-        short = " ".join(item.strip() for item in parts if item.strip()) if parts else joined
-        return single_rhythm(short, source="short", declared=declared)
+    short = len(parts) < 2 and _visible_len(joined) <= SHORT_REPLY_MAX_CHARS
     if declared == RHYTHM_BLOCK:
         long_parts = long_reply_parts(joined, max_parts=resolved.max_parts)
         if long_parts:
@@ -698,6 +687,9 @@ def plan_text_rhythm(
     elif len(parts) >= 2:
         candidates = [item.strip() for item in parts if item.strip()]
         source = "model"
+    elif short and declared in {RHYTHM_BURST, RHYTHM_SPLIT}:
+        # 没写 ||| 的几个字：系统不替它拆。
+        return single_rhythm(joined, source="short", declared=declared)
     elif declared == RHYTHM_BURST:
         candidates = _balanced_groups(_clauses(joined), _rhythm_cap(RHYTHM_BURST, resolved))
         source = "model_clauses"
@@ -750,38 +742,8 @@ def _finish(
     elif rhythm == RHYTHM_BURST and max(_visible_len(item) for item in clean) > BURST_LONG_PART_CHARS:
         # 说是连发、每条却是一整句：按正常打字速度发，别像机关枪一样甩长句。
         rhythm = RHYTHM_SPLIT
-    clean = _limit_fragments(clean, rhythm)
-    if len(clean) <= 1:
-        return single_rhythm(clean[0] if clean else seed, source=source, declared=declared)
     delays = pacing_delays(clean, rhythm, settings=settings, emotion=emotion, style=style, seed=seed)
     return RhythmPlan(rhythm, clean, delays, source, declared)
-
-
-def _limit_fragments(parts: tuple[str, ...], rhythm: str) -> tuple[str, ...]:
-    """分条/连发别切得比字还碎：过短的条并进相邻一条，总条数随总字数收紧。"""
-
-    min_chars = _MIN_PART_CHARS.get(rhythm)
-    if min_chars is None:
-        return parts
-    merged: list[str] = []
-    carry = ""
-    for item in parts:
-        piece = f"{carry} {item}".strip() if carry else item
-        if _visible_len(piece) < min_chars:
-            carry = piece
-            continue
-        carry = ""
-        merged.append(piece)
-    if carry:
-        if merged:
-            merged[-1] = f"{merged[-1]} {carry}"
-        else:
-            merged.append(carry)
-    total = sum(_visible_len(item) for item in merged)
-    cap = max(1, total // _CHARS_PER_PART)
-    if len(merged) > cap:
-        merged = _balanced_groups(merged, cap, " ")
-    return tuple(merged)
 
 
 def plan_group_rhythm(
@@ -869,7 +831,8 @@ def rhythm_instruction(
     lines = [
         "发送节奏（每次都要选）：回复最前面先写【节奏:整段/分条/连发/蹦字】，标签不会发出去，"
         "||| 隔开的每段是一条 QQ 消息。节奏就是你此刻的心情，像真人一样挑：",
-        f"只有几个字（{SHORT_REPLY_MAX_CHARS} 字以内）的回复一律【节奏:整段】一条，不要拆；",
+        "分条照你的语气来，系统按你写的 ||| 原样发：想一个字一个字蹦，或者话说完再补一句俏皮的，"
+        "就自己用 ||| 隔开，如【节奏:分条】这题我会|||略略略～；几个字又没想好怎么断就【节奏:整段】，系统不会替你硬拆；",
         "整段=认真讨论、争论、讲道理或给步骤，一条发完；内容长（一百多字以上）时用空行分好段，会按段落分成几条发；",
         f"分条=平常闲聊，把同一句话在自然停顿处断成 2~{resolved.max_parts} 条，"
         "如【节奏:分条】刚看到|||笑死 这也太巧了；",
