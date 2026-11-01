@@ -192,7 +192,7 @@ def test_short_model_parts_are_inferred_as_burst() -> None:
 
 
 def test_single_char_parts_are_inferred_as_pop() -> None:
-    plan = R.plan_text_rhythm("", parts=("你", "好", "呀"))
+    plan = R.plan_text_rhythm("", parts=("哈", "哈", "笑", "死", "我", "了", "啦"))
     assert plan.rhythm == R.RHYTHM_POP
 
 
@@ -316,7 +316,7 @@ def test_lists_and_code_are_not_auto_split() -> None:
 def test_marked_mode_only_splits_model_markers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_REPLY_SPLIT", "marked")
     assert not R.plan_text_rhythm("先说结论：能用。\n\n不过要先重启一下").multi
-    assert R.plan_text_rhythm("", parts=("一条", "两条")).multi
+    assert R.plan_text_rhythm("", parts=("这是一条", "这是两条")).multi
 
 
 def test_off_mode_never_splits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,8 +357,8 @@ def test_ellipsis_is_kept_when_dropping_trailing_period() -> None:
 
 
 def test_repeated_parts_are_kept_for_burst_but_not_split() -> None:
-    burst = R.plan_text_rhythm("", parts=("啊", "啊", "啊"), declared=R.RHYTHM_BURST)
-    assert burst.parts == ("啊", "啊", "啊")
+    burst = R.plan_text_rhythm("", parts=("啊啊啊", "啊啊啊", "啊啊啊"), declared=R.RHYTHM_BURST)
+    assert burst.parts == ("啊啊啊", "啊啊啊", "啊啊啊")
     split = R.plan_text_rhythm("", parts=("这个可以用", "这个可以用"))
     assert split.parts == ("这个可以用",)
 
@@ -429,13 +429,13 @@ def test_split_delay_bounds() -> None:
 
 
 def test_trace_payload_and_preview() -> None:
-    plan = R.plan_text_rhythm("", parts=("一", "二"))
+    plan = R.plan_text_rhythm("", parts=("第一条在这", "第二条在这"))
     payload = plan.trace_payload()
     assert payload["parts"] == 2
     assert payload["rhythm_label"]
     preview = plan.preview()
     assert preview[0]["delayMs"] == 0
-    assert preview[1]["text"] == "二"
+    assert preview[1]["text"] == "第二条在这"
 
 
 # ── 提示词 ─────────────────────────────────────────────────
@@ -1229,3 +1229,90 @@ def test_rhythm_env_keys_are_in_catalog() -> None:
         "AGENT_REPLY_MAX_SPREAD_SECONDS",
     ):
         assert f"\n{key}=" in catalog
+
+
+# ── 2026-11 分条失灵修复：短回复不拆、长回复按段落分 ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("parts", "declared"),
+    [
+        (("好", "的"), R.RHYTHM_SPLIT),
+        (("嗯", "嗯", "嗯"), R.RHYTHM_BURST),
+        (("在",), R.RHYTHM_POP),
+        (("哈哈", "行吧"), R.RHYTHM_AUTO),
+    ],
+)
+def test_tiny_replies_are_never_split(parts: tuple[str, ...], declared: str) -> None:
+    plan = R.plan_text_rhythm("", parts=parts, declared=declared)
+    assert not plan.multi
+    assert plan.source == "short"
+
+
+def test_tiny_split_without_markers_stays_single() -> None:
+    plan = R.plan_text_rhythm("好的。收到！", declared=R.RHYTHM_SPLIT)
+    assert not plan.multi
+
+
+def test_pop_needs_a_few_characters() -> None:
+    assert not R.plan_text_rhythm("在吗", declared=R.RHYTHM_POP).multi
+    assert R.plan_text_rhythm("你在干嘛呀", declared=R.RHYTHM_POP).multi
+
+
+def test_fragment_count_shrinks_with_total_length() -> None:
+    plan = R.plan_text_rhythm("", parts=("好", "啊", "那", "就", "这样吧"), declared=R.RHYTHM_SPLIT)
+    # 7 个字最多 2 条；单字碎片并进相邻一条
+    assert len(plan.parts) <= 2
+
+
+LONG_REPLY = (
+    "因为之前那些活都不值得派，签到画爱心看图查记录这种两三步就办完了。\n\n"
+    "签到、画爱心、看图、查记录，都是两三步就能办完的，派出去反而绕远路，还得等它回来。\n\n"
+    "小助手适合耗时的、多步骤的，比如联网查一堆资料整理、处理你发来的大文件、写长东西。\n\n"
+    "你要是有什么这种活，我随时可以派给它去做，做完了它会一步一步给你报进度的。"
+)
+
+
+def test_long_block_reply_is_split_by_paragraph() -> None:
+    plan = R.plan_text_rhythm(LONG_REPLY, declared=R.RHYTHM_BLOCK)
+    assert plan.multi
+    assert plan.source == "long_paragraph"
+    assert len(plan.parts) <= R.rhythm_settings().max_parts
+    assert "".join(plan.parts).replace("\n", "") == LONG_REPLY.replace("\n", "")
+
+
+def test_long_auto_reply_with_more_paragraphs_than_cap_is_grouped() -> None:
+    plan = R.plan_text_rhythm(LONG_REPLY)
+    assert plan.multi
+    assert 2 <= len(plan.parts) <= R.rhythm_settings().max_parts
+
+
+def test_long_reply_lines_are_grouped() -> None:
+    text = "\n".join(
+        [
+            "说句实话我只能读到文件信息，看不到图里画的是什么",
+            "这张是七百乘七百的粉色系图，主色是浅粉白，其他就读不出来了",
+            "你要不跟我说说画的是啥，或者你想要我拿它做点什么",
+            "真要看内容你可以直接跟我说画的是啥，或者我用代码跑一下看颜色尺寸这类",
+            "但是说实话意义不大，还是你直接告诉我比较快，我们省点时间",
+        ]
+    )
+    plan = R.plan_text_rhythm(text, declared=R.RHYTHM_BLOCK)
+    assert plan.multi
+
+
+def test_short_block_reply_stays_one_message() -> None:
+    plan = R.plan_text_rhythm("先说结论：能用。\n\n不过要先重启一下", declared=R.RHYTHM_BLOCK)
+    assert not plan.multi
+
+
+def test_long_structured_block_reply_is_not_split() -> None:
+    text = "步骤如下：\n" + "\n".join(f"{i}. 这是第{i}步要做的事情，写得长一点免得太短" for i in range(1, 9))
+    plan = R.plan_text_rhythm(text, declared=R.RHYTHM_BLOCK)
+    assert not plan.multi
+
+
+def test_instruction_says_tiny_replies_stay_whole() -> None:
+    text = R.rhythm_instruction(scene="private", act="continue", complexity="normal")
+    assert "不要拆" in text
+    assert "别回回同一种" not in text

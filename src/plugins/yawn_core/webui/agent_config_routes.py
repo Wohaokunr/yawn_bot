@@ -214,6 +214,11 @@ async def get_agent_vision_status(_session: AdminReadSession) -> dict[str, Any]:
         )
     ]
     advice: list[str] = []
+    if route.get("known_text_only"):
+        advice.append(
+            f"对话模型 {route['dialogue_model']} 只收文字，图片要靠识图模型先转述；"
+            "如果它其实支持图片，把 AI_DEFAULT_MULTIMODAL 设为 supported。"
+        )
     if route["route"] == "none":
         advice.append(
             "对话模型不支持图片，也没有配置识图模型：在环境配置里填 AI_VISION_MODEL，"

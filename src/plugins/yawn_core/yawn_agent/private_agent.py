@@ -173,6 +173,13 @@ def build_messages(
     return messages
 
 
+def _last_user_index(messages: list[dict[str, Any]]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            return index
+    return None
+
+
 def split_reply(text: str) -> list[str]:
     """按 ||| 分条，清洗每条；空条丢弃，最多 MAX_PARTS 条（多的并进最后一条）。"""
 
@@ -337,11 +344,19 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
     context = await build_private_context(
         session, user_id, bot_id=bot_id, nickname=request.nickname, now=now
     )
+    from . import private_vision
+
+    earlier_images = private_vision.recent_captions(user_id)
+    if earlier_images:
+        context.payload["recent_images"] = earlier_images
+    vision = await private_vision.prepare_private_vision(
+        request.bot, user_id, request.media
+    )
     if attachments:
         context.payload["attachments"] = attachments
     elif request.media:
         context.payload["attachments_note"] = (
-            "他发了图片/文件，但没能放进虚拟电脑，你看不到内容；如实说明，别假装看过"
+            "他发的附件没能放进虚拟电脑，不能用代码处理；图片能不能看以消息里附的为准"
         )
     tasks = tasks_enabled()
     from . import private_store
@@ -356,6 +371,9 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
         tasks=tasks,
         turn_style=turn_style(user_id, now, emoji_pref=emoji_pref),
     )
+    user_index = _last_user_index(messages)
+    original_user = messages[user_index]["content"] if user_index is not None else None
+    private_vision.attach_to_messages(messages, vision)
     is_superuser = _is_superuser(user_id)
     tools = tool_schemas(is_superuser=is_superuser, computer=computer, tasks=tasks)
     ctx = PrivateToolContext(
@@ -381,13 +399,30 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
                     ),
                 }
             )
-        result = await llm.complete_with_tools_result(
-            messages,  # pyright: ignore[reportArgumentType]
-            [] if final else tools,  # pyright: ignore[reportArgumentType]
-            task="agent_dialogue",
-            max_tokens=llm.NO_OUTPUT_LIMIT,
-            timeout=COMPLETION_TIMEOUT,
-        )
+        try:
+            result = await llm.complete_with_tools_result(
+                messages,  # pyright: ignore[reportArgumentType]
+                [] if final else tools,  # pyright: ignore[reportArgumentType]
+                task="agent_dialogue",
+                max_tokens=llm.NO_OUTPUT_LIMIT,
+                timeout=COMPLETION_TIMEOUT,
+                multimodal=bool(vision.blocks),
+                raise_on_unsupported=bool(vision.blocks),
+            )
+        except llm.LLMMultimodalUnsupportedError:
+            # 对话模型拒收图片：改走识图转述，同一轮再请求一次。
+            dbg(f"私聊用户 {user_id} 对话模型不收图片，改用识图转述")
+            vision = await private_vision.fallback_to_captions(user_id, vision)
+            if user_index is not None:
+                messages[user_index]["content"] = original_user
+            private_vision.attach_to_messages(messages, vision)
+            result = await llm.complete_with_tools_result(
+                messages,  # pyright: ignore[reportArgumentType]
+                [] if final else tools,  # pyright: ignore[reportArgumentType]
+                task="agent_dialogue",
+                max_tokens=llm.NO_OUTPUT_LIMIT,
+                timeout=COMPLETION_TIMEOUT,
+            )
         message = result.message
         if message is None:
             dbg(f"私聊用户 {user_id} 模型无回复（{result.outcome}）")
