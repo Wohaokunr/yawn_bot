@@ -36,6 +36,7 @@ from .private_prompt import (
     PRIVATE_WORKER_RULES,
     PRIVATE_WORKER_SAFETY,
     PRIVATE_WORKER_TEAM,
+    PRIVATE_WORKER_VOICE,
 )
 from .prompt_sections import ContentBuilder, apply_section
 from .tool_args import ToolError, tool_error_payload, validate_tool_arguments
@@ -204,6 +205,10 @@ def build_worker_messages(task: dict[str, Any], now: datetime) -> list[dict[str,
         apply_section("private.worker_rules", "\n" + PRIVATE_WORKER_RULES),
     )
     system.add(
+        "private.worker_voice",
+        apply_section("private.worker_voice", "\n" + PRIVATE_WORKER_VOICE),
+    )
+    system.add(
         "private.worker_team",
         apply_section("private.worker_team", "\n" + PRIVATE_WORKER_TEAM),
     )
@@ -222,6 +227,14 @@ def build_worker_messages(task: dict[str, Any], now: datetime) -> list[dict[str,
     }
     if task.get("member"):
         brief["your_role"] = task.get("member")
+    if task.get("asked"):
+        brief["asked"] = task.get("asked")
+    if task.get("dialogue"):
+        brief["chat_so_far"] = task.get("dialogue")
+    if task.get("voice"):
+        brief["voice"] = task.get("voice")
+    if task.get("call_them"):
+        brief["call_them"] = task.get("call_them")
     return [
         {"role": "system", "content": system.build()[0].strip()},
         {
@@ -481,6 +494,8 @@ async def run_worker(
     seen_refs: set[str] = set(task.get("seen_refs") or [])
     # 任务单（含队友成果）里出现的文件引用也算“见过”，可以交付。
     seen_refs.update(_REF_RE.findall(str(task.get("brief") or "")))
+    # 聊天节选里“已放进他的虚拟电脑：sandbox:…”的文件是他自己发的，也可以交付。
+    seen_refs.update(_REF_RE.findall(str(task.get("dialogue") or "")))
     outcome = WorkerOutcome("failed", error="小助手没有交付结果")
     total_rounds = max_rounds * (1 + max(continuations, 0))
     segment_end = max_rounds

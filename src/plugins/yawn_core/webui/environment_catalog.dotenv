@@ -267,6 +267,16 @@ PRIVATE_AGENT_TASK_MAX_ROUNDS=30
 PRIVATE_AGENT_TASK_CONTINUATIONS=2
 # 每个小助手任务最长运行多少秒（30 到 7200，不含排队），超时按没做成汇报
 PRIVATE_AGENT_TASK_TIMEOUT_SECONDS=1800
+# 后台进度消息样子：natural 像本人随口报一声（默认），template 是旧的「标题」 n/m：… 模板
+PRIVATE_AGENT_PROGRESS_STYLE=natural
+# 同一个人两条进度消息至少隔几秒（0 到 600，太近的只记录不发）；0 不限
+PRIVATE_AGENT_PROGRESS_MIN_GAP_SECONDS=10
+# 主 Agent 一轮自己调了这么多次联网/跑代码还没答完就提醒它放到后台（0 到 20，0 不提醒）
+PRIVATE_AGENT_HANDOFF_AFTER=3
+# 主 Agent 工具轮次用完还在调工具时自动放到后台接着做
+PRIVATE_AGENT_AUTO_HANDOFF=true
+# 几件后台的事前后脚做完时等几秒合成一次汇报（0 到 60）
+PRIVATE_AGENT_REPORT_BATCH_SECONDS=2
 # 私聊个人数据目录（笔记、待办、提醒等，每人一个 JSON），留空用 data/private_agent/users
 PRIVATE_AGENT_DATA_DIR=
 # 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json
