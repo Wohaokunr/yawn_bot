@@ -182,6 +182,19 @@ def test_settings_accepts_inbox_fields_and_old_payloads(api: TestClient) -> None
     assert api.put(f"{BASE}/settings", json=_settings(inboxTypes=["exe"])).status_code == 422
 
 
+def test_settings_private_fields_saved_and_kept_by_old_pages(api: TestClient) -> None:
+    response = api.put(f"{BASE}/settings", json=_settings(privateDailyRuns=12, privateInbox=False))
+    assert response.status_code == 200
+    saved = policy.load_settings()
+    assert saved.private_daily_runs == 12 and saved.private_inbox is False
+    old = {key: value for key, value in _settings().items() if not key.startswith("private")}
+    assert api.put(f"{BASE}/settings", json=old).status_code == 200
+    assert policy.load_settings().private_daily_runs == 12
+    assert api.put(f"{BASE}/settings", json=_settings(privateDailyRuns=-1)).status_code == 422
+    usage = api.get(f"{BASE}/usage").json()["data"]
+    assert usage["private"] == [] and usage["privateLimit"] == 12
+
+
 def test_inbox_endpoint_lists_events_and_reasons(api: TestClient) -> None:
     inbox_store.record_events(
         [

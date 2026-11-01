@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001, ANN201, ARG001, DTZ005, PLR2004
+# ruff: noqa: ANN001, ANN201, ARG001, DTZ005, PLR2004, E501
 """WebUI 私聊 Agent 接口：状态、暂停/恢复自动回复、删除私聊记忆（不碰群记忆）。"""
 
 from __future__ import annotations
@@ -185,4 +185,40 @@ async def test_affinity_endpoint_and_manual_adjust(maker):
         await users.adjust_user_affinity(
             USER, route_models.AffinityAdjustBody(delta=0), None
         )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_private_agent_lists_and_cancels_helper_tasks(maker, monkeypatch, tmp_path):
+    monkeypatch.setenv("PRIVATE_AGENT_DATA_DIR", str(tmp_path / "users"))
+    store = importlib.import_module(f"{_PKG}.yawn_agent.private_store")
+
+    def seed(record):
+        record["tasks"] = [
+            {"id": "t1", "title": "查天气", "status": "done", "summary": "晴"},
+            {
+                "id": "t2",
+                "title": "画图",
+                "status": "blocked",
+                "question": "要什么颜色？",
+                "progress": [{"at": "x", "note": "数据整理好了", "step": 1, "total": 2}],
+            },
+        ]
+
+    store.update(USER, seed)
+    data = (await users.get_user_private_agent(USER, None))["data"]
+    assert [row["id"] for row in data["tasks"]] == ["t2", "t1"]
+    assert data["tasks"][0]["status"] == "等你回答"
+    assert data["tasks"][0]["progress"][0]["note"] == "数据整理好了"
+    assert data["computer"]["workspace"] == f"p{USER}"
+    result = await users.cancel_user_private_task(USER, "t2", None)
+    assert result["data"]["cancelled"] is True
+    assert result["data"]["tasks"][0]["state"] == "cancelled"
+    result = await users.cancel_user_private_task(USER, "t1", None)
+    assert result["data"]["cancelled"] is False
+    with pytest.raises(HTTPException) as exc:
+        await users.cancel_user_private_task(USER, "t99", None)
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        await users.cancel_user_private_task(USER, "../x", None)
     assert exc.value.status_code == 400

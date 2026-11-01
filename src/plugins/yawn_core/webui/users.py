@@ -1,4 +1,4 @@
-# ruff: noqa: FAST002,TC001,TID252,PLR0913,PLR0917
+# ruff: noqa: FAST002,TC001,TID252,PLR0913,PLR0917,E501,PLR2004
 """Global user administration endpoints."""
 
 from __future__ import annotations
@@ -275,7 +275,73 @@ async def _private_agent_payload(db: Any, user_id: int) -> dict[str, Any]:
         "turnsToday": await turns_today(db, user_id, now),
         "memoryAvailable": memory_available,
         "facts": facts,
+        **_helper_payload(user_id),
     }
+
+
+def _helper_payload(user_id: int) -> dict[str, Any]:
+    """后台小助手任务与私聊虚拟电脑用量；yawn_agent 没加载时给空。"""
+
+    cfg = private_agent_config
+    payload: dict[str, Any] = {
+        "tasksEnabled": bool(cfg.private_agent_enabled and cfg.private_agent_tasks_enabled),
+        "taskLimits": {
+            "perUser": int(cfg.private_agent_task_per_user),
+            "daily": int(cfg.private_agent_task_daily),
+            "timeoutSeconds": int(cfg.private_agent_task_timeout_seconds),
+        },
+        "tasks": [],
+        "tasksToday": 0,
+        "computer": None,
+    }
+    try:
+        from ..yawn_agent import private_store
+        from ..yawn_agent.private_tasks import STATUS_LABELS
+        from ..yawn_agent.sandbox_policy import private_usage
+    except Exception:  # noqa: BLE001
+        return payload
+    record = private_store.load(user_id)
+    today = datetime.now(BEIJING_TZ).date().isoformat()
+    flags = record.get("flags") or {}
+    payload["tasksToday"] = int(flags.get("task_used") or 0) if flags.get("task_day") == today else 0
+    rows = []
+    for item in reversed(record.get("tasks") or []):
+        progress = item.get("progress") or []
+        rows.append(
+            {
+                "id": str(item.get("id")),
+                "title": item.get("title"),
+                "goal": item.get("goal"),
+                "state": item.get("status"),
+                "status": STATUS_LABELS.get(str(item.get("status")), item.get("status")),
+                "toolsets": list(item.get("toolsets") or []),
+                "createdAt": item.get("created_at"),
+                "startedAt": item.get("started_at"),
+                "finishedAt": item.get("finished_at"),
+                "progress": [
+                    {"at": row.get("at"), "note": row.get("note"), "step": row.get("step"), "total": row.get("total")}
+                    for row in progress[-10:]
+                ],
+                "summary": item.get("summary"),
+                "error": item.get("error"),
+                "question": item.get("question"),
+                "files": list(item.get("files") or []),
+                "reported": bool(item.get("reported_state")),
+                "held": bool(item.get("held")),
+            }
+        )
+    payload["tasks"] = rows
+    try:
+        usage = private_usage(user_id)
+        payload["computer"] = {
+            "workspace": f"p{user_id}",
+            "runsToday": usage["used"],
+            "dailyLimit": usage["limit"],
+            "inboxBytes": usage["inbox_bytes"],
+        }
+    except Exception:  # noqa: BLE001
+        payload["computer"] = None
+    return payload
 
 
 @router.get("/users/{user_id}/private-agent")
@@ -302,6 +368,30 @@ async def patch_user_private_agent(
         payload = await _private_agent_payload(db, user_id)
     await hub.notify_change("user_private_agent", str(user_id))
     return ok(payload)
+
+
+@router.delete("/users/{user_id}/private-agent/tasks/{task_id}")
+async def cancel_user_private_task(
+    user_id: int, task_id: str, _session: AdminWriteSession
+) -> dict[str, Any]:
+    """取消这位用户的一个后台小助手任务（排队、进行中或等回答的）。"""
+
+    if not task_id.startswith("t") or not task_id[1:].isdigit() or len(task_id) > 12:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "任务编号不合法")
+    try:
+        from ..yawn_agent.private_tasks import cancel_task
+        from ..yawn_agent.tool_args import ToolError
+    except Exception as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "私聊 Agent 没有加载") from exc
+    async with get_session() as db:
+        await require_user(db, user_id)
+        try:
+            result = cancel_task(user_id, task_id)
+        except ToolError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        payload = await _private_agent_payload(db, user_id)
+    await hub.notify_change("user_private_agent", str(user_id))
+    return ok({**payload, "cancelled": result.get("status") == "已取消"})
 
 
 @router.delete("/users/{user_id}/private-agent/memories")

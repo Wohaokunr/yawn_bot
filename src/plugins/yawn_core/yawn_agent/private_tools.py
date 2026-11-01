@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, PLR0912, TID252, TC003
+# ruff: noqa: E501, C901, PLR0912, TID252, TC003, TRY003
 """私聊 Agent 的工具：全部只作用于**当前私聊的这位用户本人**。
 
 没有任何工具接受 user_id；群相关的工具只能选用户本人活跃所在的群，读 Agent 数据
@@ -33,6 +33,7 @@ from ..permission import check_feature_permission
 from . import private_memory
 from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .memory_self import SELF_FACT_KEYS, forget_member_facts, remember_member_fact
+from .private_computer import COMPUTER_TOOL_SPECS
 from .private_context import SharedGroup, group_bonds, group_profile_facts
 from .tool_args import (
     ERROR_NOT_FOUND,
@@ -315,18 +316,94 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
         "（仅超级管理员）机器人运行状态：运行时长、今天私聊人数和回复数、反馈条数",
     ),
 )
+# 虚拟电脑（private_computer）：schema 在那边定义，这里包成 PrivateTool。
+COMPUTER_TOOLS: tuple[PrivateTool, ...] = tuple(
+    PrivateTool(
+        spec["name"],
+        spec["description"],
+        spec["properties"],
+        tuple(spec.get("required", ())),
+        writes=bool(spec.get("writes")),
+    )
+    for spec in COMPUTER_TOOL_SPECS
+)
+# 主从多智能体（private_tasks）：派活给后台小助手、查看/取消/转交回答。
+TASK_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "delegate_task",
+        "把耗时、多步骤的活派给后台小助手（子智能体）去做：联网查资料并整理、写代码算数据画图、处理他发来的文件、写长文。"
+        "小助手看不到聊天记录，只看 goal 和 brief；它每做完一步会自动给他发进度，做完你会收到结果再转述。简单问题自己答，不要派",
+        {
+            "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 20,
+                "description": "给他看的短标题，如 查周末天气",
+            },
+            "goal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "description": "要交付什么、做到什么程度",
+            },
+            "brief": {
+                "type": "string",
+                "maxLength": 1500,
+                "description": "小助手需要的背景：他的要求、已知信息、格式偏好、相关文件的 sandbox: 引用",
+            },
+            "tools": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": {"type": "string", "enum": ["web", "computer", "toolbox"]},
+                "description": "web 联网搜索、computer 他的虚拟电脑（算、画图、处理文件）、toolbox 小工具",
+            },
+            "save_to_notes": {
+                "type": "boolean",
+                "description": "他说要存下来时为 true：做完自动存进他的笔记",
+            },
+        },
+        ("title", "goal", "tools"),
+        writes=True,
+    ),
+    PrivateTool(
+        "tasks",
+        "后台小助手任务：list 看最近的任务和进度、cancel 取消（他说不要了）、answer 把他的回答转交给正在等回答的任务",
+        {
+            "action": {"type": "string", "enum": ["list", "cancel", "answer"]},
+            "id": {
+                "type": "string",
+                "maxLength": 12,
+                "description": "任务编号，如 t12",
+            },
+            "answer": {"type": "string", "minLength": 1, "maxLength": 500},
+        },
+        ("action",),
+        writes=True,
+    ),
+)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
-ALL_TOOLS: tuple[PrivateTool, ...] = PRIVATE_TOOLS + EXTRA_TOOLS
+ALL_TOOLS: tuple[PrivateTool, ...] = (
+    PRIVATE_TOOLS + EXTRA_TOOLS + COMPUTER_TOOLS + TASK_TOOLS
+)
+COMPUTER_NAMES = frozenset(tool.name for tool in COMPUTER_TOOLS)
+TASK_NAMES = frozenset(tool.name for tool in TASK_TOOLS)
 TOOLS_BY_NAME: dict[str, PrivateTool] = {tool.name: tool for tool in ALL_TOOLS}
 WRITE_TOOLS = frozenset(tool.name for tool in ALL_TOOLS if tool.writes)
 
 
-def tool_schemas(*, is_superuser: bool = False) -> list[dict[str, Any]]:
+def tool_schemas(
+    *, is_superuser: bool = False, computer: bool = False, tasks: bool = False
+) -> list[dict[str, Any]]:
+    """本轮给模型的工具；虚拟电脑和小助手任务只在可用时出现。"""
+
     return [
         tool.schema()
         for tool in ALL_TOOLS
-        if is_superuser or tool.name not in SUPERUSER_TOOLS
+        if (is_superuser or tool.name not in SUPERUSER_TOOLS)
+        and (computer or tool.name not in COMPUTER_NAMES)
+        and (tasks or tool.name not in TASK_NAMES)
     ]
 
 
@@ -347,6 +424,10 @@ class PrivateToolContext:
     # 联网搜索：本轮的结果编号（w1…）和已调用次数
     web_refs: dict[str, str] = field(default_factory=dict)
     web_calls: int = 0
+    # 虚拟电脑：本轮已运行次数（同一轮重跑不受冷却）
+    computer_runs: int = 0
+    # 本轮派出的小助手任务数（声明核验与“一轮最多派几个”）
+    delegated: int = 0
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -673,6 +754,16 @@ async def execute_private_tool(
             result = await _group_recent(ctx, str(args["group"]))
         elif name == "list_commands":
             result = await _commands(ctx, args)
+        elif name in COMPUTER_NAMES:
+            from .private_computer import execute_computer_tool
+
+            result = await execute_computer_tool(
+                name, args, ctx.user_id, rerun=ctx.computer_runs > 0
+            )
+            if name == "run_code":
+                ctx.computer_runs += 1
+        elif name in TASK_NAMES:
+            result = _task_tool(name, args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
@@ -684,6 +775,61 @@ async def execute_private_tool(
     return {"ok": True, "result": result}
 
 
+MAX_DELEGATIONS_PER_TURN = 3
+
+
+def _task_tool(
+    name: str, args: dict[str, Any], ctx: PrivateToolContext
+) -> dict[str, Any]:
+    from . import private_tasks
+    from .private_organizer import clean_text
+
+    if name == "delegate_task":
+        if ctx.delegated >= MAX_DELEGATIONS_PER_TURN:
+            raise ToolError(
+                "这一轮已经派了好几个任务了",
+                code=ERROR_PERMISSION,
+                hint="先告诉他已经安排的，别再派",
+            )
+        tools = [
+            str(item)
+            for item in args.get("tools") or []
+            if str(item) in {"web", "computer", "toolbox"}
+        ]
+        if not tools:
+            raise ToolError(
+                "tools 只能选 web/computer/toolbox",
+                code=ERROR_NOT_FOUND,
+                hint="按任务需要选一两个",
+            )
+        result = private_tasks.start_task(
+            ctx.bot,
+            ctx.user_id,
+            title=clean_text(args.get("title"), limit=20, field="标题"),
+            goal=clean_text(args.get("goal"), limit=600, field="目标"),
+            brief=str(args.get("brief") or "").strip()[:1500],
+            toolsets=sorted(set(tools)),
+            save_to_notes=bool(args.get("save_to_notes")),
+            now=ctx.now,
+        )
+        ctx.delegated += 1
+        return result
+    action = str(args.get("action") or "list")
+    if action == "list":
+        return {"tasks": private_tasks.list_tasks(ctx.user_id)}
+    task_id = str(args.get("id") or "").strip()
+    if not task_id:
+        raise ToolError(
+            "要给任务编号 id", code=ERROR_NOT_FOUND, hint="先用 tasks list 看编号"
+        )
+    if action == "cancel":
+        return private_tasks.cancel_task(ctx.user_id, task_id)
+    answer = str(args.get("answer") or "").strip()
+    if not answer:
+        raise ToolError("answer 不能为空", code=ERROR_NOT_FOUND, hint="把他的原话转交")
+    return private_tasks.answer_task(ctx.bot, ctx.user_id, task_id, answer)
+
+
 # 会改个人数据的动作（其余动作只读）。
 _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "notes": frozenset({"add", "delete", "pin", "unpin"}),
@@ -693,6 +839,8 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "mood": frozenset({"log"}),
     "chat_prefs": frozenset({"set"}),
     "my_data": frozenset({"wipe"}),
+    "tasks": frozenset({"cancel", "answer"}),
+    "computer_files": frozenset({"delete"}),
 }
 
 
@@ -731,9 +879,13 @@ async def _execute_extra(
 
 __all__ = [
     "ALL_TOOLS",
+    "COMPUTER_NAMES",
+    "COMPUTER_TOOLS",
     "EXTRA_TOOLS",
     "PRIVATE_TOOLS",
     "SUPERUSER_TOOLS",
+    "TASK_NAMES",
+    "TASK_TOOLS",
     "TOOLS_BY_NAME",
     "WRITE_TOOLS",
     "PrivateTool",

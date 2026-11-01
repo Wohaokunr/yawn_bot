@@ -236,6 +236,13 @@ async def _tick() -> None:
         await run_tick(now_beijing(), _send_private)
     except Exception:  # noqa: BLE001
         logger.exception("私聊 Agent 调度 tick 失败")
+    try:
+        from .private_tasks import flush_held
+
+        # 免打扰期间完成的小助手任务：免打扰结束后补发汇报（不受 proactive 开关影响，是他要的）。
+        await flush_held(now_beijing())
+    except Exception:  # noqa: BLE001
+        logger.exception("私聊子任务补发汇报失败")
 
 
 @get_driver().on_startup

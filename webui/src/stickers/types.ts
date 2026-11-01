@@ -19,6 +19,10 @@ export interface StickerSettings {
   collectAdminOnly: boolean;
   memberDailyCollect: number;
   maxBytes: number;
+  /** 私聊里也发表情包（按人计数）。 */
+  privateEnabled: boolean;
+  privateDailyLimit: number;
+  privateCooldownSeconds: number;
 }
 
 export interface Sticker {

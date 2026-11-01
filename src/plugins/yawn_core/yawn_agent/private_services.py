@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, PLR0911, TID252, TRY003, TRY301, TC003
+# ruff: noqa: E501, C901, PLR0911, TID252, TRY003, TRY301, TC003, SIM105
 """私聊扩展工具：关系与好感明细、签到榜、小工具箱、私聊记录检索、我的数据、反馈、联网搜索、管理员状态。
 
 都只作用于发消息的本人；好感只给词语和方向，不给数值（与 ``private.rules`` 一致）。
@@ -288,6 +288,7 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
             "turn_limit": cap or None,
             "turns_left": max(cap - used, 0) if cap else None,
             "web_searches_left": max(_web_daily() - web_used, 0),
+            **_task_and_computer_quota(record, ctx),
         }
     if action == "wipe":
         if not args.get("confirm"):
@@ -296,22 +297,59 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
                 code=ERROR_PERMISSION,
                 hint="先把会删掉什么（笔记、待办、提醒、倒数日、心情、偏好、私聊记忆）告诉他，他明确说确定后再带 confirm=true 调用",
             )
+        from .private_tasks import cancel_all
+
+        cancelled = cancel_all(ctx.user_id)
         removed_store = store.delete_all(ctx.user_id)
         removed_memories = await delete_private_memories(ctx.session, ctx.user_id)
         ctx.mutated = True
         return {
             "personal_data_deleted": removed_store,
+            "tasks_cancelled": cancelled,
             "private_memories_deleted": removed_memories,
             "note": "聊天记录本身没删；要清空上下文可以发 /新对话",
         }
     record = store.load(ctx.user_id)
     memories = len((await ctx.session.execute(private_memory_query(ctx.user_id))).scalars().all())
     return {
-        "stored": {**store.counts(record), "private_memories": memories},
+        "stored": {
+            **store.counts(record),
+            "private_memories": memories,
+            "tasks": len(record.get("tasks", [])),
+        },
         "has_prefs": bool(record.get("prefs")),
         "auto_reply_paused": auto_paused(ctx.user_id),
         "where": "这些只在私聊里用，不会出现在群里",
     }
+
+
+def _task_stats(now: Any) -> dict[str, int]:
+    from .private_tasks import stats_today
+
+    try:
+        return stats_today(now)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _task_and_computer_quota(
+    record: dict[str, Any], ctx: PrivateToolContext
+) -> dict[str, Any]:
+    from .sandbox_policy import private_usage
+
+    daily = int(private_agent_config.private_agent_task_daily)
+    flags = record.get("flags") or {}
+    used = (
+        int(flags.get("task_used") or 0)
+        if flags.get("task_day") == ctx.now.date().isoformat()
+        else 0
+    )
+    out: dict[str, Any] = {"helper_tasks_left": max(daily - used, 0) if daily else None}
+    try:
+        out["computer_runs_left"] = private_usage(ctx.user_id)["left"]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 # ── 反馈 ─────────────────────────────────────────────────
@@ -521,6 +559,7 @@ async def bot_status(ctx: PrivateToolContext, _args: dict[str, Any]) -> dict[str
         "uptime": f"{uptime // 86400} 天 {uptime % 86400 // 3600} 小时 {uptime % 3600 // 60} 分",
         "private_users_today": int(active or 0),
         "private_replies_today": int(replies or 0),
+        "helper_tasks_today": _task_stats(ctx.now),
         "users_with_personal_data": len(store.known_user_ids()),
         "feedback_total": feedback_lines,
         "pid": os.getpid(),

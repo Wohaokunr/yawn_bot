@@ -10,7 +10,6 @@
 
 import asyncio
 import time
-import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
@@ -40,6 +39,7 @@ from .chat_state import (
     get_state,
     is_in_mode,
     stop_worker,
+    take_burst_media,
 )
 from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 from .data_models.chat_message import ChatMessage
@@ -53,9 +53,13 @@ from .private_chat_bridge import (
     PrivateTurnRequest,
     auto_paused,
     auto_reply_available,
+    describe_media,
+    event_media,
     get_private_handler,
+    media_accepted,
     private_agent_config,
     set_auto_paused,
+    user_turn_lock,
 )
 from .reply_chain import (
     format_chain_for_prompt,
@@ -66,17 +70,10 @@ from .reply_chain import (
 # 辅助函数两者皆收
 _DbSession = Union[AsyncSession, _sa_scoped_session[AsyncSession]]
 
-_chat_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = (
-    weakref.WeakValueDictionary()
-)
-
 
 def _chat_lock(user_id: int) -> asyncio.Lock:
-    lock = _chat_locks.get(user_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _chat_locks[user_id] = lock
-    return lock
+    # 与私聊 Agent 子任务的汇报轮共用同一把锁（见 private_chat_bridge）。
+    return user_turn_lock(user_id)
 
 
 def _record_stream_metric(outcome: str, started: float) -> None:
@@ -501,6 +498,15 @@ async def _process_chat(  # noqa: C901
         )
         return
 
+    # 图片/文件/语音：私聊 Agent 开着且允许收媒体时交给它（连发合并进来的
+    # 也算），正文里放占位，让历史里看得出对方发过什么。
+    media: list[dict] = []
+    if media_accepted() and isinstance(event, PrivateMessageEvent):
+        media = [*take_burst_media(user_id), *event_media(event)]
+        if media:
+            placeholder = describe_media(media)
+            user_input = f"{user_input}\n{placeholder}" if user_input else placeholder
+
     # 非文本消息（图片/语音等）守卫：
     # 避免空内容入库并发送给 AI
     if not user_input:
@@ -570,6 +576,7 @@ async def _process_chat(  # noqa: C901
         raw_text=user_input,
         history=history,
         time_prefix=time_prefix,
+        media=media,
     )
     if reply_text is None:
         reply_text = await _stream_and_send(bot, event, history)
@@ -596,6 +603,7 @@ async def _try_private_agent(  # noqa: PLR0913
     raw_text: str,
     history: list[dict[str, str]],
     time_prefix: str,
+    media: Optional[list[dict]] = None,
 ) -> Optional[str]:
     """交给私聊 Agent；没有处理函数或它放弃时返回 None。异常一律吞掉降级。"""
 
@@ -613,6 +621,7 @@ async def _try_private_agent(  # noqa: PLR0913
         session=session,
         time_note=time_prefix,
         nickname=getattr(sender, "nickname", None) or None,
+        media=list(media or []),
     )
     try:
         return await handler(request)
@@ -878,7 +887,10 @@ async def _is_auto_reply_msg(event: MessageEvent) -> bool:
     if is_in_mode(user_id) or auto_paused(user_id):
         return False
     text = event.get_plaintext().strip()
-    return bool(text) and not text.startswith("/")
+    if not text:
+        # 只发了图片/文件：允许收媒体时也交给 Agent
+        return media_accepted() and bool(event_media(event))
+    return not text.startswith("/")
 
 
 # priority=9：排在所有命令（priority=5）、对局私聊监听（-1）和多步向导的临时

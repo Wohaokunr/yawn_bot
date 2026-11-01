@@ -8,8 +8,11 @@ import {
   privateAgentState,
   PrivateAgentPanel,
   sourceRows,
+  taskCancellable,
+  taskOutcomeText,
   turnsText,
 } from "./user-insights";
+import type { PrivateHelperTask } from "./user-insights";
 
 const state = vi.hoisted(() => ({ api: vi.fn() }));
 
@@ -24,6 +27,11 @@ beforeEach(() => {
     removeEventListener: vi.fn(),
     dispatchEvent: vi.fn(),
   })));
+  vi.stubGlobal("ResizeObserver", class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  });
 });
 
 function privateAgent(overrides: Partial<UserPrivateAgent> = {}): UserPrivateAgent {
@@ -149,6 +157,46 @@ describe("PrivateAgentPanel", () => {
         body: JSON.stringify({ autoPaused: true }),
       });
     });
+  });
+
+  it("列出后台小助手任务，取消发 DELETE", async () => {
+    const running: PrivateHelperTask = {
+      id: "t2", title: "画图", state: "running", status: "进行中", toolsets: ["computer"],
+      progress: [{ note: "数据整理好了", step: 1, total: 2 }], files: [], reported: false, held: false,
+    };
+    const done: PrivateHelperTask = {
+      id: "t1", title: "查天气", state: "done", status: "已完成", toolsets: ["web"],
+      progress: [], files: [], summary: "北京晴", reported: true, held: false,
+    };
+    state.api.mockResolvedValue({
+      data: privateAgent({
+        tasksEnabled: true,
+        taskLimits: { perUser: 6, daily: 90, timeoutSeconds: 1800 },
+        tasks: [running, done],
+        tasksToday: 2,
+        computer: { workspace: "p42", runsToday: 3, dailyLimit: 500, inboxBytes: 0 },
+      }),
+      meta: {},
+    });
+    render(<AntApp><PrivateAgentPanel userId="42" /></AntApp>);
+    expect(await screen.findByText("后台小助手")).toBeInTheDocument();
+    expect(screen.getByText("1/2：数据整理好了")).toBeInTheDocument();
+    expect(screen.getByText("北京晴")).toBeInTheDocument();
+    expect(screen.getByText(/今日运行 3 \/ 500 次/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*定|OK/ }));
+    await waitFor(() => {
+      expect(state.api).toHaveBeenCalledWith("/users/42/private-agent/tasks/t2", { method: "DELETE" });
+    });
+  });
+
+  it("任务文字与可取消判断", () => {
+    const base: PrivateHelperTask = { id: "t1", title: "x", state: "blocked", status: "等你回答", toolsets: [], progress: [], files: [], question: "哪天？", reported: false, held: false };
+    expect(taskOutcomeText(base)).toBe("等回答：哪天？");
+    expect(taskCancellable(base)).toBe(true);
+    expect(taskCancellable({ state: "failed" })).toBe(false);
+    expect(taskOutcomeText({ ...base, state: "failed", error: "超时" })).toBe("超时");
+    expect(taskOutcomeText({ ...base, state: "queued" })).toBe("排队中");
   });
 
   it("自动接管关闭时开关不可用", async () => {

@@ -62,6 +62,10 @@ class StickerSettings(BaseModel):
     collect_admin_only: bool = False
     member_daily_collect: int = Field(default=10, ge=0, le=200)
     max_bytes: int = Field(default=3 * 1024 * 1024, ge=64 * 1024, le=10 * 1024 * 1024)
+    # 私聊里也能发表情包（只用“所有群可用”的那部分库）；每人每天上限与冷却。
+    private_enabled: bool = True
+    private_daily_limit: int = Field(default=20, ge=0, le=1000)
+    private_cooldown_seconds: int = Field(default=20, ge=0, le=86400)
 
     def group_open(self, group_id: int) -> bool:
         if group_id in self.blocked_groups:

@@ -247,6 +247,20 @@ PRIVATE_AGENT_WEB_DAILY=10
 PRIVATE_AGENT_PROACTIVE=true
 # 连发合并等待毫秒数（0 到 10000，0 关闭）：几秒内连发的几条私聊合成一轮回复
 PRIVATE_AGENT_MERGE_WINDOW_MS=1500
+# 私聊里收图片/文件/语音交给 Agent（虚拟电脑开着时自动放进他的 inbox/）；关闭后私聊仍只收文字
+PRIVATE_AGENT_ACCEPT_MEDIA=true
+# 主从多智能体：主 Agent 可以把耗时多步的活派给后台小助手（子智能体，上下文隔离），做完再转述
+PRIVATE_AGENT_TASKS_ENABLED=true
+# 每人同时最多几个小助手任务在跑（1 到 50），多出来的排队
+PRIVATE_AGENT_TASK_PER_USER=6
+# 全站同时最多几个小助手任务在跑（1 到 200），多出来的排队
+PRIVATE_AGENT_TASK_SLOTS=30
+# 每人每天最多派几个小助手任务（0 到 5000，0 表示不限）
+PRIVATE_AGENT_TASK_DAILY=90
+# 每个小助手任务最多调用几轮工具（2 到 100）
+PRIVATE_AGENT_TASK_MAX_ROUNDS=30
+# 每个小助手任务最长运行多少秒（30 到 7200，不含排队），超时按没做成汇报
+PRIVATE_AGENT_TASK_TIMEOUT_SECONDS=1800
 # 私聊个人数据目录（笔记、待办、提醒等，每人一个 JSON），留空用 data/private_agent/users
 PRIVATE_AGENT_DATA_DIR=
 # 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json

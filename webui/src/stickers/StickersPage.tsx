@@ -587,6 +587,22 @@ function PolicyTab({ overview, onSaved }: { overview: StickerOverview; onSaved: 
           </div>
           {num("memberDailyCollect")}
         </Card>
+        <Card size="small" title="私聊">
+          <div className="sbx-switch-row">
+            <Switch
+              checked={draft.privateEnabled}
+              disabled={!draft.enabled}
+              onChange={(value) => update("privateEnabled", value)}
+              aria-label="私聊里也发表情包"
+            />
+            <div>
+              <strong>私聊 Agent 也能发表情包</strong>
+              <span className="sbx-muted">只用对所有群开放的通用表情；本人设置了“不要表情”时不发。次数按人计，不占群的额度。</span>
+            </div>
+          </div>
+          {num("privateDailyLimit")}
+          {num("privateCooldownSeconds")}
+        </Card>
       </div>
     </div>
   );

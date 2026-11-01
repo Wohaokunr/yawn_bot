@@ -171,7 +171,9 @@ export type NumericSettingKey =
   | "inboxMaxFileMb"
   | "inboxMaxPerTurn"
   | "inboxHistoryMinutes"
-  | "inboxGroupDailyMb";
+  | "inboxGroupDailyMb"
+  | "privateDailyRuns"
+  | "privateInboxDailyMb";
 
 export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: number; unit: string; label: string }> = {
   memberDailyRuns: { min: 0, max: 1000, unit: "次/天", label: "每位成员每日次数" },
@@ -186,6 +188,8 @@ export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: numbe
   inboxMaxPerTurn: { min: 1, max: 20, unit: "个/轮", label: "每轮最多入箱" },
   inboxHistoryMinutes: { min: 0, max: 2880, unit: "分钟", label: "可回溯的历史附件" },
   inboxGroupDailyMb: { min: 0, max: 20000, unit: "MB/天", label: "每群每日入箱总量" },
+  privateDailyRuns: { min: 0, max: 10000, unit: "次/天", label: "每人每日运行次数" },
+  privateInboxDailyMb: { min: 0, max: 20000, unit: "MB/天", label: "每人每日入箱总量" },
 };
 
 const GROUP_ID_RE = /^\d{4,12}$/;
