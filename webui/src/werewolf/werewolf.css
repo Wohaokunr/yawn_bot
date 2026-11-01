@@ -1,0 +1,413 @@
+/* 狼人杀管理台 2.0：中性底色 + 樱粉单一强调色；阵营色只用于语义（狼红 / 神蓝 / 民灰 / 好人绿）。 */
+
+.ww2-page {
+  --ww-wolf: #d9485f;
+  --ww-wolf-bg: #fdecef;
+  --ww-good: #2f9e6e;
+  --ww-good-bg: #e9f7f0;
+  --ww-god: #3b74d9;
+  --ww-god-bg: #eaf1fc;
+  --ww-villager: #8b8fa3;
+  --ww-villager-bg: #f1f1f5;
+  --ww-gold: #d39b16;
+  --ww-night: #2b2f4a;
+  --ww-night-2: #3c3866;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.ww2-grow { flex: 1 1 auto; }
+.ww2-gap { margin-bottom: 10px; }
+.ww2-muted { color: var(--ink-tertiary); font-size: 12px; }
+.ww2-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.ww2-chip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ww2-chip-row .ant-tag { margin-inline-end: 0; }
+.ww2-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ww2-linklike { border: 0; background: none; padding: 0; color: var(--brand); cursor: pointer; font: inherit; }
+.ww2-linklike:hover { text-decoration: underline; }
+.ww2-pre {
+  font-size: 12px; line-height: 1.55; padding: 8px 10px; border-radius: 10px;
+  background: var(--surface-muted); border: 1px solid var(--border-soft);
+  max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
+
+/* ---------- 状态条 ---------- */
+.ww2-status {
+  display: grid;
+  grid-template-columns: minmax(220px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-xs);
+}
+.ww2-status.is-error { border-color: #f5c2c0; }
+.ww2-status-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ww2-status-main > div { display: flex; flex-direction: column; min-width: 0; }
+.ww2-status-main strong { color: var(--ink); font-size: 15px; }
+.ww2-status-main span { color: var(--ink-secondary); font-size: 12.5px; }
+.ww2-status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ink-tertiary); flex: none; }
+.ww2-status-dot.is-live { background: var(--brand); box-shadow: 0 0 0 4px var(--brand-100); animation: ww2-pulse 2s ease-in-out infinite; }
+.ww2-status-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.ww2-status-chips .ant-tag { margin: 0; }
+.ww2-status-actions { display: flex; align-items: center; gap: 8px; }
+.ww2-reveal {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 10px;
+  border: 1px solid var(--border); border-radius: 999px; cursor: pointer; font-size: 12.5px; color: var(--ink-secondary);
+  user-select: none;
+}
+.ww2-reveal.is-on { border-color: var(--brand-200); background: var(--brand-50); color: var(--brand-active); }
+.ww2-views { align-self: flex-start; }
+.ww2-views .ant-badge { margin-inline-start: 4px; }
+
+@keyframes ww2-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--brand-100); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ww2-status-dot.is-live, .ww2-seat.is-speaking .ww2-seat-avatar { animation: none !important; }
+}
+
+/* ---------- 通用徽标 ---------- */
+.ww2-pill {
+  display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 10px;
+  border-radius: 999px; font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  background: var(--surface-muted); color: var(--ink-secondary); border: 1px solid var(--border);
+}
+.ww2-pill.is-blue { background: #eef4ff; color: #2f5fb8; border-color: #d6e3fb; }
+.ww2-pill.is-night { background: var(--ww-night); color: #e6e4ff; border-color: var(--ww-night); }
+.ww2-pill.is-orange { background: #fff4e5; color: #b4610a; border-color: #fbe0bd; }
+.ww2-pill.is-gold { background: #fff8e1; color: #9a6b00; border-color: #f7e4a8; }
+.ww2-pill.is-green { background: var(--ww-good-bg); color: #1f7a52; border-color: #cdeedd; }
+.ww2-pill.is-red { background: var(--ww-wolf-bg); color: #b13248; border-color: #f7cfd6; }
+.ww2-pill.is-gray { background: var(--surface-muted); color: var(--ink-tertiary); }
+
+.ww2-role {
+  display: inline-flex; align-items: center; gap: 3px; padding: 0 8px; height: 22px; border-radius: 6px;
+  font-size: 12px; white-space: nowrap; background: var(--ww-villager-bg); color: var(--ink-secondary);
+}
+.ww2-role.is-wolf { background: var(--ww-wolf-bg); color: #b13248; }
+.ww2-role.is-good { background: var(--ww-good-bg); color: #1f7a52; }
+.ww2-role.is-hidden { color: var(--ink-tertiary); }
+
+.ww2-seatno {
+  display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 6px;
+  background: var(--brand-50); color: var(--brand-active); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.ww2-seatno.is-dead { background: var(--surface-muted); color: var(--ink-tertiary); text-decoration: line-through; }
+
+.ww2-stages { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.ww2-stages li {
+  flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0;
+  padding-top: 6px; border-top: 3px solid var(--border-soft); font-size: 11px; color: var(--ink-tertiary);
+}
+.ww2-stages li.is-done { border-top-color: var(--brand-200); }
+.ww2-stages li.is-current { border-top-color: var(--brand); color: var(--ink); font-weight: 700; }
+.ww2-stage-dot { font-size: 12px; line-height: 1; filter: grayscale(1); opacity: 0.55; }
+.ww2-stages li.is-current .ww2-stage-dot, .ww2-stages li.is-done .ww2-stage-dot { filter: none; opacity: 1; }
+.ww2-stage-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+.ww2-ratio { display: flex; gap: 2px; width: 100%; border-radius: 999px; overflow: hidden; background: var(--border-soft); margin: 6px 0; }
+.ww2-ratio-seg { display: block; min-width: 4px; }
+.ww2-ratio-seg.is-wolf, .ww2-legend i.is-wolf { background: var(--ww-wolf); }
+.ww2-ratio-seg.is-good, .ww2-legend i.is-good { background: var(--ww-good); }
+.ww2-ratio-seg.is-god, .ww2-legend i.is-god { background: var(--ww-god); }
+.ww2-ratio-seg.is-villager, .ww2-legend i.is-villager { background: var(--ww-villager); }
+.ww2-ratio-seg.is-accent, .ww2-legend i.is-accent { background: var(--brand); }
+.ww2-ratio-seg.is-gray, .ww2-legend i.is-gray { background: #d7d6de; }
+.ww2-ratio-empty { flex: 1; }
+.ww2-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--ink-secondary); }
+.ww2-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.ww2-legend i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+
+.ww2-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.ww2-metric {
+  display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 12px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-xs);
+}
+.ww2-metric-label { font-size: 12px; color: var(--ink-secondary); }
+.ww2-metric-value { font-size: 22px; color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1.25; }
+.ww2-metric-hint { font-size: 11.5px; color: var(--ink-tertiary); }
+.ww2-metric.is-warn { border-color: #f3d9a4; }
+.ww2-metric.is-error { border-color: #f5c2c0; }
+
+.ww2-meter { display: grid; grid-template-columns: minmax(64px, 120px) minmax(40px, 1fr) auto; align-items: center; gap: 8px; padding: 4px 0; font-size: 12.5px; width: 100%; }
+.ww2-meter.is-link { border: 0; background: none; text-align: left; cursor: pointer; border-radius: 8px; padding: 4px 6px; margin: 0 -6px; width: calc(100% + 12px); font: inherit; font-size: 12.5px; }
+.ww2-meter.is-link:hover { background: var(--brand-50); }
+.ww2-meter-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.ww2-meter-track { display: block; height: 8px; border-radius: 999px; background: var(--border-soft); overflow: hidden; }
+.ww2-meter-fill { display: block; height: 100%; border-radius: 999px; background: var(--brand); }
+.ww2-meter-fill.is-wolf, .ww2-meter-fill.is-red { background: var(--ww-wolf); }
+.ww2-meter-fill.is-good { background: var(--ww-good); }
+.ww2-meter-fill.is-gold { background: var(--ww-gold); }
+.ww2-meter-fill.is-purple { background: #8a6fe0; }
+.ww2-meter-text { color: var(--ink-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.ww2-panel {
+  padding: 14px 16px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-xs); min-width: 0;
+}
+.ww2-panel h4 { margin: 0 0 8px; font-size: 14px; color: var(--ink); }
+.ww2-panel h5 { margin: 12px 0 6px; font-size: 12.5px; color: var(--ink-secondary); }
+.ww2-panel p { margin: 6px 0 0; }
+.ww2-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ww2-panel-head h4 { margin: 0; }
+
+/* ---------- 实时对局卡片 ---------- */
+.ww2-empty { padding: 32px 16px; text-align: center; background: var(--surface); border: 1px dashed var(--border); border-radius: 14px; }
+.ww2-empty p { max-width: 520px; margin: 0 auto; color: var(--ink-secondary); }
+.ww2-empty code, .ww2-rules code { padding: 1px 6px; border-radius: 5px; background: var(--brand-50); color: var(--brand-active); font-size: 12px; }
+.ww2-live-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 14px; }
+.ww2-card {
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-xs); min-width: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ww2-card:hover { border-color: var(--brand-200); box-shadow: var(--shadow-sm); }
+.ww2-card.is-night { background: linear-gradient(180deg, #f5f4fc 0%, var(--surface) 55%); }
+.ww2-card.is-broken { border-color: #f5c2c0; }
+.ww2-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.ww2-card-title { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; border: 0; background: none; padding: 0; cursor: pointer; text-align: left; font: inherit; }
+.ww2-card-title strong { font-size: 15px; color: var(--ink); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ww2-card-title span { font-size: 12px; color: var(--ink-tertiary); }
+.ww2-card-title:hover strong { color: var(--brand-active); }
+.ww2-card-seats { display: flex; flex-wrap: wrap; gap: 5px; }
+.ww2-mini-seat {
+  display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%;
+  background: var(--surface-muted); border: 1px solid var(--border); font-size: 12px; font-weight: 700; color: var(--ink-secondary);
+}
+.ww2-mini-seat.is-wolf { background: var(--ww-wolf-bg); border-color: #f2c3cc; }
+.ww2-mini-seat.is-good { background: var(--ww-good-bg); border-color: #c8ead8; }
+.ww2-mini-seat.is-dead { opacity: 0.35; filter: grayscale(1); }
+.ww2-mini-seat.is-speaking { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-100); }
+.ww2-card-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 8px; margin: 0; }
+.ww2-card-facts div { display: flex; flex-direction: column; gap: 1px; }
+.ww2-card-facts dt { font-size: 11.5px; color: var(--ink-tertiary); }
+.ww2-card-facts dd { margin: 0; font-size: 13.5px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.ww2-card-signup { display: flex; flex-direction: column; gap: 8px; }
+.ww2-card-alerts { display: flex; flex-direction: column; gap: 4px; }
+.ww2-card-alerts .ant-alert { border-radius: 8px; padding: 4px 10px; font-size: 12.5px; }
+.ww2-card-foot { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+
+/* ---------- 观战室 ---------- */
+.ww2-room { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ww2-room-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ww2-room-bar h3 { margin: 0 4px; font-size: 18px; color: var(--ink); }
+.ww2-room-bar .ant-tag { margin: 0; }
+.ww2-live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-secondary); }
+.ww2-live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ww-good); }
+.ww2-live.is-off::before { background: var(--ink-tertiary); }
+.ww2-live.is-error::before { background: var(--ww-wolf); }
+.ww2-banner {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 380px); gap: 16px; align-items: center;
+  padding: 14px 18px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-xs);
+}
+.ww2-banner.is-night { background: linear-gradient(120deg, var(--ww-night) 0%, var(--ww-night-2) 100%); border-color: var(--ww-night); color: #e6e4ff; }
+.ww2-banner.is-night .ww2-stages li { color: #a9a6d6; border-top-color: rgba(255, 255, 255, 0.15); }
+.ww2-banner.is-night .ww2-stages li.is-current { color: #fff; border-top-color: var(--brand); }
+.ww2-banner.is-night .ww2-stages li.is-done { border-top-color: rgba(228, 85, 138, 0.5); }
+.ww2-banner-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ww2-banner-main strong { font-size: 18px; }
+.ww2-banner-main span { font-size: 12.5px; opacity: 0.85; }
+.ww2-banner-speaker { font-weight: 600; opacity: 1 !important; }
+.ww2-banner-clock { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ww2-clock { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ww2-clock.is-muted { font-size: 14px; font-weight: 600; opacity: 0.8; }
+.ww2-banner .ant-progress { margin: 0; }
+.ww2-room-grid { display: grid; grid-template-columns: minmax(320px, 5fr) minmax(0, 7fr); gap: 14px; align-items: start; }
+.ww2-room-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; position: sticky; top: 12px; }
+.ww2-room-right { min-width: 0; padding: 4px 16px 14px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-xs); }
+
+.ww2-table {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; max-height: 520px; border-radius: 18px;
+  background: radial-gradient(circle at 50% 50%, #fff 0%, #fff 38%, var(--brand-50) 39%, var(--surface-muted) 70%);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.ww2-table.is-night { background: radial-gradient(circle at 50% 50%, #3a3760 0%, #3a3760 38%, #2f2c52 39%, var(--ww-night) 72%); border-color: var(--ww-night); }
+.ww2-table.is-signup { display: grid; place-items: center; aspect-ratio: auto; min-height: 220px; padding: 20px; }
+.ww2-table-center {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; color: var(--ink);
+  max-width: 46%;
+}
+.ww2-table.is-signup .ww2-table-center { position: static; transform: none; max-width: none; gap: 10px; }
+.ww2-table.is-night .ww2-table-center { color: #e6e4ff; }
+.ww2-table-center strong { font-size: 16px; }
+.ww2-table-center span { font-size: 12px; }
+.ww2-table.is-night .ww2-muted { color: #a9a6d6; }
+.ww2-table-icon { font-size: 26px !important; line-height: 1; }
+.ww2-seat {
+  position: absolute; transform: translate(-50%, -30%); display: flex; flex-direction: column; align-items: center; gap: 1px;
+  width: 78px; padding: 2px; border: 0; background: none; cursor: pointer; font: inherit; color: var(--ink); border-radius: 12px;
+}
+.ww2-seat:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.ww2-table.is-night .ww2-seat { color: #eceaff; }
+.ww2-seat-avatar {
+  position: relative; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
+  background: var(--surface); border: 2px solid var(--border); font-size: 18px; font-weight: 700; color: var(--ink);
+  box-shadow: var(--shadow-xs); transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.ww2-seat-avatar.is-lg { width: 48px; height: 48px; flex: none; }
+.ww2-seat:hover .ww2-seat-avatar { transform: scale(1.06); }
+.ww2-seat.is-wolf .ww2-seat-avatar, .ww2-seat-avatar.is-wolf { background: var(--ww-wolf-bg); border-color: #efb4c0; }
+.ww2-seat.is-good .ww2-seat-avatar, .ww2-seat-avatar.is-good { background: var(--ww-good-bg); border-color: #b7e2cb; }
+.ww2-seat.is-dead .ww2-seat-avatar { filter: grayscale(1); opacity: 0.45; }
+.ww2-seat.is-dead .ww2-seat-name { text-decoration: line-through; opacity: 0.6; }
+.ww2-seat.is-selected .ww2-seat-avatar { border-color: var(--brand); box-shadow: 0 0 0 4px var(--brand-100); }
+.ww2-seat.is-speaking .ww2-seat-avatar { border-color: var(--brand); animation: ww2-pulse 1.6s ease-in-out infinite; }
+.ww2-seat-no {
+  position: absolute; left: -6px; top: -6px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 999px;
+  background: var(--ink); color: #fff; font-size: 10.5px; line-height: 18px; text-align: center;
+}
+.ww2-seat-badge { position: absolute; font-size: 11px; line-height: 1; }
+.ww2-seat-badge.is-sheriff { right: -6px; top: -6px; font-size: 14px; }
+.ww2-seat-badge.is-ai { right: -8px; bottom: -4px; padding: 1px 4px; border-radius: 5px; background: #8a6fe0; color: #fff; font-size: 9.5px; font-weight: 700; }
+.ww2-seat-badge.is-silenced { left: -8px; bottom: -4px; font-size: 13px; }
+.ww2-seat-name { max-width: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; }
+.ww2-seat-role { font-size: 10.5px; opacity: 0.8; }
+.ww2-seat-dead { font-size: 10px; color: var(--ww-wolf); }
+.ww2-table.is-night .ww2-seat-dead { color: #ff9fb0; }
+.ww2-seat-votes { font-size: 10px; padding: 0 5px; border-radius: 999px; background: #fff3cf; color: #8a6200; }
+
+.ww2-verdict { font-weight: 600; }
+.ww2-verdict.is-wolf { color: var(--ww-wolf); }
+.ww2-verdict.is-good { color: var(--ww-good); }
+.ww2-verdict.is-even { color: var(--ink-secondary); }
+.ww2-seat-detail { display: flex; flex-direction: column; gap: 10px; }
+.ww2-seat-detail-head { display: flex; align-items: center; gap: 10px; }
+.ww2-seat-detail-head > div { display: flex; flex-direction: column; }
+.ww2-quote { margin: 0; padding: 8px 12px; border-left: 3px solid var(--brand-200); background: var(--surface-muted); border-radius: 0 10px 10px 0; display: flex; flex-direction: column; gap: 3px; white-space: pre-wrap; word-break: break-word; }
+
+/* 时间线 */
+.ww2-feed { display: flex; flex-direction: column; gap: 10px; }
+.ww2-feed-toolbar { display: flex; flex-direction: column; gap: 8px; position: sticky; top: 0; z-index: 2; background: var(--surface); padding: 2px 0 8px; border-bottom: 1px solid var(--border-soft); }
+.ww2-feed-toolbar .ant-segmented { max-width: 100%; overflow-x: auto; }
+.ww2-feed-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ww2-feed-list { display: flex; flex-direction: column; gap: 4px; }
+.ww2-feed-day { display: flex; flex-direction: column; gap: 6px; }
+.ww2-feed-dayhead { margin: 8px 0 2px; font-size: 12px; color: var(--ink-tertiary); letter-spacing: 0.04em; display: flex; align-items: center; gap: 8px; }
+.ww2-feed-dayhead::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+.ww2-feed-phase { display: flex; justify-content: space-between; gap: 8px; padding: 2px 10px; font-size: 12px; color: var(--ink-secondary); border-left: 2px solid var(--brand-200); }
+.ww2-feed-phase time { color: var(--ink-tertiary); }
+.ww2-feed-item { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border-soft); background: var(--surface); display: flex; flex-direction: column; gap: 4px; }
+.ww2-feed-item:hover { border-color: var(--border); }
+.ww2-feed-item.is-death { background: #fff8f9; border-color: #f7dbe0; }
+.ww2-feed-item.is-system { background: #fff8f0; }
+.ww2-feed-item.is-announce { background: var(--surface-muted); }
+.ww2-feed-item header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; }
+.ww2-feed-item header time { font-size: 11.5px; color: var(--ink-tertiary); }
+.ww2-feed-item header .ant-tag { margin: 0; }
+.ww2-feed-seat { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; cursor: pointer; font: inherit; font-weight: 600; color: var(--ink); }
+.ww2-feed-seat:hover { color: var(--brand-active); }
+.ww2-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-tertiary); flex: none; }
+.ww2-dot.is-green { background: var(--ww-good); }
+.ww2-dot.is-red { background: var(--ww-wolf); }
+.ww2-dot.is-gold { background: var(--ww-gold); }
+.ww2-dot.is-purple { background: #8a6fe0; }
+.ww2-dot.is-blue { background: var(--ww-god); }
+.ww2-type.is-green { background: var(--ww-good-bg); color: #1f7a52; }
+.ww2-type.is-red { background: var(--ww-wolf-bg); color: #b13248; }
+.ww2-type.is-gold { background: #fff8e1; color: #9a6b00; }
+.ww2-type.is-purple { background: #f1edff; color: #6a4fc9; }
+.ww2-type.is-blue { background: var(--ww-god-bg); color: #2f5fb8; }
+.ww2-speech, .ww2-feed-text { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 13.5px; line-height: 1.6; color: var(--ink); }
+.ww2-feed-text { color: var(--ink-secondary); font-size: 13px; }
+.ww2-ai { display: flex; flex-direction: column; gap: 4px; }
+.ww2-ai-instruction { font-size: 12px; color: var(--ink-tertiary); }
+.ww2-ai-reply { white-space: pre-wrap; word-break: break-word; font-size: 13px; padding: 6px 10px; border-radius: 8px; background: #f7f5ff; }
+.ww2-ai-reply.is-empty { color: var(--ww-wolf); background: var(--ww-wolf-bg); }
+.ww2-ai .ant-collapse-header { padding: 2px 0 !important; }
+
+/* 投票 */
+.ww2-votes { display: flex; flex-direction: column; gap: 12px; }
+.ww2-vote { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 4px; }
+.ww2-vote header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin-bottom: 4px; }
+.ww2-vote-row { display: grid; grid-template-columns: minmax(110px, 180px) minmax(40px, 1fr) 36px minmax(60px, auto); gap: 8px; align-items: center; font-size: 12.5px; }
+.ww2-vote-row.is-lead .ww2-vote-target { font-weight: 700; }
+.ww2-vote-target { display: inline-flex; align-items: center; gap: 4px; min-width: 0; border: 0; background: none; padding: 0; cursor: pointer; font: inherit; text-align: left; color: var(--ink); overflow: hidden; white-space: nowrap; }
+.ww2-vote-count { text-align: right; font-variant-numeric: tabular-nums; }
+.ww2-vote-voters { color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+.ww2-row-selected > td { background: var(--brand-50) !important; }
+.ww2-row-dead > td { color: var(--ink-tertiary); }
+
+/* ---------- 战绩 ---------- */
+.ww2-history .ant-table { background: var(--surface); }
+.ww2-detail { display: flex; flex-direction: column; gap: 12px; }
+.ww2-detail h4 { margin: 4px 0 0; font-size: 14px; }
+.ww2-detail-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ww2-detail-teams { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.ww2-team { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.ww2-team.is-wolf { border-color: #f2c3cc; background: #fffafb; }
+.ww2-team.is-good { border-color: #c8ead8; background: #fbfefc; }
+.ww2-team h4 { margin: 0 0 2px; }
+.ww2-team-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; }
+.ww2-team-row.is-dead .ww2-team-name { color: var(--ink-tertiary); }
+.ww2-team-name { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; }
+
+/* ---------- 数据洞察 ---------- */
+.ww2-insight-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.ww2-span-2 { grid-column: span 2; }
+.ww2-span-3 { grid-column: 1 / -1; }
+.ww2-bars { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding-top: 6px; }
+.ww2-bar { position: relative; flex: 1 1 0; min-width: 3px; max-width: 26px; border-radius: 4px 4px 0 0; background: var(--brand-200); display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
+.ww2-bar.is-zero { background: var(--border-soft); }
+.ww2-bar-wolf { display: block; width: 100%; background: var(--ww-wolf); opacity: 0.75; }
+.ww2-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-tertiary); margin-top: 4px; }
+.ww2-hours { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.ww2-hour { display: grid; place-items: center; height: 28px; border-radius: 6px; background: var(--brand); color: #fff; font-size: 11px; font-weight: 700; }
+
+/* ---------- 规则与配置 ---------- */
+.ww2-rules { display: flex; flex-direction: column; gap: 12px; }
+.ww2-rules > .ant-segmented { align-self: flex-start; }
+.ww2-board-grid, .ww2-role-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 12px; margin-top: 10px; }
+.ww2-board header, .ww2-role-card header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ww2-board header h4, .ww2-role-card header h4 { margin: 0; }
+.ww2-board { display: flex; flex-direction: column; gap: 8px; }
+.ww2-role-card { display: flex; flex-direction: column; gap: 8px; }
+.ww2-role-card.is-wolf { border-top: 3px solid var(--ww-wolf); }
+.ww2-role-card.is-good { border-top: 3px solid var(--ww-good); }
+.ww2-role-icon { font-size: 26px; line-height: 1; }
+.ww2-skill { white-space: pre-wrap; font-size: 13px; line-height: 1.65; color: var(--ink-secondary); margin: 0; }
+.ww2-role-card details summary { cursor: pointer; font-size: 12px; color: var(--ink-secondary); }
+.ww2-timing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.ww2-config-group h5 { margin: 14px 0 6px; }
+.ww2-config { margin: 0; display: flex; flex-direction: column; }
+.ww2-config > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px dashed var(--border-soft); }
+.ww2-config dt { display: flex; flex-direction: column; font-size: 13px; color: var(--ink); }
+.ww2-config dt code { font-size: 10.5px; color: var(--ink-tertiary); background: none; padding: 0; }
+.ww2-config dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1180px) {
+  .ww2-room-grid { grid-template-columns: minmax(0, 1fr); }
+  .ww2-room-left { position: static; }
+  .ww2-table { max-width: 520px; margin: 0 auto; }
+  .ww2-insight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ww2-span-2 { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .ww2-status { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .ww2-status-actions { justify-content: space-between; }
+  .ww2-banner { grid-template-columns: minmax(0, 1fr); }
+  .ww2-views { max-width: 100%; overflow-x: auto; }
+  .ww2-insight-grid, .ww2-timing { grid-template-columns: minmax(0, 1fr); }
+  .ww2-seat { width: 60px; }
+  .ww2-seat-avatar { width: 34px; height: 34px; font-size: 14px; }
+  .ww2-seat-name { max-width: 58px; font-size: 10.5px; }
+  .ww2-seat-role, .ww2-seat-dead, .ww2-seat-votes { display: none; }
+  .ww2-table-center strong { font-size: 13px; }
+  .ww2-vote-row { grid-template-columns: minmax(80px, 1fr) minmax(40px, 1fr) 32px; }
+  .ww2-vote-voters { grid-column: 1 / -1; }
+  .ww2-room-right { padding: 4px 10px 10px; }
+  .ww2-history .ant-table-wrapper .ant-table { min-width: 0; }
+}
+
+/* 窄屏下分段控件不压缩文字，改为横向滚动 */
+.ww2-page .ant-segmented { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.ww2-page .ant-segmented::-webkit-scrollbar { display: none; }
+.ww2-page .ant-segmented-group { flex-wrap: nowrap; }
+.ww2-page .ant-segmented-item { flex: none; }
+.ww2-page .ant-segmented-item-label { overflow: visible; text-overflow: clip; }
+.ww2-room-link { font-size: 12.5px; color: var(--brand); }

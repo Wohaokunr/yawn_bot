@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { rpgActionOptions, wwSeatPosition } from "./games";
+import { rpgActionOptions } from "./games";
+import { seatPosition as wwSeatPosition } from "./werewolf/ww-meta";
 
 describe("wwSeatPosition", () => {
   it("1 号位在正上方", () => {
