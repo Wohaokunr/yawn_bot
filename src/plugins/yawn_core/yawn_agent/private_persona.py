@@ -763,8 +763,8 @@ def state_payload(user_id: int) -> dict[str, Any]:
     resolved = resolve_from_record(record, policy)
     stored = parse_persona_card(raw.get("card"))
     compiled = _payload(resolved)
-    prefs = record.get("prefs") if isinstance(record.get("prefs"), dict) else {}
-    call_me = str(prefs.get("call_me") or "")
+    prefs = record.get("prefs")
+    call_me = str(prefs.get("call_me") or "") if isinstance(prefs, dict) else ""
     return {
         "userId": str(user_id),
         "mode": _mode(raw),

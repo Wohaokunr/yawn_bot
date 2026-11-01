@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001, ANN201, PLR2004, E501, RUF001
+# ruff: noqa: ANN001, ANN003, ANN201, DTZ001, E501, FBT003, PLR2004
 """私聊每用户人设：生效顺序、策略、自助修改（my_persona）、历史与撤销、提示词接入。"""
 
 from __future__ import annotations

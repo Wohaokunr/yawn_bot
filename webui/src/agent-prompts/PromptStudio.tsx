@@ -26,7 +26,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { CopyButton } from "../agent-debug/debug-utils";
 import { collapseDiff, diffStats, downloadJson, estimateTokens, lineDiff } from "../agent-debug/trace-analysis";
@@ -537,6 +537,12 @@ export function PromptStudio({ groupId }: { groupId: string }): React.JSX.Elemen
         <Button danger icon={<DeleteOutlined />} onClick={removeSafety} disabled={busy}>一键删除安全上下文</Button>
       </div>
       {data.loadError && <Alert type="error" showIcon message="覆盖文件读取失败，当前按代码默认运行" description={`${data.storeFile}：${data.loadError}`} />}
+      {(data.privateSections ?? 0) > 0 && <Alert
+        type="info"
+        showIcon
+        className="pst-private-hint"
+        message={<span>私聊 Agent 的 {data.privateSections} 个分段（含私聊工具描述）不在这里，移到了 <Link to="/private-agent">私聊 Agent → 提示词</Link>：那里可以对所有私聊改，也可以只给某一位用户改。</span>}
+      />}
       {safetyGone.length > 0 && <Alert
         type="warning"
         showIcon

@@ -18,6 +18,7 @@ import {
   Typography,
 } from "antd";
 import { useCallback, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "./api";
 import { formatTime, QueryErrorAlert, useApiQuery } from "./shared";
 
@@ -96,6 +97,21 @@ export interface UserPrivateAgent {
   tasksToday?: number;
   computer?: { workspace: string; runsToday: number; dailyLimit: number; inboxBytes: number } | null;
   cancelled?: boolean;
+  /** 私聊人设摘要与本人提示词覆盖数（旧后端没有）。 */
+  persona?: UserPrivatePersonaBrief | null;
+}
+
+export interface UserPrivatePersonaBrief {
+  mode: "follow" | "custom" | "library";
+  source: string;
+  sourceLabel: string;
+  personal: boolean;
+  name: string | null;
+  summary: string;
+  templateName: string | null;
+  locked: boolean;
+  updatedAt: string | null;
+  promptOverrides: number;
 }
 
 export type PrivateTaskState = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
@@ -371,6 +387,26 @@ export function PrivateAgentPanel({ userId }: { userId: string }): React.JSX.Ele
         </Descriptions.Item>
       </Descriptions>
     </Card>
+    {data.persona && <Card
+      size="small"
+      title="私聊人设与提示词"
+      extra={<Link to={`/private-agent?pa.tab=persona&pa.user=${encodeURIComponent(userId)}`}>去「私聊 Agent」页管理</Link>}
+    >
+      <Descriptions size="small" column={1}>
+        <Descriptions.Item label="人设">
+          <Space wrap>
+            <Tag color={data.persona.personal ? "magenta" : "default"}>{data.persona.sourceLabel}</Tag>
+            {data.persona.locked && <Tag color="gold">已锁定</Tag>}
+            <Text type="secondary">{data.persona.summary}</Text>
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="本人提示词覆盖">
+          {data.persona.promptOverrides > 0
+            ? <Link to={`/private-agent?pa.tab=prompts&pa.user=${encodeURIComponent(userId)}`}>{data.persona.promptOverrides} 处</Link>
+            : <Text type="secondary">没有，跟随全局</Text>}
+        </Descriptions.Item>
+      </Descriptions>
+    </Card>}
     {data.tasks && <Card
       size="small"
       title="后台小助手"

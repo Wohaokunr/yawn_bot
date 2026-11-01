@@ -20,6 +20,7 @@ import "./sandbox/sandbox.css";
 import "./web-search/web-search.css";
 import "./stickers/stickers.css";
 import "./schedules/schedules.css";
+import "./private-agent/private-agent.css";
 import "./directory/directory.css";
 import "./werewolf/werewolf.css";
 import "./theme-anime.css";

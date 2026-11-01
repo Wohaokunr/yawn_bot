@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001, ANN201, PLR2004, E501, RUF001
+# ruff: noqa: ANN001, ANN201, E501, PLR2004
 """私聊提示词注册表：本人作用域、解析顺序、目录/链路/体检、提升与清空、按用户抓取、预览。"""
 
 from __future__ import annotations

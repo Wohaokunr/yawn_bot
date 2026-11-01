@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001, ANN201, PLR2004, E501, RUF001
+# ruff: noqa: ANN001, ANN003, ANN201, ARG001, E501, PLR2004
 """WebUI「私聊 Agent」页接口：私聊提示词（全局/本人）、人设、最近请求，以及人设库联动。"""
 
 from __future__ import annotations
