@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, PLR0912, TID252, TC003, TRY003
+# ruff: noqa: E501, C901, PLR0911, PLR0912, TID252, TC003, TRY003
 """私聊 Agent 的工具：全部只作用于**当前私聊的这位用户本人**。
 
 没有任何工具接受 user_id；群相关的工具只能选用户本人活跃所在的群，读 Agent 数据
@@ -331,14 +331,15 @@ COMPUTER_TOOLS: tuple[PrivateTool, ...] = tuple(
 TASK_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "delegate_task",
-        "把耗时、多步骤的活派给后台小助手（子智能体）去做：联网查资料并整理、写代码算数据画图、处理他发来的文件、写长文。"
-        "小助手看不到聊天记录，只看 goal 和 brief；它每做完一步会自动给他发进度，做完你会收到结果再转述。简单问题自己答，不要派",
+        "把费时间的活放到后台做，你这边马上回他一句：联网查好几处再整理对比、写代码算数据画图、处理他发来的文件、做表格/PPT/文档、写长文，"
+        "估计要调三次以上工具或半分钟以上的都适合。只要写 goal；最近的聊天、本轮附件、他的称呼会自动带过去，brief 只补聊天里没有的要求。"
+        "做的过程中会用你的口吻给他报进度，做完你收到结果再用自己的话告诉他。对他来说都是你在做，别提后台和小助手",
         {
             "title": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 20,
-                "description": "给他看的短标题，如 查周末天气",
+                "description": "短标题，如 查周末天气；不写就从 goal 里截",
             },
             "goal": {
                 "type": "string",
@@ -356,14 +357,19 @@ TASK_TOOLS: tuple[PrivateTool, ...] = (
                 "minItems": 1,
                 "maxItems": 3,
                 "items": {"type": "string", "enum": ["web", "computer", "toolbox"]},
-                "description": "web 联网搜索、computer 他的虚拟电脑（算、画图、处理文件）、toolbox 小工具",
+                "description": "web 联网搜索、computer 他的虚拟电脑（算、画图、处理文件）、toolbox 小工具；不写就按情况自动选",
             },
             "save_to_notes": {
                 "type": "boolean",
                 "description": "他说要存下来时为 true：做完自动存进他的笔记",
             },
+            "follow_up_of": {
+                "type": "string",
+                "maxLength": 12,
+                "description": "接着之前做完的哪件事做（tasks 里的编号，如 t3）：他说“展开第二点”“换成表格”时用，上次的结论和文件会带过去",
+            },
         },
-        ("title", "goal", "tools"),
+        ("goal",),
         writes=True,
     ),
     PrivateTool(
@@ -404,10 +410,11 @@ TASK_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "tasks",
-        "后台小助手任务：list 看最近的任务、项目和进度；cancel 取消（他说不要了）；answer 把他的回答转交给正在等回答的任务；"
-        "message 给正在做的小助手发消息（补充要求、改方向、回答它在 helper_messages 里问你的事；id 写任务编号/成员名，all 发给所有在做的）",
+        "你在后台做的事：list 看最近在做/做完的和进度；result 看某件事的完整结果（他追问细节时用）；cancel 取消（他说不要了）；"
+        "answer 把他的回答转给正在等回答的那件事；message 给正在做的那件补充要求、改方向、回答 helper_messages 里问你的事"
+        "（id 写编号/成员名，all 发给所有在做的）",
         {
-            "action": {"type": "string", "enum": ["list", "cancel", "answer", "message"]},
+            "action": {"type": "string", "enum": ["list", "result", "cancel", "answer", "message"]},
             "id": {
                 "type": "string",
                 "maxLength": 12,
@@ -436,9 +443,15 @@ def tool_schemas(
 ) -> list[dict[str, Any]]:
     """本轮给模型的工具；虚拟电脑和小助手任务只在可用时出现。"""
 
+    # 能放后台时把派活工具排在最前面：模型更容易想到“交出去”，而不是自己一路调工具。
+    ordered = (
+        [*TASK_TOOLS, *(tool for tool in ALL_TOOLS if tool.name not in TASK_NAMES)]
+        if tasks
+        else list(ALL_TOOLS)
+    )
     return [
         tool.schema()
-        for tool in ALL_TOOLS
+        for tool in ordered
         if (is_superuser or tool.name not in SUPERUSER_TOOLS)
         and (computer or tool.name not in COMPUTER_NAMES)
         and (tasks or tool.name not in TASK_NAMES)
@@ -466,6 +479,15 @@ class PrivateToolContext:
     computer_runs: int = 0
     # 本轮派出的小助手任务数（声明核验与“一轮最多派几个”）
     delegated: int = 0
+    # 以下由主回合填好，派活时自动带进任务单（子智能体据此用同一个口吻、知道他原话）
+    dialogue: str = ""
+    user_input: str = ""
+    voice: dict[str, Any] = field(default_factory=dict)
+    call_them: str = ""
+    computer: bool = False
+    attachment_refs: list[str] = field(default_factory=list)
+    # 本轮主智能体自己调用重活工具（联网/读网页/跑代码/能力包）的次数
+    heavy_calls: int = 0
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -768,6 +790,10 @@ async def execute_private_tool(
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
         return {"ok": False, "error": f"没有工具 {name}", "error_code": "invalid_args"}
+    from .private_voice import HEAVY_TOOLS
+
+    if name in HEAVY_TOOLS:
+        ctx.heavy_calls += 1
     try:
         args = validate_tool_arguments(
             name, tool.properties, tool.required, raw_args or {}
@@ -829,26 +855,38 @@ def _task_tool(
                 code=ERROR_PERMISSION,
                 hint="先告诉他已经安排的，别再派",
             )
+        from .private_voice import infer_toolsets, short_title
+
+        goal = clean_text(args.get("goal"), limit=600, field="目标")
         tools = [
             str(item)
             for item in args.get("tools") or []
             if str(item) in {"web", "computer", "toolbox"}
         ]
+        brief = _auto_brief(ctx, str(args.get("brief") or ""))
         if not tools:
-            raise ToolError(
-                "tools 只能选 web/computer/toolbox",
-                code=ERROR_NOT_FOUND,
-                hint="按任务需要选一两个",
+            tools = infer_toolsets(
+                computer=ctx.computer, has_refs="sandbox:" in brief
             )
+        if not ctx.computer:
+            tools = [item for item in tools if item != "computer"] or ["toolbox"]
+        title = (
+            clean_text(args.get("title"), limit=20, field="标题")
+            if str(args.get("title") or "").strip()
+            else short_title(goal)
+        )
+        follow_up = str(args.get("follow_up_of") or "").strip() or None
         result = private_tasks.start_task(
             ctx.bot,
             ctx.user_id,
-            title=clean_text(args.get("title"), limit=20, field="标题"),
-            goal=clean_text(args.get("goal"), limit=600, field="目标"),
-            brief=str(args.get("brief") or "").strip()[:1500],
+            title=title,
+            goal=goal,
+            brief=brief,
             toolsets=sorted(set(tools)),
             save_to_notes=bool(args.get("save_to_notes")),
             now=ctx.now,
+            **_hand_context(ctx),
+            follow_up_of=follow_up,
         )
         ctx.delegated += 1
         return result
@@ -860,10 +898,11 @@ def _task_tool(
             ctx.user_id,
             title=clean_text(args.get("title"), limit=20, field="标题"),
             goal=clean_text(args.get("goal"), limit=600, field="目标"),
-            brief=str(args.get("brief") or "").strip()[:1500],
+            brief=_auto_brief(ctx, str(args.get("brief") or "")),
             members=args.get("members"),
             save_to_notes=bool(args.get("save_to_notes")),
             now=ctx.now,
+            **_hand_context(ctx),
         )
         ctx.delegated += 1
         return result
@@ -874,6 +913,11 @@ def _task_tool(
         if projects:
             payload["projects"] = projects[:3]
         return payload
+    if action == "result":
+        task_id = str(args.get("id") or "").strip()
+        if not task_id:
+            raise ToolError("result 要写编号 id", code=ERROR_NOT_FOUND, hint="先用 tasks list 看编号")
+        return private_tasks.result_detail(ctx.user_id, task_id)
     if action == "message":
         target = str(args.get("id") or "").strip()
         text = str(args.get("text") or args.get("answer") or "").strip()
@@ -891,6 +935,28 @@ def _task_tool(
     if not answer:
         raise ToolError("answer 不能为空", code=ERROR_NOT_FOUND, hint="把他的原话转交")
     return private_tasks.answer_task(ctx.bot, ctx.user_id, task_id, answer)
+
+
+BRIEF_LIMIT = 1500
+
+
+def _auto_brief(ctx: PrivateToolContext, brief: str) -> str:
+    """模型写的 brief + 本轮附件的 sandbox 引用（它没抄进去的）。聊天节选单独存，不占 brief。"""
+
+    text = brief.strip()[:BRIEF_LIMIT]
+    missing = [ref for ref in ctx.attachment_refs if ref not in text]
+    if missing:
+        text = f"{text}\n他这次发来的文件：{' '.join(missing[:6])}".strip()
+    return text
+
+
+def _hand_context(ctx: PrivateToolContext) -> dict[str, Any]:
+    return {
+        "dialogue": ctx.dialogue,
+        "asked": ctx.user_input,
+        "voice": ctx.voice,
+        "call_them": ctx.call_them,
+    }
 
 
 # 会改个人数据的动作（其余动作只读）。

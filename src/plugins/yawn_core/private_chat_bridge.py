@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime  # noqa: TC003
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from nonebot import get_plugin_config, logger
 from pydantic import BaseModel, Field
@@ -85,6 +85,19 @@ class PrivateAgentConfig(BaseModel):
     private_agent_task_continuations: int = Field(default=2, ge=0, le=10)
     # 每个子任务最长运行多少秒（不含排队），超时按失败汇报
     private_agent_task_timeout_seconds: int = Field(default=1800, ge=30, le=7200)
+    # 后台进度消息的样子：natural 像本人随口报一声（默认）；
+    # template 是旧的「标题」 n/m：… 模板
+    private_agent_progress_style: Literal["natural", "template"] = "natural"
+    # 同一个人两条进度消息至少隔几秒（太近的只记录不发；派活那句回复也算一条）；0 不限
+    private_agent_progress_min_gap_seconds: int = Field(default=10, ge=0, le=600)
+    # 主 Agent 一轮里自己调了这么多次重活工具（联网/读网页/跑代码/能力包）还没答完，
+    # 就提醒它放到后台接着做；0 不提醒
+    private_agent_handoff_after: int = Field(default=3, ge=0, le=20)
+    # 主 Agent 工具轮次用完还在调工具时，自动把这件事放到后台接着做
+    # （而不是用半截结果硬答）
+    private_agent_auto_handoff: bool = True
+    # 几件后台的事前后脚做完时，等这么多秒合成一次汇报；0 不等
+    private_agent_report_batch_seconds: float = Field(default=2.0, ge=0, le=60)
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

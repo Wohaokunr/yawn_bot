@@ -46,6 +46,9 @@ def _isolated(tmp_path, monkeypatch):
     ptasks.reset_state_for_tests()
     ptasks.register_reporter(None, None)
     monkeypatch.setattr(ptasks, "_quiet", lambda _uid, _now: False)
+    cfg = ptasks.private_agent_config
+    monkeypatch.setattr(cfg, "private_agent_progress_min_gap_seconds", 0)
+    monkeypatch.setattr(cfg, "private_agent_report_batch_seconds", 0)
 
     async def fake_health(*, refresh: bool = False):
         return HEALTHY, None
@@ -332,7 +335,8 @@ async def test_delegate_progress_done_report(monkeypatch, recorder) -> None:
     payload = _start(save_to_notes=True)
     assert payload["task_id"] == "t1" and payload["status"] == "已派出"
     await _settle()
-    assert recorder.progress == ["「查天气」 1/2：已查到北京", "「查天气」 2/2：已查到上海"]
+    # 像本人随口报一声：没有「标题」前缀，计数放句尾
+    assert recorder.progress == ["已查到北京（1/2）", "已查到上海（2/2）"]
     assert [r["status"] for r in recorder.reports] == ["done"]
     task = ptasks.get_task(USER, "t1")
     assert task["summary"] == "北京晴，上海雨" and task["reported_state"] == "done"
@@ -529,6 +533,8 @@ def test_fallback_report_and_claim_guard() -> None:
     assert "[图片:sandbox:out/a.png]" in pagent.fallback_report(done)
     blocked = {"title": "查天气", "status": "blocked", "question": "哪三个城市？", "id": "t1"}
     assert "哪三个城市" in pagent.fallback_report(blocked)
+    assert "小助手" not in pagent.fallback_report(blocked)
+    assert "「" not in pagent.fallback_report(done)
     assert pagent.report_payload(blocked)["status"] == "waiting_for_you"
     failed = {"title": "x", "status": "failed", "error": "超时"}
     assert pagent.report_payload(failed)["reason"] == "超时"

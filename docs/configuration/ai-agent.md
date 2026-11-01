@@ -221,6 +221,11 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 | `PRIVATE_AGENT_TASK_MAX_ROUNDS` | `30` | 每个小助手任务最多几轮工具（2–100），最后一轮只能交付 |
 | `PRIVATE_AGENT_TASK_CONTINUATIONS` | `2` | 轮次用完还没交付时最多再续几段（0–10），续跑前先自查计划与备忘 |
 | `PRIVATE_AGENT_TASK_TIMEOUT_SECONDS` | `1800` | 每个小助手任务最长运行秒数（30–7200，不含排队），超时按没做成汇报 |
+| `PRIVATE_AGENT_PROGRESS_STYLE` | `natural` | 后台进度消息样子：`natural` 用人设口吻随口报一声，只有同时做好几件事才带上是哪件；`template` 是旧的「标题」 n/m：… |
+| `PRIVATE_AGENT_PROGRESS_MIN_GAP_SECONDS` | `10` | 同一个人两条进度至少隔几秒（0–600），太近的只记录不发，派活那句回复也算一条 |
+| `PRIVATE_AGENT_HANDOFF_AFTER` | `3` | 主 Agent 一轮里自己调了这么多次重活工具（联网、读网页、跑代码、能力包）还没答完时，提醒它放到后台（0 不提醒） |
+| `PRIVATE_AGENT_AUTO_HANDOFF` | `true` | 主 Agent 工具轮次用完还在调工具时，系统自动把这件事放到后台接着做，并让它先简短回一句 |
+| `PRIVATE_AGENT_REPORT_BATCH_SECONDS` | `2` | 几件后台的事前后脚做完时，等几秒合成一次汇报（0–60） |
 
 - 私聊里只会读到用户本人所在、且群里 Agent 开着、本人没有退出记忆的群；群里的关系和画像只以词语出现，不给数值。
 - 私聊里记住的事只在私聊里用，不会带进群聊；本人明确要求时才同步到群里。

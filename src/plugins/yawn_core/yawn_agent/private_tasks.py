@@ -40,6 +40,11 @@ from .tool_args import (
 
 MAX_TASKS = 20
 MAX_PROGRESS_MESSAGES = 20
+# 发给他的进度记几条（主智能体资料里的 told_him、汇报时别再重复）
+MAX_TOLD = 6
+ASKED_LIMIT = 200
+DIALOGUE_LIMIT = 1600
+FOLLOW_UP_DETAILS = 1500
 CONTEXT_TTL = timedelta(hours=24)
 QUIET_GRACE = timedelta(minutes=10)
 ACTIVE = frozenset({"queued", "running"})
@@ -64,6 +69,7 @@ _bots: dict[int, Any] = {}
 _user_sems: dict[int, asyncio.Semaphore] = {}
 _global_sem: asyncio.Semaphore | None = None
 _global_size = 0
+_report_locks: dict[int, asyncio.Lock] = {}
 
 
 def register_reporter(
@@ -186,10 +192,21 @@ def view(task: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     progress = task.get("progress") or []
     if progress:
         row["last_progress"] = progress[-1].get("note")
+    told = task.get("told") or []
+    if told:
+        row["told_him"] = told[-2:]
+    if task.get("asked"):
+        row["asked"] = str(task.get("asked"))[:80]
+    if task.get("follow_up_of"):
+        row["follow_up_of"] = task.get("follow_up_of")
+    if task.get("status") in {"done", "failed", "blocked"}:
+        row["reported"] = task.get("reported_state") == task.get("status")
     if task.get("status") == "blocked":
         row["waiting_for_you"] = task.get("question")
     if task.get("status") == "done":
         row["summary"] = task.get("summary")
+        if task.get("files"):
+            row["files"] = len(task.get("files") or [])
     if task.get("status") == "failed":
         row["reason"] = task.get("error")
     return row
@@ -210,10 +227,45 @@ def context_digest(user_id: int, now: datetime) -> list[dict[str, Any]]:
             continue
         finished = _parse(item.get("finished_at"))
         if finished and now - finished <= timedelta(hours=6):
-            row = view(item, now)
-            row.pop("summary", None)
-            rows.append(row)
+            # 结论留着：他接着问“第二点展开说说”时，主智能体知道自己做过什么。
+            rows.append(view(item, now))
     return rows[:5]
+
+
+def result_detail(user_id: int, task_id: str) -> dict[str, Any]:
+    """一件事的完整结果（tasks 的 result 动作）：结论、要点、文件、原话。"""
+
+    task = get_task(user_id, task_id)
+    if task is None:
+        raise ToolError(
+            f"没有 {task_id}", code=ERROR_NOT_FOUND, hint="先用 tasks list 看编号"
+        )
+    row = view(task)
+    for key in ("summary", "details", "files", "question", "error"):
+        if task.get(key):
+            row[key] = task.get(key)
+    if task.get("asked"):
+        row["asked"] = task.get("asked")
+    return row
+
+
+def _follow_up_brief(record: dict[str, Any], task_id: str) -> str:
+    previous = _find(record, task_id)
+    if previous is None or previous.get("status") != "done":
+        raise ToolError(
+            f"{task_id} 不是一件做完的事",
+            code=ERROR_NOT_FOUND,
+            hint="follow_up_of 写做完的那件事的编号（tasks list 里 state=done 的）",
+        )
+    files = " ".join(previous.get("files") or [])
+    parts = [
+        f"【接着上次的「{previous.get('title')}」做】上次的结论：{previous.get('summary') or ''}",
+    ]
+    if previous.get("details"):
+        parts.append(f"上次的要点：{str(previous['details'])[:FOLLOW_UP_DETAILS]}")
+    if files:
+        parts.append(f"上次的文件：{files}")
+    return "\n".join(parts)
 
 
 # ── 派活 ──────────────────────────────────────────────────────────────────
@@ -229,8 +281,19 @@ def start_task(
     toolsets: list[str],
     save_to_notes: bool,
     now: datetime,
+    dialogue: str = "",
+    asked: str = "",
+    voice: dict[str, Any] | None = None,
+    call_them: str = "",
+    follow_up_of: str | None = None,
+    origin: str = "model",
 ) -> dict[str, Any]:
-    """登记一个任务并在后台开跑；返回给主智能体的结果。超限抛 ``ToolError``。"""
+    """登记一个任务并在后台开跑；返回给主智能体的结果。超限抛 ``ToolError``。
+
+    ``dialogue``（最近聊天节选）、``asked``（他的原话）、``voice``（人设短卡）、
+    ``call_them``（他的称呼）由系统自动带上，子智能体据此用同一个口吻说话；
+    ``follow_up_of`` 是接着做的上一件事，它的结论和文件并进任务单。
+    """
 
     if not tasks_enabled():
         raise ToolError(
@@ -259,19 +322,37 @@ def start_task(
                 code=ERROR_QUOTA,
                 hint="如实说明，可以自己尽力回答",
             )
+        full_brief = brief
+        if follow_up_of:
+            full_brief = f"{brief}\n{_follow_up_brief(record, follow_up_of)}".strip()[
+                :4000
+            ]
         flags["task_day"] = today
         flags["task_used"] = used + 1
+        # 派活那句回复也算一次“刚跟他说过话”，紧跟着的进度不用再发。
+        flags["progress_last_at"] = time.time()
         task = {
             "id": f"t{store.next_id(record)}",
             "title": title,
             "goal": goal,
-            "brief": brief,
+            "brief": full_brief,
             "toolsets": toolsets,
             "save_to_notes": bool(save_to_notes),
             "status": "queued",
             "created_at": _fmt(now),
             "progress": [],
+            "origin": origin,
         }
+        if dialogue:
+            task["dialogue"] = dialogue[:DIALOGUE_LIMIT]
+        if asked:
+            task["asked"] = asked[:ASKED_LIMIT]
+        if voice:
+            task["voice"] = dict(voice)
+        if call_them:
+            task["call_them"] = call_them[:20]
+        if follow_up_of:
+            task["follow_up_of"] = follow_up_of
         tasks.append(task)
         _trim(record)
         return {
@@ -294,7 +375,8 @@ def start_task(
         payload["status"] = "排队中"
         payload["note"] = f"他前面还有 {created['queued']} 个任务，轮到才会开始"
     payload["next"] = (
-        "简短告诉他交给小助手了，小助手每做完一步会自己发进度，做完你会收到结果再转述；不要现在编结果"
+        "用你自己的口吻简短回他一句你去弄了（比如“我去查一下，弄好跟你说”），别提小助手、后台、编号；"
+        "做的过程中系统会用你的口吻报进度，做完你会收到结果再告诉他；不要现在编结果"
     )
     return payload
 
@@ -536,6 +618,10 @@ def start_project(
     members: Any,
     save_to_notes: bool,
     now: datetime,
+    dialogue: str = "",
+    asked: str = "",
+    voice: dict[str, Any] | None = None,
+    call_them: str = "",
 ) -> dict[str, Any]:
     """登记一个多成员项目：每个成员一个任务，没有依赖的先开工。"""
 
@@ -569,6 +655,7 @@ def start_project(
             )
         flags["task_day"] = today
         flags["task_used"] = used + len(cleaned)
+        flags["progress_last_at"] = time.time()
         project_id = f"P{store.next_id(record)}"
         ids: dict[str, str] = {}
         for member in cleaned:
@@ -592,8 +679,13 @@ def start_project(
                     "created_at": _fmt(now),
                     "progress": [],
                     "project": project_id,
+                    "project_title": title,
                     "member": member["name"],
                     "depends_on": [ids[dep] for dep in member["depends_on"]],
+                    **({"dialogue": dialogue[:DIALOGUE_LIMIT]} if dialogue else {}),
+                    **({"asked": asked[:ASKED_LIMIT]} if asked else {}),
+                    **({"voice": dict(voice)} if voice else {}),
+                    **({"call_them": call_them[:20]} if call_them else {}),
                 }
             )
         projects = record.setdefault("projects", [])
@@ -606,6 +698,7 @@ def start_project(
                 "status": "running",
                 "created_at": _fmt(now),
                 "save_to_notes": bool(save_to_notes),
+                **({"asked": asked[:ASKED_LIMIT]} if asked else {}),
             }
         )
         del projects[:-MAX_PROJECTS]
@@ -635,7 +728,7 @@ def start_project(
             }
             for name, task_id in created["ids"].items()
         ],
-        "next": "简短告诉他已经组了个小队分头去做，做完会一起汇报；中途他补充要求就用 tasks message 转给对应成员",
+        "next": "用你自己的口吻简短回他一句你去弄了（别说组队、小助手、成员），做完会一起告诉他；中途他补充要求就用 tasks message 转给对应成员",
     }
 
 
@@ -738,6 +831,12 @@ def project_summary(user_id: int, project_id: str) -> dict[str, Any] | None:
         "error": "成员都没做成" if not done else "",
         "project": True,
         "save_to_notes": project.get("save_to_notes"),
+        "asked": project.get("asked") or next(
+            (item.get("asked") for item in members if item.get("asked")), ""
+        ),
+        "told": [note for item in members for note in item.get("told") or []][
+            -MAX_TOLD:
+        ],
     }
 
 
@@ -759,7 +858,8 @@ async def deliver_project_report(user_id: int, project_id: str) -> bool:
                 now_beijing(),
             )
     try:
-        return bool(await _reporter(_bots.get(user_id), user_id, summary))
+        async with _report_lock(user_id):
+            return bool(await _reporter(_bots.get(user_id), user_id, summary))
     except Exception:  # noqa: BLE001
         dbg_exc(f"私聊用户 {user_id} 项目 {project_id} 汇报失败")
         return False
@@ -807,8 +907,24 @@ def _quiet(user_id: int, now: datetime) -> bool:
 
 
 def progress_text(
-    task: dict[str, Any], note: str, step: int | None, total: int | None
+    task: dict[str, Any],
+    note: str,
+    step: int | None,
+    total: int | None,
+    *,
+    several: bool = False,
+    style: str | None = None,
 ) -> str:
+    """进度消息。natural（默认）像本人随口报一声；template 是旧的「标题」 n/m：… 模板。"""
+
+    from .private_voice import natural_progress
+
+    style = style or str(private_agent_config.private_agent_progress_style)
+    if style == "natural":
+        title = task.get("project_title") or task.get("title") or ""
+        return natural_progress(
+            note, title=str(title), step=step, total=total, several=several
+        )
     counter = ""
     if step and total and step <= total:
         counter = f" {step}/{total}"
@@ -817,46 +933,132 @@ def progress_text(
     return f"「{task.get('title')}」{counter}：{note}"
 
 
+def _open_threads(record: dict[str, Any]) -> int:
+    """他现在有几件事在做（一个项目算一件）。"""
+
+    keys = {
+        item.get("project") or item.get("id")
+        for item in record.get("tasks", [])
+        if item.get("status") in OPEN
+    }
+    return len(keys)
+
+
 async def _on_progress(
     user_id: int, task_id: str, note: str, step: int | None, total: int | None
 ) -> None:
     now = now_beijing()
+    gap = float(private_agent_config.private_agent_progress_min_gap_seconds)
 
-    def add(record: dict[str, Any]) -> tuple[dict[str, Any], int] | None:
+    def add(record: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
         item = _find(record, task_id)
         if item is None:
             return None
+        previous = item.get("progress") or []
+        repeated = bool(previous) and previous[-1].get("note") == note
         item.setdefault("progress", []).append(
             {"at": _fmt(now), "note": note, "step": step, "total": total}
         )
         item["progress"] = item["progress"][-MAX_PROGRESS_MESSAGES:]
         sent = int(item.get("progress_sent") or 0)
-        if sent < MAX_PROGRESS_MESSAGES:
-            item["progress_sent"] = sent + 1
-        return dict(item), sent
+        if sent >= MAX_PROGRESS_MESSAGES:
+            return dict(item), "cap"
+        if repeated:
+            return dict(item), "repeat"
+        flags = record["flags"]
+        last = float(flags.get("progress_last_at") or 0)
+        if gap and time.time() - last < gap:
+            return dict(item), "gap"
+        item["progress_sent"] = sent + 1
+        flags["progress_last_at"] = time.time()
+        return dict(item), "send"
 
     added = store.update(user_id, add)
     if added is None:
         return
-    task, sent = added
-    if sent >= MAX_PROGRESS_MESSAGES or _quiet(user_id, now) or _notifier is None:
+    task, decision = added
+    if decision != "send" or _quiet(user_id, now) or _notifier is None:
+        if decision != "send":
+            dbg(f"私聊用户 {user_id} 子任务 {task_id} 进度不发（{decision}）")
         return
-    text = progress_text(task, note, step, total)
+    several = _open_threads(store.load(user_id)) > 1
+    text = progress_text(task, note, step, total, several=several)
+    if not text:
+        return
     try:
-        await _notifier(_bots.get(user_id), user_id, text)
+        ok = await _notifier(_bots.get(user_id), user_id, text)
     except Exception:  # noqa: BLE001
         dbg_exc(f"私聊用户 {user_id} 子任务进度发送失败(忽略)")
+        return
+    if ok is not False:
+
+        def told(record: dict[str, Any]) -> None:
+            item = _find(record, task_id)
+            if item is not None:
+                item["told"] = [*(item.get("told") or []), text][-MAX_TOLD:]
+
+        store.update(user_id, told)
+
+
+REPORTABLE = frozenset({"done", "failed", "blocked"})
+
+
+def _needs_report(item: dict[str, Any]) -> bool:
+    return (
+        item.get("status") in REPORTABLE
+        and item.get("reported_state") != item.get("status")
+        and not item.get("project")
+    )
+
+
+def unreported_results(user_id: int) -> list[dict[str, Any]]:
+    """做完/没做成/等回答、还没告诉他、也没被免打扰压着的结果（不含项目成员）。"""
+
+    return [
+        dict(item)
+        for item in store.load(user_id).get("tasks", [])
+        if _needs_report(item) and not item.get("held")
+    ]
+
+
+def mark_reported(user_id: int, task_ids: list[str], *, via: str = "report") -> None:
+    """这些结果已经告诉他了（汇报轮，或顺进了他正在聊的那一轮）。"""
+
+    if not task_ids:
+        return
+    stamp = _fmt(now_beijing())
+    wanted = set(task_ids)
+
+    def mark(record: dict[str, Any]) -> None:
+        for item in record.get("tasks", []):
+            if item.get("id") in wanted:
+                item.update(
+                    held=False,
+                    reported_state=item.get("status"),
+                    reported_at=stamp,
+                    reported_via=via,
+                )
+
+    store.update(user_id, mark)
+
+
+def _report_lock(user_id: int) -> asyncio.Lock:
+    lock = _report_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _report_locks[user_id] = lock
+    return lock
 
 
 async def deliver_report(user_id: int, task_id: str, *, force: bool = False) -> bool:
-    """把结束（或等回答）的任务交给主智能体转述；免打扰中先压着。"""
+    """把结束（或等回答）的任务交给主智能体转述；免打扰中先压着。
+
+    前后脚做完的几件事（``PRIVATE_AGENT_REPORT_BATCH_SECONDS`` 内）合成一次汇报：
+    主任务带 ``batch``（其余几件）交给汇报函数，成功后一起标记已汇报。
+    """
 
     task = get_task(user_id, task_id)
-    if (
-        task is None
-        or task.get("status") not in {"done", "failed", "blocked"}
-        or task.get("reported_state") == task.get("status")
-    ):
+    if task is None or not _needs_report(task):
         return False
     now = now_beijing()
     created = _parse(task.get("created_at")) or now
@@ -866,20 +1068,33 @@ async def deliver_report(user_id: int, task_id: str, *, force: bool = False) -> 
         return False
     if _reporter is None:
         return False
-    try:
-        ok = await _reporter(_bots.get(user_id), user_id, task)
-    except Exception:  # noqa: BLE001
-        dbg_exc(f"私聊用户 {user_id} 子任务 {task_id} 汇报失败")
-        ok = False
-    if ok:
-        _update_task(
-            user_id,
-            task_id,
-            held=False,
-            reported_state=task.get("status"),
-            reported_at=_fmt(now),
-        )
-    return ok
+    wait = float(private_agent_config.private_agent_report_batch_seconds)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    async with _report_lock(user_id):
+        task = get_task(user_id, task_id)
+        if task is None or task.get("reported_state") == task.get("status"):
+            # 等的这几秒里，已经顺着他正在聊的话告诉他了，或者被同批汇报带走了。
+            return True
+        others = [
+            item
+            for item in unreported_results(user_id)
+            if item.get("id") != task_id and item.get("status") in {"done", "failed"}
+        ]
+        payload = dict(task)
+        if others and task.get("status") in {"done", "failed"}:
+            payload["batch"] = others
+        try:
+            ok = await _reporter(_bots.get(user_id), user_id, payload)
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"私聊用户 {user_id} 子任务 {task_id} 汇报失败")
+            ok = False
+        if ok:
+            mark_reported(
+                user_id,
+                [task_id, *[str(item["id"]) for item in payload.get("batch") or []]],
+            )
+        return ok
 
 
 async def flush_held(now: datetime) -> int:
@@ -1017,6 +1232,7 @@ def reset_state_for_tests() -> None:
     _contexts.clear()
     _bots.clear()
     _user_sems.clear()
+    _report_locks.clear()
     _global_sem = None
     _global_size = 0
 
@@ -1034,14 +1250,17 @@ __all__ = [
     "get_task",
     "list_projects",
     "list_tasks",
+    "mark_reported",
     "message_task",
     "progress_text",
     "project_summary",
     "recover_on_startup",
     "register_reporter",
+    "result_detail",
     "start_project",
     "start_task",
     "stats_today",
     "tasks_enabled",
+    "unreported_results",
     "view",
 ]
