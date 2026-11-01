@@ -539,7 +539,7 @@ async def test_run_day_holds_postponed_campaign(
     async def campaign(game: Any, _cfg: Any) -> None:
         campaigns.append(game.round_no)
 
-    async def order(game: Any, _cfg: Any) -> list[Any]:
+    async def order(game: Any, _cfg: Any, *_args: object) -> list[Any]:
         return game.alive_players()
 
     async def no_exile(*_args: object) -> None:

@@ -115,6 +115,11 @@ def events(group_id: int, after_seq: int = 0) -> list[GameEvent]:
     return [event for event in log if event.seq > after_seq]
 
 
+def last_seq(group_id: int) -> int:
+    """当前最新事件序号（0=无事件），用于"某时刻之后"的增量查询。"""
+    return _seqs.get(group_id, 0)
+
+
 def clear(group_id: int) -> None:
     """对局清理时释放内存（state.discard_game 调用）。"""
     _logs.pop(group_id, None)

@@ -76,7 +76,7 @@ def test_running_status_hides_night_role_and_action_details(
     text = commands.format_game_status(game)
 
     assert "第 2 夜" in text
-    assert "存活座位：1号、2号" in text
+    assert "存活（2）：1号、2号" in text
     assert "夜间行动不会在群内显示" in text
     assert "女巫" not in text
     assert "NIGHT_WITCH" not in text

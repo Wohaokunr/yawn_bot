@@ -1,7 +1,8 @@
 # yawn_werewolf — 狼人杀子插件
 
-群聊狼人杀，四块板子：预女猎白（9–12 人）/ 预女猎白混（混血儿，12 人）/
-禁言骑士（12 人）/ 禁票骑士（12 人），支持 LLM 驱动的 AI 玩家。由父插件
+群聊狼人杀，九块板子：新手局（6–8 人）/ 预女猎白（9–12 人）/ 预女猎守（10、12 人）/
+预女猎白混 / 狼王守卫 / 白狼王骑士 / 隐狼守墓 / 禁言骑士 / 禁票骑士（均 12 人），
+支持房规（`house_rules.py`）与 LLM 驱动的 AI 玩家。由父插件
 `yawn_core/__init__.py` 的 `_load_sub_plugins()` 动态加载。
 
 ## 模块地图
@@ -14,7 +15,8 @@
 | `state.py` | 内存状态：`Game`/`PlayerState`/`Action`、注册表与身份守卫式清理 |
 | `game_log.py` | WebUI 可视化用内存事件日志（按群环形队列，含发言正文与 AI 决策上下文，管理员全可见；引擎与 AI 驱动都只经模块函数记录，互不写对方状态；`discard_game` 时 `clear`） |
 | `dsl.py` | 自由文本 → `Action` 解析（`parse_dm_action`），人类私聊与 AI 共用 |
-| `roles.py` | 角色/阵营/死因枚举、板子注册表（`BOARDS`/`BoardSpec`，默认板子 `预女猎白`）、身份卡文本 |
+| `roles.py` | 角色/阵营/死因枚举、`WOLF_ROLES`/`SHOOTER_ROLES`/`seer_sees_wolf`、板子注册表（`BOARDS`/`BoardSpec`，含 description/level，默认板子 `预女猎白`）、身份卡与 `/狼人规则` 文本 |
+| `house_rules.py` | 房规 `HouseRules`（不可变 dataclass）、预设、中文键解析 `set_rule`、差异展示 |
 | `api.py` | OneBot V11 安全封装：所有 API 异常降级为 warning，不打断游戏 |
 | `config.py` | 玩法与超时配置（`WW_*` 环境变量） |
 | `models.py` | ORM 模型（`bind_key=yawn_werewolf`）：仅 `WerewolfGame`/`WerewolfPlayer` 两张汇总表 |
@@ -109,6 +111,26 @@
   `dsl._DM_HINT` 仅作兜底。`dsl.py` 的匹配行为与 `allow_votes`
   语义是人类与 AI 共用契约，不得擅改。
 
+- **房规只在报名阶段可改**：`/房规` 由命令层整体替换 `game.rules`（报名阶段内存
+  写入例外），发牌时锁定并经 `state.remember_room_prefs` 记住，下次开房沿用。
+  引擎只读 `game.rules`；新增房规项要同时改 `house_rules.RULE_KEYS` 与引擎读取点。
+- **狼人阵营一律按 `WOLF_ROLES` 判断**，不要再写 `role is Role.WEREWOLF`：狼王/
+  白狼王/隐狼都一起睁眼出刀、都能自爆。预言家结果走 `seer_sees_wolf`（隐狼=好人）。
+- **夜间顺序**：混血儿 → 守卫 → 狼人 → 女巫 → 预言家 → 长老 → 守墓人。守卫与守墓人
+  阶段只在板子含该角色时进入；守墓人阶段无论是否有信息都走 `_idle_phase` 拟真等待。
+  同守同救（`rules.guard_save_conflict`）在 `_run_night` 结算。
+- **开枪统一走待处理队列**：猎人与狼王（`SHOOTER_ROLES`）经 `_resolve_pending_day_effects`
+  → `_can_shoot`（排除毒杀与自爆、一局一次）→ `_hunter_prompt`；警徽也只在队列里结算，
+  `_resolve_hunter_shot` 不再自行移交警徽。白狼王 `/自爆 N` 经 `_DetonatedError.take_seat`
+  传到 `_handle_detonation`。
+- **计时公开**：所有阶段计时用 `_timer(game, 秒)`，它写 `phase_deadline`/`phase_duration`；
+  `/狼人状态` 经 `state.phase_remaining` 只在白天展示剩余秒数（夜间会泄漏子阶段）。
+- **复盘时间线**：引擎在裁决点调用 `game.note(标签, 上帝视角文本)`；终局 `_finish`
+  生成复盘存入 `state.remember_review`（不随 `discard_game` 清理），`/复盘` 在对局
+  进行中拒绝查看。高光 `_highlights` 只读结构化统计（`speech_count`/`votes_on_wolves` 等）。
+- **挂机判定**：发言窗口结束时用 `game_log` 的发言事件判断是否说过话
+  （`_spoke_since`），连续 `_AFK_STRIKES` 次超时后该真人窗口缩短到 30 秒。
+
 ## AI 驱动时序要点
 
 - 驱动主循环一次只处理一帧 `_process_phase`。**批量决策（上警 / 投票）
@@ -141,7 +163,7 @@
 
 ## 配置键（`.env` 可覆盖，见 `config.py`）
 
-`WW_MIN_PLAYERS` / `WW_MAX_PLAYERS`（引擎取其与当前板子支持人数的交集：
+`WW_MIN_PLAYERS`（默认 6）/ `WW_MAX_PLAYERS`（引擎取其与当前板子支持人数的交集：
 无交集→报名即流局；开局人数不在板子 `counts` 内→发牌前流局。12 人专属
 板子下 AI 自动补位目标随之变为 12）、`WW_SIGNUP_TIMEOUT`（默认 180；
 提醒点两段：`WW_SIGNUP_WARN_REMAIN` 60 + `WW_SIGNUP_WARN_REMAIN_FINAL` 20）、

@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from .. import game_registry  # noqa: TID252
 from ..metrics import record_queue_rejection  # noqa: TID252
 from . import game_log
-from .roles import DEFAULT_BOARD_KEY
+from .house_rules import DEFAULT_RULES, HouseRules
+from .roles import DEFAULT_BOARD_KEY, WOLF_ROLES
 
 if TYPE_CHECKING:
     from .roles import DeathCause, Faction, Role
@@ -28,10 +29,12 @@ class Phase(str, Enum):
     SIGNUP = "SIGNUP"  # 报名
     DEALING = "DEALING"  # 发牌及身份下发（锁定报名状态）
     NIGHT_HALFBLOOD = "NIGHT_HALFBLOOD"  # 混血儿认主（仅首夜，率先睁眼）
+    NIGHT_GUARD = "NIGHT_GUARD"  # 守卫守护（狼人之前）
     NIGHT_WOLVES = "NIGHT_WOLVES"  # 狼人行动
     NIGHT_WITCH = "NIGHT_WITCH"  # 女巫行动
     NIGHT_SEER = "NIGHT_SEER"  # 预言家行动
     NIGHT_ELDER = "NIGHT_ELDER"  # 禁言长老行动
+    NIGHT_GRAVEKEEPER = "NIGHT_GRAVEKEEPER"  # 守墓人得知昨日放逐者阵营
     DAY_ANNOUNCE = "DAY_ANNOUNCE"  # 白天死讯播报
     LAST_WORDS = "LAST_WORDS"  # 遗言
     HUNTER_SHOT = "HUNTER_SHOT"  # 猎人开枪决策
@@ -47,6 +50,19 @@ class Phase(str, Enum):
     PK_VOTE = "PK_VOTE"  # 平票 PK 投票
     ENDED = "ENDED"
 
+
+# 全部夜间子阶段（报错/状态折叠为"夜晚"，防泄漏当前行动角色）
+NIGHT_PHASES: frozenset[Phase] = frozenset(
+    {
+        Phase.NIGHT_HALFBLOOD,
+        Phase.NIGHT_GUARD,
+        Phase.NIGHT_WOLVES,
+        Phase.NIGHT_WITCH,
+        Phase.NIGHT_SEER,
+        Phase.NIGHT_ELDER,
+        Phase.NIGHT_GRAVEKEEPER,
+    }
+)
 
 # 允许狼人 /自爆 中断的白天子阶段
 SELF_DETONATE_PHASES: frozenset[Phase] = frozenset(
@@ -90,12 +106,13 @@ class ActionKind(str, Enum):
     ORDER = "order"  # 警长定发言序（value=起始座位，aux=cw|ccw）
     PASS_BADGE = "pass_badge"  # 移交警徽（value=目标座位）
     TEAR_BADGE = "tear_badge"  # 撕警徽
-    SELF_DETONATE = "self_detonate"  # 狼人自爆
+    SELF_DETONATE = "self_detonate"  # 狼人自爆（白狼王 value=带走座位）
     SAY = "say"  # 狼人讨论发言（aux=文本，由引擎转发给其他狼人）
     START_GAME = "start_game"  # 房主/管理员手动开局（报名阶段）
     CHOOSE_OWNER = "choose_owner"  # 混血儿认主（value=主人座位）
     SILENCE = "silence"  # 禁言长老禁言（value=目标座位）
     DUEL = "duel"  # 骑士决斗（value=目标座位）
+    GUARD = "guard"  # 守卫守护（value=目标座位）
 
 
 @dataclass
@@ -149,8 +166,20 @@ class PlayerState:
     owner_seat: Optional[int] = None
     # 禁言长老上一晚的实际禁言目标（连续两晚不可同人；放弃后清空）
     elder_last_target: Optional[int] = None
+    # 守卫上一晚的实际守护目标（连续两晚不可同人；空守后清空）
+    guard_last_target: Optional[int] = None
+    # 预言家查验史：(夜, 座位, "狼人"/"好人")
+    seer_checks: list[tuple[int, int, str]] = field(default_factory=list)
+    # 狼王/猎人是否已开过枪（一局一次）
+    shot_used: bool = False
     # 身份卡私聊是否投递成功
     dm_ok: bool = True
+    # 连续发言超时次数（挂机判定；发言或主动 /过 清零）
+    afk_strikes: int = 0
+    # 本局统计（终局高光与复盘用）
+    speech_count: int = 0
+    votes_on_wolves: int = 0
+    votes_cast: int = 0
 
 
 @dataclass
@@ -200,6 +229,18 @@ class Game:
     role_requests: dict[int, Role] = field(default_factory=dict)
     # 事件日志使用独立的进程内稳定 id，不依赖 ORM 是否成功写入。
     event_log_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # 房规（报名阶段房主可改，发牌后锁定；引擎只读）
+    rules: HouseRules = DEFAULT_RULES
+    # 当前阶段计时截止（事件循环时间；None=无计时）。仅引擎写入
+    phase_deadline: Optional[float] = None
+    # 当前阶段计时总长（秒），状态展示进度用。仅引擎写入
+    phase_duration: Optional[float] = None
+    # 最近一个白天被放逐出局的座位（守墓人信息源；白痴翻牌不算）。仅引擎写入
+    last_exiled_seat: Optional[int] = None
+    # 结构化复盘时间线：(回合, 标签, 上帝视角文本)。仅引擎写入
+    timeline: list[tuple[int, str, str]] = field(default_factory=list)
+    # 报名阶段被房主请出的用户（本局不可再报名）
+    kicked_user_ids: set[int] = field(default_factory=set)
 
     # ── 玩家查询 ──────────────────────────────────────
 
@@ -227,6 +268,14 @@ class Game:
     def alive_players_of_role(self, role: Role) -> list[PlayerState]:
         """存活的指定角色玩家。"""
         return [p for p in self.alive_players() if p.role is role]
+
+    def alive_wolves(self) -> list[PlayerState]:
+        """存活的狼人阵营玩家（含狼王 / 白狼王 / 隐狼）。"""
+        return [p for p in self.alive_players() if p.role in WOLF_ROLES]
+
+    def note(self, label: str, text: str) -> None:
+        """追加一条复盘时间线（仅引擎调用）。"""
+        self.timeline.append((self.round_no, label, text))
 
     def sheriff(self) -> Optional[PlayerState]:
         """当前警长（存活与否均返回）。"""
@@ -377,6 +426,8 @@ def join_signup(game: Game, user_id: int) -> bool:
     """报名；已在任意局中或已报名返回 False。"""
     if user_id in _user_index or user_id in game.signup_user_ids:
         return False
+    if user_id in game.kicked_user_ids:
+        return False
     if not game_registry.reserve_user("werewolf", game.group_id, user_id):
         return False
     _user_index[user_id] = game.group_id
@@ -420,8 +471,7 @@ def submit_action(
             record_queue_rejection("action_queue", "werewolf", "not_member")
             return False
     if any(
-        _same_action(existing, action)
-        for existing in game.pending_actions.values()
+        _same_action(existing, action) for existing in game.pending_actions.values()
     ):
         record_queue_rejection("action_queue", "werewolf", "duplicate")
         return False
@@ -449,6 +499,62 @@ def release_action(game: Game, action: Action) -> None:
         game.pending_by_user[action.actor_user_id] = count
     else:
         game.pending_by_user.pop(action.actor_user_id, None)
+
+
+def phase_remaining(game: Game) -> Optional[int]:
+    """当前阶段剩余秒数（无计时或不在事件循环中返回 None）。"""
+    if game.phase_deadline is None:
+        return None
+    try:
+        now = asyncio.get_running_loop().time()
+    except RuntimeError:
+        return None
+    return max(int(game.phase_deadline - now), 0)
+
+
+# ── 跨局记忆（不随 discard_game 清理）────────────────────
+
+# 群 -> 最近一局终局复盘文本（/复盘 查看）
+_last_reviews: dict[int, str] = {}
+# 群 -> 最近一局的人类玩家（/再来一局 复用）、AI 人数与显示名
+_last_rosters: dict[int, tuple[list[int], int, dict[int, str]]] = {}
+# 群 -> 最近一次使用的 (板子, 房规)，下次开房沿用
+_room_prefs: dict[int, tuple[str, HouseRules]] = {}
+
+
+def remember_review(group_id: int, text: str) -> None:
+    """保存终局复盘。"""
+    _last_reviews[group_id] = text
+
+
+def last_review(group_id: int) -> Optional[str]:
+    """最近一局复盘；没有返回 None。"""
+    return _last_reviews.get(group_id)
+
+
+def remember_roster(
+    group_id: int,
+    humans: list[int],
+    ai_count: int,
+    names: Optional[dict[int, str]] = None,
+) -> None:
+    """保存最近一局名单（/再来一局 用）。"""
+    _last_rosters[group_id] = (list(humans), ai_count, dict(names or {}))
+
+
+def last_roster(group_id: int) -> Optional[tuple[list[int], int, dict[int, str]]]:
+    """最近一局名单。"""
+    return _last_rosters.get(group_id)
+
+
+def remember_room_prefs(group_id: int, board: str, rules: HouseRules) -> None:
+    """记住本群最近使用的板子与房规。"""
+    _room_prefs[group_id] = (board, rules)
+
+
+def room_prefs(group_id: int) -> Optional[tuple[str, HouseRules]]:
+    """本群最近使用的板子与房规。"""
+    return _room_prefs.get(group_id)
 
 
 def note_signup_name(game: Game, user_id: int, name: str) -> None:

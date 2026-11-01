@@ -36,14 +36,25 @@ from ..permission import (  # noqa: TID252
     is_group_admin,
     require_feature,
 )
-from . import ai_player, api, engine
+from . import ai_player, api, engine, house_rules
 from .command_definitions import COMMAND_BY_NAME
 from .config import Config
 from .dsl import _DM_HINT, parse_dm_action
-from .models import WerewolfPlayer
-from .roles import BOARDS, Role, build_role_card, parse_role
+from .models import WerewolfGame, WerewolfPlayer
+from .roles import (
+    BOARDS,
+    WOLF_ROLES,
+    Faction,
+    Role,
+    build_role_card,
+    parse_role,
+    resolve_board_key,
+    role_guide,
+    suggest_boards,
+)
 from .state import (
     DUEL_PHASES,
+    NIGHT_PHASES,
     SELF_DETONATE_PHASES,
     Action,
     ActionKind,
@@ -58,9 +69,13 @@ from .state import (
     get_game,
     is_ai_uid,
     join_signup,
+    last_review,
+    last_roster,
     leave_signup,
     note_signup_name,
+    phase_remaining,
     remove_ai_signup,
+    room_prefs,
     stop_game,
     submit_action,
 )
@@ -128,15 +143,7 @@ def _eff_limits(game: Game) -> tuple[int, int]:
     )
 
 
-_NIGHT_PHASES: frozenset[Phase] = frozenset(
-    {
-        Phase.NIGHT_HALFBLOOD,
-        Phase.NIGHT_WOLVES,
-        Phase.NIGHT_WITCH,
-        Phase.NIGHT_SEER,
-        Phase.NIGHT_ELDER,
-    }
-)
+_NIGHT_PHASES: frozenset[Phase] = NIGHT_PHASES
 
 
 def _seat_list_text(seats: list[int]) -> str:
@@ -144,7 +151,16 @@ def _seat_list_text(seats: list[int]) -> str:
     return "、".join(f"{seat}号" for seat in seats) if seats else "无"
 
 
-def format_game_status(game: Game) -> str:
+def _rules_line(game: Game) -> str:
+    """房规一行摘要：预设名或与标准不同的项。"""
+    preset = house_rules.preset_name(game.rules)
+    diff = house_rules.diff_from_default(game.rules)
+    if preset and preset != "标准":
+        return f"{preset}（{'；'.join(diff)}）"
+    return "；".join(diff) or "标准"
+
+
+def format_game_status(game: Game) -> str:  # noqa: C901,PLR0912
     """生成不泄露身份和夜间行动细节的公开进度。"""
     if game.phase is Phase.SIGNUP:
         eff_min, eff_max = _eff_limits(game)
@@ -152,6 +168,7 @@ def format_game_status(game: Game) -> str:
             "═══ 狼人杀 · 当前进度 ═══",
             "阶段：报名中",
             f"板子：{game.board}",
+            f"房规：{_rules_line(game)}",
             "报名名单：",
         ]
         if game.signup_user_ids:
@@ -165,7 +182,7 @@ def format_game_status(game: Game) -> str:
             (
                 "──────────────",
                 f"当前 {len(game.signup_user_ids)}/{eff_max} 人，至少 {eff_min} 人开局",
-                "房主可发送 /开始游戏；发送 /板子 查看或切换板子",
+                "房主可发送 /开始游戏；/板子 切换板子，/房规 调整规则",
             )
         )
         return "\n".join(lines)
@@ -187,20 +204,39 @@ def format_game_status(game: Game) -> str:
             sheriff_text += "（已死亡，警徽处理中）"
     lines = [
         "═══ 狼人杀 · 当前进度 ═══",
-        f"板子：{game.board}",
+        f"板子：{game.board}（{len(game.players)} 人）",
         f"回合：{round_text}",
         f"阶段：{phase_name}",
-        f"存活座位：{_seat_list_text(alive)}",
-        f"倒牌座位：{_seat_list_text(dead)}",
+        f"存活（{len(alive)}）：{_seat_list_text(alive)}",
+        f"出局（{len(dead)}）：{_seat_list_text(dead)}",
         f"警长：{sheriff_text}",
     ]
+    revealed = [p.seat for p in game.players if p.idiot_revealed and p.alive]
+    if revealed:
+        lines.append(f"已翻牌白痴：{_seat_list_text(revealed)}")
     if game.phase in _VOTE_PHASES and game.vote_targets:
         lines.append(f"当前可投：{_seat_list_text(game.vote_targets)}")
     elif game.current_speaker is not None:
         lines.append(f"当前发言：{game.current_speaker}号")
+    remain = phase_remaining(game)
+    if remain is not None and game.phase not in _NIGHT_PHASES:
+        # 夜间子阶段的剩余时间会暴露当前轮到谁，只在白天显示
+        lines.append(f"本阶段剩余：约 {remain} 秒")
+    rules_text = _rules_line(game)
+    if rules_text != "标准":
+        lines.append(f"房规：{rules_text}")
     if game.phase in _NIGHT_PHASES:
         lines.append("夜间行动不会在群内显示，请按私聊提示操作。")
     return "\n".join(lines)
+
+
+def _seat_from_arg(game: Game, arg: Message) -> Optional[int]:
+    """参数解析为座位：支持 "3"、"3号" 与 @某人（按在局玩家反查座位）。"""
+    for seg in arg:
+        if seg.type == "at" and str(seg.data.get("qq", "")).isdigit():
+            player = game.player_by_user(int(seg.data["qq"]))
+            return player.seat if player is not None else None
+    return _parse_seat(arg.extract_plain_text())
 
 
 def _parse_seat(text: object) -> Optional[int]:
@@ -215,13 +251,15 @@ _PHASE_CN: dict[Phase, str] = {
     Phase.SIGNUP: "报名中",
     Phase.DEALING: "发牌中",
     Phase.NIGHT_HALFBLOOD: "夜晚",
+    Phase.NIGHT_GUARD: "夜晚",
+    Phase.NIGHT_GRAVEKEEPER: "夜晚",
     Phase.NIGHT_WOLVES: "夜晚",
     Phase.NIGHT_WITCH: "夜晚",
     Phase.NIGHT_SEER: "夜晚",
     Phase.NIGHT_ELDER: "夜晚",
     Phase.DAY_ANNOUNCE: "天亮结算",
     Phase.LAST_WORDS: "遗言环节",
-    Phase.HUNTER_SHOT: "猎人开枪决策",
+    Phase.HUNTER_SHOT: "死亡技能",
     Phase.BADGE_TRANSFER: "警徽移交",
     Phase.SHERIFF_REGISTER: "警长竞选报名",
     Phase.SHERIFF_SPEECH: "竞选发言",
@@ -254,6 +292,11 @@ _ROLE_DM_ACTIONS: dict[Role, str] = {
     Role.VILLAGER: "（本角色无夜间行动，耐心等待即可）",
     Role.IDIOT: "（本角色无夜间行动，耐心等待即可）",
     Role.KNIGHT: "（夜间无行动；白天发言阶段可在群内 /决斗 N）",
+    Role.GUARD: "守护N（可守自己，不可连续两晚同人）/ 过（空守）",
+    Role.WOLF_KING: "刀N / 过 / 说XXX；出局后 开枪N / 不开枪",
+    Role.WHITE_WOLF_KING: "刀N / 过 / 说XXX；白天群内 /自爆 N 带走一人",
+    Role.HIDDEN_WOLF: "刀N（击杀）/ 过（空刀）/ 说XXX（与狼队友讨论）",
+    Role.GRAVEKEEPER: "（无需操作，每晚我会私聊告诉你昨日放逐者的阵营）",
 }
 
 
@@ -278,9 +321,9 @@ def _dm_hint_for(game: Game, player: Optional[PlayerState], raw: str) -> str:
 # 报错文案不暴露当前轮到哪个角色
 _DM_ALLOWED: dict[Phase, frozenset[ActionKind]] = {
     Phase.NIGHT_HALFBLOOD: frozenset({ActionKind.CHOOSE_OWNER}),
-    Phase.NIGHT_WOLVES: frozenset(
-        {ActionKind.KILL, ActionKind.SKIP, ActionKind.SAY}
-    ),
+    Phase.NIGHT_GUARD: frozenset({ActionKind.GUARD, ActionKind.SKIP}),
+    Phase.NIGHT_GRAVEKEEPER: frozenset(),
+    Phase.NIGHT_WOLVES: frozenset({ActionKind.KILL, ActionKind.SKIP, ActionKind.SAY}),
     Phase.NIGHT_WITCH: frozenset({ActionKind.SAVE, ActionKind.POISON, ActionKind.SKIP}),
     Phase.NIGHT_SEER: frozenset({ActionKind.CHECK}),
     Phase.NIGHT_ELDER: frozenset({ActionKind.SILENCE, ActionKind.SKIP}),
@@ -296,9 +339,7 @@ _DM_ALLOWED: dict[Phase, frozenset[ActionKind]] = {
         {ActionKind.SKIP, ActionKind.WITHDRAW, ActionKind.SELF_DETONATE}
     ),
     Phase.SHERIFF_VOTE: frozenset({ActionKind.SELF_DETONATE}),
-    Phase.SHERIFF_FINAL_SPEECH: frozenset(
-        {ActionKind.SKIP, ActionKind.SELF_DETONATE}
-    ),
+    Phase.SHERIFF_FINAL_SPEECH: frozenset({ActionKind.SKIP, ActionKind.SELF_DETONATE}),
     Phase.SHERIFF_REVOTE: frozenset({ActionKind.SELF_DETONATE}),
     Phase.DAY_SPEECH: frozenset(
         {ActionKind.SKIP, ActionKind.DUEL, ActionKind.ORDER, ActionKind.SELF_DETONATE}
@@ -318,32 +359,40 @@ _NO_SKILL = "你没有这个技能（或已无法行动）~"
 
 # 夜间私聊行动 → 可使用它的角色
 _NIGHT_SKILL_ROLES: dict[ActionKind, frozenset[Role]] = {
-    ActionKind.KILL: frozenset({Role.WEREWOLF}),
-    ActionKind.SAY: frozenset({Role.WEREWOLF}),
+    ActionKind.KILL: WOLF_ROLES,
+    ActionKind.SAY: WOLF_ROLES,
+    ActionKind.GUARD: frozenset({Role.GUARD}),
     ActionKind.SAVE: frozenset({Role.WITCH}),
     ActionKind.POISON: frozenset({Role.WITCH}),
     ActionKind.CHECK: frozenset({Role.SEER}),
     ActionKind.CHOOSE_OWNER: frozenset({Role.HALFBLOOD}),
     ActionKind.SILENCE: frozenset({Role.SILENT_ELDER}),
-    ActionKind.SKIP: frozenset({Role.WEREWOLF, Role.WITCH, Role.SILENT_ELDER}),
+    ActionKind.SKIP: WOLF_ROLES | {Role.WITCH, Role.SILENT_ELDER, Role.GUARD},
 }
 
-# 夜间子阶段 → 当前行动的角色
-_NIGHT_PHASE_ROLE: dict[Phase, Role] = {
-    Phase.NIGHT_HALFBLOOD: Role.HALFBLOOD,
-    Phase.NIGHT_WOLVES: Role.WEREWOLF,
-    Phase.NIGHT_WITCH: Role.WITCH,
-    Phase.NIGHT_SEER: Role.SEER,
-    Phase.NIGHT_ELDER: Role.SILENT_ELDER,
+# 夜间子阶段 → 当前行动的角色集合
+_NIGHT_PHASE_ROLE: dict[Phase, frozenset[Role]] = {
+    Phase.NIGHT_HALFBLOOD: frozenset({Role.HALFBLOOD}),
+    Phase.NIGHT_GUARD: frozenset({Role.GUARD}),
+    Phase.NIGHT_WOLVES: WOLF_ROLES,
+    Phase.NIGHT_WITCH: frozenset({Role.WITCH}),
+    Phase.NIGHT_SEER: frozenset({Role.SEER}),
+    Phase.NIGHT_ELDER: frozenset({Role.SILENT_ELDER}),
+    Phase.NIGHT_GRAVEKEEPER: frozenset({Role.GRAVEKEEPER}),
 }
 
 
-def _lacks_skill(game: Optional[Game], user_id: int, role: Role) -> bool:
+def _lacks_skill(
+    game: Optional[Game],
+    user_id: int,
+    role: "Role | frozenset[Role]",
+) -> bool:
     """在局玩家不持有该角色或已出局（结果与当前阶段无关）。"""
     if game is None:
         return False
     player = game.player_by_user(user_id)
-    return player is None or not player.alive or player.role is not role
+    roles = role if isinstance(role, frozenset) else frozenset({role})
+    return player is None or not player.alive or player.role not in roles
 
 
 def _sender_display(event: GroupMessageEvent) -> str:
@@ -398,10 +447,18 @@ async def handle_open(
     # ValueError，引擎不能依赖它选连接（见 engine.run_game）
     game.bot = bot
     note_signup_name(game, user_id, _sender_display(event))
+    # 沿用本群上一局的板子与房规（房主可再改）
+    prefs = room_prefs(group_id)
+    prefs_note = ""
+    if prefs is not None and prefs[0] in BOARDS:
+        game.board, game.rules = prefs
+        prefs_note = f"\n已沿用上局设置：板子「{game.board}」，房规 {_rules_line(game)}"
     game.worker = asyncio.create_task(engine.run_game(game))
     logger.info(f"狼人杀群 {group_id} 由 {user_id} 开房")
     hint = "可私聊 /选身份 身份名请求期望角色~" if config.ww_role_request else ""
-    await wolf_open.finish(f"狼人杀房间已创建，房主已自动报名~\n{hint}".rstrip())
+    await wolf_open.finish(
+        f"狼人杀房间已创建，房主已自动报名~{prefs_note}\n{hint}".rstrip()
+    )
 
 
 signup_cmd = build_matcher(COMMAND_BY_NAME["报名"])
@@ -419,6 +476,8 @@ async def handle_signup(
     eff_min, eff_max = _eff_limits(game)
     if len(game.signup_user_ids) >= eff_max:
         await signup_cmd.finish("报名已满员，等待开局~")
+    if int(event.get_user_id()) in game.kicked_user_ids:
+        await signup_cmd.finish("你已被房主移出本局报名，下局再来吧~")
     if not join_signup(game, int(event.get_user_id())):
         await signup_cmd.finish("你已在局中，无需重复报名~")
     note_signup_name(game, int(event.get_user_id()), _sender_display(event))
@@ -426,11 +485,16 @@ async def handle_signup(
         f"狼人杀群 {int(event.group_id)} {int(event.get_user_id())} 报名"
         f"（{len(game.signup_user_ids)}/{eff_max}）"
     )
+    count = len(game.signup_user_ids)
+    if count >= eff_max:
+        progress = "，已满员，马上开局！"
+    elif count >= eff_min:
+        progress = "，人数已够，房主可发 /开始游戏"
+    else:
+        progress = f"，还差 {eff_min - count} 人开局"
     response = (
         MessageSegment.at(event.user_id)
-        + f"报名成功！当前 {len(game.signup_user_ids)}"
-        + f"/{eff_max} 人"
-        + f"（至少 {eff_min} 人开局）"
+        + f"报名成功！当前 {count}/{eff_max} 人{progress}"
     )
     if config.ww_role_request:
         response += "\n可私聊 /选身份 身份名请求期望角色~"
@@ -484,9 +548,11 @@ async def handle_view(
     lines = [
         "═══ 狼人杀 · 报名名单 ═══",
         f"板子：{game.board}（房主可发 /板子 切换）",
+        f"房规：{_rules_line(game)}（房主可发 /房规 调整）",
     ]
     for idx, uid in enumerate(game.signup_user_ids, start=1):
-        lines.append(f"{idx}. {display_name_of(game, uid)}")
+        host_mark = "（房主）" if uid == game.host_user_id else ""
+        lines.append(f"{idx}. {display_name_of(game, uid)}{host_mark}")
     lines.append("──────────────")
     lines.append(
         f"当前 {len(game.signup_user_ids)}/{eff_max} 人，至少 {eff_min} 人开局"
@@ -526,24 +592,47 @@ async def handle_board(
         await board_cmd.finish("本群当前没有报名中的狼人杀对局")
     text = str(arg).strip()
     if not text:
+        current = len(game.signup_user_ids)
         lines = ["═══ 狼人杀 · 可选板子 ═══"]
         for spec in BOARDS.values():
             marker = "（当前）" if spec.key == game.board else ""
+            fits = "✓" if current in spec.counts else " "
             lines.append(
-                f"· {spec.key}{marker}：{spec.roles_summary()}，"
-                f"支持 {spec.counts_summary()} 人"
+                f"{fits} {spec.key}{marker}【{spec.level}】{spec.counts_summary()} 人"
             )
+            if spec.description:
+                lines.append(f"   {spec.description}")
         lines.append("──────────────")
-        lines.append("房主发送 /板子 名称 切换（如 /板子 预女猎白混）")
+        lines.append(f"✓ = 适合当前 {current} 人")
+        lines.append(
+            "房主发送 /板子 名称 切换（如 /板子 新手局），/狼人规则 板子名 看详情"
+        )
         await board_cmd.finish("\n".join(lines))
     user_id = int(event.get_user_id())
     if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
         await board_cmd.finish("只有房主、群管理员或超管可以切换板子~")
-    if text not in BOARDS:
+    resolved = resolve_board_key(text)
+    if resolved is None:
         keys = "、".join(BOARDS)
-        await board_cmd.finish(f"没有名为「{text}」的板子。可选：{keys}")
-    game.board = text
+        await board_cmd.finish(
+            f"没有名为「{text}」的板子（或名称有歧义）。可选：{keys}"
+        )
+    text = resolved
     spec = BOARDS[text]
+    # 切到与人数配置无交集、或容纳不下已报名人数的板子会让对局直接流局，提前拦下
+    lo = max(config.ww_min_players, min(spec.counts))
+    hi = min(config.ww_max_players, max(spec.counts))
+    if lo > hi:
+        await board_cmd.finish(
+            f"板子「{text}」支持 {spec.counts_summary()} 人，"
+            f"与本群人数配置（{config.ww_min_players}-{config.ww_max_players}）不兼容~"
+        )
+    if len(game.signup_user_ids) > hi:
+        await board_cmd.finish(
+            f"板子「{text}」最多 {hi} 人，当前已报名 {len(game.signup_user_ids)} 人，"
+            "请先 /移除AI 或请人 /退报名 再切换~"
+        )
+    game.board = text
     current = len(game.signup_user_ids)
     note = (
         f"\n提示：当前已报名 {current} 人，不在该板子支持的人数范围"
@@ -551,6 +640,8 @@ async def handle_board(
         if current not in spec.counts
         else ""
     )
+    if spec.description:
+        note = f"\n{spec.description}{note}"
     logger.info(f"狼人杀群 {int(event.group_id)} {user_id} 切换板子为 {text}")
     await board_cmd.finish(
         f"已切换板子：{text}（{spec.roles_summary()}，"
@@ -666,6 +757,16 @@ async def handle_start(
     current = len(game.signup_user_ids)
     targets = [n for n in board.counts if n >= max(eff_min, current)]
     target = min(targets) if targets else current
+    can_fill = config.ww_ai_enabled and config.ww_ai_autofill
+    if current not in board.counts and (not can_fill or not targets):
+        fits = suggest_boards(current)
+        hint = (
+            f"适合 {current} 人的板子：{'、'.join(fits)}" if fits else "请调整报名人数"
+        )
+        await start_cmd.finish(
+            f"板子「{board.key}」支持 {board.counts_summary()} 人，"
+            f"当前 {current} 人。\n{hint}"
+        )
     filled = 0
     if config.ww_ai_enabled and config.ww_ai_autofill:
         while (
@@ -754,8 +855,7 @@ async def handle_wish(
             else "\n当前请求：无（未请求则随机发牌）"
         )
         await wish_cmd.finish(
-            f"格式：/选身份 身份名。可选身份：{board.roles_summary()}"
-            f"{current_note}"
+            f"格式：/选身份 身份名。可选身份：{board.roles_summary()}{current_note}"
         )
     if role not in board.all_roles():
         await wish_cmd.finish(
@@ -815,20 +915,57 @@ async def handle_identity(
         await identity_cmd.finish("当前无法为你补发身份卡~")
     board = BOARDS[game.board]
     roster = [(item.seat, display_name_of(game, item.user_id)) for item in game.players]
-    delivered = await engine._dm(
-        game,
-        player,
-        build_role_card(
-            player.seat,
-            player.role,
-            len(game.players),
-            silence_mode=board.silence_mode,
-            roster=roster,
-        ),
+    card = build_role_card(
+        player.seat,
+        player.role,
+        len(game.players),
+        silence_mode=board.silence_mode,
+        roster=roster,
+        rule_notes=house_rules.diff_from_default(game.rules),
     )
+    notes = _private_notes(game, player)
+    if notes:
+        card += "\n─── 你的记录 ───\n" + "\n".join(notes)
+    delivered = await engine._dm(game, player, card)
     if delivered:
         await identity_cmd.finish("身份卡已私聊重发，请查收~")
     await identity_cmd.finish("身份卡发送失败，请先加机器人为好友后再发送 /身份~")
+
+
+def _private_notes(game: Game, player: PlayerState) -> list[str]:
+    """/身份 附带的私有记录：只含本人本就知道的信息。"""
+    notes: list[str] = []
+    if not player.alive:
+        notes.append("你已出局，请不要在群里透露信息~")
+    if player.role is Role.SEER and player.seer_checks:
+        notes.append(
+            "查验："
+            + "；".join(
+                f"第{n}夜 {seat}号={res}" for n, seat, res in player.seer_checks
+            )
+        )
+    if player.role is Role.WITCH:
+        notes.append(
+            f"解药{'已用' if player.save_used else '可用'}，"
+            f"毒药{'已用' if player.poison_used else '可用'}"
+        )
+    if player.role is Role.GUARD and player.guard_last_target is not None:
+        notes.append(f"昨晚守护：{player.guard_last_target}号（今晚不可连守）")
+    if player.role is Role.HALFBLOOD and player.owner_seat is not None:
+        notes.append(f"你的主人：{player.owner_seat}号")
+    if player.role is Role.SILENT_ELDER and player.elder_last_target is not None:
+        notes.append(f"昨晚目标：{player.elder_last_target}号（今晚不可连续选）")
+    if player.faction is Faction.WOLF and player.role in WOLF_ROLES:
+        mates = [
+            f"{p.seat}号{'（已出局）' if not p.alive else ''}"
+            for p in game.players
+            if p.role in WOLF_ROLES and p.user_id != player.user_id
+        ]
+        if mates:
+            notes.append(f"狼队友：{'、'.join(mates)}")
+    if player.role in (Role.HUNTER, Role.WOLF_KING) and player.shot_used:
+        notes.append("你已经开过枪了")
+    return notes
 
 
 # ── 仅私聊的特殊夜间行动命令 ──────────────────────────────
@@ -889,6 +1026,30 @@ async def handle_silence(
     )
 
 
+guard_cmd = build_matcher(COMMAND_BY_NAME["守护"])
+
+
+@guard_cmd.handle()
+async def handle_guard(
+    event: PrivateMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """守卫夜间守护。"""
+    user_id = int(event.get_user_id())
+    game = game_of_user(user_id)
+    if _lacks_skill(game, user_id, Role.GUARD):
+        await guard_cmd.finish(_NO_SKILL)
+    if game is None or game.phase is not Phase.NIGHT_GUARD:
+        await guard_cmd.finish(
+            _not_now(game, "守护 是守卫的夜间行动，请按私聊提示在夜里回复 守护N~")
+        )
+    seat = _parse_seat(arg)
+    if seat is None:
+        await guard_cmd.finish("格式：/守护 N（N 为目标座位号，可守自己）")
+    await _finish_action(guard_cmd, game, Action(ActionKind.GUARD, user_id, seat))
+
+
 # ── 夜间私聊命令 ──────────────────────────────────────────
 
 kill_cmd = build_matcher(COMMAND_BY_NAME["刀"])
@@ -902,7 +1063,7 @@ async def handle_kill(
 ) -> None:
     """狼人刀人。"""
     game = game_of_user(int(event.get_user_id()))
-    if _lacks_skill(game, int(event.get_user_id()), Role.WEREWOLF):
+    if _lacks_skill(game, int(event.get_user_id()), WOLF_ROLES):
         await kill_cmd.finish(_NO_SKILL)
     if game is None or game.phase is not Phase.NIGHT_WOLVES:
         await kill_cmd.finish(
@@ -1134,9 +1295,9 @@ async def handle_pass_badge(
         await pass_badge_cmd.finish(
             _not_now(game, "移交警徽 仅在死亡警长的移交阶段可用~")
         )
-    seat = _parse_seat(arg)
+    seat = _seat_from_arg(game, arg)
     if seat is None:
-        await pass_badge_cmd.finish("格式：/移交警徽 N（N 为存活玩家座位）")
+        await pass_badge_cmd.finish("格式：/移交警徽 N 或 /移交警徽 @某人")
     await _finish_action(
         pass_badge_cmd,
         game,
@@ -1171,18 +1332,20 @@ detonate_cmd = build_matcher(COMMAND_BY_NAME["自爆"])
 @detonate_cmd.handle()
 async def handle_detonate(
     event: GroupMessageEvent,
+    arg: Message = CommandArg(),
     _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
 ) -> None:
-    """狼人白天自爆。"""
+    """狼人白天自爆；白狼王可 /自爆 N 带走一人（其他狼人带参数也只自爆）。"""
     game = get_game(int(event.group_id))
     if game is None or game.phase not in SELF_DETONATE_PHASES:
         await detonate_cmd.finish(
             _not_now(game, "自爆 是狼人的白天行动，可在发言/投票阶段发动~")
         )
+    seat = _seat_from_arg(game, arg) if str(arg).strip() else None
     await _finish_action(
         detonate_cmd,
         game,
-        Action(ActionKind.SELF_DETONATE, int(event.get_user_id())),
+        Action(ActionKind.SELF_DETONATE, int(event.get_user_id()), seat),
     )
 
 
@@ -1201,9 +1364,9 @@ async def handle_duel(
         await duel_cmd.finish(
             _not_now(game, "决斗 是骑士的白天行动，可在发言阶段发动，格式 /决斗 N~")
         )
-    seat = _parse_seat(arg)
+    seat = _seat_from_arg(game, arg)
     if seat is None:
-        await duel_cmd.finish("格式：/决斗 N（N 为目标座位号）")
+        await duel_cmd.finish("格式：/决斗 N 或 /决斗 @某人")
     await _finish_action(
         duel_cmd,
         game,
@@ -1224,9 +1387,10 @@ async def handle_vote(
     game = get_game(int(event.group_id))
     if game is None or game.phase not in _VOTE_PHASES:
         await vote_cmd.finish(_not_now(game, "投票 仅在投票阶段可用，格式 /投票 N~"))
-    seat = _parse_seat(arg)
+    seat = _seat_from_arg(game, arg)
     if seat is None:
-        await vote_cmd.finish("格式：/投票 N（N 为目标座位号）")
+        targets = _seat_list_text(game.vote_targets)
+        await vote_cmd.finish(f"格式：/投票 N 或 /投票 @某人（可投：{targets}）")
     await _finish_action(
         vote_cmd,
         game,
@@ -1340,7 +1504,7 @@ async def handle_in_game_dm(event: PrivateMessageEvent) -> None:
     if (
         allowed
         and phase_role is not None
-        and (actor is None or actor.role is not phase_role)
+        and (actor is None or actor.role not in phase_role)
     ):
         # 持有该技能、但当前不是自己角色的子阶段（如狼人在女巫阶段回复 过）
         allowed = False
@@ -1407,13 +1571,301 @@ async def handle_game_speech(event: GroupMessageEvent) -> None:
     ai_player.record_speech(game, game.current_speaker, text)
 
 
+# ── 房规 / 踢出 ───────────────────────────────────────────
+
+rules_cmd = build_matcher(COMMAND_BY_NAME["房规"])
+
+
+@rules_cmd.handle()
+async def handle_rules(
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """查看房规；房主/群管/超管在报名阶段可套用预设或逐项修改。"""
+    game = get_game(int(event.group_id))
+    if game is None:
+        await rules_cmd.finish(
+            "本群当前没有狼人杀对局（发送 /狼人杀 开房后可调整房规）"
+        )
+    text = str(arg).strip()
+    if not text:
+        lines = ["═══ 狼人杀 · 本局房规 ═══", *house_rules.describe(game.rules)]
+        lines.append("──────────────")
+        lines.append(f"预设：{'、'.join(house_rules.PRESETS)}（/房规 预设名 一键套用）")
+        lines.append("修改单项：/房规 项目 值，如 /房规 警长 关、/房规 发言时长 90")
+        await rules_cmd.finish("\n".join(lines))
+    if game.phase is not Phase.SIGNUP:
+        await rules_cmd.finish("房规已在发牌时锁定，下局开房后再调整吧~")
+    user_id = int(event.get_user_id())
+    if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
+        await rules_cmd.finish("只有房主、群管理员或超管可以调整房规~")
+    if text in house_rules.PRESETS:
+        game.rules = house_rules.PRESETS[text]
+        diff = house_rules.diff_from_default(game.rules)
+        logger.info(f"狼人杀群 {game.group_id} {user_id} 套用房规预设 {text}")
+        await rules_cmd.finish(
+            f"已套用「{text}」房规：{'；'.join(diff) or '与标准一致'}"
+        )
+    parts = text.split(maxsplit=1)
+    if len(parts) != 2:  # noqa: PLR2004
+        await rules_cmd.finish("格式：/房规 项目 值（发送 /房规 查看全部项目）")
+    updated, message = house_rules.set_rule(game.rules, parts[0], parts[1])
+    if not message.startswith("×"):
+        game.rules = updated
+        logger.info(f"狼人杀群 {game.group_id} {user_id} 房规：{message}")
+    await rules_cmd.finish(message.lstrip("× "))
+
+
+kick_cmd = build_matcher(COMMAND_BY_NAME["踢出"])
+
+
+@kick_cmd.handle()
+async def handle_kick(  # noqa: C901
+    event: GroupMessageEvent,
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """报名阶段移出某位报名者（@某人 或 名单序号）；被移出者本局不可再报名。"""
+    game = get_game(int(event.group_id))
+    if game is None or game.phase is not Phase.SIGNUP:
+        await kick_cmd.finish("只能在报名阶段移出玩家~")
+    user_id = int(event.get_user_id())
+    if not (user_id == game.host_user_id or is_group_admin(event) or _is_su(user_id)):
+        await kick_cmd.finish("只有房主、群管理员或超管可以移出玩家~")
+    target: Optional[int] = None
+    for seg in arg:
+        if seg.type == "at" and str(seg.data.get("qq", "")).isdigit():
+            target = int(seg.data["qq"])
+            break
+    plain = arg.extract_plain_text().strip()
+    if target is None and plain.isdigit():
+        index = int(plain)
+        if 1 <= index <= len(game.signup_user_ids):
+            target = game.signup_user_ids[index - 1]
+    if target is None or target not in game.signup_user_ids:
+        await kick_cmd.finish("格式：/踢出 @某人 或 /踢出 序号（见 /查看报名）")
+    if target == user_id:
+        await kick_cmd.finish("不能移出自己，想退出请发 /退报名~")
+    name = display_name_of(game, target)
+    if is_ai_uid(target):
+        leave_signup(game, target)
+        game.ai_names.pop(target, None)
+    else:
+        leave_signup(game, target)
+        game.kicked_user_ids.add(target)
+    if target == game.host_user_id:
+        humans = [uid for uid in game.signup_user_ids if not is_ai_uid(uid)]
+        if humans:
+            game.host_user_id = humans[0]
+    logger.info(f"狼人杀群 {game.group_id} {user_id} 移出报名者 {target}")
+    await kick_cmd.finish(f"已将 {name} 移出报名，当前 {len(game.signup_user_ids)} 人")
+
+
+# ── 规则说明 / 复盘 / 再来一局 / 排行 ─────────────────────
+
+guide_cmd = build_matcher(COMMAND_BY_NAME["狼人规则"])
+
+_GAME_GUIDE = (
+    "═══ 狼人杀 · 快速上手 ═══",
+    "1. 开房：/狼人杀，其他人 /报名；人够了房主 /开始游戏（不够可 /添加AI）。",
+    "2. 发牌：机器人私聊你身份卡，请先加机器人好友。",
+    "3. 夜晚：全员禁言，有技能的人按私聊提示直接回复（如 刀3、查验5、救）。",
+    "4. 白天：公布死讯 → 首日竞选警长 → 依次发言（/过 结束）→ /投票 N 放逐。",
+    "5. 胜负：狼人全部出局好人胜；神职或平民全灭（屠边）狼人胜。",
+    "──────────────",
+    "/狼人规则 角色名：看某个角色（如 /狼人规则 守卫）",
+    "/狼人规则 板子名：看某个板子的配置（如 /狼人规则 新手局）",
+    "/板子 列出全部板子，/房规 查看本局规则，/狼人状态 随时看进度",
+)
+
+
+@guide_cmd.handle()
+async def handle_guide(
+    arg: Message = CommandArg(),
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """玩法教程：无参数给流程概览；角色名/板子名给详细说明。"""
+    text = str(arg).strip()
+    if not text:
+        await guide_cmd.finish("\n".join(_GAME_GUIDE))
+    role = parse_role(text)
+    if role is not None:
+        await guide_cmd.finish(role_guide(role))
+    board_key = resolve_board_key(text)
+    if board_key is not None:
+        spec = BOARDS[board_key]
+        lines = [
+            f"═══ 板子 · {spec.key}【{spec.level}】 ═══",
+            spec.description or "",
+            *spec.composition_lines(),
+        ]
+        if spec.silence_mode == "vote":
+            lines.append("本板子的长老为禁票长老（封投票权）")
+        lines.append("──────────────")
+        lines.append("/狼人规则 角色名 查看各角色技能")
+        await guide_cmd.finish("\n".join(line for line in lines if line))
+    await guide_cmd.finish(
+        f"没找到「{text}」。可以查角色（如 女巫）或板子（如 预女猎白）~"
+    )
+
+
+review_cmd = build_matcher(COMMAND_BY_NAME["狼人复盘"])
+
+
+@review_cmd.handle()
+async def handle_review(
+    event: GroupMessageEvent,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """查看本群上一局复盘；对局进行中不提供，避免剧透。"""
+    group_id = int(event.group_id)
+    game = get_game(group_id)
+    if game is not None and game.phase not in (Phase.SIGNUP, Phase.ENDED):
+        await review_cmd.finish("对局进行中，结束后才能查看复盘哦~")
+    text = last_review(group_id)
+    if text is None:
+        await review_cmd.finish(
+            "本群还没有可复盘的狼人杀对局（复盘保存在内存中，重启后清空）"
+        )
+    await review_cmd.finish(text)
+
+
+again_cmd = build_matcher(COMMAND_BY_NAME["再来一局"])
+
+
+@again_cmd.handle()
+async def handle_again(  # noqa: C901,PLR0912
+    bot: Bot,
+    event: GroupMessageEvent,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """原班人马再开：发起者为房主，上局真人自动报名，AI 按上局人数补回。"""
+    group_id = int(event.group_id)
+    user_id = int(event.get_user_id())
+    roster = last_roster(group_id)
+    if roster is None:
+        await again_cmd.finish("本群还没有上一局的记录，发送 /狼人杀 开新房吧~")
+    if get_game(group_id) is not None:
+        await again_cmd.finish("本群已有进行中的狼人杀对局~")
+    if game_of_user(user_id) is not None:
+        await again_cmd.finish("你已经在其他对局中了~")
+    humans, ai_count, names = roster
+    game = create_game(group_id, user_id, queue_max=config.ww_action_queue_max)
+    if game is None:
+        await again_cmd.finish("房间创建失败：群或账号刚被其他玩法占用")
+    game.bot = bot
+    note_signup_name(game, user_id, _sender_display(event))
+    prefs = room_prefs(group_id)
+    if prefs is not None and prefs[0] in BOARDS:
+        game.board, game.rules = prefs
+    _, eff_max = _eff_limits(game)
+    rejoined: list[str] = []
+    skipped = 0
+    for uid in humans:
+        if uid == user_id:
+            continue
+        if len(game.signup_user_ids) >= eff_max or not join_signup(game, uid):
+            skipped += 1
+            continue
+        if uid in names:
+            note_signup_name(game, uid, names[uid])
+        rejoined.append(display_name_of(game, uid))
+    added_ai = 0
+    if config.ww_ai_enabled:
+        for _ in range(ai_count):
+            if len(game.signup_user_ids) >= eff_max or add_ai_signup(game) is None:
+                break
+            added_ai += 1
+    game.worker = asyncio.create_task(engine.run_game(game))
+    logger.info(
+        f"狼人杀群 {group_id} 由 {user_id} 再来一局"
+        f"（回归 {len(rejoined)} 人，AI {added_ai}，跳过 {skipped}）"
+    )
+    lines = [
+        f"再来一局！房主：{display_name_of(game, user_id)}，板子「{game.board}」",
+        f"已自动报名上局玩家：{'、'.join(rejoined) or '无'}",
+    ]
+    if added_ai:
+        lines.append(f"已补回 {added_ai} 名玩家")
+    if skipped:
+        lines.append(f"{skipped} 人因已在其他对局或满员未能自动报名")
+    lines.append("不想玩的请发 /退报名，房主 /开始游戏 即可发车")
+    await again_cmd.finish("\n".join(lines))
+
+
+rank_cmd = build_matcher(COMMAND_BY_NAME["狼人排行"])
+
+_RANK_MIN_GAMES = 3
+_STREAK_MIN = 2
+_RANK_SIZE = 10
+
+
+@rank_cmd.handle()
+async def handle_rank(
+    bot: Bot,
+    event: GroupMessageEvent,
+    session: async_scoped_session,
+    _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
+) -> None:
+    """本群胜场排行：只统计真人、已结束对局，至少 3 局上榜。"""
+    group_id = int(event.group_id)
+    stmt = (
+        select(WerewolfPlayer.user_id, WerewolfPlayer.is_winner)
+        .join(WerewolfGame, WerewolfGame.id == WerewolfPlayer.game_id)
+        .where(
+            WerewolfGame.group_id == group_id,
+            WerewolfPlayer.is_ai == False,  # noqa: E712
+            WerewolfPlayer.is_winner.is_not(None),
+        )
+    )
+    rows = (await session.execute(stmt)).all()
+    stats: dict[int, list[int]] = {}
+    for uid, is_winner in rows:
+        entry = stats.setdefault(int(uid), [0, 0])
+        entry[0] += 1
+        if is_winner:
+            entry[1] += 1
+    ranked = sorted(
+        (
+            (uid, games, wins)
+            for uid, (games, wins) in stats.items()
+            if games >= _RANK_MIN_GAMES
+        ),
+        key=lambda item: (-item[2], -item[2] / item[1], -item[1]),
+    )[:_RANK_SIZE]
+    if not ranked:
+        await rank_cmd.finish(f"本群还没有玩够 {_RANK_MIN_GAMES} 局的玩家，快开一局吧~")
+    names: dict[int, str] = {}
+    try:
+        members = await asyncio.wait_for(
+            bot.get_group_member_list(group_id=group_id), timeout=config.ww_api_timeout
+        )
+        for member in members:
+            names[int(member["user_id"])] = (
+                member.get("card") or member.get("nickname") or ""
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug(f"狼人杀群 {group_id} 排行获取群名片失败，回退 QQ 号")
+    medals = ("🥇", "🥈", "🥉")
+    lines = ["═══ 本群狼人杀排行 ═══"]
+    for index, (uid, games, wins) in enumerate(ranked):
+        mark = medals[index] if index < len(medals) else f"{index + 1}."
+        lines.append(
+            f"{mark} {names.get(uid) or uid}："
+            f"{wins} 胜 / {games} 局（{wins / games:.0%}）"
+        )
+    lines.append(f"（至少 {_RANK_MIN_GAMES} 局上榜，按胜场排序）")
+    await rank_cmd.finish("\n".join(lines))
+
+
 # ── 战绩 ──────────────────────────────────────────────────
 
 record_cmd = build_matcher(COMMAND_BY_NAME["战绩"])
 
 
 @record_cmd.handle()
-async def handle_record(
+async def handle_record(  # noqa: C901,PLR0912
     event: MessageEvent,
     session: async_scoped_session,
     _perm: None = require_feature("werewolf"),  # pyright: ignore[reportArgumentType]
@@ -1450,12 +1902,35 @@ async def handle_record(
         entry[0] += 1
         if r.is_winner:
             entry[1] += 1
+    survived = sum(1 for r in finished if r.death_round is None)
+    by_faction: dict[str, list[int]] = {"good": [0, 0], "wolf": [0, 0]}
+    for r in finished:
+        entry = by_faction.setdefault(r.faction, [0, 0])
+        entry[0] += 1
+        if r.is_winner:
+            entry[1] += 1
+    recent = sorted(finished, key=lambda r: r.id)[-10:]
+    form = "".join("胜" if r.is_winner else "负" for r in recent)
+    streak = 0
+    for r in reversed(recent):
+        if r.is_winner:
+            streak += 1
+        else:
+            break
     lines = [
         "═══ 狼人战绩 ═══",
         f"总场次：{total}，胜场：{wins}，胜率：{wins / total:.1%}",
-        f"曾任警长：{sheriff_times} 次",
-        "─── 各角色 ───",
+        f"存活到终局：{survived} 次，曾任警长：{sheriff_times} 次",
     ]
+    for key, label in (("good", "好人阵营"), ("wolf", "狼人阵营")):
+        played, won = by_faction.get(key, [0, 0])
+        if played:
+            lines.append(f"{label}：{played} 场 {won} 胜（{won / played:.0%}）")
+    lines.append(
+        f"最近 {len(recent)} 局：{form}"
+        + (f"（{streak} 连胜中）" if streak >= _STREAK_MIN else "")
+    )
+    lines.append("─── 各角色 ───")
     for role in Role:
         if role.value in role_stats:
             played, won = role_stats[role.value]

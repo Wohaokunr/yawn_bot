@@ -27,7 +27,7 @@ from ..metrics import record_ai_degradation  # noqa: TID252
 from . import api, game_log
 from .config import SHERIFF_FINAL_SPEECH_SECONDS, Config
 from .dsl import parse_dm_action
-from .roles import BOARDS, Faction, Role, build_role_card
+from .roles import BOARDS, SHOOTER_ROLES, Faction, Role, build_role_card
 from .state import (
     DUEL_PHASES,
     Action,
@@ -74,6 +74,7 @@ def _enqueue_action(game: Game, action: Action) -> bool:
         )
     return accepted
 
+
 # 公共记录与私聊记录保留条数上限（控制提示词规模）
 _PUBLIC_LOG_MAX = 200
 _CONTEXT_PUBLIC_LINES = 60
@@ -97,13 +98,15 @@ _SHERIFF_FINAL_SPEECH_WINDOW = float(SHERIFF_FINAL_SPEECH_SECONDS)
 
 _PHASE_DESC: dict[Phase, str] = {
     Phase.NIGHT_HALFBLOOD: "夜晚-混血儿认主",
+    Phase.NIGHT_GUARD: "夜晚-守卫守护",
+    Phase.NIGHT_GRAVEKEEPER: "夜晚-守墓人验尸",
     Phase.NIGHT_WOLVES: "夜晚-狼人行动",
     Phase.NIGHT_WITCH: "夜晚-女巫行动",
     Phase.NIGHT_SEER: "夜晚-预言家行动",
     Phase.NIGHT_ELDER: "夜晚-长老禁言",
     Phase.DAY_ANNOUNCE: "白天-死讯播报",
     Phase.LAST_WORDS: "遗言环节",
-    Phase.HUNTER_SHOT: "猎人开枪决策",
+    Phase.HUNTER_SHOT: "死亡技能（开枪）决策",
     Phase.BADGE_TRANSFER: "警徽移交",
     Phase.SHERIFF_REGISTER: "警长竞选报名",
     Phase.SHERIFF_SPEECH: "竞选发言",
@@ -146,8 +149,7 @@ _SPEECH_SCENE_PROMPTS: dict[Phase, str] = {
         "明确给出你怀疑的对象与理由（或为某人担保）。"
     ),
     Phase.PK_SPEECH: (
-        "放逐投票平票，现在是 PK 发言：自证清白，"
-        "并指出另一位平票者的疑点。"
+        "放逐投票平票，现在是 PK 发言：自证清白，并指出另一位平票者的疑点。"
     ),
 }
 
@@ -163,6 +165,7 @@ def _clip_timeout_to_window(preferred: float, window: float) -> float:
 def _decision_timeout(window: float) -> float:
     """当前配置下，单次决策在指定引擎窗口内的可用总预算。"""
     return _clip_timeout_to_window(config.ww_ai_decision_timeout, window)
+
 
 _VOTE_PHASES: frozenset[Phase] = frozenset(
     {
@@ -195,6 +198,10 @@ class SeatKnowledge:
     poisoned_seat: Optional[int] = None
     # 狼队友座位（每晚睁眼时刷新为当夜存活队友）
     wolf_mates: list[int] = field(default_factory=list)
+    # 守卫守护史：(夜, 座位)
+    guards: list[tuple[int, int]] = field(default_factory=list)
+    # 守墓人信息：(夜, 昨日放逐座位, "狼人"/"好人")
+    graves: list[tuple[int, int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -362,6 +369,30 @@ def note_wolf_mates(game: Game, seat: int, mates: list[int]) -> None:
     driver.wake.set()
 
 
+def note_guard(game: Game, seat: int, round_no: int, target: int) -> None:
+    """守卫守护沉淀（引擎 _phase_guard 裁决后调用）。"""
+    driver = _drivers.get(game.group_id)
+    if driver is None:
+        return
+    _knowledge_of(driver, seat).guards.append((round_no, target))
+    driver.wake.set()
+
+
+def note_grave(
+    game: Game,
+    seat: int,
+    round_no: int,
+    target: int,
+    identity: str,
+) -> None:
+    """守墓人信息沉淀（引擎 _phase_gravekeeper 调用）。"""
+    driver = _drivers.get(game.group_id)
+    if driver is None:
+        return
+    _knowledge_of(driver, seat).graves.append((round_no, target, identity))
+    driver.wake.set()
+
+
 def on_phase_change(game: Game) -> None:
     """引擎切换阶段时，取消本局尚在运行的旧阶段后台决策。
 
@@ -495,7 +526,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
 
     # ── 夜晚：DM 提示驱动 ──
     if phase is Phase.NIGHT_WOLVES:
-        wolves = [p for p in game.alive_players_of_role(Role.WEREWOLF) if p.is_ai]
+        wolves = [p for p in game.alive_wolves() if p.is_ai]
         flow_key = (round_no, phase, "wolf-flow")
         # 整段「并行讨论 → 串行出刀」都交给带 phase token 的
         # 后台任务。主循环不再被狼队多次 LLM 调用占住，因此能
@@ -520,6 +551,35 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
                     driver,
                     witch,
                     "请根据私聊提示决定今晚用药。",
+                    fallback=ActionKind.SKIP,
+                    timeout=_decision_timeout(config.ww_night_timeout),
+                )
+        return
+    if phase is Phase.NIGHT_GUARD:
+        guards = [p for p in game.alive_players_of_role(Role.GUARD) if p.is_ai]
+        if guards:
+            guard = guards[0]
+            key = (round_no, phase, guard.seat)
+            if key not in driver.handled and _has_phase_dm(driver, guard.seat, phase):
+                driver.handled.add(key)
+                await asyncio.sleep(_SETTLE_DELAY)
+                options = [
+                    p.seat
+                    for p in game.alive_players()
+                    if p.seat != guard.guard_last_target
+                ]
+                repeat_note = (
+                    f"昨晚你守了 {guard.guard_last_target}号，今晚不可连守。"
+                    if guard.guard_last_target is not None
+                    else ""
+                )
+                await _simple_decide(
+                    driver,
+                    guard,
+                    f"可守护目标：{_fmt_seats(options)}（可以守自己）。{repeat_note}"
+                    "优先守护对好人最关键、最可能被刀的玩家（如已跳且可信的预言家）；"
+                    "女巫有解药时首夜守刀口容易同守同救，可考虑空守。"
+                    "回复 守护N 或 过（空守）。",
                     fallback=ActionKind.SKIP,
                     timeout=_decision_timeout(config.ww_night_timeout),
                 )
@@ -600,7 +660,7 @@ async def _process_phase(  # noqa: C901,PLR0911,PLR0912,PLR0915
     # ── 猎人 / 警徽：DM 提示驱动 ──
     if phase is Phase.HUNTER_SHOT:
         for p in _ai_players(game):
-            if p.role is not Role.HUNTER or p.alive:
+            if p.role not in SHOOTER_ROLES or p.alive:
                 continue
             key = (round_no, phase, p.seat)
             if key in driver.handled or not _has_phase_dm(driver, p.seat, phase):
@@ -730,8 +790,7 @@ def _phase_token_is_current(game: Game, token: int) -> bool:
 def _enqueue_wolf_skip(game: Game, wolf: PlayerState) -> None:
     """狼刀无法产出时显式交给引擎按空刀托管。"""
     logger.info(
-        f"狼人杀群 {game.group_id} {wolf.seat}号 "
-        "AI 狼刀决策失败，托管：过（空刀）"
+        f"狼人杀群 {game.group_id} {wolf.seat}号 AI 狼刀决策失败，托管：过（空刀）"
     )
     record_ai_degradation("werewolf", "action_fallback")
     _enqueue_action(game, Action(ActionKind.SKIP, wolf.user_id))
@@ -803,7 +862,7 @@ async def _wolf_discuss(
 ) -> None:
     """狼队讨论：提议今晚刀谁（说XXX），引擎转发给其他狼；失败不影响出刀。"""
     game = driver.game
-    teammates = [w.seat for w in game.alive_players_of_role(Role.WEREWOLF)]
+    teammates = [w.seat for w in game.alive_wolves()]
     targets = [p.seat for p in game.alive_players() if p.faction is not Faction.WOLF]
     instruction = (
         f"狼人队友：{_fmt_seats(teammates)}；"
@@ -828,7 +887,7 @@ async def _wolf_decide(
 ) -> None:
     """狼人刀决策：失败/非刀口回复显式投入 SKIP 空刀。"""
     game = driver.game
-    teammates = [w.seat for w in game.alive_players_of_role(Role.WEREWOLF)]
+    teammates = [w.seat for w in game.alive_wolves()]
     targets = [p.seat for p in game.alive_players() if p.faction is not Faction.WOLF]
     instruction = (
         f"狼人队友：{_fmt_seats(teammates)}；"
@@ -1035,9 +1094,7 @@ async def _llm_decide(  # noqa: PLR0911
                 "attempt": attempt + 1,
             },
         )
-        if (
-            action is not None and _is_valid_action(game, player, action)
-        ):
+        if action is not None and _is_valid_action(game, player, action):
             action.phase_token = phase_token
             return action
         if attempt != 0 or phase_token != game.phase_token:
@@ -1085,6 +1142,13 @@ def _is_valid_action(  # noqa: C901,PLR0911,PLR0912
         return target is not None and target.alive and target.seat != player.seat
     if kind is ActionKind.SHOOT:
         return target is not None and target.alive
+    if kind is ActionKind.GUARD:
+        return (
+            player.role is Role.GUARD
+            and target is not None
+            and target.alive
+            and target.seat != player.guard_last_target
+        )
     if kind is ActionKind.CHOOSE_OWNER:
         return target is not None and target.alive and target.seat != player.seat
     if kind is ActionKind.SILENCE:
@@ -1211,6 +1275,7 @@ async def _llm_speech(driver: AIDriver, player: PlayerState) -> Optional[str]:
         "\n【发言规则】只输出发言内容本身（150 字以内），"
         "不要输出任何指令、格式标记或前缀。发言应符合你的身份立场与场景目标。"
         f"{_speech_strategy(player)}"
+        f"\n【说话风格】{_persona(player)}"
     )
     user = _render_context(driver, player) + f"\n\n{scene}请发言："
     if game.phase is Phase.LAST_WORDS:
@@ -1260,6 +1325,23 @@ def _fmt_seats(seats: list[int]) -> str:
     return "、".join(str(s) for s in seats) if seats else "无"
 
 
+# AI 发言人格：按座位与昵称稳定分配，让每个 AI 说话风格不同
+_PERSONAS: tuple[str, ...] = (
+    "说话简短直接，一两句话点出重点。",
+    "口语化，爱用“哈哈”“emmm”之类的语气词，像在群里闲聊。",
+    "逻辑严谨，喜欢分点列出理由。",
+    "情绪外露，被怀疑时会急着辩解。",
+    "温和谨慎，不轻易下结论，常说“我再听听”。",
+    "自信强势，喜欢带节奏、号召大家跟票。",
+)
+
+
+def _persona(player: PlayerState) -> str:
+    """该 AI 的稳定发言风格。"""
+    seed = sum(ord(ch) for ch in (player.display_name or "")) + player.seat
+    return _PERSONAS[seed % len(_PERSONAS)]
+
+
 def _speech_strategy(player: PlayerState) -> str:
     """按身份给出的发言策略提示（拼在【发言规则】尾部）。"""
     if player.role is Role.HALFBLOOD and player.owner_seat is not None:
@@ -1278,13 +1360,23 @@ def _speech_strategy(player: PlayerState) -> str:
             "发言策略：查验记录（[你的已知信息]）是你最硬的武器——"
             "适时报出金水与查杀并解释查验顺序的理由，防备狼人悍跳对跳。"
         )
+    if player.role is Role.GRAVEKEEPER:
+        return (
+            "发言策略：守墓信息能验证放逐结果与预言家真假——"
+            "在关键时刻亮出，帮好人校准站边。"
+        )
+    if player.role is Role.GUARD:
+        return (
+            "发言策略：守卫身份不宜早暴露，先以好人视角分析；"
+            "需要时再报出守护记录解释平安夜。"
+        )
     return (
         "发言策略：像好人一样分析逻辑——引用具体的发言与投票记录，"
         "指出矛盾点，明确你的怀疑对象与理由。"
     )
 
 
-def _identity_prompt(
+def _identity_prompt(  # noqa: C901
     game: Game,
     player: PlayerState,
     *,
@@ -1309,10 +1401,25 @@ def _identity_prompt(
             "你的胜利条件只有一个：主人所在阵营获胜。"
         )
     elif player.faction is Faction.WOLF:
+        win = (
+            "好人全部出局（屠城）"
+            if game.rules.win_mode == "city"
+            else "神职全灭或村民全灭（屠边）"
+        )
         faction_goal = (
             "你的阵营是狼人阵营：夜间与队友配合刀人，白天伪装成好人发言、"
-            "带节奏引开放逐好人。胜利条件：神职全灭或村民全灭。"
+            f"带节奏引开放逐好人。胜利条件：{win}。"
         )
+        if player.role is Role.HIDDEN_WOLF:
+            faction_goal += (
+                "你是隐狼：预言家查验你会得到“好人”，可以放心接受查验、给队友做掩护。"
+            )
+        elif player.role is Role.WOLF_KING:
+            faction_goal += (
+                "你是狼王：出局（非毒杀、非自爆）时可以开枪带走一人，优先带走神职。"
+            )
+        elif player.role is Role.WHITE_WOLF_KING:
+            faction_goal += "你是白狼王：夜间正常出刀即可。"
     else:
         faction_goal = (
             "你的阵营是好人阵营：通过白天发言与投票找出狼人并放逐。"
@@ -1331,6 +1438,8 @@ def _identity_prompt(
         role_commands = "禁言5 / "
     elif player.role is Role.KNIGHT:
         role_commands = "决斗5（群命令 /决斗5 翻牌）/ "
+    elif player.role is Role.GUARD:
+        role_commands = "守护5 / "
     action_rules = (
         "【行动规则】决策环节回复且仅回复一条指令（如 刀3 / 查验5 / 救 / "
         f"毒3 / 过 / {role_commands}投票2 / 弃票 / 上警 / 排序5顺 / "
@@ -1366,6 +1475,14 @@ def _render_knowledge(known: SeatKnowledge) -> str:
         potion_parts.append(f"毒药已用（毒过 {target}）" if target else "毒药已用")
     if potion_parts:
         lines.append("、".join(potion_parts))
+    if known.guards:
+        entries = "；".join(f"第{n}夜守 {seat}号" for n, seat in known.guards)
+        lines.append(f"守护记录：{entries}（不能连续两晚守同一人）")
+    if known.graves:
+        entries = "；".join(
+            f"第{n}夜得知 {seat}号={res}" for n, seat, res in known.graves
+        )
+        lines.append(f"守墓信息：{entries}")
     if known.wolf_mates:
         lines.append(
             f"狼队友座位：{_fmt_seats(known.wolf_mates)}"
