@@ -219,7 +219,7 @@ def _fit(payload: dict[str, Any]) -> dict[str, Any]:
     def size() -> int:
         return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
-    for key in ("group_profile", "bonds_in_groups", "groups"):
+    for key in ("group_profile", "bonds_in_groups", "groups", "assistant"):
         while size() > CONTEXT_CHAR_BUDGET and payload.get(key):
             payload[key] = payload[key][:-1]
         if not payload.get(key):
@@ -287,7 +287,43 @@ async def build_private_context(
         ]
     if groups:
         payload["groups"] = [item.name for item in groups[:MAX_GROUPS]]
+    payload["time_of_day"] = time_of_day(now)
+    assistant = _assistant_digest(user_id, now)
+    if assistant:
+        style = assistant.get("chat_style") or {}
+        if style.get("call_me"):
+            payload["user"]["call_them"] = style["call_me"]
+        payload["assistant"] = [assistant]
     return PrivateContext(payload=_fit(payload), groups=groups, queries=7)
+
+
+def time_of_day(now: datetime) -> str:  # noqa: PLR0911
+    hour = now.hour
+    if hour < 5:  # noqa: PLR2004
+        return "深夜"
+    if hour < 9:  # noqa: PLR2004
+        return "早上"
+    if hour < 12:  # noqa: PLR2004
+        return "上午"
+    if hour < 14:  # noqa: PLR2004
+        return "中午"
+    if hour < 18:  # noqa: PLR2004
+        return "下午"
+    if hour < 23:  # noqa: PLR2004
+        return "晚上"
+    return "深夜"
+
+
+def _assistant_digest(user_id: int, now: datetime) -> dict[str, Any]:
+    """个人助理摘要（偏好、待办、提醒、倒数日）；读失败不影响本轮。"""
+
+    from . import private_store
+    from .private_organizer import prompt_digest
+
+    try:
+        return prompt_digest(private_store.load(user_id), now)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 __all__ = [
