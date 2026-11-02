@@ -281,6 +281,24 @@ PRIVATE_AGENT_HANDOFF_AFTER=3
 PRIVATE_AGENT_AUTO_HANDOFF=true
 # 几件后台的事前后脚做完时等几秒合成一次汇报（0 到 60）
 PRIVATE_AGENT_REPORT_BATCH_SECONDS=2
+# 私聊历史最多带多少字符；窗口起点锚定，超了一次挪一大块，提高前缀缓存命中（1000 到 60000）
+PRIVATE_AGENT_HISTORY_CHARS=9000
+# 交给私聊 Agent 的历史最多读多少条（4 到 200）
+PRIVATE_AGENT_HISTORY_MESSAGES=40
+# 历史窗口要挪时一次至少挪掉预算的多少（0.2 到 0.8）
+PRIVATE_AGENT_HISTORY_DROP_RATIO=0.4
+# 早先的单条历史超过这么多字时只留头尾（200 到 20000）
+PRIVATE_AGENT_HISTORY_MESSAGE_CHARS=1500
+# 最后一轮/汇报/协调仍发同一份工具表并用 tool_choice 限制，保住前缀缓存；端点不支持 tool_choice 时关掉
+PRIVATE_AGENT_STABLE_TOOLS=true
+# 把群里的记忆带进私聊（共同认识的人、各群最近的事、他最近在群里说的话）
+PRIVATE_AGENT_GROUP_MEMORY=true
+# 他最近在群里说的话最多带几句（0 到 20）
+PRIVATE_AGENT_GROUP_LINES=4
+# 只看多少小时以内的群发言（1 到 168）
+PRIVATE_AGENT_GROUP_LINES_HOURS=24
+# 私聊记忆整理时顺便写“之前聊到哪”的回顾
+PRIVATE_AGENT_RECAP=true
 # 私聊个人数据目录（笔记、待办、提醒等，每人一个 JSON），留空用 data/private_agent/users
 PRIVATE_AGENT_DATA_DIR=
 # 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json

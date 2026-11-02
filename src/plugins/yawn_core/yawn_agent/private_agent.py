@@ -50,6 +50,7 @@ from .private_prompt import (
     PRIVATE_ATTACHMENTS_MISSING,
     PRIVATE_ATTACHMENTS_UNREAD,
     PRIVATE_AUTO_HANDOFF,
+    PRIVATE_CONTEXT_GUIDE,
     PRIVATE_CONTEXT_HEADER,
     PRIVATE_COORDINATE_NOTICE,
     PRIVATE_COORDINATE_TURN,
@@ -61,6 +62,7 @@ from .private_prompt import (
     PRIVATE_JUST_FINISHED,
     PRIVATE_MEDIA,
     PRIVATE_PERSONA_SCOPE,
+    PRIVATE_REPEAT_GUARD,
     PRIVATE_REPORT_NOTICE,
     PRIVATE_REPORT_TURN,
     PRIVATE_RESUMED_NOTE,
@@ -69,6 +71,7 @@ from .private_prompt import (
     PRIVATE_SAFETY,
     PRIVATE_TEAM,
     PRIVATE_TOOLKITS,
+    PRIVATE_TURN_HEADER,
     PRIVATE_TURN_TAKING,
 )
 from .private_tools import (
@@ -95,6 +98,14 @@ PART_PAUSE_SECONDS = 0.8
 # 历史最多带多少条（ai_chat 已经按 20 条截断，这里再按字符兜底）。
 HISTORY_CHAR_BUDGET = 6000
 COMPLETION_TIMEOUT = 60.0
+# 模型没给回复时（超时/空回复/上游报错）同一轮重试一次前等多久。
+RETRY_PAUSE_SECONDS = 1.0
+_RETRY_OUTCOMES = frozenset({"timeout", "empty", "error"})
+# 和上一条回复的相似度超过这个就算“复读”（只看 12 字以上的回复）。
+REPEAT_SIMILARITY = 0.88
+REPEAT_MIN_CHARS = 12
+# 单个工具结果进上下文的字符上限（超过的截掉尾部并注明），防止一次搜索把上下文撑爆。
+TOOL_RESULT_CHAR_LIMIT = 12000
 # 私聊工具名（或“工具.动作”）→ 声明核验用的群聊工具名（共用 speech_claims 的声明族）。
 _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "delegate_task": ("delegate_task",),
@@ -135,25 +146,30 @@ _background: set[asyncio.Task[Any]] = set()
 
 
 def _trim_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
-    """从新往旧装，超出字符预算就停；保证以 user 开头。"""
+    """不记锚点的历史裁剪（按字符预算从新往旧装，保证以 user 开头）。"""
 
-    kept: list[dict[str, str]] = []
-    used = 0
-    for item in reversed(history):
-        content = str(item.get("content") or "")
-        if used + len(content) > HISTORY_CHAR_BUDGET and kept:
-            break
-        kept.append({"role": item["role"], "content": content})
-        used += len(content)
-    kept.reverse()
-    while kept and kept[0]["role"] != "user":
-        kept.pop(0)
-    return kept
+    return _history_window(None, history).messages
+
+
+def _history_window(user_id: int | None, history: list[dict[str, str]]) -> Any:
+    from .private_cache import anchored_window
+
+    config = private_agent_config
+    return anchored_window(
+        user_id,
+        history,
+        budget=int(getattr(config, "private_agent_history_chars", HISTORY_CHAR_BUDGET)),
+        max_count=max(
+            int(getattr(config, "private_agent_history_messages", 40)) - 4, 2
+        ),
+        drop_ratio=float(getattr(config, "private_agent_history_drop_ratio", 0.4)),
+        message_chars=int(getattr(config, "private_agent_history_message_chars", 1500)),
+    )
 
 
 def build_messages(
     persona: dict[str, Any],
-    context_json: str,
+    context: Any,
     request: PrivateTurnRequest,
     *,
     computer: bool = False,
@@ -161,13 +177,26 @@ def build_messages(
     turn_style: str = "",
     allow_silence: bool = False,
     just_finished: bool = False,
+    round_note: tuple[str, str] | None = None,
     spans_out: list[dict[str, Any]] | None = None,
+    meta_out: dict[str, Any] | None = None,
+    anchor: bool = True,
 ) -> list[dict[str, Any]]:
-    """system（角色、人设、规则、能力、安全）+ system（用户资料、本轮发言方式）+ 历史。
+    """按“越稳定越靠前”拼一轮请求（服务商的前缀缓存只认从头开始完全相同的部分）::
 
-    ``spans_out`` 给了时写入每个分段在消息里的位置（WebUI 完整请求高亮用）；同时记进
-    ``prompt_sections`` 的构建清单，真实请求被抓取时也能按分段标注。
+        system#1 角色、人设、规则、能力、资料用法、安全   ← 只随配置/人设变
+        system#2 长期资料（称呼、关系、记忆、群里的关系与近况）← 记忆整理后才变
+        历史（锚定窗口，起点很多轮不动）                      ← 只在末尾追加
+        本条消息
+        system#3 本轮资料（时间、签到、待办、附件、刚做完的事）+ 本轮发言方式 ← 每轮都变
+
+    ``context`` 是 ``PrivateContext``（按键分成长期/本轮两层）；传 JSON 字符串时整段当长期资料
+    （兼容旧调用）。``round_note`` 是汇报轮/协调轮的说明（分段 id, 文字），放进 system#3。
+    ``spans_out`` 写入每个分段的位置（WebUI 高亮）；``meta_out`` 写入分层指纹与历史窗口，
+    用来诊断缓存为什么没命中。
     """
+
+    from .private_cache import layer_digest
 
     core = ContentBuilder()
     core.add("private.role", apply_section("private.role", PRIVATE_ROLE))
@@ -197,42 +226,195 @@ def build_messages(
             apply_section("private.delegation", "\n" + PRIVATE_DELEGATION),
         )
         core.add("private.team", apply_section("private.team", "\n" + PRIVATE_TEAM))
-        if just_finished:
-            core.add(
-                "private.just_finished",
-                apply_section("private.just_finished", "\n" + PRIVATE_JUST_FINISHED),
-            )
+    core.add(
+        "private.context_guide",
+        apply_section("private.context_guide", "\n" + PRIVATE_CONTEXT_GUIDE),
+    )
+    core.add("private.rhythm", apply_section("private.rhythm", "\n" + rhythm_style(persona)))
     core.add("private.safety", apply_section("private.safety", "\n" + PRIVATE_SAFETY))
     core_text, core_spans = _stripped(core)
+
+    if isinstance(context, str):
+        stable_json, volatile_json = context, ""
+    else:
+        stable_json, volatile_json = context.render_stable(), context.render_volatile()
     profile = ContentBuilder()
-    profile.add(
-        "private.context_header",
-        apply_section("private.context_header", PRIVATE_CONTEXT_HEADER),
-    )
-    profile.add("private.context", apply_section("private.context", context_json))
-    if request.time_note:
+    if stable_json:
         profile.add(
+            "private.context_header",
+            apply_section("private.context_header", PRIVATE_CONTEXT_HEADER),
+        )
+        profile.add("private.context", apply_section("private.context", stable_json))
+    profile_text, profile_spans = _stripped(profile)
+
+    turn = ContentBuilder()
+    if volatile_json:
+        turn.add(
+            "private.turn_header",
+            apply_section("private.turn_header", PRIVATE_TURN_HEADER),
+        )
+        turn.add("private.turn_context", apply_section("private.turn_context", volatile_json))
+    if request.time_note:
+        turn.add(
             "private.time_note",
             apply_section("private.time_note", "\n" + request.time_note),
         )
+    if tasks and just_finished:
+        turn.add(
+            "private.just_finished",
+            apply_section("private.just_finished", "\n" + PRIVATE_JUST_FINISHED),
+        )
+    if round_note:
+        section_id, note = round_note
+        turn.add(section_id, apply_section(section_id, "\n" + note))
     if turn_style:
-        profile.add(
+        turn.add(
             "private.turn_style", apply_section("private.turn_style", "\n" + turn_style)
         )
-    profile_text, profile_spans = _stripped(profile)
+    turn_text, turn_spans = _stripped(turn)
+
+    window = _history_window(_anchor_user(request) if anchor else None, request.history)
+    history = list(window.messages)
+    if not history or history[-1].get("role") != "user":
+        history.append({"role": "user", "content": request.user_input})
+
     messages: list[dict[str, Any]] = []
     spans: list[dict[str, Any]] = []
     for text, parts in ((core_text, core_spans), (profile_text, profile_spans)):
         if text:
             spans.extend(span.as_dict(len(messages)) for span in parts)
             messages.append({"role": "system", "content": text})
-    messages.extend(_trim_history(request.history))
-    if not messages or messages[-1].get("role") != "user":
-        messages.append({"role": "user", "content": request.user_input})
+    messages.extend(history)
+    if turn_text:
+        spans.extend(span.as_dict(len(messages)) for span in turn_spans)
+        messages.append({"role": "system", "content": turn_text})
     remember_manifest(messages, spans)
     if spans_out is not None:
         spans_out.extend(spans)
+    if meta_out is not None:
+        meta_out.update(
+            {
+                "layers": {
+                    "system": layer_digest(core_text),
+                    "profile": layer_digest(profile_text),
+                    "history": layer_digest(history[0]) if history else "",
+                },
+                "history": {
+                    "kept": len(history),
+                    "dropped": window.dropped,
+                    "chars": window.chars,
+                    "moved": window.moved,
+                    "reason": window.reason,
+                },
+                "chars": {
+                    "system": len(core_text),
+                    "profile": len(profile_text),
+                    "turn": len(turn_text),
+                },
+            }
+        )
     return messages
+
+
+def _stable_tools() -> bool:
+    return bool(getattr(private_agent_config, "private_agent_stable_tools", True))
+
+
+def _round_tools(
+    tools: list[dict[str, Any]],
+    *,
+    final: bool = False,
+    allowed: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """这一轮的 tools/tool_choice。
+
+    开着 ``PRIVATE_AGENT_STABLE_TOOLS`` 时工具表永远是同一份（它是请求前缀的一部分，换了
+    整段缓存失效）：最后一轮用 ``tool_choice="none"`` 不许再调；只放行部分工具的轮
+    （汇报/协调）靠执行时拦截。关着时退回旧做法：最后一轮不带工具、只放行的轮只带那几个。
+    """
+
+    if _stable_tools():
+        if final:
+            return {"tools": tools, "tool_choice": "none"}
+        return {"tools": tools}
+    if final:
+        return {"tools": []}
+    if allowed is not None:
+        return {
+            "tools": [
+                tool
+                for tool in tools
+                if str((tool.get("function") or {}).get("name")) in allowed
+            ]
+        }
+    return {"tools": tools}
+
+
+def _trace_prompt(
+    user_id: int, pipeline: str, meta: dict[str, Any], tools: list[dict[str, Any]]
+) -> str | None:
+    """记下分层指纹，和上一轮比出第一处变化的层；写进 Trace。返回变化的层名。"""
+
+    from .private_cache import layer_digest, note_prefix
+
+    layers = dict(meta.get("layers") or {})
+    layers["tools"] = layer_digest(tools)
+    diff = note_prefix(user_id, pipeline, layers)
+    try:
+        from .execution_trace import trace_event
+
+        trace_event(
+            "prompt",
+            "私聊提示词分层",
+            status="success",
+            output={
+                "pipeline": pipeline,
+                "tool_count": len(tools),
+                "history": meta.get("history"),
+                "chars": meta.get("chars"),
+                "prefix_changed": diff.get("changed"),
+                "stable_layers": diff.get("stable_layers"),
+                "first": diff.get("first"),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        dbg_exc("私聊提示词分层记录失败(忽略)")
+    history = meta.get("history") or {}
+    dbg(
+        f"私聊用户 {user_id} {pipeline} 提示词: 历史 {history.get('kept')} 条"
+        f"（{history.get('reason')}），前缀变化层={diff.get('changed') or '无'}"
+    )
+    return diff.get("changed")
+
+
+def _record_usage(
+    pipeline: str, result: Any, user_id: int, round_index: int, changed: str | None
+) -> None:
+    from .private_cache import record_usage
+
+    try:
+        entry = record_usage(
+            pipeline,
+            result,
+            user_id=user_id,
+            round_index=round_index,
+            changed=changed if round_index == 0 else None,
+        )
+    except Exception:  # noqa: BLE001
+        dbg_exc("私聊缓存统计失败(忽略)")
+        return
+    if entry.get("hit_rate") is not None:
+        dbg(
+            f"私聊用户 {user_id} {pipeline} 第 {round_index + 1} 次请求: 缓存命中 "
+            f"{entry.get('cached')}/{entry.get('cached', 0) + entry.get('miss', 0)} tokens"
+        )
+
+
+def _anchor_user(request: PrivateTurnRequest) -> int | None:
+    try:
+        return int(request.user_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def _stripped(builder: ContentBuilder) -> tuple[str, list[Span]]:
@@ -271,6 +453,49 @@ def verify_claims(text: str, succeeded: set[str]) -> str:
     if check.changed:
         dbg(f"私聊回复去掉了没有依据的完成声明: {check.families}")
     return check.text
+
+
+def _normalized_reply(text: str) -> str:
+    import re
+
+    plain = re.sub(r"【[^】]{1,12}】", "", str(text or ""))
+    plain = plain.replace(SPLIT_MARK, "")
+    return re.sub(r"[\s，。！？!?,.~\uff5e…]+", "", plain)
+
+
+def repeats_last_reply(text: str, history: list[dict[str, str]]) -> bool:
+    """这条回复是不是和他看到的上一条回复几乎一样（复读）。只比较足够长的回复。"""
+
+    from difflib import SequenceMatcher
+
+    current = _normalized_reply(text)
+    if len(current) < REPEAT_MIN_CHARS:
+        return False
+    previous = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(history)
+            if item.get("role") == "assistant"
+        ),
+        "",
+    )
+    before = _normalized_reply(previous)
+    if len(before) < REPEAT_MIN_CHARS:
+        return False
+    return SequenceMatcher(None, current, before).ratio() >= REPEAT_SIMILARITY
+
+
+def _tool_content(payload: dict[str, Any]) -> str:
+    """工具结果转 JSON；太长时截掉尾部并标明，模型知道结果不完整。"""
+
+    content = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(content) <= TOOL_RESULT_CHAR_LIMIT:
+        return content
+    omitted = len(content) - TOOL_RESULT_CHAR_LIMIT
+    return (
+        content[:TOOL_RESULT_CHAR_LIMIT]
+        + f"…（结果太长，后面 {omitted} 字省略；需要细节就缩小范围再查，或放到后台做）"
+    )
 
 
 def _assistant_with_calls(message: Any) -> dict[str, Any]:
@@ -329,7 +554,7 @@ async def _run_tools(
             {
                 "role": "tool",
                 "tool_call_id": call["id"],
-                "content": json.dumps(payload, ensure_ascii=False, default=str),
+                "content": _tool_content(payload),
             }
         )
     if ctx.mutated:
@@ -342,6 +567,21 @@ async def _run_tools(
 FILES_HINT = PRIVATE_FILES_HINT
 
 
+def rhythm_style(persona: dict[str, Any] | None = None) -> str:
+    """节奏标签用法（按他人设的表现力/详略）。只随人设变，所以放在开头那层（前缀缓存）。"""
+
+    from types import SimpleNamespace
+
+    from .persona import persona_style_levels
+    from .speech_rhythm import rhythm_instruction
+
+    levels = persona_style_levels(persona)
+    style = SimpleNamespace(expressiveness=levels.get("expressiveness", 1)) if levels else None
+    # 详略档位最低（只说一句）的人设：按“短回应”给节奏说明。
+    act = "acknowledge" if levels.get("verbosity", 1) <= 0 else "continue"
+    return rhythm_instruction(scene="private", act=act, complexity="normal", style=style)
+
+
 def turn_style(
     user_id: int,
     now: datetime,
@@ -349,22 +589,17 @@ def turn_style(
     emoji_pref: str | None = None,
     files: bool = False,
     persona: dict[str, Any] | None = None,
+    include_rhythm: bool = False,
 ) -> str:
-    """本轮的发言方式：节奏标签用法（按他人设的表现力/详略）+ 表情包菜单 + 附件提示。"""
+    """本轮的发言方式：表情包菜单（额度、冷却每轮都可能变）+ 附件提示。
 
-    from types import SimpleNamespace
+    节奏说明默认不在这里：它只随人设变，由 ``build_messages`` 放进开头那层
+    （``private.rhythm``）；``include_rhythm=True`` 时仍拼在最前（兼容旧调用）。
+    """
 
-    from .persona import persona_style_levels
     from .private_delivery import private_sticker_instruction
-    from .speech_rhythm import rhythm_instruction
 
-    levels = persona_style_levels(persona)
-    style = SimpleNamespace(expressiveness=levels.get("expressiveness", 1)) if levels else None
-    # 详略档位最低（只说一句）的人设：本轮按“短回应”给节奏说明。
-    act = "acknowledge" if levels.get("verbosity", 1) <= 0 else "continue"
-    parts = [
-        rhythm_instruction(scene="private", act=act, complexity="normal", style=style)
-    ]
+    parts = [rhythm_style(persona)] if include_rhythm else []
     if files:
         parts.append(apply_section("private.files_hint", PRIVATE_FILES_HINT))
     try:
@@ -542,9 +777,10 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             ]
     emoji_pref = (private_store.load(user_id).get("prefs") or {}).get("emoji")
     persona = resolve_private_persona(user_id)
+    meta: dict[str, Any] = {}
     messages = build_messages(
         persona,
-        context.render(),
+        context,
         request,
         computer=computer,
         tasks=tasks,
@@ -557,6 +793,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         ),
         allow_silence=silence_ok,
         just_finished=bool(just_finished),
+        meta_out=meta,
     )
     if resumed:
         resumed_note = apply_section("private.resumed_note", PRIVATE_RESUMED_NOTE)
@@ -570,6 +807,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     private_vision.attach_to_messages(messages, vision)
     is_superuser = _is_superuser(user_id)
     tools = tool_schemas(is_superuser=is_superuser, computer=computer, tasks=tasks)
+    changed = _trace_prompt(user_id, "turn", meta, tools)
     ctx = PrivateToolContext(
         session=session,
         user_id=user_id,
@@ -589,6 +827,8 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     max_rounds = int(private_agent_config.private_agent_max_tool_rounds)
     handoff_after = int(private_agent_config.private_agent_handoff_after)
     nudged = False
+    retried = False
+    repeat_checked = False
     text = ""
     for round_index in range(max_rounds + 1):
         final = round_index == max_rounds
@@ -622,7 +862,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         try:
             result = await llm.complete_with_tools_result(
                 messages,  # pyright: ignore[reportArgumentType]
-                [] if final else tools,  # pyright: ignore[reportArgumentType]
+                **_round_tools(tools, final=final),
                 task="agent_dialogue",
                 max_tokens=llm.NO_OUTPUT_LIMIT,
                 timeout=COMPLETION_TIMEOUT,
@@ -639,11 +879,27 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             private_vision.attach_to_messages(messages, vision)
             result = await llm.complete_with_tools_result(
                 messages,  # pyright: ignore[reportArgumentType]
-                [] if final else tools,  # pyright: ignore[reportArgumentType]
+                **_round_tools(tools, final=final),
                 task="agent_dialogue",
                 max_tokens=llm.NO_OUTPUT_LIMIT,
                 timeout=COMPLETION_TIMEOUT,
             )
+        _record_usage("turn", result, user_id, round_index, changed)
+        if result.message is None and not retried and result.outcome in _RETRY_OUTCOMES:
+            # 上游抖了一下（超时/空回复）：同样的请求再试一次（前缀相同，基本全命中缓存），
+            # 而不是直接退回没有人设的纯对话。
+            retried = True
+            dbg(f"私聊用户 {user_id} 模型无回复（{result.outcome}），重试一次")
+            await asyncio.sleep(RETRY_PAUSE_SECONDS)
+            result = await llm.complete_with_tools_result(
+                messages,  # pyright: ignore[reportArgumentType]
+                **_round_tools(tools, final=final),
+                task="agent_dialogue",
+                max_tokens=llm.NO_OUTPUT_LIMIT,
+                timeout=COMPLETION_TIMEOUT,
+                multimodal=bool(vision.blocks),
+            )
+            _record_usage("turn", result, user_id, round_index, None)
         message = result.message
         if message is None:
             dbg(f"私聊用户 {user_id} 模型无回复（{result.outcome}）")
@@ -652,6 +908,19 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             await _run_tools(message, messages, ctx)
             continue
         text = str(getattr(message, "content", "") or "")
+        if (
+            not final
+            and not repeat_checked
+            and repeats_last_reply(text, request.history)
+        ):
+            # 和上一条几乎一字不差：提醒一次换个说法（常见于模型卡在同一句客套话上）。
+            repeat_checked = True
+            dbg(f"私聊用户 {user_id} 回复和上一条几乎一样，要求换个说法")
+            note = apply_section("private.repeat_guard", PRIVATE_REPEAT_GUARD)
+            if note:
+                messages.append({"role": "system", "content": note})
+                text = ""
+                continue
         break
 
     if not resumed:
@@ -968,7 +1237,15 @@ async def _recent_history(session: Any, user_id: int) -> list[dict[str, str]]:
             select(ChatMessage.role, ChatMessage.content)
             .where(ChatMessage.session_id == session_id)
             .order_by(ChatMessage.id.desc())
-            .limit(REPORT_HISTORY_MESSAGES)
+            .limit(
+                int(
+                    getattr(
+                        private_agent_config,
+                        "private_agent_history_messages",
+                        REPORT_HISTORY_MESSAGES,
+                    )
+                )
+            )
         )
     ).all()
     return [
@@ -1047,6 +1324,23 @@ def fallback_report(task: dict[str, Any]) -> str:
 REPORT_MAX_ROUNDS = 2
 
 
+def _report_tools(user_id: int, computer: bool) -> list[dict[str, Any]]:  # noqa: FBT001
+    """汇报/协调轮的工具表：和主回合同一份（只放行 tasks，执行时拦截），保住前缀缓存。
+
+    关着 ``PRIVATE_AGENT_STABLE_TOOLS`` 时只给 tasks 一个（旧做法）。
+    """
+
+    from .private_tools import TOOLS_BY_NAME
+
+    if not _stable_tools():
+        return [TOOLS_BY_NAME["tasks"].schema()]
+    from .private_tasks import tasks_enabled
+
+    return tool_schemas(
+        is_superuser=_is_superuser(user_id), computer=computer, tasks=tasks_enabled()
+    )
+
+
 def _already_told(user_id: int, task: dict[str, Any]) -> dict[str, Any] | None:
     """拿到回合锁后再看一眼：已经顺着聊天告诉他的就不重复汇报；返回还要汇报的部分。"""
 
@@ -1092,7 +1386,6 @@ async def _report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
     from ..private_chat_bridge import user_turn_lock
     from .private_computer import computer_ready
     from .private_scheduler import record_outgoing
-    from .private_tools import TOOLS_BY_NAME
 
     bot = bot or _any_bot()
     if bot is None:
@@ -1128,20 +1421,20 @@ async def _report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
                     session=None,
                 )
                 persona = resolve_private_persona(user_id)
+                computer = computer_ready()
+                meta: dict[str, Any] = {}
+                # 和主回合同一份开头（发言判断、电脑说明都一样）、同一份工具表：
+                # 汇报轮能直接命中主回合留下的前缀缓存。
                 messages = build_messages(
                     persona,
-                    context.render(),
+                    context,
                     request,
-                    computer=computer_ready(),
+                    computer=computer,
                     tasks=True,
                     turn_style=turn_style(user_id, now, persona=persona),
-                )
-                messages.insert(
-                    -1,
-                    {
-                        "role": "system",
-                        "content": apply_section("private.report_turn", PRIVATE_REPORT_TURN),
-                    },
+                    allow_silence=turn_taking.enabled(),
+                    round_note=("private.report_turn", PRIVATE_REPORT_TURN),
+                    meta_out=meta,
                 )
                 ctx = PrivateToolContext(
                     session=session,
@@ -1150,17 +1443,20 @@ async def _report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
                     groups=context.groups,
                     now=now,
                     bot=bot,
+                    allowed_tools=frozenset({"tasks"}) if blocked else frozenset(),
                 )
-                tools = [TOOLS_BY_NAME["tasks"].schema()] if blocked else []
+                tools = _report_tools(user_id, computer)
+                changed = _trace_prompt(user_id, "report", meta, tools)
                 for round_index in range(REPORT_MAX_ROUNDS + 1):
-                    final = round_index == REPORT_MAX_ROUNDS or not tools
+                    final = round_index == REPORT_MAX_ROUNDS or not blocked
                     result = await llm.complete_with_tools_result(
                         messages,  # pyright: ignore[reportArgumentType]
-                        [] if final else tools,  # pyright: ignore[reportArgumentType]
+                        **_round_tools(tools, final=final, allowed=ctx.allowed_tools),
                         task="agent_dialogue",
                         max_tokens=llm.NO_OUTPUT_LIMIT,
                         timeout=COMPLETION_TIMEOUT,
                     )
+                    _record_usage("report", result, user_id, round_index, changed)
                     message = result.message
                     if message is None:
                         break
@@ -1219,8 +1515,8 @@ async def _coordinate(bot: Any, user_id: int) -> None:
 
     from ..private_chat_bridge import user_turn_lock
     from . import private_team
+    from .private_computer import computer_ready
     from .private_scheduler import record_outgoing
-    from .private_tools import TOOLS_BY_NAME
 
     bot = bot or _any_bot()
     if bot is None:
@@ -1248,29 +1544,41 @@ async def _coordinate(bot: Any, user_id: int) -> None:
                 session=session,
             )
             persona = resolve_private_persona(user_id)
+            computer = computer_ready()
+            meta: dict[str, Any] = {}
             messages = build_messages(
                 persona,
-                context.render(),
+                context,
                 request,
+                computer=computer,
                 tasks=True,
                 turn_style=turn_style(user_id, now, persona=persona),
+                allow_silence=turn_taking.enabled(),
+                round_note=("private.coordinate_turn", PRIVATE_COORDINATE_TURN),
+                meta_out=meta,
             )
-            messages.insert(
-                -1,
-                {"role": "system", "content": apply_section("private.coordinate_turn", PRIVATE_COORDINATE_TURN)},
+            ctx = PrivateToolContext(
+                session=session,
+                user_id=user_id,
+                bot_id=None,
+                groups=context.groups,
+                now=now,
+                bot=bot,
+                allowed_tools=frozenset({"tasks"}),
             )
-            ctx = PrivateToolContext(session=session, user_id=user_id, bot_id=None, groups=context.groups, now=now, bot=bot)
-            tools = [TOOLS_BY_NAME["tasks"].schema()]
+            tools = _report_tools(user_id, computer)
+            changed = _trace_prompt(user_id, "coordinate", meta, tools)
             text = ""
             for round_index in range(COORDINATE_MAX_ROUNDS + 1):
                 final = round_index == COORDINATE_MAX_ROUNDS
                 result = await llm.complete_with_tools_result(
                     messages,  # pyright: ignore[reportArgumentType]
-                    [] if final else tools,  # pyright: ignore[reportArgumentType]
+                    **_round_tools(tools, final=final, allowed=ctx.allowed_tools),
                     task="agent_dialogue",
                     max_tokens=llm.NO_OUTPUT_LIMIT,
                     timeout=COMPLETION_TIMEOUT,
                 )
+                _record_usage("coordinate", result, user_id, round_index, changed)
                 message = result.message
                 if message is None:
                     break

@@ -288,8 +288,13 @@ def test_default_persona_prompt_has_no_scope_section():
 
 def test_turn_style_follows_persona_verbosity():
     quiet = pp.resolve_private_persona(USER, draft=_card(verbosity=0))
-    style = pagent.turn_style(USER, datetime(2026, 11, 1, 12), persona=quiet)
-    assert style
+    style = pagent.rhythm_style(quiet)
+    assert style and style != pagent.rhythm_style(pp.resolve_private_persona(USER))
+    # 节奏说明只随人设变：放在开头那层，不再每轮拼进本轮资料。
+    assert style not in pagent.turn_style(USER, datetime(2026, 11, 1, 12), persona=quiet)
+    assert style in pagent.turn_style(
+        USER, datetime(2026, 11, 1, 12), persona=quiet, include_rhythm=True
+    )
 
 
 # ── E1/E2 ─────────────────────────────────────────────────────────────

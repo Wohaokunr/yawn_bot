@@ -664,6 +664,33 @@ async def complete(  # noqa: PLR0911, PLR0915
     return result
 
 
+# 拒收过 tool_choice 的模型（进程内记住，避免每轮都先失败一次）。
+_TOOL_CHOICE_UNSUPPORTED: set[str] = set()
+
+
+def _without_tool_choice(
+    tools: list[ChatCompletionToolParam], tool_choice: object
+) -> list[ChatCompletionToolParam]:
+    """不能用 tool_choice 时的等价工具表：none → 不带工具；指定函数 → 只带它。"""
+
+    if isinstance(tool_choice, dict):
+        name = str((tool_choice.get("function") or {}).get("name") or "")
+        return [
+            tool
+            for tool in tools
+            if str((tool.get("function") or {}).get("name") or "") == name  # pyright: ignore[reportAttributeAccessIssue]
+        ]
+    if tool_choice == "none":
+        return []
+    return tools
+
+
+def _looks_like_tool_choice_unsupported(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    return (status in {400, 422} or status is None) and "tool_choice" in text
+
+
 @dataclass(frozen=True, slots=True)
 class LLMToolCompletionResult:
     """工具补全的消息与只读诊断元数据。"""
@@ -704,7 +731,7 @@ def _tool_completion_result(
     )
 
 
-async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0915
+async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
     messages: list[ChatCompletionMessageParam],
     tools: list[ChatCompletionToolParam],
     *,
@@ -715,12 +742,18 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0915
     response_format: dict[str, Any] | None = None,
     multimodal: bool = False,
     raise_on_unsupported: bool = False,
+    tool_choice: str | dict[str, Any] | None = None,
 ) -> LLMToolCompletionResult:
     """带工具调用的非流式补全，并返回 WebUI 可展示的诊断元数据。
 
     面向 agentic 场景（如跑团 KP 通过 tool_call 驱动系统判定）。失败、
     超时或空回复通过 outcome 和空 message 表达；成功时保留原始 message，
     供调用方读取 content/tool_calls，并额外返回结束原因、Token 与耗时。
+
+    ``tool_choice`` 用来在**不换工具表**的前提下限制这一轮（``"none"`` 不许调工具、
+    指定函数则必须调它）：工具表是请求前缀的一部分，换掉它会让服务商的前缀缓存整段
+    失效。端点拒收 ``tool_choice`` 时记住这个模型，本次和以后都退回旧做法
+    （``"none"`` → 不带工具；指定函数 → 只带那一个工具）。
     """
     started = time.perf_counter()
     outcome = "error"
@@ -741,12 +774,16 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0915
             return _tool_completion_result(
                 message=None, outcome=outcome, started=started
             )
+        if tool_choice is not None and tools and request.model in _TOOL_CHOICE_UNSUPPORTED:
+            tools = _without_tool_choice(tools, tool_choice)
+            tool_choice = None
         create_kwargs = {
             "model": request.model,
             "messages": messages,
             # OpenAI 官方及多数兼容端点对空 tools 数组直接 400；
             # 无工具场景（如主动发言）不传该参数。
             **({"tools": tools} if tools else {}),
+            **({"tool_choice": tool_choice} if tool_choice is not None and tools else {}),
             "stream": False,
             **_max_tokens_kwargs(max_tokens),
             **request.reasoning_kwargs,
@@ -780,6 +817,23 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0915
                 outcome = "unsupported_multimodal"
                 if raise_on_unsupported:
                     raise LLMMultimodalUnsupportedError(str(exc)) from exc
+            elif "tool_choice" in create_kwargs and _looks_like_tool_choice_unsupported(exc):
+                # 端点不认 tool_choice：记住，换回旧做法再请求一次。
+                _TOOL_CHOICE_UNSUPPORTED.add(request.model)
+                logger.warning(
+                    f"模型 {request.model} 不支持 tool_choice，改为换工具表的旧做法"
+                )
+                return await complete_with_tools_result(
+                    messages,
+                    _without_tool_choice(tools, create_kwargs["tool_choice"]),
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                    task=task,
+                    response_format=response_format,
+                    multimodal=multimodal,
+                    raise_on_unsupported=raise_on_unsupported,
+                )
             logger.warning(
                 f"LLM 工具补全失败（task={task}, model={request.model}, "
                 f"timeout={timeout}s）",

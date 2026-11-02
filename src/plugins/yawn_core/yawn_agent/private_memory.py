@@ -40,7 +40,7 @@ from .memory_hygiene import (
     sanitize_fact,
 )
 from .memory_self import SELF_FACT_KEYS
-from .private_prompt import PRIVATE_MEMORY_SYSTEM
+from .private_prompt import PRIVATE_MEMORY_RECAP, PRIVATE_MEMORY_SYSTEM
 from .prompt_sections import system_messages
 
 PRIVATE_SCOPE = PRIVATE_MEMORY_SCOPE
@@ -309,9 +309,15 @@ async def consolidate(session: Any, user_id: int, *, now: datetime) -> int:
         return 0
     from .prompt_sections import use_private_user
 
+    recap_on = _recap_enabled()
     with use_private_user(user_id, pipeline="memory"):
         messages = [
             *system_messages("private.memory_system", PRIVATE_MEMORY_SYSTEM),
+            *(
+                system_messages("private.memory_recap", PRIVATE_MEMORY_RECAP)
+                if recap_on
+                else []
+            ),
             {"role": "user", "content": "\n".join(lines)},
         ]
     raw = await llm.complete(
@@ -332,8 +338,81 @@ async def consolidate(session: Any, user_id: int, *, now: datetime) -> int:
         if result.get("created") or result.get("changed"):
             written += 1
     await session.commit()
+    if recap_on:
+        recap = parse_recap(raw)
+        if recap is not None:
+            save_recap(user_id, recap, now=now)
     dbg(f"私聊记忆整理: 用户 {user_id} 写入 {written} 条")
     return written
+
+
+RECAP_SUMMARY_CHARS = 120
+RECAP_THREAD_CHARS = 40
+RECAP_MAX_THREADS = 3
+
+
+def _recap_enabled() -> bool:
+    try:
+        from ..private_chat_bridge import private_agent_config
+
+        return bool(private_agent_config.private_agent_recap)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def parse_recap(raw: str | None) -> dict[str, Any] | None:  # noqa: C901
+    """解析整理结果里的 recap；每句都过记忆卫生（像指令、敏感、纯联系方式的丢掉）。"""
+
+    if not raw:
+        return None
+    text = raw.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    recap = payload.get("recap") if isinstance(payload, dict) else None
+    if not isinstance(recap, dict):
+        return None
+
+    def clean(value: object, limit: int) -> str:
+        value = str(value or "").strip()
+        if not value or reject_reason(value) is not None:
+            return ""
+        return sanitize_fact(value, max_chars=limit) or ""
+
+    summary = clean(recap.get("summary"), RECAP_SUMMARY_CHARS)
+    threads_raw = recap.get("open_threads")
+    threads: list[str] = []
+    for item in threads_raw if isinstance(threads_raw, list) else []:
+        cleaned = clean(item, RECAP_THREAD_CHARS)
+        if cleaned and cleaned not in threads:
+            threads.append(cleaned)
+        if len(threads) >= RECAP_MAX_THREADS:
+            break
+    if not summary and not threads:
+        return None
+    return {"summary": summary, "open_threads": threads}
+
+
+def save_recap(user_id: int, recap: dict[str, Any], *, now: datetime) -> None:
+    """写进个人数据的 ``recap`` 键（整体替换，只留最新一份）。"""
+
+    from . import private_store
+
+    def apply(record: dict[str, Any]) -> None:
+        record["recap"] = {
+            "summary": recap.get("summary") or "",
+            "open_threads": list(recap.get("open_threads") or []),
+            "updated_at": f"{now:%Y-%m-%d %H:%M}",
+        }
+
+    try:
+        private_store.update(user_id, apply)
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"私聊对话回顾保存失败: 用户 {user_id}")
 
 
 async def consolidate_in_background(user_id: int, now: datetime) -> None:
@@ -359,8 +438,10 @@ __all__ = [
     "forget",
     "list_facts",
     "parse_facts",
+    "parse_recap",
     "purge_user",
     "remember",
+    "save_recap",
     "should_consolidate",
     "user_message_count",
 ]

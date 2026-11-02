@@ -104,6 +104,34 @@ export interface PrivateSnapshot extends PromptSnapshot {
   flags?: { computer: boolean; tasks: boolean; allowSilence: boolean; history: number };
 }
 
+export interface CacheCall {
+  at: number;
+  round: number;
+  user_id?: number;
+  changed?: string;
+  cached?: number;
+  miss?: number;
+  hit_rate?: number | null;
+}
+
+export interface CachePipelineStats {
+  calls: number;
+  reported: number;
+  promptTokens: number;
+  cachedTokens: number;
+  missTokens: number;
+  hitRate: number | null;
+  recent: CacheCall[];
+}
+
+export interface CacheStats {
+  pipelines: Record<string, CachePipelineStats>;
+  cachedTokens: number;
+  missTokens: number;
+  hitRate: number | null;
+  anchoredUsers: number;
+}
+
 export interface CaptureStatus {
   captureEnabled: boolean;
   paused: boolean;
@@ -262,6 +290,7 @@ export const privateApi = {
   resetUser: (userId: string, expectedRevision: number) =>
     data<{ revision: number; changed: number }>(`${BASE}/prompts/users/${encodeURIComponent(userId)}?expectedRevision=${expectedRevision}`, json("DELETE")),
 
+  cacheStats: (signal?: AbortSignal) => data<CacheStats>(`${BASE}/cache`, { signal }),
   captures: (signal?: AbortSignal) => data<CaptureStatus & { users: CaptureUser[] }>(`${BASE}/captures`, { signal }),
   userCaptures: (userId: string, signal?: AbortSignal) =>
     data<CaptureStatus & { userId: string; prompts: PrivateSnapshot[] }>(`${BASE}/captures/${encodeURIComponent(userId)}`, { signal }),

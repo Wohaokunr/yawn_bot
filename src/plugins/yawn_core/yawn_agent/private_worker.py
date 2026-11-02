@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from .. import llm
-from .log import dbg
+from .log import dbg, dbg_exc
 from .private_computer import (
     COMPUTER_TOOL_NAMES,
     COMPUTER_TOOL_SPECS,
@@ -579,7 +579,12 @@ async def _run_worker(
             note = _workbench_note(task)
             if note:
                 history.append({"role": "user", "content": note})
-        result = await _complete(history, finish_only if final else schemas)
+        if final and _stable_tools():
+            # 同一份工具表 + 强制 finish：换成只剩 finish 的工具表会让整段前缀缓存失效。
+            result = await _complete(history, schemas, tool_choice=_FINISH_CHOICE)
+        else:
+            result = await _complete(history, finish_only if final else schemas)
+        _record_worker_usage(user_id, result, round_index)
         outcome.rounds = round_index + 1
         message = result.message
         if message is None:
@@ -743,17 +748,45 @@ def _incoming(user_id: int, task: dict[str, Any]) -> str | None:
 _TRANSIENT_RETRY_SECONDS = 3.0
 
 
-async def _complete(history: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Any:
+_FINISH_CHOICE: dict[str, Any] = {"type": "function", "function": {"name": "finish"}}
+
+
+def _stable_tools() -> bool:
+    try:
+        from ..private_chat_bridge import private_agent_config
+
+        return bool(private_agent_config.private_agent_stable_tools)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _record_worker_usage(user_id: int, result: Any, round_index: int) -> None:
+    from .private_cache import record_usage
+
+    try:
+        record_usage("worker", result, user_id=user_id, round_index=round_index)
+    except Exception:  # noqa: BLE001
+        dbg_exc("后台任务缓存统计失败(忽略)")
+
+
+async def _complete(
+    history: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    *,
+    tool_choice: Any = None,
+) -> Any:
     """请求模型；没拿到回复（超时、上游抖动）时等一下重试一次，长任务不因一次抖动整个失败。"""
 
     import asyncio
 
+    extra: dict[str, Any] = {"tool_choice": tool_choice} if tool_choice is not None else {}
     result = await llm.complete_with_tools_result(
         history,  # pyright: ignore[reportArgumentType]
         tools,  # pyright: ignore[reportArgumentType]
         task="agent_dialogue",
         max_tokens=llm.NO_OUTPUT_LIMIT,
         timeout=COMPLETION_TIMEOUT,
+        **extra,
     )
     if result.message is not None:
         return result
@@ -764,6 +797,7 @@ async def _complete(history: list[dict[str, Any]], tools: list[dict[str, Any]]) 
         task="agent_dialogue",
         max_tokens=llm.NO_OUTPUT_LIMIT,
         timeout=COMPLETION_TIMEOUT,
+        **extra,
     )
 
 

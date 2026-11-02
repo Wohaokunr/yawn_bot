@@ -190,7 +190,7 @@ async def test_turn_reads_docx_when_computer_unavailable(maker, monkeypatch) -> 
         request.media = [{"type": "file", "name": "SOP.docx", "file_id": "f1"}]
         assert await pagent.handle_private_turn(request) == "看到了，是清洁 SOP"
         history = await pagent._recent_history(session, USER)
-    profile = seen[0]["messages"][1]["content"]
+    profile = seen[0]["messages"][-1]["content"]
     assert "第一步：断电挂牌" in profile and "in_computer" in profile
     assert "第一步：断电挂牌" in history[0]["content"]
 

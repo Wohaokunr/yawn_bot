@@ -68,10 +68,15 @@ _GROUP_OF: dict[str, str] = {
     "private.rules": "rules",
     "private.safety": "rules",
     "private.final_round": "rules",
+    "private.repeat_guard": "rules",
     "private.context_header": "context",
     "private.context": "context",
+    "private.context_guide": "context",
+    "private.turn_header": "context",
+    "private.turn_context": "context",
     "private.time_note": "context",
     "private.turn_style": "context",
+    "private.rhythm": "rules",
     "private.turn_taking": "context",
     "private.resumed_note": "context",
     "private.media": "files",
@@ -91,6 +96,7 @@ _GROUP_OF: dict[str, str] = {
     "private.coordinate_turn": "team",
     "private.coordinate_notice": "team",
     "private.memory_system": "memory",
+    "private.memory_recap": "memory",
 }
 
 
@@ -123,7 +129,8 @@ class Pipeline:
 
 
 _S = PipelineStep
-_CORE_STEPS = (
+# 排列顺序 = 真实请求里的顺序：越稳定越靠前（前缀缓存），每轮都变的放最后。
+_HEAD_STEPS = (
     _S("private.role", "system#1"),
     _S("private.persona", "system#1"),
     _S("private.persona_scope", "system#1", "这位用户有专属人设"),
@@ -133,19 +140,26 @@ _CORE_STEPS = (
     _S("private.toolkits", "system#1", "虚拟电脑可用"),
     _S("private.delegation", "system#1", "小助手任务开启"),
     _S("private.team", "system#1", "小助手任务开启"),
-    _S("private.just_finished", "system#1", "有刚做完、还没汇报的结果"),
+    _S("private.context_guide", "system#1"),
+    _S("private.rhythm", "system#1"),
     _S("private.safety", "system#1"),
     _S("private.context_header", "system#2"),
     _S("private.context", "system#2"),
-    _S("private.time_note", "system#2", "久别重聊"),
-    _S("private.turn_style", "system#2"),
 )
+_TAIL_STEPS = (
+    _S("private.turn_header", "system#3"),
+    _S("private.turn_context", "system#3"),
+    _S("private.time_note", "system#3", "久别重聊"),
+    _S("private.just_finished", "system#3", "有刚做完、还没汇报的结果"),
+    _S("private.turn_style", "system#3"),
+)
+_CORE_STEPS = (*_HEAD_STEPS, *_TAIL_STEPS)
 
 PIPELINES: tuple[Pipeline, ...] = (
     Pipeline(
         "turn",
         "主回合",
-        "用户发来消息时的一轮：两层 system + 近期历史 + 本条消息，然后进工具循环。",
+        "用户发来消息时的一轮：规则与长期资料两层 system + 锚定历史 + 本条消息 + 本轮资料 system，然后进工具循环（越稳定越靠前，前缀缓存命中更多）。",
         "用户私聊发消息",
         (
             *_CORE_STEPS,
@@ -161,6 +175,7 @@ PIPELINES: tuple[Pipeline, ...] = (
             _S("private.handoff_nudge", "round", "重活工具次数到阈值（每轮最多一次）"),
             _S("private.auto_handoff", "round", "工具轮次用完且自动转后台成功"),
             _S("private.final_round", "round", "工具轮次用完"),
+            _S("private.repeat_guard", "round", "回复和上一条几乎一样（每轮最多一次）"),
             _S("private.handoff_findings", "worker", "自动转后台时写进任务单"),
         ),
         tools="main",
@@ -172,7 +187,7 @@ PIPELINES: tuple[Pipeline, ...] = (
         "小助手任务结束",
         (
             *_CORE_STEPS,
-            _S("private.report_turn", "round", "插在最后一条之前"),
+            _S("private.report_turn", "system#3", "接在本轮资料后面"),
             _S("private.report_notice", "user"),
         ),
         tools="main",
@@ -183,12 +198,9 @@ PIPELINES: tuple[Pipeline, ...] = (
         "小助手在团队留言板上发来需要回复的消息时，主智能体回它的一轮（只给 tasks 工具）。",
         "小助手发来需要回复的消息",
         (
-            *(
-                step
-                for step in _CORE_STEPS
-                if step.section_id not in {"private.media", "private.toolkits"}
-            ),
-            _S("private.coordinate_turn", "round", "插在最后一条之前"),
+            # 和主回合同一份开头（含电脑说明），工具表也相同、只放行 tasks：共用前缀缓存。
+            *_CORE_STEPS,
+            _S("private.coordinate_turn", "system#3", "接在本轮资料后面"),
             _S("private.coordinate_notice", "user"),
         ),
         tools="tasks_only",
@@ -219,7 +231,10 @@ PIPELINES: tuple[Pipeline, ...] = (
         "记忆整理",
         "一段私聊结束后整理成私聊记忆（scope=private），只有一条 system。",
         "私聊回合结束后",
-        (_S("private.memory_system", "system#1"),),
+        (
+            _S("private.memory_system", "system#1"),
+            _S("private.memory_recap", "system#1", "开着对话回顾"),
+        ),
         tools="none",
     ),
 )
@@ -691,12 +706,14 @@ async def preview(
         emoji_pref = (load_record(user_id).get("prefs") or {}).get("emoji")
         messages = build_messages(
             persona,
-            context.render(),
+            context,
             request,
             computer=computer,
             tasks=use_tasks,
             turn_style=turn_style(user_id, now, emoji_pref=emoji_pref, persona=persona),
             allow_silence=silence,
+            # 预览不动真实回合的历史锚点（否则预览一次就可能让下一轮缓存不命中）。
+            anchor=False,
         )
         tools = tool_schemas(
             is_superuser=_is_superuser(user_id), computer=computer, tasks=use_tasks
