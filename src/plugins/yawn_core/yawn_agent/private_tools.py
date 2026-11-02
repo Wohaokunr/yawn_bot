@@ -146,6 +146,25 @@ PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
         ("group",),
     ),
     PrivateTool(
+        "recall",
+        "按关键词回想：他在群里的事（你整理的群聊摘要、群里记下的他的画像）、你们以前的私聊（聊天记录窗口之外的旧消息）、"
+        "你在私聊里记住的他的事。他问“你还记得…吗”“群里那天聊的…”“我上次跟你说的…”时先用它查；查不到就直说不记得",
+        {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40,
+                "description": "要回想的关键词，比如“考研”“上周的聚餐”",
+            },
+            "where": {
+                "type": "string",
+                "enum": ["all", "groups", "private_chat"],
+                "description": "all 都查（默认）；groups 只查群里的；private_chat 只查你们的私聊",
+            },
+        },
+        ("query",),
+    ),
+    PrivateTool(
         "list_commands",
         "查现在私聊/群里有哪些命令可用、各自做什么；query 可按关键词筛选",
         {
@@ -575,6 +594,8 @@ class PrivateToolContext:
     heavy_calls: int = 0
     # 本轮用 my_persona 改了私聊人设：发送前清词要用新的人设名
     persona_changed: bool = False
+    # 只放行这些工具（汇报/协调轮发同一份工具表保前缀缓存，越界的调用在这里拦下）；None 不限
+    allowed_tools: frozenset[str] | None = None
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -826,6 +847,159 @@ async def _group_recent(ctx: PrivateToolContext, raw: str) -> dict[str, Any]:
     return {"group": group.name, "summaries": summaries, "empty": not summaries}
 
 
+_RECALL_PER_GROUP = 4
+_RECALL_GROUP_TOTAL = 8
+_RECALL_CHAT = 6
+_RECALL_CHAT_CHARS = 120
+_RECALL_SKIP_RECENT = 12
+
+
+async def _recall(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """按关键词回想群里的事、旧私聊和私聊记忆；全部只读、只看本人能看的部分。"""
+
+    query = str(args.get("query") or "").strip()
+    where = str(args.get("where") or "all")
+    result: dict[str, Any] = {"query": query}
+    if where in {"all", "groups"}:
+        result["in_groups"] = await _recall_groups(ctx, query)
+    if where in {"all", "private_chat"}:
+        result["in_private_chat"] = await _recall_chat(ctx, query)
+        result["remembered"] = await _recall_facts(ctx, query)
+    result["found"] = any(
+        result.get(key) for key in ("in_groups", "in_private_chat", "remembered")
+    )
+    if not result["found"]:
+        result["hint"] = "没找到相关的，直接告诉他不记得了，别编"
+    return result
+
+
+async def _recall_groups(ctx: PrivateToolContext, query: str) -> list[dict[str, Any]]:
+    """可读群里与关键词相关的群摘要、以及关于他本人的画像（不返回别的成员的画像）。"""
+
+    from .memory_retrieval import search_group_memories
+
+    found: list[dict[str, Any]] = []
+    for group in [item for item in ctx.groups if item.agent_readable]:
+        try:
+            rows = await search_group_memories(
+                ctx.session, group.group_id, query, limit=_RECALL_PER_GROUP * 3, now=ctx.now
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        picked = 0
+        for row in rows:
+            subject = int(row.subject_user_id or 0)
+            related = {int(uid) for uid in row.related_user_ids or []}
+            about_him = subject == ctx.user_id
+            if not about_him and subject != 0:
+                continue
+            if row.memory_type not in {"summary", "core", "profile"}:
+                continue
+            text = _clean_summary(str(row.content or ""))
+            if not text:
+                continue
+            key = str(row.memory_key)
+            item: dict[str, Any] = {"group": group.name, "content": text}
+            if row.memory_type == "summary":
+                item["period"] = key.split(":", 1)[-1]
+                if ctx.user_id in related:
+                    item["you_were_there"] = True
+            else:
+                item["about_you"] = key
+            found.append(item)
+            picked += 1
+            if picked >= _RECALL_PER_GROUP:
+                break
+        if len(found) >= _RECALL_GROUP_TOTAL:
+            break
+    return found[:_RECALL_GROUP_TOTAL]
+
+
+async def _recall_chat(ctx: PrivateToolContext, query: str) -> list[dict[str, Any]]:
+    """他和你的旧私聊里提到关键词的消息（跳过最近十几条：那些本来就在聊天记录里）。"""
+
+    from ..data_models.chat_message import ChatMessage
+    from ..data_models.chat_session import ChatSession
+    from .memory_retrieval import query_terms
+
+    terms = [query, *query_terms(query)]
+    terms = [term for term in dict.fromkeys(terms) if term]
+    if not terms:
+        return []
+    from sqlalchemy import or_
+
+    base = (
+        select(ChatMessage.id)
+        .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+        .where(
+            ChatSession.user_id == ctx.user_id,
+            ChatSession.group_id.is_(None),
+            ChatMessage.is_deleted.is_(False),
+        )
+        .order_by(ChatMessage.id.desc())
+        .limit(_RECALL_SKIP_RECENT)
+    )
+    recent_ids = set((await ctx.session.execute(base)).scalars().all())
+    rows = (
+        await ctx.session.execute(
+            select(ChatMessage.id, ChatMessage.role, ChatMessage.content, ChatMessage.created_at)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatSession.user_id == ctx.user_id,
+                ChatSession.group_id.is_(None),
+                ChatMessage.is_deleted.is_(False),
+                or_(*(ChatMessage.content.contains(term, autoescape=True) for term in terms[:6])),
+            )
+            .order_by(ChatMessage.id.desc())
+            .limit(_RECALL_CHAT * 4)
+        )
+    ).all()
+    found: list[dict[str, Any]] = []
+    for message_id, role, content, created_at in rows:
+        if message_id in recent_ids:
+            continue
+        text = _clean_summary(_snippet(str(content or ""), terms))
+        if not text:
+            continue
+        found.append(
+            {
+                "who": "他" if role == "user" else "你",
+                "said": text[:_RECALL_CHAT_CHARS],
+                "when": f"{created_at:%Y-%m-%d}" if created_at else "",
+            }
+        )
+        if len(found) >= _RECALL_CHAT:
+            break
+    found.reverse()
+    return found
+
+
+def _snippet(text: str, terms: list[str]) -> str:
+    """长消息只截命中关键词附近的一段。"""
+
+    if len(text) <= _RECALL_CHAT_CHARS:
+        return text
+    position = min(
+        (text.find(term) for term in terms if term and term in text), default=0
+    )
+    start = max(position - _RECALL_CHAT_CHARS // 3, 0)
+    piece = text[start : start + _RECALL_CHAT_CHARS]
+    return ("…" if start else "") + piece
+
+
+async def _recall_facts(ctx: PrivateToolContext, query: str) -> list[dict[str, Any]]:
+    from .memory_retrieval import query_terms
+    from .private_memory import fact_view, list_facts
+
+    terms = [query, *query_terms(query)]
+    facts = [fact_view(row) for row in await list_facts(ctx.session, ctx.user_id, now=ctx.now)]
+    return [
+        {"what": item["label"], "content": item["content"]}
+        for item in facts
+        if any(term and (term in item["content"] or term in item["label"]) for term in terms)
+    ]
+
+
 async def _commands(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, Any]:
     from ..command_access import CommandAccessContext
     from ..permission import get_user_feature_status
@@ -869,7 +1043,7 @@ async def _commands(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, 
     }
 
 
-async def execute_private_tool(
+async def execute_private_tool(  # noqa: PLR0915
     name: str, raw_args: Any, ctx: PrivateToolContext
 ) -> dict[str, Any]:
     """执行一个私聊工具，返回给模型的 payload（``ok`` + ``result`` 或错误）。"""
@@ -877,6 +1051,14 @@ async def execute_private_tool(
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
         return {"ok": False, "error": f"没有工具 {name}", "error_code": "invalid_args"}
+    if ctx.allowed_tools is not None and name not in ctx.allowed_tools:
+        allowed = "、".join(sorted(ctx.allowed_tools)) or "不调用任何工具"
+        return {
+            "ok": False,
+            "error": f"这一轮只能用：{allowed}",
+            "error_code": "not_allowed",
+            "hint": "别的事等他回话的那一轮再做；现在直接回复",
+        }
     from .private_voice import HEAVY_TOOLS
 
     if name in HEAVY_TOOLS:
@@ -903,6 +1085,8 @@ async def execute_private_tool(
             result = await _relationship(ctx)
         elif name == "group_recent":
             result = await _group_recent(ctx, str(args["group"]))
+        elif name == "recall":
+            result = await _recall(ctx, args)
         elif name == "list_commands":
             result = await _commands(ctx, args)
         elif name in COMPUTER_NAMES:

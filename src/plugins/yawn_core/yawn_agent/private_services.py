@@ -303,6 +303,9 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
         had_persona = bool(store.load(ctx.user_id).get("persona"))
         removed_store = store.delete_all(ctx.user_id)
         removed_memories = await delete_private_memories(ctx.session, ctx.user_id)
+        from .private_cache import forget_user
+
+        forget_user(ctx.user_id)
         ctx.mutated = True
         return {
             "personal_data_deleted": removed_store,

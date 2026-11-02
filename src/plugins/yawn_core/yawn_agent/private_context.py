@@ -1,4 +1,4 @@
-# ruff: noqa: TID252, TC003
+# ruff: noqa: TID252, TC003, E501, C901, PLR0912, PLR0913, PLR0915
 """私聊 Agent 的上下文：Bot 对这位用户的了解，从签到、好感、群里的关系和记忆汇总。
 
 边界（与 AGENTS.md「私聊 Agent」一节一致）：
@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -33,8 +35,26 @@ from .bot_bond import bond_summary
 from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .private_memory import fact_view, list_facts
 
-# 整块上下文的字符上限（JSON）。
+# 每一层上下文的字符上限（JSON）：长期资料一份、本轮资料一份。
 CONTEXT_CHAR_BUDGET = 2400
+# 长期资料（几乎不变，放在历史前面，前缀缓存能命中）里的键；其余都算本轮资料。
+STABLE_KEYS = (
+    "user",
+    "relationship",
+    "told_you_in_private",
+    "group_profile",
+    "bonds_in_groups",
+    "people_you_both_know",
+    "group_happenings",
+    "groups",
+)
+MAX_PEOPLE = 6
+MAX_HAPPENINGS = 3
+HAPPENING_DAYS = 3
+_HAPPENING_CHARS = 120
+_LINE_CHARS = 60
+# 私聊里不主动提的关系类型（尴尬或容易冒犯）。
+_QUIET_RELATIONS = frozenset({"对立"})
 MAX_GROUPS = 8
 MAX_PROFILE_FACTS = 8
 MAX_JOKES = 3
@@ -63,6 +83,30 @@ class PrivateContext:
 
     def render(self) -> str:
         return json.dumps(self.payload, ensure_ascii=False, separators=(",", ":"))
+
+    def stable(self) -> dict[str, Any]:
+        """长期资料：只有记忆整理、关系变化时才变。键顺序固定，渲染结果逐字稳定。"""
+
+        return {key: self.payload[key] for key in STABLE_KEYS if key in self.payload}
+
+    def volatile(self) -> dict[str, Any]:
+        """本轮资料：时间、签到、待办、附件、刚做完的事……每轮都可能变。"""
+
+        return {
+            key: value for key, value in self.payload.items() if key not in STABLE_KEYS
+        }
+
+    def render_stable(self) -> str:
+        stable = _fit_layer(self.stable(), _STABLE_TRIM)
+        return json.dumps(stable, ensure_ascii=False, separators=(",", ":")) if stable else ""
+
+    def render_volatile(self) -> str:
+        volatile = _fit_layer(self.volatile(), _VOLATILE_TRIM)
+        return (
+            json.dumps(volatile, ensure_ascii=False, separators=(",", ":"))
+            if volatile
+            else ""
+        )
 
 
 async def shared_groups(session: Any, user_id: int) -> list[SharedGroup]:
@@ -146,7 +190,12 @@ async def group_profile_facts(
             continue
         seen.add(key)
         facts.append(
-            {"key": key, "content": content, "group_id": int(row.group_id or 0)}
+            {
+                "key": key,
+                "content": content,
+                "group_id": int(row.group_id or 0),
+                "id": int(row.id or 0),
+            }
         )
         if len(facts) >= MAX_PROFILE_FACTS:
             break
@@ -216,17 +265,282 @@ async def group_bonds(
 
 
 def _fit(payload: dict[str, Any]) -> dict[str, Any]:
-    """按优先级裁剪到字符预算：先缩画像，再缩关系，最后缩群列表。"""
+    """去掉空列表；真正的裁剪按层做（``render_stable`` / ``render_volatile``）。"""
+
+    for key in [key for key, value in payload.items() if value in ([], {}, None)]:
+        payload.pop(key, None)
+    return payload
+
+
+# 超预算时先缩谁（越靠前越先缩）。
+_STABLE_TRIM = (
+    "group_happenings",
+    "people_you_both_know",
+    "group_profile",
+    "bonds_in_groups",
+    "groups",
+    "told_you_in_private",
+)
+_VOLATILE_TRIM = (
+    "recent_in_groups",
+    "helper_messages",
+    "assistant",
+    "tasks",
+    "just_finished",
+)
+
+
+def _fit_layer(layer: dict[str, Any], order: tuple[str, ...]) -> dict[str, Any]:
+    """按优先级把一层裁到字符预算（从列表尾部一条条去掉）；不改原 payload。"""
+
+    layer = {
+        key: (list(value) if isinstance(value, list) else value)
+        for key, value in layer.items()
+    }
 
     def size() -> int:
-        return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return len(json.dumps(layer, ensure_ascii=False, separators=(",", ":")))
 
-    for key in ("group_profile", "bonds_in_groups", "groups", "assistant"):
-        while size() > CONTEXT_CHAR_BUDGET and payload.get(key):
-            payload[key] = payload[key][:-1]
-        if not payload.get(key):
-            payload.pop(key, None)
-    return payload
+    for key in order:
+        while size() > CONTEXT_CHAR_BUDGET and isinstance(layer.get(key), list) and layer[key]:
+            layer[key] = layer[key][:-1]
+        if key in layer and not layer[key]:
+            layer.pop(key, None)
+    return layer
+
+
+async def _names_in_group(
+    session: Any, group_id: int, user_ids: set[int]
+) -> dict[int, str]:
+    """群名片优先，没有就用 QQ 昵称；都没有的不给（不报 QQ 号）。"""
+
+    if not user_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(UserGroup.user_id, UserGroup.group_nickname, BotUser.nickname)
+            .outerjoin(BotUser, BotUser.user_id == UserGroup.user_id)
+            .where(UserGroup.group_id == group_id, UserGroup.user_id.in_(sorted(user_ids)))
+        )
+    ).all()
+    names: dict[int, str] = {}
+    for uid, card, nickname in rows:
+        name = _safe_text(card or nickname, 20)
+        if name:
+            names[int(uid)] = name
+    return names
+
+
+async def _opted_out(session: Any, group_id: int) -> set[int]:
+    rows = (
+        await session.execute(
+            select(AgentPrivacy.user_id).where(
+                AgentPrivacy.group_id == group_id, AgentPrivacy.opted_out.is_(True)
+            )
+        )
+    ).scalars()
+    return {int(uid) for uid in rows}
+
+
+async def people_you_both_know(
+    session: Any, user_id: int, groups: list[SharedGroup], *, now: datetime
+) -> list[dict[str, Any]]:
+    """群里记下的、他和别人的关系（好友/搭子/同学……），只给名字和关系词。
+
+    只看可读的群；对方在那个群隐私退出的跳过；@提及这类噪声边和“对立”不给；
+    半年没再见到的旧关系不给。按置信度、证据数排序后再按群名、名字固定顺序。
+    """
+
+    from datetime import timedelta
+
+    from ..data_models.agent_memory import AgentRelation
+    from .memory import RELATION_TTL_DAYS, RELATION_TYPE_CHOICES
+
+    readable = {item.group_id: item for item in groups if item.agent_readable}
+    if not readable:
+        return []
+    try:
+        rows = (
+            (
+                await session.execute(
+                    select(AgentRelation)
+                    .where(
+                        AgentRelation.group_id.in_(sorted(readable)),
+                        (AgentRelation.subject_user_id == user_id)
+                        | (AgentRelation.object_user_id == user_id),
+                        AgentRelation.relation_type.in_(RELATION_TYPE_CHOICES),
+                        AgentRelation.last_seen_at
+                        >= now - timedelta(days=RELATION_TTL_DAYS),
+                    )
+                    .order_by(
+                        AgentRelation.confidence.desc(),
+                        AgentRelation.evidence_count.desc(),
+                        AgentRelation.id.asc(),
+                    )
+                    .limit(40)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    except Exception:  # noqa: BLE001 - 关系表缺失时整段跳过
+        return []
+    picked: list[tuple[int, int, str, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for row in rows:
+        if str(row.relation_type) in _QUIET_RELATIONS:
+            continue
+        other = (
+            int(row.object_user_id)
+            if int(row.subject_user_id) == user_id
+            else int(row.subject_user_id)
+        )
+        if other == user_id or (other, str(row.relation_type)) in seen:
+            continue
+        seen.add((other, str(row.relation_type)))
+        picked.append((int(row.group_id), other, str(row.relation_type), str(row.note or "")))
+        if len(picked) >= MAX_PEOPLE * 2:
+            break
+    people: list[dict[str, Any]] = []
+    by_group: dict[int, list[tuple[int, int, str, str]]] = {}
+    for item in picked:
+        by_group.setdefault(item[0], []).append(item)
+    for group_id, items in by_group.items():
+        blocked = await _opted_out(session, group_id)
+        names = await _names_in_group(
+            session, group_id, {other for _g, other, _t, _n in items} - blocked
+        )
+        for _g, other, relation, note in items:
+            name = names.get(other)
+            if not name or other in blocked:
+                continue
+            view: dict[str, Any] = {
+                "name": name,
+                "relation": relation,
+                "group": readable[group_id].name,
+            }
+            clean_note = _safe_text(note, 40)
+            if clean_note:
+                view["note"] = clean_note
+            people.append(view)
+    people = people[:MAX_PEOPLE]
+    people.sort(key=lambda item: (item["group"], item["name"], item["relation"]))
+    return people
+
+
+_HAPPENING_DIGITS = re.compile(r"\d{5,}")
+
+
+async def group_happenings(
+    session: Any, groups: list[SharedGroup], *, now: datetime
+) -> list[dict[str, Any]]:
+    """可读的群最近几天发生了什么：每群取最新一条“可跨群分享”的公开摘要。
+
+    用 ``public_daily``（整理时就按跨群分享的标准写、过了卫生检查），不用群内部的
+    ``daily``；读时再复检一遍注入/联系方式，长串数字打码。按群名固定顺序。
+    """
+
+    from datetime import timedelta
+
+    readable = {item.group_id: item for item in groups if item.agent_readable}
+    if not readable:
+        return []
+    since = (now - timedelta(days=HAPPENING_DAYS)).date()
+    rows = (
+        (
+            await session.execute(
+                select(AgentMemory)
+                .where(
+                    AgentMemory.group_id.in_(sorted(readable)),
+                    AgentMemory.subject_user_id == 0,
+                    AgentMemory.memory_type == "summary",
+                    AgentMemory.memory_key.like("public_daily:%"),
+                    AgentMemory.memory_key >= f"public_daily:{since:%Y-%m-%d}",
+                )
+                .order_by(AgentMemory.memory_key.desc(), AgentMemory.id.desc())
+                .limit(len(readable) * 3)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    picked: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        group_id = int(row.group_id or 0)
+        if group_id in picked or (row.expires_at is not None and row.expires_at < now):
+            continue
+        text = _safe_text(row.content, _HAPPENING_CHARS)
+        if not text:
+            continue
+        picked[group_id] = {
+            "group": readable[group_id].name,
+            "day": str(row.memory_key).split(":", 1)[-1],
+            "what": _HAPPENING_DIGITS.sub("[号码]", text),
+        }
+    items = sorted(picked.values(), key=lambda item: (item["group"], item["day"]))
+    return items[:MAX_HAPPENINGS]
+
+
+async def recent_group_lines(
+    session: Any,
+    user_id: int,
+    groups: list[SharedGroup],
+    *,
+    now: datetime,
+    limit: int,
+    hours: int,
+) -> list[dict[str, Any]]:
+    """他最近在群里说过的几句话（只是他自己的话），私聊里能自然接上“你刚在群里说……”。"""
+
+    from datetime import timedelta
+
+    from ..data_models.group_agent_message import GroupAgentMessage
+
+    readable = {item.group_id: item for item in groups if item.agent_readable}
+    if not readable or limit <= 0:
+        return []
+    try:
+        rows = (
+            await session.execute(
+                select(
+                    GroupAgentMessage.group_id,
+                    GroupAgentMessage.normalized_text,
+                    GroupAgentMessage.received_at,
+                )
+                .where(
+                    GroupAgentMessage.user_id == user_id,
+                    GroupAgentMessage.group_id.in_(sorted(readable)),
+                    GroupAgentMessage.role != "bot",
+                    GroupAgentMessage.received_at >= now - timedelta(hours=hours),
+                )
+                .order_by(GroupAgentMessage.received_at.desc(), GroupAgentMessage.id.desc())
+                .limit(limit * 4)
+            )
+        ).all()
+    except Exception:  # noqa: BLE001 - 消息表缺失时整段跳过
+        return []
+    lines: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group_id, text, received_at in rows:
+        raw = str(text or "").strip()
+        # 只有占位符（[图片]）或很短的“哈哈”不值得带。
+        if len(raw.replace("[图片]", "").replace("[表情]", "").strip()) < 4:  # noqa: PLR2004
+            continue
+        clean = _safe_text(raw, _LINE_CHARS)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        minutes = (now - received_at).total_seconds() / 60 if received_at else 0
+        lines.append(
+            {
+                "group": readable[int(group_id)].name,
+                "said": _HAPPENING_DIGITS.sub("[号码]", clean),
+                "ago": _ago(max(minutes, 1)),
+            }
+        )
+        if len(lines) >= limit:
+            break
+    return lines
 
 
 LAST_CHAT_GAP_MINUTES = 30
@@ -270,7 +584,7 @@ async def last_chat(session: Any, user_id: int, now: datetime) -> dict[str, Any]
     return payload
 
 
-async def build_private_context(  # noqa: C901
+async def build_private_context(
     session: Any,
     user_id: int,
     *,
@@ -290,6 +604,25 @@ async def build_private_context(  # noqa: C901
     private_facts = [
         fact_view(row) for row in await list_facts(session, user_id, now=now)
     ]
+    group_memory = _group_memory_enabled()
+    people = (
+        await people_you_both_know(session, user_id, groups, now=now)
+        if group_memory
+        else []
+    )
+    happenings = await group_happenings(session, groups, now=now) if group_memory else []
+    lines_limit, lines_hours = _group_lines_config()
+    recent_lines = (
+        await recent_group_lines(
+            session, user_id, groups, now=now, limit=lines_limit, hours=lines_hours
+        )
+        if group_memory
+        else []
+    )
+    # 私聊里亲口说过的，群画像里同样内容的就不再重复。
+    private_contents = {item["content"] for item in private_facts}
+    profile = [item for item in profile if item["content"] not in private_contents]
+    _record_injected(profile, now)
 
     payload: dict[str, Any] = {
         "now": f"{now:%Y-%m-%d %H:%M}",
@@ -328,9 +661,19 @@ async def build_private_context(  # noqa: C901
             }
             for item in profile
         ]
+    if people:
+        payload["people_you_both_know"] = people
+    if happenings:
+        payload["group_happenings"] = happenings
     if groups:
-        payload["groups"] = [item.name for item in groups[:MAX_GROUPS]]
+        # 取最近活跃的几个群，但按群名排序：活跃顺序每说一句话都可能变，会击穿前缀缓存。
+        payload["groups"] = sorted(item.name for item in groups[:MAX_GROUPS])
     payload["time_of_day"] = time_of_day(now)
+    if recent_lines:
+        payload["recent_in_groups"] = recent_lines
+    recap = _recap(user_id)
+    if recap:
+        payload["earlier_chat"] = recap
     previous = await last_chat(session, user_id, now)
     if previous:
         payload["last_chat"] = previous
@@ -344,6 +687,55 @@ async def build_private_context(  # noqa: C901
             payload["user"]["call_them"] = style["call_me"]
         payload["assistant"] = [assistant]
     return PrivateContext(payload=_fit(payload), groups=groups, queries=8)
+
+
+def _group_memory_enabled() -> bool:
+    try:
+        from ..private_chat_bridge import private_agent_config
+
+        return bool(private_agent_config.private_agent_group_memory)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _group_lines_config() -> tuple[int, int]:
+    try:
+        from ..private_chat_bridge import private_agent_config
+
+        return (
+            int(private_agent_config.private_agent_group_lines),
+            int(private_agent_config.private_agent_group_lines_hours),
+        )
+    except Exception:  # noqa: BLE001
+        return 4, 24
+
+
+def _record_injected(profile: list[dict[str, Any]], now: datetime) -> None:
+    """注入私聊的群画像也算一次“用到”：常被想起的记忆衰减更慢（与群聊同一口径）。"""
+
+    from .memory_access import record_access
+
+    with contextlib.suppress(Exception):
+        record_access((int(item.get("id") or 0) for item in profile), now=now)
+
+
+def _recap(user_id: int) -> dict[str, Any]:
+    """记忆整理时写下的“之前聊到哪”（历史窗口外的旧话题也接得上）。"""
+
+    from . import private_store
+
+    try:
+        recap = private_store.load(user_id).get("recap") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    view: dict[str, Any] = {}
+    if recap.get("summary"):
+        view["summary"] = str(recap["summary"])
+    if recap.get("open_threads"):
+        view["follow_up"] = list(recap["open_threads"])[:3]
+    if view and recap.get("updated_at"):
+        view["as_of"] = str(recap["updated_at"])
+    return view
 
 
 def time_of_day(now: datetime) -> str:  # noqa: PLR0911
@@ -392,6 +784,9 @@ __all__ = [
     "SharedGroup",
     "build_private_context",
     "group_bonds",
+    "group_happenings",
     "group_profile_facts",
+    "people_you_both_know",
+    "recent_group_lines",
     "shared_groups",
 ]

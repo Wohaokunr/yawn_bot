@@ -269,7 +269,10 @@ async def test_preview_applies_drafts_and_persona_without_saving(db):
     assert "【全局草稿】" in system
     assert "【本人草稿】" in system
     assert "草稿猫" in system
-    assert snapshot["messages"][-1]["content"] == "今天好累"
+    users = [m for m in snapshot["messages"] if m["role"] == "user"]
+    assert users[-1]["content"] == "今天好累"
+    # 本轮资料排在最后（前缀缓存：每轮都变的放后面）。
+    assert snapshot["messages"][-1]["role"] == "system"
     assert snapshot["persona"]["source"] == "draft"
     assert snapshot["outcome"] == "not_sent"
     assert snapshot["toolNames"]

@@ -60,6 +60,7 @@ function respond(path: string, init?: RequestInit) {
   }
   if (path === "/private-agent/persona/preview") return { data: { compiled: "角色：小橘", promptTokens: 20, promptTokenLimit: 700, trimmed: false, summary: "", unsafe: null } };
   if (path === "/private-agent/captures") return { data: { captureEnabled: true, paused: false, perUser: 8, maxUsers: 64, users: [{ userId: "12345", count: 2, lastAt: null, lastPipeline: "turn" }] } };
+  if (path === "/private-agent/cache") return { data: { cachedTokens: 900, missTokens: 100, hitRate: 0.9, anchoredUsers: 1, pipelines: { turn: { calls: 3, reported: 3, promptTokens: 1000, cachedTokens: 900, missTokens: 100, hitRate: 0.9, recent: [{ at: 1, round: 0, changed: "profile" }] } } } };
   if (path.startsWith("/private-agent/captures/12345")) return { data: { captureEnabled: true, paused: false, perUser: 8, maxUsers: 64, userId: "12345", prompts: [] } };
   if (path.startsWith("/private-agent/prompts/sections/") && init?.method === "PUT") return { data: { revision: 4 } };
   throw new Error(`unexpected ${path}`);
@@ -119,5 +120,12 @@ describe("PrivateAgentPage", () => {
     renderAt("/private-agent?pa.tab=captures");
     expect(await screen.findByText("私聊最近请求")).toBeTruthy();
     expect(screen.getByRole("button", { name: "12345" })).toBeTruthy();
+  });
+
+  it("shows prefix cache hit rate per pipeline", async () => {
+    renderAt("/private-agent?pa.tab=captures");
+    expect(await screen.findByText("前缀缓存命中")).toBeTruthy();
+    expect(screen.getByText("总命中率 90%")).toBeTruthy();
+    expect(screen.getByText(/最近一次没命中是因为长期资料变了/)).toBeTruthy();
   });
 });

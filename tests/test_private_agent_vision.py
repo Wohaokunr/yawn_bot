@@ -154,7 +154,8 @@ async def test_turn_sends_image_to_model_and_falls_back_to_caption(maker, monkey
 
     async def fake(messages, tools, **kwargs):
         calls["n"] += 1
-        seen.append({"content": messages[-1]["content"], "kwargs": kwargs})
+        last_user = [m for m in messages if m.get("role") == "user"][-1]
+        seen.append({"content": last_user["content"], "kwargs": kwargs})
         if kwargs.get("raise_on_unsupported"):
             raise llm.LLMMultimodalUnsupportedError("unknown variant `image_url`")
         return SimpleNamespace(message=_message("是只橘猫诶"), outcome="success")

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PrivateSectionRow } from "./private-api";
 import {
   cleanUserId,
+  formatHitRate,
   filterPrivateSections,
   groupCounts,
   inheritedOf,
@@ -107,5 +108,14 @@ describe("withPipelineTask", () => {
     const snap = withPipelineTask({ task: "agent_dialogue", pipeline: "worker" } as never);
     expect(taskLabel(snap.task)).toBe("私聊小助手");
     expect(withPipelineTask({ task: "agent_dialogue" } as never).task).toBe("agent_dialogue");
+  });
+});
+
+describe("formatHitRate", () => {
+  it("shows a percentage with one decimal, or a dash when the provider did not report usage", () => {
+    expect(formatHitRate(0.8765)).toBe("87.7%");
+    expect(formatHitRate(0)).toBe("0%");
+    expect(formatHitRate(null)).toBe("—");
+    expect(formatHitRate(undefined)).toBe("—");
   });
 });

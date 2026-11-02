@@ -383,7 +383,7 @@ async def test_auto_handoff_when_rounds_run_out(maker, monkeypatch) -> None:
             _request(session, bot, "帮我把三家手机的续航价格都比一下")
         )
     assert text == "我还在弄，好了跟你说"
-    assert spawned and seen[-1]["tools"] == []
+    assert spawned and seen[-1]["tool_choice"] == "none"
     systems = _system_texts(seen[-1])
     assert prompt.PRIVATE_AUTO_HANDOFF in systems
     assert prompt.PRIVATE_FINAL_ROUND not in systems
@@ -431,9 +431,12 @@ async def test_just_finished_folds_into_current_reply(maker, monkeypatch) -> Non
     _script(monkeypatch, [_message("在呢！对了周六是晴天")], seen)
     async with maker() as session:
         await pagent.handle_private_turn(_request(session, _Bot(), "在吗"))
-    profile = seen[0]["messages"][1]["content"]
-    assert "just_finished" in profile and "周六晴" in profile
-    assert prompt.PRIVATE_JUST_FINISHED in seen[0]["messages"][0]["content"]
+    # 刚做完的结果是本轮资料：在最后一条消息后面，不进开头那层（否则每次有结果都击穿前缀缓存）。
+    turn = seen[0]["messages"][-1]["content"]
+    assert seen[0]["messages"][-1]["role"] == "system"
+    assert "just_finished" in turn and "周六晴" in turn
+    assert prompt.PRIVATE_JUST_FINISHED in turn
+    assert prompt.PRIVATE_JUST_FINISHED not in seen[0]["messages"][0]["content"]
     task = ptasks.get_task(USER, "t1")
     assert task["reported_state"] == "done" and task["reported_via"] == "chat"
 
@@ -501,7 +504,9 @@ async def test_blocked_report_answers_from_chat_without_bothering(maker, monkeyp
     assert await pagent.report_task(bot, USER, ptasks.get_task(USER, "t1")) is True
     assert bot.sent == []
     assert spawned == ["t1"]
-    assert {t["function"]["name"] for t in seen[0]["tools"]} == {"tasks"}
+    # 工具表和主回合同一份（前缀缓存），只放行 tasks（执行时拦截）。
+    assert "tasks" in {t["function"]["name"] for t in seen[0]["tools"]}
+    assert len(seen[0]["tools"]) > 1 and seen[0]["tool_choice"] is None
 
 
 @pytest.mark.asyncio
@@ -513,9 +518,10 @@ async def test_report_turn_text_is_one_voice(maker, monkeypatch) -> None:
     bot = _PrivateBot()
     assert await pagent.report_task(bot, USER, ptasks.get_task(USER, "t1")) is True
     assert bot.sent == ["周末是晴天~"]
-    notice = seen[0]["messages"][-1]["content"]
+    notice = [m for m in seen[0]["messages"] if m["role"] == "user"][-1]["content"]
     assert "周末天气" in notice and "北京查好了" in notice
-    assert seen[0]["tools"] == []
+    assert seen[0]["tool_choice"] == "none"
+    assert prompt.PRIVATE_REPORT_TURN in seen[0]["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio

@@ -270,6 +270,8 @@ async def _load_history(
     session: _DbSession,
     session_id: int,
     time_prefix: str = "",
+    *,
+    limit: int = _MAX_HISTORY_MESSAGES,
 ) -> list[dict[str, str]]:
     """加载会话历史消息，构建 OpenAI messages 格式。"""
     stmt = (
@@ -279,7 +281,7 @@ async def _load_history(
             ChatMessage.is_deleted == False,  # noqa: E712
         )
         .order_by(ChatMessage.id.desc())
-        .limit(_MAX_HISTORY_MESSAGES)
+        .limit(max(int(limit), 1))
     )
     result = await session.execute(stmt)
     messages = result.scalars().all()
@@ -302,6 +304,16 @@ async def _load_history(
     ]
     history.extend({"role": msg.role, "content": msg.content} for msg in messages)
     return history
+
+
+def _plain_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
+    """纯对话兜底用：system + 最近 _MAX_HISTORY_MESSAGES 条，且以 user 开头。"""
+
+    head = [item for item in history[:1] if item.get("role") == "system"]
+    tail = history[len(head) :][-_MAX_HISTORY_MESSAGES:]
+    while tail and tail[0].get("role") != "user":
+        tail.pop(0)
+    return [*head, *tail]
 
 
 async def _stream_and_send(
@@ -566,7 +578,16 @@ async def _process_chat(  # noqa: C901
 
     # 加载历史；私聊 Agent 可用时先交给它（人设、工具、跨群关系），
     # 它返回 None（未配置/出错/超额）再退回流式纯对话。
-    history = await _load_history(session, chat_session_id, time_prefix)
+    # 私聊 Agent 自己按字符预算和“锚定窗口”挑历史（前缀缓存），所以多读一些；
+    # 纯对话兜底仍只带最近 _MAX_HISTORY_MESSAGES 条。
+    agent_limit = (
+        int(private_agent_config.private_agent_history_messages)
+        if get_private_handler() is not None
+        else _MAX_HISTORY_MESSAGES
+    )
+    history = await _load_history(
+        session, chat_session_id, time_prefix, limit=agent_limit
+    )
     reply_text = await _try_private_agent(
         bot,
         event,
@@ -579,7 +600,7 @@ async def _process_chat(  # noqa: C901
         media=media,
     )
     if reply_text is None:
-        reply_text = await _stream_and_send(bot, event, history)
+        reply_text = await _stream_and_send(bot, event, _plain_history(history))
 
     # 仅持久化有效回复；致歉提示不入库，避免污染上下文
     if reply_text:

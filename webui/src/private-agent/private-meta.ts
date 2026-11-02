@@ -102,7 +102,8 @@ export function worstIssue(issues: PrivatePromptIssue[]): PrivatePromptIssue["le
 
 export const PIPELINE_WHERE_LABELS: Record<string, string> = {
   "system#1": "system 第 1 层",
-  "system#2": "system 第 2 层（资料）",
+  "system#2": "system 第 2 层（长期资料）",
+  "system#3": "system 第 3 层（本轮资料，排在最后）",
   user: "user 消息",
   round: "工具循环中追加",
   history: "写进历史",
@@ -159,6 +160,18 @@ export const PIPELINE_LABELS: Record<string, string> = {
   worker: "后台小助手",
   memory: "记忆整理",
 };
+
+export const PREFIX_LAYER_LABELS: Record<string, string> = {
+  system: "开头规则/人设",
+  tools: "工具表",
+  profile: "长期资料",
+  history: "历史起点",
+};
+
+/** 命中率显示成百分比；服务商没报 usage 时给“—”。 */
+export function formatHitRate(rate: number | null | undefined): string {
+  return typeof rate === "number" ? `${Math.round(rate * 1000) / 10}%` : "—";
+}
 
 export function pipelineLabel(key: string | null | undefined): string {
   return PIPELINE_LABELS[String(key ?? "")] ?? String(key ?? "—");

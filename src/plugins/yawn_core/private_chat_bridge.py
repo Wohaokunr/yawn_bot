@@ -98,6 +98,26 @@ class PrivateAgentConfig(BaseModel):
     private_agent_auto_handoff: bool = True
     # 几件后台的事前后脚做完时，等这么多秒合成一次汇报；0 不等
     private_agent_report_batch_seconds: float = Field(default=2.0, ge=0, le=60)
+    # ── 上下文与前缀缓存 ──
+    # 私聊历史最多带多少字符（从新往旧装）。窗口起点“锚定”：没超预算就不往后挪，
+    # 超了一次挪掉一大块，让历史前缀连续很多轮保持不变，提高服务商的前缀缓存命中
+    private_agent_history_chars: int = Field(default=9000, ge=1000, le=60000)
+    # 交给私聊 Agent 的历史最多读多少条（纯对话兜底仍按原来的 20 条）
+    private_agent_history_messages: int = Field(default=40, ge=4, le=200)
+    # 窗口要挪时，一次至少挪掉预算的这个比例（0.2 到 0.8），越大缓存越稳、可见历史越短
+    private_agent_history_drop_ratio: float = Field(default=0.4, ge=0.2, le=0.8)
+    # 早先的单条历史消息超过这么多字时只留头尾（最后一条永远完整）
+    private_agent_history_message_chars: int = Field(default=1500, ge=200, le=20000)
+    # 最后一轮/汇报轮/协调轮仍发送同一份工具表、用 tool_choice 限制，而不是换工具表
+    # （换工具表会让整段前缀缓存失效）；端点不支持 tool_choice 时关掉
+    private_agent_stable_tools: bool = True
+    # 把群里的记忆带进私聊：共同认识的人、各群最近发生的事、他最近在群里说的话
+    private_agent_group_memory: bool = True
+    # 他最近在群里说的话最多带几句、看多久以内（小时）
+    private_agent_group_lines: int = Field(default=4, ge=0, le=20)
+    private_agent_group_lines_hours: int = Field(default=24, ge=1, le=168)
+    # 私聊记忆整理时顺便写一段“之前聊到哪”的回顾，窗口外的旧话题也接得上
+    private_agent_recap: bool = True
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

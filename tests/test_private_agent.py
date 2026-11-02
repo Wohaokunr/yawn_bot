@@ -552,7 +552,13 @@ def _script(monkeypatch, replies: list[Any], seen: list[dict] | None = None) -> 
     async def fake(messages, tools, **kwargs):
         assert kwargs["max_tokens"] == llm.NO_OUTPUT_LIMIT
         if seen is not None:
-            seen.append({"messages": [dict(m) for m in messages], "tools": tools})
+            seen.append(
+                {
+                    "messages": [dict(m) for m in messages],
+                    "tools": tools,
+                    "tool_choice": kwargs.get("tool_choice"),
+                }
+            )
         message = queue.pop(0) if queue else None
         return SimpleNamespace(
             message=message, outcome="success" if message else "error"
@@ -663,7 +669,9 @@ async def test_turn_respects_daily_cap(maker, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_round_drops_tools(maker, monkeypatch) -> None:
+async def test_final_round_keeps_tool_table_and_forbids_calls(maker, monkeypatch) -> None:
+    """最后一轮仍发同一份工具表（前缀缓存），用 tool_choice=none 不许再调。"""
+
     seen: list[dict] = []
     monkeypatch.setattr(bridge.private_agent_config, "private_agent_max_tool_rounds", 1)
     _script(
@@ -676,8 +684,26 @@ async def test_final_round_drops_tools(maker, monkeypatch) -> None:
             _request(session, _Bot(), "我们关系怎样")
         )
     assert text == "你现在是熟人啦"
-    assert seen[-1]["tools"] == []
+    assert seen[-1]["tools"] == seen[0]["tools"] and seen[-1]["tools"]
+    assert seen[-1]["tool_choice"] == "none" and seen[0]["tool_choice"] is None
     assert seen[-1]["messages"][-1]["role"] == "system"
+    # 前一次请求是后一次的前缀：工具循环只在末尾追加。
+    assert seen[-1]["messages"][: len(seen[0]["messages"])] == seen[0]["messages"]
+
+
+@pytest.mark.asyncio
+async def test_final_round_drops_tools_when_stable_tools_off(maker, monkeypatch) -> None:
+    seen: list[dict] = []
+    monkeypatch.setattr(bridge.private_agent_config, "private_agent_max_tool_rounds", 1)
+    monkeypatch.setattr(bridge.private_agent_config, "private_agent_stable_tools", False)
+    _script(
+        monkeypatch,
+        [_message(calls=[("my_overview", {})]), _message("你现在是熟人啦")],
+        seen,
+    )
+    async with maker() as session:
+        await pagent.handle_private_turn(_request(session, _Bot(), "我们关系怎样"))
+    assert seen[-1]["tools"] == [] and seen[-1]["tool_choice"] is None
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ import { Alert, App as AntApp, Button, Empty, Popconfirm, Skeleton, Space, Switc
 import { PromptSnapshotView } from "../agent-prompts/PromptSnapshotView";
 import { formatTime, QueryErrorAlert, useApiQuery } from "../shared";
 import { privateApi } from "./private-api";
-import { pipelineLabel, PERSONA_SOURCE_LABELS, withPipelineTask } from "./private-meta";
+import { formatHitRate, pipelineLabel, PERSONA_SOURCE_LABELS, PREFIX_LAYER_LABELS, withPipelineTask } from "./private-meta";
 
 const { Text, Paragraph } = Typography;
 
@@ -31,6 +31,42 @@ function UserCaptures({ userId, onOpenSection }: { userId: string; onOpenSection
       {prompts.map((item) => <Tag key={item.id} className="dbg-tag-soft">{pipelineLabel(item.pipeline)} #{item.round} · {formatTime(item.capturedAt)}</Tag>)}
     </div>
     <PromptSnapshotView snapshots={prompts} filenamePrefix={`private-${userId}`} emptyHint="这位用户最近还没有请求" onOpenSection={onOpenSection} />
+  </section>;
+}
+
+function CacheStatsPanel(): React.JSX.Element | null {
+  const query = useApiQuery({
+    queryKey: ["private-cache-stats"],
+    fetcher: (signal) => privateApi.cacheStats(signal),
+  });
+  if (query.error && !query.data) return <QueryErrorAlert error={query.error} onRetry={query.reload} />;
+  if (!query.data) return null;
+  const data = query.data;
+  const rows = Object.entries(data.pipelines);
+  return <section className="dbg-panel" aria-label="前缀缓存命中">
+    <div className="pst-section-head">
+      <Text strong>前缀缓存命中</Text>
+      <Tag color={data.hitRate !== null && data.hitRate >= 0.5 ? "green" : "default"}>总命中率 {formatHitRate(data.hitRate)}</Tag>
+      <Text type="secondary" className="dbg-small">服务商报告的命中/未命中 token，按链路累计（进程内，重启清零）；锚定历史的用户 {data.anchoredUsers} 位。</Text>
+      <span className="dbg-grow" />
+      <Button size="small" icon={<ReloadOutlined />} onClick={query.reload} loading={query.refreshing}>刷新</Button>
+    </div>
+    {rows.length === 0
+      ? <Empty description="还没有私聊请求" />
+      : <ul className="pa-user-list">
+        {rows.map(([name, row]) => {
+          const last = row.recent[row.recent.length - 1];
+          return <li key={name}>
+            <Text strong>{pipelineLabel(name)}</Text>
+            <Tag className="dbg-tag-soft">{formatHitRate(row.hitRate)}</Tag>
+            <Text type="secondary" className="dbg-small">
+              {row.calls} 次请求 · 命中 {row.cachedTokens} / 未命中 {row.missTokens} tokens
+              {row.reported < row.calls ? ` · ${row.calls - row.reported} 次没报 usage` : ""}
+              {last?.changed ? ` · 最近一次没命中是因为${PREFIX_LAYER_LABELS[last.changed] ?? last.changed}变了` : ""}
+            </Text>
+          </li>;
+        })}
+      </ul>}
   </section>;
 }
 
@@ -69,6 +105,7 @@ export function CapturesTab({ userId, onPickUser, onOpenSection }: { userId: str
           </li>)}
         </ul>}
     </section>
+    <CacheStatsPanel />
     {userId && <UserCaptures key={userId} userId={userId} onOpenSection={onOpenSection} />}
   </Space>;
 }

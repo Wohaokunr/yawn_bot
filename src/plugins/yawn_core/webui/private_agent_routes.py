@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..yawn_agent import (
+    private_cache,
     private_persona,
     private_prompt_registry,
     prompt_capture,
@@ -383,6 +384,13 @@ async def clear_private_captures(
     user_id: int | None = Query(default=None, alias="userId", gt=0),
 ) -> dict[str, Any]:
     return ok({"cleared": prompt_capture.clear_private_prompts(user_id)})
+
+
+@router.get("/cache")
+async def get_private_cache_stats(_session: AdminReadSession) -> dict[str, Any]:
+    """前缀缓存命中：各链路累计命中/未命中 token 与最近几次明细（进程内，重启清零）。"""
+
+    return ok(private_cache.usage_snapshot())
 
 
 @router.put("/captures/settings")

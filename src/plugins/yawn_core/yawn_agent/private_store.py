@@ -62,6 +62,8 @@ def empty_record() -> dict[str, Any]:
         "projects": [],
         # 私聊每用户人设（private_persona）：模式、卡片、历史、锁定、自助次数
         "persona": {},
+        # 对话回顾（private_memory.save_recap）：最近聊了什么、还没下文的事
+        "recap": {},
     }
 
 
