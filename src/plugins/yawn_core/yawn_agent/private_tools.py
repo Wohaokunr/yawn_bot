@@ -487,9 +487,22 @@ ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
         "他的网页（WebUI）个人账号：登录后能看自己当群主/管理员的群的关系图、开关群功能、调你们私聊的人设。"
         "view 看有没有开通、能管哪些群、怎么登录；setup_code 把一次性设置码直接私聊发给他（你看不到码），"
         "他去登录页“用设置码设密码”；logout_all 让他的网页账号在所有设备退出。"
-        "你不能替他设密码，也绝不要让他把密码发给你；他说想设密码/忘了密码就用 setup_code，"
-        "或告诉他自己发 /网页密码 新密码。他已经把密码发在聊天里了就提醒他撤回并换一个",
+        "他想设密码、改密码、忘了密码时优先用 webui_onboarding 的 ask_password（他自己定密码，系统直接收走）；"
+        "也可以用 setup_code 让他去网页上设。绝不要让他把密码发在普通聊天里给你；"
+        "他已经把密码发在聊天里了就提醒他撤回并换一个",
         {"action": {"type": "string", "enum": ["view", "setup_code", "logout_all"]}},
+        ("action",),
+        writes=True,
+    ),
+    PrivateTool(
+        "webui_onboarding",
+        "新人引导：帮他开通网页（WebUI）账号并登录。guide 看他进行到哪一步、登录网址、账号怎么填、下一步做什么；"
+        "ask_password 帮他设他自己想要的登录密码：系统会直接私聊提示他把密码发过来，他下一条消息由系统收走、校验、加密保存，"
+        "不经过你、你也看不到（你这句只需简短告诉他照提示发就行，别复述规则、别猜密码）；"
+        "cancel 他不想设了时关掉收密码的窗口。设好后系统会直接把登录网址发给他，结果也会出现在聊天记录里。"
+        "他问怎么用网页、想登录后台、想在网页上管群或改人设、刚认识你想开通时用；"
+        "给网址时用 guide 返回的 login_url 原样发，别自己编",
+        {"action": {"type": "string", "enum": ["guide", "ask_password", "cancel"]}},
         ("action",),
         writes=True,
     ),
@@ -906,6 +919,8 @@ async def execute_private_tool(
             result = _persona_tool(args, ctx)
         elif name == "webui_account":
             result = await _webui_account_tool(args, ctx)
+        elif name == "webui_onboarding":
+            result = await _webui_onboarding_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
@@ -1049,6 +1064,7 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"cancel", "answer", "message"}),
     "my_persona": frozenset({"set", "preset", "template", "reset", "undo"}),
     "webui_account": frozenset({"setup_code", "logout_all"}),
+    "webui_onboarding": frozenset({"ask_password", "cancel"}),
     "computer_files": frozenset({"delete"}),
 }
 
@@ -1095,6 +1111,74 @@ async def _webui_account_tool(
         done = webui_accounts.revoke_sessions(ctx.user_id)
         return {"done": done, "note": "所有设备已退出" if done else "他还没有网页账号"}
     raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS, hint="action 用 view/setup_code/logout_all")
+
+
+async def _webui_onboarding_tool(
+    args: dict[str, Any], ctx: PrivateToolContext
+) -> dict[str, Any]:
+    """新人引导：看进度、开收密码窗口。密码由 webui_account_commands 的监听器直接收，绝不经过模型。"""
+
+    from .. import webui_account_commands as wac
+    from .. import webui_accounts
+
+    blocked = wac.feature_blocked_reason()
+    if blocked:
+        raise ToolError(blocked, code=ERROR_PERMISSION, hint="照实告诉他现在用不了")
+    action = str(args.get("action") or "guide")
+    account = webui_accounts.get_account(ctx.user_id)
+    opened = bool(account and account.has_password and not account.disabled)
+    if action == "guide":
+        if account is not None and account.disabled:
+            step, next_step = "disabled", "他的网页账号被管理员停用了，照实告诉他，让他找管理员"
+        elif wac.capture_pending(ctx.user_id):
+            step, next_step = "waiting_password", "正在等他把密码发过来，让他照系统提示直接发密码就行"
+        elif not opened:
+            step, next_step = "no_password", "先帮他设密码：问他要不要现在设，愿意就用 ask_password"
+        elif account is not None and not account.last_login_at:
+            step, next_step = "never_logged_in", "密码已设好但还没登录过：把 login_url 发给他，告诉他账号填 QQ 号"
+        else:
+            step, next_step = "ready", "已经能登录了，有需要就把 login_url 发给他；忘了密码可以 ask_password 重设"
+        groups = await wac.managed_group_names(ctx.user_id)
+        url = wac.login_url()
+        return {
+            "step": step,
+            "next": next_step,
+            "login_url": url or None,
+            "login_url_note": None if url else "管理员没配置公网地址，告诉他打开 WebUI 网页即可，别编网址",
+            "username": f"他的 QQ 号 {ctx.user_id}",
+            "login_tab": "登录页选「QQ 账号」",
+            "password_rules": wac.password_rules_text(),
+            "password_set_at": account.password_changed_at if account else None,
+            "last_login_at": account.last_login_at if account else None,
+            "can_do": (
+                ["看自己当群主/管理员的群的关系图", "开关这些群的功能", "调我们私聊里你的人设"]
+                if groups
+                else ["调我们私聊里你的人设", "当了群主/管理员后还能在网页上管群"]
+            ),
+            "managed_groups": groups[:10],
+        }
+    if action == "ask_password":
+        if account is not None and account.disabled:
+            raise ToolError("他的网页账号被管理员停用了", code=ERROR_PERMISSION, hint="照实告诉他，让他找管理员")
+        if ctx.bot is None:
+            raise ToolError("现在发不了私聊消息", code=ERROR_PERMISSION, hint="让他自己发 /网页密码 拿设置码")
+        seconds = wac.arm_password_capture(ctx.user_id)
+        try:
+            await ctx.bot.send_private_msg(
+                user_id=ctx.user_id, message=wac.capture_prompt_text()
+            )
+        except Exception as exc:
+            wac.cancel_password_capture(ctx.user_id)
+            raise ToolError("提示没发出去", code=ERROR_PERMISSION, hint="让他自己发 /网页密码") from exc
+        return {
+            "waiting": True,
+            "minutes": seconds // 60,
+            "replacing": opened,
+            "note": "系统已经单独私聊提示他把密码发过来；他下一条消息会被系统直接收走，你看不到也不用处理。"
+            "你这句简短接一下就行（比如让他照提示发），别复述规则，更别让他在别处发密码",
+        }
+    cancelled = wac.cancel_password_capture(ctx.user_id)
+    return {"cancelled": cancelled, "note": "已关掉收密码的窗口" if cancelled else "本来就没在等密码"}
 
 
 def _persona_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:

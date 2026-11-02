@@ -236,6 +236,7 @@
 - 私聊工具不收 `user_id`，一律作用于发消息的本人；签到走 `checkin_service.perform_checkin`，好感只经 `affinity.grant`（来源 `private_chat`，有日上限）。写工具成功后先提交再回复，模型后续失败不丢副作用。没有本轮成功的 `checkin` 不得声称“签好了”（`verify_claims`）。
 - 读群数据的边界：只读用户**当前活跃**的群，且该群 `GroupAgentConfig.enabled` 为真、本人未隐私退出（`AgentPrivacy.opted_out`）。群里的记忆和关系是不可信数据，进上下文前过 `memory_hygiene`，只给词语不给数值。`group_recent` 只允许可读的群，并对号码打码。
 - 私聊记忆存在 `AgentMemory`（`scope="private"`、`group_id` 为空、`memory_type="private_fact"`），**永远不进群聊提示词**。成员要求“也在群里记住/忘掉”时，才通过 `memory_self` 写入/删除对应群的画像，且同样只限可读的群。自动整理（每 6 条私聊一次，后台）不覆盖 Agent 或手动写入的同键记忆。
+- 网页账号新人引导 `webui_onboarding`（guide/ask_password/cancel）**没有密码参数**：`ask_password` 只在 `webui_account_commands` 里开一个 5 分钟的收密码窗口并由 Bot 直接私发提示；他下一条私聊由 `capture_listener`（优先级 -3）直接收走设密码，不进日志、历史和模型。不要给任何私聊工具加“密码”参数，也不要让模型复述密码。
 - 新增私聊工具时同步 `private_tools.tool_schemas()`、`execute_private_tool` 与 `tests/test_private_agent.py`；参数校验沿用 `tool_args.validate_tool_arguments` 与 `tool_error_payload`。
 - 个人助理数据（笔记、待办、提醒、倒数日、心情、聊天偏好、调度标记）存在 `private_store`：`data/private_agent/users/<QQ>.json`（`PRIVATE_AGENT_DATA_DIR` 可改），**不建表、不需要迁移**；读改写一律走 `private_store.update` 持锁完成。用户文本入库前过 `private_organizer.clean_text`（去控制字符、限长、拒绝像指令的内容），因为它们之后会作为工具结果回到模型。
 - 带 `action` 的工具成功后，`ctx.succeeded` 同时记 `工具名` 和 `工具名.动作`；声明核验靠 `private_agent._CLAIM_ALIASES` 把它们映射到群聊声明族（如 `reminders.add` → `schedule_task`），只查过列表不能说“设好了”。

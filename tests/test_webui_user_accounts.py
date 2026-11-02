@@ -667,3 +667,178 @@ async def test_agent_tool_sends_setup_code_out_of_band(monkeypatch):
         "webui_account", {"action": "logout_all"}, ctx
     )
     assert out["result"]["done"] is True
+
+
+# ── 新人引导：Agent 开窗口，下一条私聊由系统直接收作密码 ─────────────────
+
+
+def _onboarding_ctx(sent):
+    class FakeBot:
+        async def send_private_msg(self, **kwargs):
+            sent.append(kwargs)
+
+    return ptools.PrivateToolContext(
+        session=None, user_id=OWNER, bot_id=None, groups=[], now=NOW, bot=FakeBot()
+    )
+
+
+@pytest.fixture
+def _onboarding(monkeypatch):
+    async def no_groups(_user_id):
+        return []
+
+    monkeypatch.setattr(commands, "managed_group_names", no_groups)
+    monkeypatch.setattr(
+        commands._webui_config(), "webui_public_url", "https://bot.example.com/"
+    )
+    recorded: list[tuple[int, str]] = []
+
+    async def fake_record(user_id, text):
+        recorded.append((user_id, text))
+
+    monkeypatch.setattr(commands, "_record_capture_result", fake_record)
+    commands.reset_captures_for_tests()
+    yield recorded
+    commands.reset_captures_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_onboarding_guide_gives_login_url_and_next_step(_onboarding):
+    sent: list[dict[str, Any]] = []
+    ctx = _onboarding_ctx(sent)
+    tool = ptools.TOOLS_BY_NAME["webui_onboarding"]
+    assert set(tool.properties) == {"action"}
+    guide = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "guide"}, ctx
+    )
+    assert guide["ok"] is True
+    assert guide["result"]["step"] == "no_password"
+    assert guide["result"]["login_url"] == "https://bot.example.com/?login=qq"
+    assert str(OWNER) in guide["result"]["username"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    guide = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "guide"}, ctx
+    )
+    assert guide["result"]["step"] == "never_logged_in"
+    accounts.record_login(OWNER)
+    guide = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "guide"}, ctx
+    )
+    assert guide["result"]["step"] == "ready"
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_onboarding_ask_password_captures_next_message_out_of_band(_onboarding):
+
+    sent: list[dict[str, Any]] = []
+    ctx = _onboarding_ctx(sent)
+    result = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "ask_password"}, ctx
+    )
+    assert result["ok"] is True and result["result"]["waiting"] is True
+    assert "webui_onboarding.ask_password" in ctx.succeeded
+    assert len(sent) == 1 and "直接把你想用的密码发给我" in str(sent[0]["message"])
+    assert commands.capture_pending(OWNER)
+    guide = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "guide"}, ctx
+    )
+    assert guide["result"]["step"] == "waiting_password"
+
+    weak = await commands.consume_capture_message(OWNER, "12345678")
+    assert weak.done is False and weak.success is False
+    assert "12345678" not in weak.reply
+    assert commands.capture_pending(OWNER)
+    assert (
+        accounts.get_account(OWNER) is None
+        or not accounts.get_account(OWNER).has_password
+    )
+
+    ok = await commands.consume_capture_message(OWNER, f"  {GOOD_PASSWORD}\n")
+    assert ok.success is True and ok.done is True
+    assert GOOD_PASSWORD not in ok.reply
+    assert "https://bot.example.com/?login=qq" in ok.reply and str(OWNER) in ok.reply
+    assert not commands.capture_pending(OWNER)
+    assert accounts.password_hash_for(OWNER) and accounts.verify_password(
+        GOOD_PASSWORD, accounts.password_hash_for(OWNER)
+    )
+    assert accounts.get_account(OWNER).password_source == "agent_onboarding"
+    # 工具结果、发出的消息里都没有密码
+    assert GOOD_PASSWORD not in json.dumps(result, ensure_ascii=False)
+    assert all(GOOD_PASSWORD not in str(item["message"]) for item in sent)
+
+
+@pytest.mark.asyncio
+async def test_onboarding_capture_cancel_media_failures_and_expiry(_onboarding):
+    sent: list[dict[str, Any]] = []
+    ctx = _onboarding_ctx(sent)
+    await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "ask_password"}, ctx
+    )
+    out = await commands.consume_capture_message(OWNER, "取消")
+    assert out.done and not out.success and not commands.capture_pending(OWNER)
+
+    commands.arm_password_capture(OWNER)
+    media = await commands.consume_capture_message(OWNER, GOOD_PASSWORD, has_media=True)
+    assert media.done is False and not accounts.password_hash_for(OWNER)
+    for _ in range(commands.CAPTURE_MAX_FAILURES - 1):
+        last = await commands.consume_capture_message(OWNER, "short")
+    assert last.done is True and not commands.capture_pending(OWNER)
+
+    commands.arm_password_capture(OWNER, now=0)
+    assert not commands.capture_pending(OWNER)
+
+    commands.arm_password_capture(OWNER)
+    cancelled = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "cancel"}, ctx
+    )
+    assert cancelled["result"]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_onboarding_capture_message_is_hidden_from_logs_and_chat(_onboarding):
+    v11 = importlib.import_module("nonebot.adapters.onebot.v11")
+    exception = importlib.import_module("nonebot.exception")
+    base = {
+        "time": 0,
+        "self_id": 1,
+        "post_type": "message",
+        "sub_type": "friend",
+        "user_id": OWNER,
+        "message_type": "private",
+        "message_id": 1,
+        "raw_message": "",
+        "font": 0,
+        "sender": {"user_id": OWNER},
+    }
+    event = v11.PrivateMessageEvent.model_validate(
+        {**base, "message": v11.Message(GOOD_PASSWORD)}
+    )
+    assert GOOD_PASSWORD in event.get_log_string()
+    assert await commands._is_capture_msg(event) is False
+    commands.arm_password_capture(OWNER)
+    with pytest.raises(exception.NoLogException):
+        event.get_log_string()
+    assert await commands._is_capture_msg(event) is True
+    # 命令照常走命令，并关掉窗口
+    cmd = v11.PrivateMessageEvent.model_validate(
+        {**base, "message": v11.Message("/网页登录")}
+    )
+    assert await commands._is_capture_msg(cmd) is False
+    assert not commands.capture_pending(OWNER)
+    # 优先级排在对话模式与自动接管之前
+    assert commands.capture_listener.priority < commands.password_cmd.priority
+    ai_chat = importlib.import_module(f"{_PKG}.ai_chat")
+    assert commands.capture_listener.priority < ai_chat.chat_mode_listener.priority
+    assert commands.capture_listener.priority < ai_chat.auto_reply_listener.priority
+
+
+@pytest.mark.asyncio
+async def test_onboarding_respects_feature_switch(_onboarding, monkeypatch):
+    sent: list[dict[str, Any]] = []
+    ctx = _onboarding_ctx(sent)
+    monkeypatch.setattr(auth.config, "webui_user_login_enabled", False)
+    out = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "ask_password"}, ctx
+    )
+    assert out["ok"] is False and sent == [] and not commands.capture_pending(OWNER)
