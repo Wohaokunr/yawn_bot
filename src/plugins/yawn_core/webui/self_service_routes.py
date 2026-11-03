@@ -83,9 +83,16 @@ async def get_me(session: UserReadSession) -> dict[str, Any]:
             "managedGroupCount": len(groups),
             "groupCount": group_count,
             "persona": persona,
+            "groupManage": _group_manage_flags(),
             "sessionExpiresAt": session.expires_at,
         }
     )
+
+
+def _group_manage_flags() -> dict[str, bool]:
+    from ..yawn_agent import group_manage
+
+    return {"enabled": group_manage.enabled(), "webui": group_manage.webui_enabled()}
 
 
 def _persona_brief(user_id: int) -> dict[str, Any] | None:
@@ -238,6 +245,7 @@ async def get_my_group(group_id: int, session: UserReadSession) -> dict[str, Any
             "verified": access["verified"],
             "features": features,
             "featureHints": _GROUP_FEATURE_HINTS,
+            "groupManage": _group_manage_flags(),
         }
     )
 

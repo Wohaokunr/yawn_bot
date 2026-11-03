@@ -128,6 +128,22 @@ class PrivateAgentConfig(BaseModel):
     private_agent_reply_max_parts: int = Field(default=4, ge=1, le=4)
     # 最近几次回复条数一模一样（如连着三次三条）或每次都分条时，在本轮资料里提醒一句
     private_agent_rhythm_mix_hint: bool = True
+    # ── 群管代办（yawn_agent/group_manage.py）──
+    # 群主/管理员（Bot 也是群主/管理员时）可以私聊 Bot 或在网页上
+    # 让 Bot 代为禁言、发公告、设群待办等
+    group_manage_enabled: bool = True
+    # 群管理员登录网页后可以改自己管理的群的 Agent 配置和群人设、在网页上做群管理
+    group_manage_webui: bool = True
+    # 每人每天最多代办几次写操作（0 表示不限）
+    group_manage_daily: int = Field(default=60, ge=0, le=1000)
+    # 群策略里“一次最多禁言多久”的硬上限（分钟，QQ 最长 30 天）
+    group_manage_max_mute_minutes: int = Field(default=43200, ge=1, le=43200)
+    # 私聊里待确认的操作多久没确认就作废（秒）
+    group_manage_confirm_seconds: int = Field(default=300, ge=30, le=3600)
+    # 不允许通过 Bot 禁言/踢出/改名片 Bot 的超级管理员
+    group_manage_protect_superusers: bool = True
+    # 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
+    group_manage_data_dir: str = ""
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

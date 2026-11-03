@@ -404,7 +404,8 @@ def test_user_session_cannot_reach_admin_or_guest_routes(env):
         "/private-agent/persona/users",
         f"/private-agent/persona/users/{MEMBER}",
         f"/agent/groups/{G_OWNED}/memories",
-        f"/agent/groups/{G_OWNED}/config",
+        # 本群的 /agent/groups/{id}/config 与 persona 对群管理员开放（见 test_group_manage.py）
+        f"/agent/groups/{G_OTHER}/config",
         "/guest/groups",
         "/audits/web",
     ):

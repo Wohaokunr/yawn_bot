@@ -123,6 +123,18 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "reminders.snooze": ("update_scheduled_task",),
     "reminders.cancel": ("cancel_scheduled_task",),
     "my_data.wipe": ("forget_about_me",),
+    # 群管代办：只有真正执行了（group_manage.<动作>）才允许说“禁言好了/公告发了”
+    "group_manage.mute": ("mute_member",),
+    "group_manage.unmute": ("unmute_member",),
+    "group_manage.whole_mute": ("set_whole_group_mute",),
+    "group_manage.announce": ("create_group_announcement",),
+    "group_manage.delete_notice": ("delete_group_notice",),
+    "group_manage.recall": ("recall_bot_message",),
+    "group_manage.essence": ("set_essence_message",),
+    "group_manage.kick": ("kick_member",),
+    "group_manage.rename": ("set_group_name",),
+    "group_manage.card": ("set_group_card",),
+    "group_manage.title": ("set_special_title",),
 }
 # 模型这轮做了写操作却没说话时，用兜底句子告知结果。
 _WRITE_RESULTS = frozenset(
@@ -846,7 +858,12 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     }
     private_vision.attach_to_messages(messages, vision)
     is_superuser = _is_superuser(user_id)
-    tools = tool_schemas(is_superuser=is_superuser, computer=computer, tasks=tasks)
+    from .group_manage import refresh_manager_hint
+
+    manage = await refresh_manager_hint(session, user_id)
+    tools = tool_schemas(
+        is_superuser=is_superuser, computer=computer, tasks=tasks, manage=manage
+    )
     changed = _trace_prompt(user_id, "turn", meta, tools)
     ctx = PrivateToolContext(
         session=session,
@@ -1380,10 +1397,14 @@ def _report_tools(user_id: int, computer: bool) -> list[dict[str, Any]]:  # noqa
 
     if not _stable_tools():
         return [TOOLS_BY_NAME["tasks"].schema()]
+    from .group_manage import manager_hint
     from .private_tasks import tasks_enabled
 
     return tool_schemas(
-        is_superuser=_is_superuser(user_id), computer=computer, tasks=tasks_enabled()
+        is_superuser=_is_superuser(user_id),
+        computer=computer,
+        tasks=tasks_enabled(),
+        manage=manager_hint(user_id),
     )
 
 

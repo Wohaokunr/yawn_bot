@@ -37,6 +37,7 @@ from .config import API_PATH, BASE_PATH, COOKIE_NAME, DIST_DIR
 from .environment_routes import router as environment_router
 from .fanqie import router as fanqie_router
 from .games import router as games_router
+from .group_manage_routes import router as group_manage_router
 from .groups import router as groups_router
 from .guest_access_routes import router as guest_access_router
 from .hub import hub
@@ -143,6 +144,7 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(stickers_router)
     app.include_router(schedules_router)
     app.include_router(self_service_router)
+    app.include_router(group_manage_router)
 
     @app.middleware("http")
     async def webui_audit_middleware(request: Request, call_next: Any) -> Response:

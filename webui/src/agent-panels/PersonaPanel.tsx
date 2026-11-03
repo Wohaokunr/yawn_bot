@@ -35,7 +35,11 @@ import { PersonaLibrary } from "./PersonaLibrary";
 
 const { Text, Paragraph } = Typography;
 
-export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Element {
+/**
+ * 群人设。``manager`` 为群管理员（个人账号）视图：人设库只能“用于本群”，不能存库/改库/设全局；
+ * 不提供草稿试演（试演会展示完整提示词，里面有群成员画像，不对群管理员开放）。
+ */
+export function PersonaPanel({ groupId, manager = false }: { groupId: string; manager?: boolean }): React.JSX.Element {
   const { message, modal } = AntApp.useApp();
   const [form] = Form.useForm<PersonaFormValues>();
   const [saving, setSaving] = useState(false);
@@ -355,7 +359,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
 
             <section className="persona-config-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
-                <div><div className="persona-config-section-kicker">LIBRARY</div><h3>人设库</h3><p>把调好的人设存起来给其它群一键套用；设为全局的那张会被所有“跟随全局”的群使用。</p></div>
+                <div><div className="persona-config-section-kicker">LIBRARY</div><h3>人设库</h3><p>{manager ? "运维整理好的人设模板，点“用于本群”即可一键套用（套用后仍可继续微调）。" : "把调好的人设存起来给其它群一键套用；设为全局的那张会被所有“跟随全局”的群使用。"}</p></div>
               </div>
               <PersonaLibrary
                 groupId={groupId}
@@ -363,9 +367,11 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                 version={() => baseVersion.current}
                 dirty={dirty}
                 onApplied={(persona) => { serverState.acceptServerData(persona); query.reload(); }}
+                readOnly={manager}
               />
             </section>
 
+            {!manager && (
             <section className="persona-config-section persona-trial-section liquid-glass agent-config-floating">
               <div className="persona-config-section-head">
                 <div><div className="persona-config-section-kicker">TRY IT</div><h3>未保存草稿试演</h3><p>直接用当前表单草稿调用同一套 Agent Debug。不会保存人设、不会执行工具、不会发 QQ、不会写记忆或主动状态。</p></div>
@@ -416,6 +422,7 @@ export function PersonaPanel({ groupId }: { groupId: string }): React.JSX.Elemen
                 </Card>
               )}
             </section>
+            )}
           </div>
 
           <aside className="persona-config-aside">

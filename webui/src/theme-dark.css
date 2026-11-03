@@ -686,3 +686,10 @@
 :root[data-theme="dark"] .rg-node-pin {
   stroke: var(--surface);
 }
+
+/* 人设模板卡选中态：原样式是浅色渐变，深色下文字看不清（群管理员人设页暴露出来） */
+:root[data-theme="dark"] .persona-preset-card.is-selected {
+  border-color: var(--brand);
+  background: var(--brand-50);
+  box-shadow: 0 0 0 3px var(--brand-100);
+}

@@ -48,7 +48,7 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | `/guest-access` | `guest-access.tsx` | `guest_access_routes.py` |
 | `/audits` | `audits.tsx` | `audits.py` |
 | `/guest`、`/guest/:groupId`（访客） | `guest-home.tsx` | 访客只读接口（`deps.py` 过滤） |
-| `/me`、`/me/groups/:groupId`、`/me/persona`、`/me/account`（QQ 个人账号） | `me/`：`MeHomePage.tsx` 主页与我管理的群；`MyGroupPage.tsx` 群关系洞悉（复用 `RelationsPanel readOnly`，默认洞察视图）/群功能设置（复用 `FeatureTable`），标签在 URL `tab`；`MyPersonaPage.tsx` 私聊人设（复用 `PersonaCardForm`）；`MyAccountPage.tsx` 改密码/退出所有设备；`me-meta.ts` 纯逻辑（密码规则镜像后端 `webui_accounts.password_problem`）；`me-api.ts` 接口 | `self_service_routes.py`、关系只读接口 |
+| `/me`、`/me/groups/:groupId`、`/me/persona`、`/me/account`（QQ 个人账号） | `me/`：`MeHomePage.tsx` 主页与我管理的群；`MyGroupPage.tsx` 群管理（`GroupManagePanel.tsx`，子视图在 URL `manage.view`，写操作先 preview 再弹窗确认）/Agent 设置（复用 `AgentConfigPanel manager`）/群人设（复用 `PersonaPanel manager`：人设库只读、无试演）/群关系洞悉（复用 `RelationsPanel readOnly`，默认洞察视图）/群功能设置（复用 `FeatureTable`），标签在 URL `tab`，`groupManage.webui=false` 时只剩后两个；`MyPersonaPage.tsx` 私聊人设（复用 `PersonaCardForm`）；`MyAccountPage.tsx` 改密码/退出所有设备；`me-meta.ts` 纯逻辑（密码规则镜像后端 `webui_accounts.password_problem`）；`me-api.ts` 接口 | `self_service_routes.py`、关系只读接口 |
 | 登录 | `login.tsx`（运维/QQ 账号/访客三种；`?login=qq` 或上次用过的方式存在 `localStorage` 的 `yawnbot.login.mode`；QQ 账号含设置码设密码流程） | `auth_routes.py` |
 
 测试与源码同目录（`*.test.ts(x)`）。

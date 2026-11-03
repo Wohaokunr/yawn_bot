@@ -94,3 +94,29 @@ export function formatQqTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   return iso.replace("T", " ").slice(0, 16);
 }
+
+// ── 群管代办 ──────────────────────────────────────────────────────────
+
+/** 禁言时长快捷选项（分钟） */
+export const MUTE_PRESETS = [10, 30, 60, 360, 1440, 10080] as const;
+
+/** 分钟数 → “10 分钟 / 1 小时 / 1 天”，和后端 group_manage.format_minutes 一致 */
+export function manageMinutesLabel(minutes: number): string {
+  if (minutes > 0 && minutes % 1440 === 0) return `${minutes / 1440} 天`;
+  if (minutes > 0 && minutes % 60 === 0) return `${minutes / 60} 小时`;
+  return `${minutes} 分钟`;
+}
+
+const RESULT_META: Record<string, { label: string; color: string }> = {
+  success: { label: "成功", color: "success" },
+  failed: { label: "失败", color: "error" },
+  denied: { label: "被拒", color: "warning" },
+};
+
+export function manageResultMeta(result: string): { label: string; color: string } {
+  return RESULT_META[result] ?? { label: result, color: "default" };
+}
+
+export function manageSourceLabel(source: string): string {
+  return source === "private" ? "私聊" : source === "webui" ? "网页" : source;
+}

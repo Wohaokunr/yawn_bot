@@ -86,8 +86,18 @@ from ..yawn_agent.tools import (
 from .agent_route_helpers import is_guest_view as _is_guest_view
 from .agent_route_helpers import memory_privacy_clauses as _memory_privacy_clauses
 from .config import API_PATH
-from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
+from .deps import (
+    AdminOrManagerReadSession,
+    AdminReadSession,
+    AdminWriteSession,
+    GroupAgentReadSession,
+    GroupAgentWriteSession,
+    GroupViewSession,
+    ok,
+    page_params,
+)
 from .hub import hub
+from .manager_audit import note_manager_change
 from .route_helpers import check_version, optimistic_write_lock, require_group
 from .route_models import (
     AgentConfigPatch,
@@ -178,7 +188,7 @@ async def _save_group_card(
 
 @router.get("/agent/groups/{group_id}/persona")
 async def get_agent_persona(
-    group_id: int, _session: AdminReadSession
+    group_id: int, _session: GroupAgentReadSession
 ) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
@@ -188,19 +198,24 @@ async def get_agent_persona(
 
 @router.put("/agent/groups/{group_id}/persona")
 async def put_agent_persona(
-    group_id: int, body: PersonaPatch, _session: AdminWriteSession
+    group_id: int, body: PersonaPatch, session: GroupAgentWriteSession
 ) -> dict[str, Any]:
     _require_safe_card(body.card)
-    return ok(
-        await _save_group_card(
-            group_id, body.card, version=body.version, enabled=body.enabled
-        )
+    result = await _save_group_card(
+        group_id, body.card, version=body.version, enabled=body.enabled
     )
+    note_manager_change(
+        session,
+        group_id,
+        "agent_persona",
+        detail=f"{'本群自定义' if body.enabled else '跟随全局'}：{body.card.name or '未命名'}",
+    )
+    return ok(result)
 
 
 @router.post("/agent/groups/{group_id}/persona/apply-template")
 async def apply_agent_persona_template(
-    group_id: int, body: PersonaApplyTemplateBody, _session: AdminWriteSession
+    group_id: int, body: PersonaApplyTemplateBody, session: GroupAgentWriteSession
 ) -> dict[str, Any]:
     """复制人设库里的一张卡到本群，并切换为本群自定义。"""
 
@@ -210,13 +225,18 @@ async def apply_agent_persona_template(
         except PersonaLibraryError as exc:
             raise _library_http_error(exc) from exc
         card = template_card(template)
-    return ok(await _save_group_card(group_id, card, version=body.version, enabled=True))
+        template_name = str(template.name)
+    result = await _save_group_card(group_id, card, version=body.version, enabled=True)
+    note_manager_change(
+        session, group_id, "agent_persona", detail=f"套用人设库：{template_name}"
+    )
+    return ok(result)
 
 
 @router.delete("/agent/groups/{group_id}/persona")
 async def reset_agent_persona(
     group_id: int,
-    _session: AdminWriteSession,
+    session: GroupAgentWriteSession,
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> dict[str, Any]:
     changed = False
@@ -236,6 +256,7 @@ async def reset_agent_persona(
             await db.refresh(row)
         result = serialize_persona(row, group_id)
     if changed:
+        note_manager_change(session, group_id, "agent_persona", detail="恢复默认人设")
         await hub.notify_change("agent_persona", str(group_id), group_id=group_id)
     return ok(result)
 
@@ -256,7 +277,7 @@ async def _library_changed(*, global_changed: bool) -> None:
 
 
 @router.get("/agent/persona-library")
-async def list_persona_library(_session: AdminReadSession) -> dict[str, Any]:
+async def list_persona_library(_session: AdminOrManagerReadSession) -> dict[str, Any]:
     async with get_session() as db:
         try:
             rows = await list_templates(db)

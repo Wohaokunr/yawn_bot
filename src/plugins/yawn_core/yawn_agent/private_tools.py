@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, PLR0911, PLR0912, TID252, TC003, TRY003, RUF001
+# ruff: noqa: E501, C901, PLR0911, PLR0912, TID252, TC003, TRY003, RUF001, PERF203, TRY300
 """私聊 Agent 的工具：全部只作用于**当前私聊的这位用户本人**。
 
 没有任何工具接受 user_id；群相关的工具只能选用户本人活跃所在的群，读 Agent 数据
@@ -526,6 +526,45 @@ ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
 )
+# 群管代办（group_manage）：只给数据库里当群主/管理员的人；每次执行都实时确认他和 Bot 的身份。
+MANAGE_ACTIONS = (
+    "groups", "members", "muted", "notices", "audit",
+    "mute", "unmute", "whole_mute", "announce", "delete_notice", "send", "todo",
+    "todo_done", "todo_cancel", "essence", "unessence", "recall", "card", "title",
+    "kick", "rename", "confirm", "cancel",
+)
+MANAGE_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "group_manage",
+        "替他管理他当群主/管理员、且你也是管理员的群（群里实时核对两边身份，不够就会被拒）。"
+        "查：groups 他能管哪些群和能做什么；members 找成员（query 写名字/QQ）；muted 谁在禁言；notices 群公告；audit 最近的操作记录。"
+        "做：mute 禁言（member + minutes）/unmute 解禁；whole_mute 全员禁言（enable）；announce 发群公告（content，可 pinned 置顶、confirm_required 要群员确认）；"
+        "delete_notice 删公告（notice_id）；send 以你的身份在群里发一句（text）；todo 发一条并设为群待办（text）；todo_done/todo_cancel 完成/取消待办（message_id）；"
+        "essence/unessence 设/取消精华（message_id，只限你代发的）；recall 撤回你代发的（message_id）；card 改群名片（member + text，空=清空）；title 专属头衔；kick 踢人（reject 拒绝再加群）；rename 改群名（text）。"
+        "很多操作会先返回 needs_confirm 和 summary：把 summary 原样问他，等他下一条回复同意后再用 confirm + confirm_id 执行；他不同意或改主意就 cancel。"
+        "绝不替他确认，也别在他没开口要时主动管群；管理员不能处置群主和其他管理员。group 写群名或群号，只有一个群时可省略",
+        {
+            "action": {"type": "string", "enum": list(MANAGE_ACTIONS)},
+            "group": {"type": "string", "minLength": 1, "maxLength": 60, "description": "群名（可以只写一部分）或群号"},
+            "member": {"type": "string", "minLength": 1, "maxLength": 40, "description": "成员群名片/昵称/QQ 号"},
+            "query": {"type": "string", "maxLength": 40},
+            "minutes": {"type": "integer", "minimum": 1, "maximum": 43200, "description": "禁言分钟数"},
+            "enable": {"type": "boolean"},
+            "content": {"type": "string", "minLength": 1, "maxLength": 600, "description": "公告正文"},
+            "text": {"type": "string", "maxLength": 500, "description": "要发的消息/待办/群名片/头衔/新群名"},
+            "pinned": {"type": "boolean"},
+            "confirm_required": {"type": "boolean"},
+            "reject": {"type": "boolean"},
+            "notice_id": {"type": "string", "maxLength": 128},
+            "message_id": {"type": "string", "maxLength": 24},
+            "confirm_id": {"type": "string", "maxLength": 12},
+            "reason": {"type": "string", "maxLength": 80, "description": "他说的理由（记进操作记录）"},
+        },
+        ("action",),
+        writes=True,
+    ),
+)
+MANAGE_NAMES = frozenset(tool.name for tool in MANAGE_TOOLS)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
@@ -533,6 +572,7 @@ ALL_TOOLS: tuple[PrivateTool, ...] = (
     + EXTRA_TOOLS
     + PERSONA_TOOLS
     + ACCOUNT_TOOLS
+    + MANAGE_TOOLS
     + COMPUTER_TOOLS
     + TASK_TOOLS
 )
@@ -543,9 +583,13 @@ WRITE_TOOLS = frozenset(tool.name for tool in ALL_TOOLS if tool.writes)
 
 
 def tool_schemas(
-    *, is_superuser: bool = False, computer: bool = False, tasks: bool = False
+    *,
+    is_superuser: bool = False,
+    computer: bool = False,
+    tasks: bool = False,
+    manage: bool = False,
 ) -> list[dict[str, Any]]:
-    """本轮给模型的工具；虚拟电脑和小助手任务只在可用时出现。"""
+    """本轮给模型的工具；虚拟电脑、小助手任务、群管代办只在可用时出现。"""
 
     # 能放后台时把派活工具排在最前面：模型更容易想到“交出去”，而不是自己一路调工具。
     ordered = (
@@ -559,6 +603,7 @@ def tool_schemas(
         if (is_superuser or tool.name not in SUPERUSER_TOOLS)
         and (computer or tool.name not in COMPUTER_NAMES)
         and (tasks or tool.name not in TASK_NAMES)
+        and (manage or tool.name not in MANAGE_NAMES)
     ]
 
 
@@ -1105,11 +1150,17 @@ async def execute_private_tool(  # noqa: PLR0915
             result = await _webui_account_tool(args, ctx)
         elif name == "webui_onboarding":
             result = await _webui_onboarding_tool(args, ctx)
+        elif name in MANAGE_NAMES:
+            result = await _group_manage_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
         return tool_error_payload(exc)
     ctx.succeeded.add(name)
+    if name in MANAGE_NAMES and isinstance(result, dict) and result.get("done"):
+        # 声明核验：只有真正执行了（不是“待确认”）才算办成
+        ctx.succeeded.add(f"{name}.done")
+        ctx.succeeded.add(f"{name}.{result.get('action')}")
     if name in _ORGANIZER_ACTIONS and str(args.get("action") or "") in _ORGANIZER_ACTIONS[name]:
         # 声明核验按“工具.动作”区分：查了待办不能说“已经帮你加上了”
         ctx.succeeded.add(f"{name}.{args['action']}")
@@ -1413,6 +1464,105 @@ def _persona_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, An
     }
 
 
+_MANAGE_CODES = {
+    "permission_denied": ERROR_PERMISSION,
+    "quota_exceeded": ERROR_QUOTA,
+    "not_found": ERROR_NOT_FOUND,
+    "invalid_args": ERROR_INVALID_ARGS,
+    "ambiguous": ERROR_INVALID_ARGS,
+    "needs_confirm": ERROR_PERMISSION,
+    "unsupported": "unsupported",
+    "unavailable": "upstream",
+    "tool_failed": "upstream",
+}
+
+
+async def _manage_group(ctx: PrivateToolContext, raw: str | None) -> tuple[int, str]:
+    from . import group_manage as gm
+
+    candidates = await gm.candidate_groups(ctx.session, ctx.user_id)
+    if not candidates:
+        raise ToolError("他不是任何一个你所在群的群主或管理员", code=ERROR_PERMISSION, hint="照实告诉他")
+    if not raw:
+        if len(candidates) == 1:
+            return candidates[0][0], candidates[0][1]
+        names = "、".join(name for _gid, name, _role in candidates[:6])
+        raise ToolError(f"他管着好几个群：{names}", code=ERROR_INVALID_ARGS, hint="问他是哪个群，再用 group 指定")
+    needle = raw.strip().casefold()
+    if needle.isdigit():
+        hits = [row for row in candidates if str(row[0]) == needle]
+    else:
+        hits = [row for row in candidates if row[1].casefold() == needle] or [
+            row for row in candidates if needle in row[1].casefold()
+        ]
+    if not hits:
+        raise ToolError(f"他管理的群里没有「{raw}」", code=ERROR_NOT_FOUND, hint="用 groups 看他能管哪些群")
+    if len(hits) > 1:
+        names = "、".join(row[1] for row in hits[:5])
+        raise ToolError(f"有多个群匹配「{raw}」：{names}", code=ERROR_INVALID_ARGS, hint="问他具体是哪个群")
+    return hits[0][0], hits[0][1]
+
+
+async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
+    """群管代办。权限、确认、额度、审计全在 group_manage，这里只做群匹配和错误翻译。"""
+
+    from . import group_manage as gm
+
+    action = str(args.get("action") or "groups")
+    group_id: int | None = None
+    try:
+        if action == "cancel":
+            count = gm.cancel_pending(ctx.user_id, str(args.get("confirm_id") or "") or None)
+            return {"cancelled": count, "note": "已作废，没有执行" if count else "没有待确认的操作"}
+        if action == "groups":
+            rows = []
+            for gid, name, _role in (await gm.candidate_groups(ctx.session, ctx.user_id))[:8]:
+                try:
+                    access = await gm.verify(ctx.bot, gid, ctx.user_id, source="private")
+                    rows.append({"group": name, **access.as_dict()})
+                except gm.ManageError as exc:
+                    rows.append({"group": name, "group_id": str(gid), "unavailable": str(exc)})
+            waiting = [
+                {"confirm_id": item.id, "summary": item.summary} for item in gm.pending_for(ctx.user_id)
+            ]
+            return {"groups": rows, "waiting_confirm": waiting, "used_today": gm.used_today(ctx.user_id)}
+        if action == "confirm":
+            pending = gm.take_pending(ctx.user_id, str(args.get("confirm_id") or ""))
+            group_id = pending.group_id
+            access = await gm.verify(ctx.bot, pending.group_id, ctx.user_id, source="private")
+            result = await gm.execute(
+                access, pending.action, pending.args, source="private", actor_name=ctx.nickname
+            )
+            return {**result, "summary": pending.summary, "group": pending.group_name}
+        group_id, group_name = await _manage_group(ctx, args.get("group"))
+        access = await gm.verify(ctx.bot, group_id, ctx.user_id, source="private")
+        if action == "members":
+            members = await gm.member_list(ctx.bot, group_id)
+            return {"group": group_name, "members": gm.search_members(members, args.get("query"), limit=15), "total": len(members)}
+        if action == "muted":
+            return {"group": group_name, "muted": (await gm.list_muted(access))[:30]}
+        if action == "notices":
+            return {"group": group_name, "notices": (await gm.list_notices(access))[:10]}
+        if action == "audit":
+            return {"group": group_name, "recent": gm.audit_rows(group_id, limit=10)}
+        summary, normalized = await gm.describe(access, action, args, group_name)
+        if action in access.policy["confirm_actions"]:
+            pending = gm.create_pending(ctx.user_id, group_id, group_name, action, normalized, summary)
+            return {
+                "needs_confirm": True,
+                "confirm_id": pending.id,
+                "summary": summary,
+                "expires_in_seconds": gm.confirm_seconds(),
+                "note": "还没执行。把 summary 原样问他要不要做；等他下一条回复同意后再用 confirm 执行，不同意就 cancel",
+            }
+        result = await gm.execute(access, action, normalized, source="private", actor_name=ctx.nickname)
+        return {**result, "summary": summary, "group": group_name}
+    except gm.ManageError as exc:
+        if group_id is not None and exc.code == "permission_denied":
+            gm.deny(group_id, ctx.user_id, action, "private", str(exc))
+        raise ToolError(str(exc), code=_MANAGE_CODES.get(exc.code, "upstream"), hint=exc.hint) from exc
+
+
 async def _execute_extra(
     name: str, args: dict[str, Any], ctx: PrivateToolContext
 ) -> dict[str, Any]:
@@ -1451,6 +1601,8 @@ __all__ = [
     "COMPUTER_NAMES",
     "COMPUTER_TOOLS",
     "EXTRA_TOOLS",
+    "MANAGE_NAMES",
+    "MANAGE_TOOLS",
     "PERSONA_TOOLS",
     "PRIVATE_TOOLS",
     "SUPERUSER_TOOLS",

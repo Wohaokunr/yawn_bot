@@ -67,8 +67,17 @@ from ..yawn_agent.tools import (
 from .agent_route_helpers import is_guest_view as _is_guest_view
 from .agent_route_helpers import memory_privacy_clauses as _memory_privacy_clauses
 from .config import API_PATH
-from .deps import AdminReadSession, AdminWriteSession, GroupViewSession, ok, page_params
+from .deps import (
+    AdminReadSession,
+    AdminWriteSession,
+    GroupAgentReadSession,
+    GroupAgentWriteSession,
+    GroupViewSession,
+    ok,
+    page_params,
+)
 from .hub import hub
+from .manager_audit import note_manager_change
 from .route_helpers import check_version, optimistic_write_lock, require_group
 from .route_models import (
     AgentConfigPatch,
@@ -103,7 +112,9 @@ router = APIRouter(prefix=API_PATH)
 
 
 @router.get("/agent/groups/{group_id}/config")
-async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[str, Any]:
+async def get_agent_config(
+    group_id: int, _session: GroupAgentReadSession
+) -> dict[str, Any]:
     async with get_session() as db:
         await require_group(db, group_id)
         row = await db.get(GroupAgentConfig, group_id)
@@ -122,7 +133,7 @@ async def get_agent_config(group_id: int, _session: AdminReadSession) -> dict[st
 
 @router.patch("/agent/groups/{group_id}/config")
 async def patch_agent_config(
-    group_id: int, body: AgentConfigPatch, _session: AdminWriteSession
+    group_id: int, body: AgentConfigPatch, session: GroupAgentWriteSession
 ) -> dict[str, Any]:
     async with optimistic_write_lock, get_session() as db:
         await require_group(db, group_id)
@@ -182,6 +193,12 @@ async def patch_agent_config(
             close_group_conversations(group_id, reason="WebUI 关闭 Agent 总开关")
         elif updates.get("short_conversation_enabled") is False:
             close_group_conversations(group_id, reason="WebUI 关闭短会话续聊")
+    note_manager_change(
+        session,
+        group_id,
+        "agent_config",
+        detail="、".join(sorted(updates)) or "trigger_mode",
+    )
     await hub.notify_change("agent_config", str(group_id), group_id=group_id)
     if "enabled" in updates:
         await hub.notify_change(

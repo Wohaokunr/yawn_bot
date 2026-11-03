@@ -5,21 +5,30 @@ import { api } from "../api";
 import type { AgentConfig, GroupSummary } from "../types";
 import { downloadText, parseConfigImport, pickPortableConfig, type PortableAgentConfig, serializeConfigExport } from "./config-transfer";
 
+type GroupOption = Pick<GroupSummary, "groupId" | "groupName">;
+
+// 默认从管理台群列表搜；群管理员（个人账号）只能从自己管理的群里选。
+function adminGroups(search: string, signal: AbortSignal): Promise<GroupOption[]> {
+  return api<GroupSummary[]>(`/groups?page=1&pageSize=20&search=${encodeURIComponent(search)}`, { signal }).then((response) => response.data);
+}
+
 // 运行配置的导出 / 导入 / 从其它群复制：都只填进表单草稿，管理员确认后再保存。
 export function ConfigTransferBar({
   groupId,
   getValues,
   onApply,
+  loadGroups = adminGroups,
 }: {
   groupId: string;
   getValues: () => Record<string, unknown>;
   onApply: (values: PortableAgentConfig, source: string) => void;
+  loadGroups?: (search: string, signal: AbortSignal) => Promise<GroupOption[]>;
 }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const fileRef = useRef<HTMLInputElement>(null);
   const [copyOpen, setCopyOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [groups, setGroups] = useState<GroupSummary[]>([]);
+  const [groups, setGroups] = useState<GroupOption[]>([]);
   const [selected, setSelected] = useState<string | undefined>();
   const [copying, setCopying] = useState(false);
 
@@ -27,15 +36,15 @@ export function ConfigTransferBar({
     if (!copyOpen) return undefined;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      api<GroupSummary[]>(`/groups?page=1&pageSize=20&search=${encodeURIComponent(search)}`, { signal: controller.signal })
-        .then((response) => setGroups(response.data.filter((row) => row.groupId !== groupId)))
+      loadGroups(search, controller.signal)
+        .then((rows) => setGroups(rows.filter((row) => row.groupId !== groupId)))
         .catch(() => undefined);
     }, 200);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [copyOpen, groupId, search]);
+  }, [copyOpen, groupId, search, loadGroups]);
 
   const exportConfig = () => {
     downloadText(`agent-config-${groupId}.json`, serializeConfigExport(groupId, getValues()));

@@ -312,6 +312,22 @@ PRIVATE_AGENT_DATA_DIR=
 # 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json
 PRIVATE_AGENT_STATE_PATH=
 
+# ── 群管代办（群主/管理员私聊或网页让 Bot 代办群管理）────────────────────────
+# 群主/管理员（Bot 也是群主/管理员时）可以私聊 Bot 或在网页上让它代为禁言、发公告、设群待办等
+GROUP_MANAGE_ENABLED=true
+# 群管理员登录网页后可以改自己管理的群的 Agent 配置和群人设，并在网页上做群管理
+GROUP_MANAGE_WEBUI=true
+# 每人每天最多代办几次写操作（0 表示不限）
+GROUP_MANAGE_DAILY=60
+# 群策略里“一次最多禁言多久”的硬上限（分钟，QQ 最长 43200 即 30 天）
+GROUP_MANAGE_MAX_MUTE_MINUTES=43200
+# 私聊里待确认的操作多久没确认就作废（秒）
+GROUP_MANAGE_CONFIRM_SECONDS=300
+# 不允许通过 Bot 禁言/踢出/改名片 Bot 的超级管理员
+GROUP_MANAGE_PROTECT_SUPERUSERS=true
+# 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
+GROUP_MANAGE_DATA_DIR=
+
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 
 # RPG 是否启用 AI 叙事/工具流程；false 为确定性模式
