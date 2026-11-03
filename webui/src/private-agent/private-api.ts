@@ -5,6 +5,59 @@ import type { PersonaCard, PersonaPreset } from "../types";
 
 export type PrivateScope = "global" | "user";
 
+// ── 群聊记忆 ↔ 私聊记忆打通 ──
+
+export interface MemoryLinkEvent {
+  at: string;
+  what: string;
+  key?: string;
+  keys?: string[];
+  keyword?: string;
+  group?: string;
+  groups?: string[];
+  on?: boolean;
+  by?: string;
+  user_id?: string;
+}
+
+export interface MemoryLinkUserRow {
+  user_id: string;
+  shares: string[];
+  share_groups: number;
+  muted_groups: number;
+  groups_in_private: boolean;
+  tombstones: number;
+}
+
+export interface MemoryLinkOverview {
+  enabled: boolean;
+  share_enabled: boolean;
+  group_self_facts: boolean;
+  tombstone_days: number;
+  group_fact_limit: number;
+  totals: { sharing: number; muting: number; forgetting: number };
+  users: MemoryLinkUserRow[];
+  events: MemoryLinkEvent[];
+}
+
+export interface MemoryLinkTombstone {
+  index: number;
+  what: string;
+  keyword: string;
+  scope: string;
+  until: string;
+}
+
+export interface MemoryLinkUserDetail {
+  user_id: string;
+  settings: { groups_in_private: boolean; muted_groups: string[]; share_keys: string[]; share_groups: string[] };
+  tombstones: MemoryLinkTombstone[];
+  ledger: MemoryLinkEvent[];
+  private_facts: Array<{ key: string; label: string; content: string; source: string }>;
+  group_profile: Array<{ key: string; content: string; groups: string[]; self_told: boolean; as_of: string }>;
+  groups: Array<{ group_id: string; name: string; agent_readable: boolean; in_private: boolean; group_sees_shared: Array<{ label: string; content: string }> }>;
+}
+
 // ── 群聊 ↔ 私聊协作 ──
 export interface BridgeHandoff {
   id: string;
@@ -371,6 +424,15 @@ export const privateApi = {
   bridge: (signal?: AbortSignal) => data<BridgeOverview>(`${BASE}/bridge`, { signal }),
   bridgeUser: (userId: string, signal?: AbortSignal) =>
     data<BridgeUserDetail>(`${BASE}/bridge/users/${encodeURIComponent(userId)}`, { signal }),
+  memoryLink: (signal?: AbortSignal) => data<MemoryLinkOverview>(`${BASE}/memory-link`, { signal }),
+  memoryLinkUser: (userId: string, signal?: AbortSignal) =>
+    data<MemoryLinkUserDetail>(`${BASE}/memory-link/users/${encodeURIComponent(userId)}`, { signal }),
+  memoryLinkUnshare: (userId: string) =>
+    data<MemoryLinkUserDetail>(`${BASE}/memory-link/users/${encodeURIComponent(userId)}/unshare`, json("POST")),
+  memoryLinkReset: (userId: string) =>
+    data<MemoryLinkUserDetail>(`${BASE}/memory-link/users/${encodeURIComponent(userId)}/reset`, json("POST")),
+  memoryLinkDropTombstone: (userId: string, index: number) =>
+    data<MemoryLinkUserDetail>(`${BASE}/memory-link/users/${encodeURIComponent(userId)}/tombstones/${index}`, json("DELETE")),
   rhythmStats: (userId?: string | null, signal?: AbortSignal) =>
     data<RhythmStats>(`${BASE}/rhythm${userId ? `?userId=${encodeURIComponent(userId)}` : ""}`, { signal }),
   captures: (signal?: AbortSignal) => data<CaptureStatus & { users: CaptureUser[] }>(`${BASE}/captures`, { signal }),

@@ -347,6 +347,16 @@ AGENT_BRIDGE_REPLY_LIMIT=20
 AGENT_BRIDGE_REPLY_BATCH_SECONDS=20
 # 转告/提问发到群里前要他确认
 AGENT_BRIDGE_CONFIRM=true
+# 群聊记忆 ↔ 私聊记忆打通：忘掉的事两边都不再提、可静音某个群、私聊查得到流动记录
+MEMORY_LINK_ENABLED=true
+# 他明确允许时，把某些类别的私聊事实（称呼、爱好……）也给群里的 Bot 看
+MEMORY_LINK_SHARE=true
+# 让 Bot 忘掉的事多少天内不会被自动整理记回来
+MEMORY_LINK_TOMBSTONE_DAYS=180
+# 群里每位相关成员最多带几条他允许共享的私聊事实
+MEMORY_LINK_GROUP_FACTS=4
+# 群里亲口让 Bot 记住的关于自己的事，私聊里也记着
+MEMORY_LINK_GROUP_SELF_FACTS=true
 
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 

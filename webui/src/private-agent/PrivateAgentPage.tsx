@@ -1,9 +1,10 @@
-import { FileSearchOutlined, FileTextOutlined, SmileOutlined, SwapOutlined } from "@ant-design/icons";
+import { FileSearchOutlined, FileTextOutlined, LinkOutlined, SmileOutlined, SwapOutlined } from "@ant-design/icons";
 import { Tabs } from "antd";
 import { useSearchParams } from "react-router-dom";
 import { updateSearchParams } from "../sandbox/sandbox-meta";
 import { BridgeTab } from "./BridgeTab";
 import { CapturesTab } from "./CapturesTab";
+import { MemoryLinkTab } from "./MemoryLinkTab";
 import { PersonaTab } from "./PersonaTab";
 import { PromptsTab } from "./PromptsTab";
 import { cleanUserId, parsePrivateTab, type PrivateFilter, type PrivateTab } from "./private-meta";
@@ -23,7 +24,7 @@ export function PrivateAgentPage(): React.JSX.Element {
   return <div className="sbx-page pa-page">
     <div className="sbx-heading">
       <h2 className="sbx-title">私聊 Agent</h2>
-      <p>私聊里发给模型的提示词（全局或只给某位用户改）、每位用户自己的人设、最近真实发出的请求，以及群聊和私聊之间的接力记录</p>
+      <p>私聊里发给模型的提示词（全局或只给某位用户改）、每位用户自己的人设、最近真实发出的请求，以及群聊和私聊之间的接力记录和记忆打通</p>
     </div>
     <Tabs
       activeKey={tab}
@@ -46,6 +47,7 @@ export function PrivateAgentPage(): React.JSX.Element {
         { key: "persona", label: <span><SmileOutlined /> 人设</span>, children: <PersonaTab userId={userId} onPickUser={pickUser} /> },
         { key: "captures", label: <span><FileSearchOutlined /> 最近请求</span>, children: <CapturesTab userId={userId} onPickUser={pickUser} onOpenSection={openSection} /> },
         { key: "bridge", label: <span><SwapOutlined /> 群聊协作</span>, children: <BridgeTab userId={userId} onPickUser={pickUser} /> },
+        { key: "memory", label: <span><LinkOutlined /> 记忆打通</span>, children: <MemoryLinkTab userId={userId} onPickUser={pickUser} /> },
       ]}
     />
   </div>;

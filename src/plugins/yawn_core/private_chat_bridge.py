@@ -164,6 +164,18 @@ class PrivateAgentConfig(BaseModel):
     agent_bridge_reply_batch_seconds: float = Field(default=20.0, ge=0, le=600)
     # 转告/提问发到群里之前要他确认（他发来下一条消息后才能确认）
     agent_bridge_confirm: bool = True
+    # ── 群聊记忆 ↔ 私聊记忆打通（yawn_agent/memory_link.py）──
+    # 总开关：忘掉的事两边都不再提/记回来、可静音某个群、私聊里查得到流动记录
+    memory_link_enabled: bool = True
+    # 他明确允许时，某些类别的私聊事实（称呼、爱好……）群里的我也知道；
+    # 关掉时他的设置保留但暂不生效
+    memory_link_share: bool = True
+    # 他让我忘掉的事，多少天内自动整理不会再记回来
+    memory_link_tombstone_days: int = Field(default=180, ge=1, le=3650)
+    # 群里每位相关成员最多带几条他允许共享的私聊事实
+    memory_link_group_facts: int = Field(default=4, ge=0, le=7)
+    # 他在群里亲口让我记住的关于自己的事，私聊里也记着（单向：群 → 私聊）
+    memory_link_group_self_facts: bool = True
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

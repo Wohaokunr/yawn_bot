@@ -1,4 +1,4 @@
-# ruff: noqa: TID252, TC003, E501, C901, PLR0912, PLR0913, PLR0915
+# ruff: noqa: TID252, TC003, E501, C901, PLR0912, PLR0913, PLR0915, PLW2901
 """私聊 Agent 的上下文：Bot 对这位用户的了解，从签到、好感、群里的关系和记忆汇总。
 
 边界（与 AGENTS.md「私聊 Agent」一节一致）：
@@ -47,6 +47,9 @@ STABLE_KEYS = (
     "people_you_both_know",
     "group_happenings",
     "groups",
+    "names_in_groups",
+    "memory_conflicts",
+    "memory_rules",
 )
 MAX_PEOPLE = 6
 MAX_HAPPENINGS = 3
@@ -154,10 +157,27 @@ def _safe_text(text: object, limit: int = _FACT_CHARS) -> str | None:
     return value[:limit] or None
 
 
+# 能跨群合并的列表类画像（爱好可能分散在几个群里）。
+_PROFILE_LIST_KEYS = frozenset({"hobby", "preference", "dislike", "skill", "recurring_topic"})
+_PROFILE_LIST_MAX = 6
+
+
 async def group_profile_facts(
-    session: Any, user_id: int, group_ids: list[int], *, now: datetime
+    session: Any,
+    user_id: int,
+    group_ids: list[int],
+    *,
+    now: datetime,
+    link: Any = None,
 ) -> list[dict[str, Any]]:
-    """各群画像里关于本人的事实，按类别去重（显著性高者优先）。"""
+    """各群画像里关于本人的事实。
+
+    单值类别（称呼、近期状态……）按显著性取一条；列表类（爱好、喜好……）跨群合并去重，
+    不再“哪个群先到就只给哪个群的”。他让我忘掉的（``memory_link`` 墓碑）在私聊里不再提。
+    """
+
+    from .memory_hygiene import is_near_duplicate
+    from .memory_link import suppressed
 
     if not group_ids:
         return []
@@ -177,29 +197,50 @@ async def group_profile_facts(
         .scalars()
         .all()
     )
-    seen: set[str] = set()
-    facts: list[dict[str, Any]] = []
+    by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for row in rows:
         if row.expires_at is not None and row.expires_at < now:
             continue
         key = str(row.memory_key)
-        if key in seen:
-            continue
         content = _safe_text(row.content)
         if content is None:
             continue
-        seen.add(key)
-        facts.append(
-            {
+        if link is not None and suppressed(user_id, key, content, now=now, state=link):
+            continue
+        updated = row.updated_at or row.created_at
+        existing = by_key.get(key)
+        if existing is None:
+            if len(order) >= MAX_PROFILE_FACTS:
+                continue
+            by_key[key] = {
                 "key": key,
                 "content": content,
                 "group_id": int(row.group_id or 0),
                 "id": int(row.id or 0),
+                "ids": [int(row.id or 0)],
+                "group_ids": [int(row.group_id or 0)],
+                "self_told": row.source_kind == "agent",
+                "as_of": f"{updated:%Y-%m-%d}" if updated else "",
             }
-        )
-        if len(facts) >= MAX_PROFILE_FACTS:
-            break
-    return facts
+            order.append(key)
+            continue
+        if key not in _PROFILE_LIST_KEYS:
+            continue
+        parts = [part for part in existing["content"].split("、") if part.strip()]
+        added = False
+        for part in content.split("、"):
+            part = part.strip()
+            if part and not any(is_near_duplicate(part, item) for item in parts):
+                parts.append(part)
+                added = True
+        if added:
+            existing["content"] = "、".join(parts[:_PROFILE_LIST_MAX])[:_FACT_CHARS]
+            existing["ids"].append(int(row.id or 0))
+            if int(row.group_id or 0) not in existing["group_ids"]:
+                existing["group_ids"].append(int(row.group_id or 0))
+            existing["self_told"] = existing["self_told"] or row.source_kind == "agent"
+    return [by_key[key] for key in order]
 
 
 async def group_bonds(
@@ -274,6 +315,8 @@ def _fit(payload: dict[str, Any]) -> dict[str, Any]:
 
 # 超预算时先缩谁（越靠前越先缩）。
 _STABLE_TRIM = (
+    "names_in_groups",
+    "memory_conflicts",
     "group_happenings",
     "people_you_both_know",
     "group_profile",
@@ -432,7 +475,12 @@ _HAPPENING_DIGITS = re.compile(r"\d{5,}")
 
 
 async def group_happenings(
-    session: Any, groups: list[SharedGroup], *, now: datetime
+    session: Any,
+    groups: list[SharedGroup],
+    *,
+    now: datetime,
+    user_id: int | None = None,
+    link: Any = None,
 ) -> list[dict[str, Any]]:
     """可读的群最近几天发生了什么：每群取最新一条“可跨群分享”的公开摘要。
 
@@ -472,11 +520,17 @@ async def group_happenings(
         text = _safe_text(row.content, _HAPPENING_CHARS)
         if not text:
             continue
-        picked[group_id] = {
+        if link is not None and user_id and _text_forgotten(user_id, text, now, link):
+            continue
+        item: dict[str, Any] = {
             "group": readable[group_id].name,
             "day": str(row.memory_key).split(":", 1)[-1],
             "what": _HAPPENING_DIGITS.sub("[号码]", text),
         }
+        # 那天他也在场（摘要的相关成员里有他）：私聊里可以说“你们那天……”，而不是当新闻讲。
+        if user_id and int(user_id) in {int(uid) for uid in row.related_user_ids or []}:
+            item["you_were_there"] = True
+        picked[group_id] = item
     items = sorted(picked.values(), key=lambda item: (item["group"], item["day"]))
     return items[:MAX_HAPPENINGS]
 
@@ -489,6 +543,7 @@ async def recent_group_lines(
     now: datetime,
     limit: int,
     hours: int,
+    link: Any = None,
 ) -> list[dict[str, Any]]:
     """他最近在群里说过的几句话（只是他自己的话），私聊里能自然接上“你刚在群里说……”。"""
 
@@ -529,6 +584,8 @@ async def recent_group_lines(
         clean = _safe_text(raw, _LINE_CHARS)
         if not clean or clean in seen:
             continue
+        if link is not None and _text_forgotten(user_id, clean, now, link):
+            continue
         seen.add(clean)
         minutes = (now - received_at).total_seconds() / 60 if received_at else 0
         lines.append(
@@ -541,6 +598,88 @@ async def recent_group_lines(
         if len(lines) >= limit:
             break
     return lines
+
+
+def _text_forgotten(user_id: int, text: str, now: datetime, link: Any) -> bool:
+    from .memory_link import text_suppressed
+
+    return text_suppressed(user_id, text, now=now, state=link)
+
+
+def visible_groups(groups: list[SharedGroup], link: Any) -> list[SharedGroup]:
+    """私聊里能提的群：可读，且他本人没说“别在私聊提（这个）群的事”。"""
+
+    if link is None:
+        return list(groups)
+    return [
+        SharedGroup(
+            group_id=item.group_id,
+            name=item.name,
+            agent_readable=item.agent_readable and link.group_visible_in_private(item.group_id),
+            nickname=item.nickname,
+        )
+        for item in groups
+    ]
+
+
+_SINGLE_VALUE_KEYS = ("display_name", "preferred_address", "current_status")
+
+
+def resolve_call_them(
+    private_facts: list[dict[str, Any]],
+    assistant_style: dict[str, Any],
+    profile: list[dict[str, Any]],
+) -> str | None:
+    """他希望我怎么叫他：私聊里亲口说的 > 个人助理里设的 > 群里亲口说的称呼。"""
+
+    for item in private_facts:
+        if item.get("key") == "preferred_address" and item.get("content"):
+            return str(item["content"])[:20]
+    if assistant_style.get("call_me"):
+        return str(assistant_style["call_me"])[:20]
+    for item in profile:
+        if item.get("key") == "preferred_address" and item.get("self_told"):
+            return str(item["content"])[:20]
+    return None
+
+
+def merge_with_private(
+    profile: list[dict[str, Any]], private_facts: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """群画像与私聊事实合并：私聊里亲口说的优先。
+
+    - 内容和私聊事实近似重复的群画像不再重复给；
+    - 单值类别（称呼、近期状态）私聊里有就不再给群里的版本，不同时记一条 conflict，
+      让模型知道“群里还记着旧说法”，必要时问一句；
+    - 列表类去掉已在私聊事实里的那几项。
+    """
+
+    from .memory_hygiene import is_near_duplicate
+
+    by_key = {str(item.get("key")): str(item.get("content") or "") for item in private_facts}
+    kept: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    for item in profile:
+        key = str(item["key"])
+        content = str(item["content"])
+        private = by_key.get(key)
+        if any(is_near_duplicate(content, other) or content == other for other in by_key.values()):
+            continue
+        if private is not None and key in _SINGLE_VALUE_KEYS:
+            conflicts.append({"key": key, "private": private[:40], "group": content[:40], "group_id": item["group_id"]})
+            continue
+        if private is not None and key in _PROFILE_LIST_KEYS:
+            private_parts = [p for p in private.split("、") if p.strip()]
+            parts = [
+                part
+                for part in content.split("、")
+                if part.strip() and not any(is_near_duplicate(part, p) for p in private_parts)
+            ]
+            if not parts:
+                continue
+            item = {**item, "content": "、".join(parts)}
+        kept.append(item)
+    return kept, conflicts
 
 
 LAST_CHAT_GAP_MINUTES = 30
@@ -596,32 +735,45 @@ async def build_private_context(
 
     user = await session.get(BotUser, user_id)
     groups = await shared_groups(session, user_id)
+    link = _link_state(user_id, now)
+    # 群里来的东西只读“私聊里能提”的群；groups 本身（群名、签到、工具选群）照旧用全部。
+    seen_groups = visible_groups(groups, link)
     snap = await affinity.snapshot(session, user_id, now=now)
     statuses = await checkin_overview(session, user_id, now=now)
-    readable_ids = [item.group_id for item in groups if item.agent_readable]
-    profile = await group_profile_facts(session, user_id, readable_ids, now=now)
-    bonds = await group_bonds(session, user_id, bot_id, groups, now=now)
+    readable_ids = [item.group_id for item in seen_groups if item.agent_readable]
+    profile = await group_profile_facts(session, user_id, readable_ids, now=now, link=link)
+    bonds = await group_bonds(session, user_id, bot_id, seen_groups, now=now)
     private_facts = [
         fact_view(row) for row in await list_facts(session, user_id, now=now)
     ]
     group_memory = _group_memory_enabled()
     people = (
-        await people_you_both_know(session, user_id, groups, now=now)
+        await people_you_both_know(session, user_id, seen_groups, now=now)
         if group_memory
         else []
     )
-    happenings = await group_happenings(session, groups, now=now) if group_memory else []
+    happenings = (
+        await group_happenings(session, seen_groups, now=now, user_id=user_id, link=link)
+        if group_memory
+        else []
+    )
     lines_limit, lines_hours = _group_lines_config()
     recent_lines = (
         await recent_group_lines(
-            session, user_id, groups, now=now, limit=lines_limit, hours=lines_hours
+            session,
+            user_id,
+            seen_groups,
+            now=now,
+            limit=lines_limit,
+            hours=lines_hours,
+            link=link,
         )
         if group_memory
         else []
     )
-    # 私聊里亲口说过的，群画像里同样内容的就不再重复。
-    private_contents = {item["content"] for item in private_facts}
-    profile = [item for item in profile if item["content"] not in private_contents]
+    # 私聊里亲口说过的优先：同样内容的群画像不再重复，单值类别冲突时记下来。
+    profile_all = list(profile)
+    profile, conflicts = merge_with_private(profile, private_facts)
     _record_injected(profile, now)
 
     payload: dict[str, Any] = {
@@ -651,15 +803,18 @@ async def build_private_context(
         ]
     if bonds:
         payload["bonds_in_groups"] = bonds
+    name_by_id = {item.group_id: item.name for item in groups}
     if profile:
-        name_by_id = {item.group_id: item.name for item in groups}
-        payload["group_profile"] = [
+        payload["group_profile"] = [_profile_view(item, name_by_id) for item in profile]
+    if conflicts:
+        payload["memory_conflicts"] = [
             {
-                "key": item["key"],
-                "content": item["content"],
+                "what": _label(item["key"]),
+                "private_says": item["private"],
+                "group_remembers": item["group"],
                 "group": name_by_id.get(item["group_id"], ""),
             }
-            for item in profile
+            for item in conflicts
         ]
     if people:
         payload["people_you_both_know"] = people
@@ -668,6 +823,12 @@ async def build_private_context(
     if groups:
         # 取最近活跃的几个群，但按群名排序：活跃顺序每说一句话都可能变，会击穿前缀缓存。
         payload["groups"] = sorted(item.name for item in groups[:MAX_GROUPS])
+        names_there = _names_in_groups_view(payload["user"]["name"], groups[:MAX_GROUPS])
+        if names_there:
+            payload["names_in_groups"] = names_there
+    rules = _link_digest(link, groups)
+    if rules:
+        payload["memory_rules"] = rules
     payload["time_of_day"] = time_of_day(now)
     if recent_lines:
         payload["recent_in_groups"] = recent_lines
@@ -681,12 +842,66 @@ async def build_private_context(
     if tasks:
         payload["tasks"] = tasks
     assistant = _assistant_digest(user_id, now)
+    style = (assistant.get("chat_style") or {}) if assistant else {}
+    call_them = resolve_call_them(private_facts, style, profile_all)
+    if call_them:
+        payload["user"]["call_them"] = call_them
     if assistant:
-        style = assistant.get("chat_style") or {}
-        if style.get("call_me"):
-            payload["user"]["call_them"] = style["call_me"]
         payload["assistant"] = [assistant]
     return PrivateContext(payload=_fit(payload), groups=groups, queries=8)
+
+
+def _label(key: str) -> str:
+    from ..private_chat_bridge import PRIVATE_MEMORY_LABELS
+
+    return PRIVATE_MEMORY_LABELS.get(key, key)
+
+
+def _profile_view(item: dict[str, Any], name_by_id: dict[int, str]) -> dict[str, Any]:
+    """群画像条目：哪个群（合并的给几个群名）、他亲口说的还是我看出来的、记到哪天为止。"""
+
+    group_names = [name_by_id.get(gid, "") for gid in item.get("group_ids") or [item["group_id"]]]
+    view: dict[str, Any] = {
+        "key": item["key"],
+        "content": item["content"],
+        "group": "、".join(sorted(name for name in group_names if name)),
+    }
+    if item.get("self_told"):
+        view["he_told_you"] = True
+    if item.get("as_of"):
+        view["as_of"] = item["as_of"]
+    return view
+
+
+def _names_in_groups_view(name: str, groups: list[SharedGroup]) -> list[dict[str, str]]:
+    """他在各群的群名片（和私聊里的名字不同时才给），私聊里提群里的事时对得上人。"""
+
+    views = []
+    for item in sorted(groups, key=lambda g: g.name):
+        card = _safe_text(item.nickname, 20)
+        if card and card != name:
+            views.append({"group": item.name, "card": card})
+    return views[:MAX_GROUPS]
+
+
+def _link_state(user_id: int, now: datetime) -> Any:
+    from . import memory_link
+
+    try:
+        return memory_link.load(user_id, now=now) if memory_link.enabled() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _link_digest(link: Any, groups: list[SharedGroup]) -> dict[str, Any]:
+    if link is None:
+        return {}
+    from .memory_link import prompt_digest
+
+    try:
+        return prompt_digest(link, groups)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _group_memory_enabled() -> bool:
@@ -786,7 +1001,10 @@ __all__ = [
     "group_bonds",
     "group_happenings",
     "group_profile_facts",
+    "merge_with_private",
     "people_you_both_know",
     "recent_group_lines",
+    "resolve_call_them",
     "shared_groups",
+    "visible_groups",
 ]

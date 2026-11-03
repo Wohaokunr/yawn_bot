@@ -169,6 +169,11 @@ _BOT_BOND_GUIDANCE = (
     "overall 是你对他的整体好感（签到、私聊、群聊攒下的），checkin_streak 是他在本群"
     "的连签，合适时可以自然提一句，别每次都说。"
 )
+# 只在成员资料里有 type=shared_by_member 的条目时出现（memory_link），不改静态前缀。
+_SHARED_FACT_GUIDANCE = (
+    "memories 里 type=shared_by_member 的，是这位成员自己允许你在群里也知道的事（称呼、爱好之类），"
+    "当成你本来就知道的自然用；不要说是私聊里听来的，也不要主动提你们私聊过什么。"
+)
 _REALTIME_SYSTEM_PREFIX = "当前群聊状态（易变）："
 _SPEECH_SYSTEM_PREFIX = "当前发言策略（只约束表达，不改变事实/权限/工具边界）："
 _MEDIA_SYSTEM_PREFIX = "本轮媒体状态（权威，覆盖历史中的旧能力自述）："
@@ -642,6 +647,11 @@ def build_prompt(  # noqa: PLR0912, PLR0913, PLR0915
         bond = ContentBuilder()
         if speaker.get("bot_bonds"):
             bond.add("core.bot_bond_guidance", apply_section("core.bot_bond_guidance", _BOT_BOND_GUIDANCE, group_id=gid))
+        if any(
+            isinstance(item, dict) and item.get("type") == "shared_by_member"
+            for item in speaker.get("memories") or []
+        ):
+            bond.add("core.shared_fact_guidance", apply_section("core.shared_fact_guidance", _SHARED_FACT_GUIDANCE, group_id=gid))
         system_builders.append(
             join_builders(
                 [

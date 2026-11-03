@@ -424,6 +424,10 @@ TOOL_DEFINITIONS = (
                 "description": "bot_bond 表示忘掉他和你（Bot）之间的关系与共同经历",
             },
             "keyword": {"type": "string", "minLength": 1, "maxLength": 40},
+            "everywhere": {
+                "type": "boolean",
+                "description": "他说“哪儿都别记/所有群和私聊都忘掉”时设 true：连他别的群和私聊里的同一件事一起删",
+            },
         },
         permission_level=TOOL_PERMISSION_STATE_WRITE,
         family="memory",
