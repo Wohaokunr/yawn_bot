@@ -144,6 +144,26 @@ class PrivateAgentConfig(BaseModel):
     group_manage_protect_superusers: bool = True
     # 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
     group_manage_data_dir: str = ""
+    # ── 群聊 ↔ 私聊协作（yawn_agent/agent_bridge.py）──
+    # 群里答应“私聊说”的事私聊接着办；私聊里替他在群里转告/提问并把回复转回来；
+    # 群里给他的私聊小助手记提醒/待办
+    agent_bridge_enabled: bool = True
+    # 每人每天最多从群里转到私聊几次（0 表示不限）
+    agent_bridge_handoff_daily: int = Field(default=10, ge=0, le=200)
+    # 群里说完“私聊你”后等几秒再私聊开口（让群里那句先发出去）
+    agent_bridge_handoff_delay_seconds: float = Field(default=3.0, ge=0, le=60)
+    # 每人每天最多让我在群里转告/提问几次（0 表示不限）
+    agent_bridge_relay_daily: int = Field(default=10, ge=0, le=200)
+    # 每个群每小时最多替私聊转告几条（防刷屏；0 表示不限）
+    agent_bridge_relay_group_hourly: int = Field(default=6, ge=0, le=100)
+    # 群里提问后收回复的时长（小时）
+    agent_bridge_ask_hours: int = Field(default=6, ge=1, le=48)
+    # 一次提问最多转回几条回复
+    agent_bridge_reply_limit: int = Field(default=20, ge=1, le=100)
+    # 群里的回复攒这么多秒合成一条私聊转给他；0 收到就转
+    agent_bridge_reply_batch_seconds: float = Field(default=20.0, ge=0, le=600)
+    # 转告/提问发到群里之前要他确认（他发来下一条消息后才能确认）
+    agent_bridge_confirm: bool = True
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

@@ -232,7 +232,7 @@ member_notice = on_notice(priority=20, block=False)
 
 
 @agent_listener.handle()
-async def handle_group_agent_message(
+async def handle_group_agent_message(  # noqa: PLR0911
     bot: Bot, event: GroupMessageEvent, _session: async_scoped_session
 ) -> None:
     dbg(
@@ -345,6 +345,15 @@ async def handle_group_agent_message(
             f"directed={trigger.respond}"
         )
     await _persist_message(bot, event, normalized, _session)
+    if getattr(event, "reply", None) is not None:
+        # 引用回复了某人私聊托我问的问题：记下来转给他，这条不再交给群聊回合。
+        from .agent_bridge import capture_group_reply
+
+        try:
+            if await capture_group_reply(bot, event, normalized):
+                return
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"群 {group_id} 私聊提问回复捕获失败(忽略)")
     held_key = (bot_id, group_id, int(event.get_user_id()))
     item = (bot, event, normalized)
     continuation = False

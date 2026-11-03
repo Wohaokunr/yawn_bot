@@ -110,6 +110,9 @@ EXTRA_LABELS = {
     "agent_config": "改 Agent 运行配置",
     "agent_persona": "改群人设",
     "manage_policy": "改群管代办策略",
+    # 群聊 ↔ 私聊协作：群友私聊让 Bot 在本群转告/提问（群主在操作记录里看得到是谁让发的）
+    "bridge_post": "私聊转告到本群",
+    "bridge_ask": "私聊托 Bot 在本群提问",
 }
 # 默认需要确认的操作（策略可改）；撤销类（解禁、取消待办、撤回）默认不用确认。
 DEFAULT_CONFIRM = frozenset(
@@ -194,6 +197,8 @@ def default_policy() -> dict[str, Any]:
         "confirm_actions": sorted(DEFAULT_CONFIRM),
         "max_mute_minutes": 1440,
         "notify_group": False,
+        # 群里的人私聊 Bot 说“帮我在群里问一下/转告一句”时，允许 Bot 发到本群（agent_bridge）
+        "allow_relay": True,
         "updated_at": None,
         "updated_by": None,
     }
@@ -211,7 +216,7 @@ def normalize_policy(raw: Any) -> dict[str, Any]:
     policy = default_policy()
     if not isinstance(raw, dict):
         return policy
-    for key in ("enabled", "private_enabled", "webui_enabled", "notify_group"):
+    for key in ("enabled", "private_enabled", "webui_enabled", "notify_group", "allow_relay"):
         if isinstance(raw.get(key), bool):
             policy[key] = raw[key]
     for key in ("disabled_actions", "admin_actions", "confirm_actions"):

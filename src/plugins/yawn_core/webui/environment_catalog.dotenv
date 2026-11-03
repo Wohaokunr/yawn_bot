@@ -329,6 +329,24 @@ GROUP_MANAGE_CONFIRM_SECONDS=300
 GROUP_MANAGE_PROTECT_SUPERUSERS=true
 # 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
 GROUP_MANAGE_DATA_DIR=
+# 群聊 ↔ 私聊协作：群里答应私聊的事私聊接着办、私聊替他在群里转告/提问并把回复转回来、群里给私聊小助手记事
+AGENT_BRIDGE_ENABLED=true
+# 每人每天最多从群里转到私聊几次（0 不限）
+AGENT_BRIDGE_HANDOFF_DAILY=10
+# 群里说完“私聊你”后等几秒再私聊开口
+AGENT_BRIDGE_HANDOFF_DELAY_SECONDS=3
+# 每人每天最多让 Bot 在群里转告/提问几次（0 不限）
+AGENT_BRIDGE_RELAY_DAILY=10
+# 每个群每小时最多替私聊转告几条（0 不限）
+AGENT_BRIDGE_RELAY_GROUP_HOURLY=6
+# 群里提问后收回复多少小时
+AGENT_BRIDGE_ASK_HOURS=6
+# 一次提问最多转回几条回复
+AGENT_BRIDGE_REPLY_LIMIT=20
+# 群里的回复攒几秒合成一条私聊转给他（0 收到就转）
+AGENT_BRIDGE_REPLY_BATCH_SECONDS=20
+# 转告/提问发到群里前要他确认
+AGENT_BRIDGE_CONFIRM=true
 
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 

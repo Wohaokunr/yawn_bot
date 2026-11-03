@@ -60,6 +60,7 @@ from .private_prompt import (
     PRIVATE_FINAL_ROUND,
     PRIVATE_HANDOFF_FINDINGS,
     PRIVATE_HANDOFF_NUDGE,
+    PRIVATE_HANDOFF_TURN,
     PRIVATE_JUST_FINISHED,
     PRIVATE_MEDIA,
     PRIVATE_PERSONA_SCOPE,
@@ -135,6 +136,9 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "group_manage.rename": ("set_group_name",),
     "group_manage.card": ("set_group_card",),
     "group_manage.title": ("set_special_title",),
+    # 群聊 ↔ 私聊协作：真的发到群里了才能说“在群里帮你问了/转告了”
+    "group_bridge.post": ("relay_to_group",),
+    "group_bridge.ask": ("relay_to_group",),
 }
 # 模型这轮做了写操作却没说话时，用兜底句子告知结果。
 _WRITE_RESULTS = frozenset(
@@ -724,8 +728,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     user_id = request.user_id
     now = now_beijing()
     resumed = bool(request.extra.get("resumed"))
+    # 群里答应了私聊他：这一轮是我主动开口（没有他刚发的消息），一定要说话。
+    handoff = request.extra.get("handoff") if isinstance(request.extra.get("handoff"), dict) else None
+    # 发言判断说明照常放（和普通回合同一份开头，保住前缀缓存），只是这一轮不许选择不说话。
     silence_ok = turn_taking.enabled()
-    if not resumed:
+    if not resumed and handoff is None:
         # 他又说话了：之前“等他说完”的计时器作废，由这一轮接着聊。
         turn_taking.cancel_wait(user_id)
     arrivals_at_start = turn_taking.arrivals(user_id)
@@ -820,8 +827,14 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             context.payload["just_finished"] = [
                 report_payload(item) for item in just_finished
             ]
+    from .agent_bridge import private_view
     from .group_manage import pending_view
 
+    # 群聊 ↔ 私聊协作：从群里转来的事、还在收回复的提问、等他确认的转告（本轮层）。
+    try:
+        context.payload.update(private_view(user_id, now))
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"私聊用户 {user_id} 读群聊协作状态失败(忽略)")
     manage_waiting = pending_view(user_id)
     if manage_waiting:
         # 之前问过他、还在等确认的群管操作：工具结果不进历史，不放这里模型就不知道 confirm_id，
@@ -852,6 +865,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         ),
         allow_silence=silence_ok,
         just_finished=bool(just_finished),
+        round_note=("private.handoff_turn", PRIVATE_HANDOFF_TURN) if handoff else None,
         meta_out=meta,
     )
     if resumed:
@@ -989,7 +1003,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
                 continue
         break
 
-    if not resumed:
+    if not resumed and handoff is None:
         await _annotate_turn_message(
             session,
             user_id,
@@ -998,7 +1012,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     wrote = bool(ctx.succeeded & (_WRITE_RESULTS | WRITE_TOOLS))
     silence = turn_taking.parse_silence(text)
     text = silence.text
-    if silence.silent and silence_ok and not (ctx.succeeded & _WRITE_RESULTS):
+    if silence.silent and silence_ok and handoff is None and not (ctx.succeeded & _WRITE_RESULTS):
         if silence.kind == "wait" and not resumed:
             turn_taking.schedule_wait(
                 request.bot,

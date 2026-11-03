@@ -117,6 +117,12 @@ _SCHEDULE_RULES = (
     "时间或频率含糊（“过几天”“经常”）先问清楚或用 dry_run 预览给对方确认；"
     "设好后用一句话复述规则和下次时间，不要承诺工具没设上的提醒。"
 )
+_PRIVATE_BRIDGE_RULES = (
+    "私聊协作：群里和私聊里是同一个你。成员说“私聊说/私聊发我”，或者他的事费时间、内容很长、要发文件、"
+    "是私事不适合在群里摊开时，用 move_to_private 转到私聊接着办，群里只回一句短的；"
+    "他要你“到点私聊提醒我/记到我的待办”时用 add_to_my_assistant。只替发消息的本人做，"
+    "不在群里透露你们私聊过什么，工具没成功不要说“私聊你了”。"
+)
 _SCHEDULED_WAKE_RULES = (
     "本轮不是有人刚发消息：是实时状态 scheduled_wake 里那个定时任务到点了，"
     "current_turn.content 是当初设下的任务说明，发言人是设任务的人。"
@@ -366,6 +372,7 @@ _TOOL_GUIDANCE_RULES: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("tools.web", _WEB_RULES, frozenset({"web_search", "web_fetch"})),
     ("tools.notice", _NOTICE_RULES, frozenset({"create_group_announcement"})),
     ("tools.schedule", _SCHEDULE_RULES, frozenset({"schedule_task"})),
+    ("tools.private_bridge", _PRIVATE_BRIDGE_RULES, frozenset({"move_to_private", "add_to_my_assistant"})),
     ("tools.file", _FILE_RULES, frozenset({"send_file", "list_agent_files"})),
     ("tools.target_member", _TARGET_MEMBER_RULES, _TARGET_MEMBER_TOOLS),
 )

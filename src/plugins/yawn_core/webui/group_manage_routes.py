@@ -70,6 +70,7 @@ class ManagePolicyBody(_Body):
     private_enabled: bool | None = Field(default=None, alias="privateEnabled")
     webui_enabled: bool | None = Field(default=None, alias="webuiEnabled")
     notify_group: bool | None = Field(default=None, alias="notifyGroup")
+    allow_relay: bool | None = Field(default=None, alias="allowRelay")
     max_mute_minutes: int | None = Field(
         default=None, ge=1, le=43200, alias="maxMuteMinutes"
     )
@@ -105,6 +106,7 @@ def _policy_payload(policy: dict[str, Any]) -> dict[str, Any]:
         "privateEnabled": policy["private_enabled"],
         "webuiEnabled": policy["webui_enabled"],
         "notifyGroup": policy["notify_group"],
+        "allowRelay": policy.get("allow_relay", True),
         "maxMuteMinutes": policy["max_mute_minutes"],
         "maxMuteCeiling": gm.max_mute_minutes_ceiling(),
         "disabledActions": policy["disabled_actions"],

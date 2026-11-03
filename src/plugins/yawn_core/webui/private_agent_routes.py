@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..yawn_agent import (
+    agent_bridge,
     private_cache,
     private_persona,
     private_prompt_registry,
@@ -403,6 +404,30 @@ async def get_private_rhythm_stats(
     给了 userId 时附他最近几次的条数和是否套了模板。"""
 
     return ok(private_rhythm.snapshot(user_id))
+
+
+@router.get("/bridge")
+async def get_agent_bridge(
+    _session: AdminReadSession,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """群聊 ↔ 私聊协作：最近从群里转到私聊的事、私聊替人在群里转告/提问的记录与限额。
+
+    只含话题和发到群里的原文（本来就是群里公开的），不含私聊对话内容。
+    """
+
+    return ok(agent_bridge.overview(limit))
+
+
+@router.get("/bridge/users/{user_id}")
+async def get_agent_bridge_user(
+    user_id: int, _session: AdminReadSession
+) -> dict[str, Any]:
+    """一位用户的协作记录：转来的事、转告/提问（含群友回复）、等他确认的转告。"""
+
+    if user_id <= 0:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "userId 不对")
+    return ok(agent_bridge.user_detail(user_id))
 
 
 @router.put("/captures/settings")

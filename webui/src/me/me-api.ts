@@ -76,6 +76,7 @@ export interface ManagePolicy {
   privateEnabled: boolean;
   webuiEnabled: boolean;
   notifyGroup: boolean;
+  allowRelay?: boolean;
   maxMuteMinutes: number;
   maxMuteCeiling: number;
   disabledActions: string[];

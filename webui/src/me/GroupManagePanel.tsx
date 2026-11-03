@@ -493,6 +493,7 @@ function PolicyView({ groupId, status, onSaved }: { groupId: string; status: Man
     { key: "enabled", label: "允许群管代办", help: "关掉后私聊和网页都不能让 Bot 代办本群的管理操作" },
     { key: "privateEnabled", label: "允许私聊代办", help: "群主/管理员私聊 Bot 说“把谁禁言”等，确认后执行" },
     { key: "webuiEnabled", label: "允许网页代办", help: "在本页直接点按钮执行" },
+    { key: "allowRelay", label: "允许私聊转告到本群", help: "群友私聊 Bot 说“帮我在群里问一下/转告一句”，确认后 Bot 以“〔某某 让我转告〕”发到本群；群友引用回复会转回给他" },
     { key: "notifyGroup", label: "在群里说明是谁让 Bot 做的", help: "禁言、踢人、全员禁言、改群名、设头衔后，Bot 会在群里发一句“〔群管代办〕某某让我…”" },
   ];
   return <div className="me-manage-view">

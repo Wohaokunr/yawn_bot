@@ -219,3 +219,9 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* 群聊 ↔ 私聊协作 */
+.pa-bridge { display: flex; flex-direction: column; gap: 12px; }
+.pa-bridge-list > li { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.pa-bridge-main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.pa-bridge-replies { margin: 4px 0 0; padding-left: 16px; }

@@ -3,8 +3,8 @@ import { composeText } from "../agent-prompts/prompt-meta";
 import type { PromptOverride } from "../agent-prompts/prompt-meta";
 import type { PersonaMode, PrivatePromptIssue, PrivateScope, PrivateSectionRow, PrivateSnapshot } from "./private-api";
 
-export type PrivateTab = "prompts" | "persona" | "captures";
-export const PRIVATE_TABS: PrivateTab[] = ["prompts", "persona", "captures"];
+export type PrivateTab = "prompts" | "persona" | "captures" | "bridge";
+export const PRIVATE_TABS: PrivateTab[] = ["prompts", "persona", "captures", "bridge"];
 
 export function parsePrivateTab(value: string | null): PrivateTab {
   return PRIVATE_TABS.includes(value as PrivateTab) ? (value as PrivateTab) : "prompts";
@@ -156,6 +156,7 @@ export function personaByLabel(by: string | null | undefined): string {
 export const PIPELINE_LABELS: Record<string, string> = {
   turn: "主回合",
   report: "汇报",
+  handoff: "群里转私聊",
   coordinate: "协调",
   worker: "后台小助手",
   memory: "记忆整理",
@@ -207,4 +208,29 @@ export function tokenBar(used: number, limit: number): { percent: number; status
 /** 私聊快照按链路显示（任务名都是 agent_dialogue，看不出是主回合还是小助手）。 */
 export function withPipelineTask(snapshot: PrivateSnapshot): PrivateSnapshot {
   return snapshot.pipeline ? { ...snapshot, task: `private_${snapshot.pipeline}` } : snapshot;
+}
+
+// 群聊 ↔ 私聊协作：状态与原因的中文标签
+export const BRIDGE_STATUS_LABELS: Record<string, string> = {
+  opening: "正在私聊开口",
+  opened: "已私聊开口",
+  done: "办完了",
+  failed: "没能私聊上",
+  dropped: "不用办了",
+  open: "收回复中",
+  sent: "已发出",
+  closed: "已停止收回复",
+};
+
+export const BRIDGE_REASON_LABELS: Record<string, string> = {
+  asked: "他说私聊",
+  long_task: "费时间的活",
+  personal: "私人的事",
+  files: "要发文件/长内容",
+  followup: "后续跟进",
+  busy_group: "群里太吵",
+};
+
+export function bridgeStatusLabel(status: string | null | undefined): string {
+  return BRIDGE_STATUS_LABELS[String(status ?? "")] ?? String(status ?? "—");
 }

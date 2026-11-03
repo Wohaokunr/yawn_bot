@@ -83,6 +83,7 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "message": ("消息", "发消息", "转发", "send", "forward"),
     "web": ("网页", "网页搜索", "联网", "联网搜索", "上网", "搜索", "搜一下", "网上", "web_search", "search", "internet", "browse", "browser", "fetch", "news", "新闻"),
     "checkin": ("签到", "打卡", "积分", "连签", "好感", "好感度", "check_in", "checkins", "sign_in", "signin", "affinity"),
+    "private": ("私聊", "私聊协作", "私信", "小窗", "私聊小助手", "private_chat", "dm", "direct_message", "bridge", "handoff"),
     "schedule": ("定时", "定时任务", "提醒", "闹钟", "日程", "计划任务", "schedule", "schedules", "reminder", "reminders", "timer", "cron", "scheduled_task", "scheduled_tasks"),
     "sandbox": ("沙箱", "代码沙箱", "虚拟机", "代码", "python", "编程", "计算", "画图", "绘图", "图表", "数据分析", "作曲", "内置电脑", "电脑", "附件", "inbox", "code", "run_code", "python_sandbox", "vm"),
 }

@@ -566,6 +566,29 @@ MANAGE_TOOLS: tuple[PrivateTool, ...] = (
     ),
 )
 MANAGE_NAMES = frozenset(tool.name for tool in MANAGE_TOOLS)
+# 群聊 ↔ 私聊协作（agent_bridge）：私聊这边替他在群里转告/提问、看从群里转来的事。
+BRIDGE_ACTIONS = ("post", "ask", "replies", "close", "handoffs", "done", "confirm", "cancel")
+BRIDGE_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "group_bridge",
+        "群和私聊之间帮他接力（群里的你和私聊的你是同一个人）。"
+        "post 替他在他所在的群里转告一句（text，会带“〔他的名字 让我转告〕”）；ask 替他在群里问大家（text），群友引用回复会攒一会儿私聊转给他；"
+        "replies 看提问收到的回复；close 不再收回复（id）；handoffs 看他从群里转到私聊的事；done 标记那件事办完了（id）。"
+        "post/ask 会先返回 needs_confirm：把群名和要发的原话问他，然后这一轮就结束；他下一条同意后再 confirm（confirm_id），不同意就 cancel。"
+        "只在他明确要你去群里说/问时用：不替他编内容、不发他没同意的话、不把你们私聊的其他内容带到群里。"
+        "本轮资料里 from_groups 是他刚在群里找你、转到私聊来的事（接着办就好），asks_in_groups 是还在收回复的提问，group_relay_waiting 是等他确认的转告",
+        {
+            "action": {"type": "string", "enum": list(BRIDGE_ACTIONS)},
+            "group": {"type": "string", "minLength": 1, "maxLength": 60, "description": "群名（可以只写一部分）或群号；他只在一个群时可省略"},
+            "text": {"type": "string", "minLength": 1, "maxLength": 300, "description": "要在群里转告/问的话（他的原意）"},
+            "id": {"type": "string", "maxLength": 12, "description": "提问编号（r…）或转来的事的编号（h…）"},
+            "confirm_id": {"type": "string", "maxLength": 12},
+        },
+        ("action",),
+        writes=True,
+    ),
+)
+BRIDGE_NAMES = frozenset(tool.name for tool in BRIDGE_TOOLS)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
@@ -574,6 +597,7 @@ ALL_TOOLS: tuple[PrivateTool, ...] = (
     + PERSONA_TOOLS
     + ACCOUNT_TOOLS
     + MANAGE_TOOLS
+    + BRIDGE_TOOLS
     + COMPUTER_TOOLS
     + TASK_TOOLS
 )
@@ -593,6 +617,9 @@ def tool_schemas(
     """本轮给模型的工具；虚拟电脑、小助手任务、群管代办只在可用时出现。"""
 
     # 能放后台时把派活工具排在最前面：模型更容易想到“交出去”，而不是自己一路调工具。
+    from .agent_bridge import enabled as bridge_enabled
+
+    bridge = bridge_enabled()
     ordered = (
         [*TASK_TOOLS, *(tool for tool in ALL_TOOLS if tool.name not in TASK_NAMES)]
         if tasks
@@ -605,6 +632,7 @@ def tool_schemas(
         and (computer or tool.name not in COMPUTER_NAMES)
         and (tasks or tool.name not in TASK_NAMES)
         and (manage or tool.name not in MANAGE_NAMES)
+        and (bridge or tool.name not in BRIDGE_NAMES)
     ]
 
 
@@ -1156,12 +1184,16 @@ async def execute_private_tool(  # noqa: PLR0915
             result = await _webui_onboarding_tool(args, ctx)
         elif name in MANAGE_NAMES:
             result = await _group_manage_tool(args, ctx)
+        elif name in BRIDGE_NAMES:
+            from .private_bridge_tool import group_bridge_tool
+
+            result = await group_bridge_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
         return tool_error_payload(exc)
     ctx.succeeded.add(name)
-    if name in MANAGE_NAMES and isinstance(result, dict) and result.get("done"):
+    if name in (MANAGE_NAMES | BRIDGE_NAMES) and isinstance(result, dict) and result.get("done"):
         # 声明核验：只有真正执行了（不是“待确认”）才算办成
         ctx.succeeded.add(f"{name}.done")
         ctx.succeeded.add(f"{name}.{result.get('action')}")
@@ -1670,6 +1702,8 @@ async def _execute_extra(
 
 __all__ = [
     "ALL_TOOLS",
+    "BRIDGE_NAMES",
+    "BRIDGE_TOOLS",
     "COMPUTER_NAMES",
     "COMPUTER_TOOLS",
     "EXTRA_TOOLS",

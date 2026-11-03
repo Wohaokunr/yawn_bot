@@ -313,6 +313,43 @@ TOOL_DEFINITIONS = (
         keywords=("签到了吗", "连签", "签到几天", "我的积分", "好感度", "我们关系"),
     ),
     ToolDefinition(
+        "move_to_private",
+        "把调用者本人的这件事转到私聊接着办（你私聊他开口，私聊那边能派后台任务、用虚拟电脑、发文件、记提醒）：他说“私聊说/私聊发我”，"
+        "或者事情费时间、内容很长、要发文件、是他的私事不适合在群里说时用。topic 用他的说法写清楚要办什么（只写他本人的事，不写别人的消息）。"
+        "成功后在群里只回一句短的（“我私聊你啦”），不要在群里把结果说完；不是好友时会被拒，照实让他加好友或直接私聊你",
+        {
+            "topic": {"type": "string", "minLength": 1, "maxLength": 300, "description": "私聊要接着办的事（用他的说法）"},
+            "reason": {"type": "string", "enum": ["asked", "long_task", "personal", "files", "followup", "busy_group"], "description": "asked 他要求私聊；long_task 费时间；personal 私事；files 要发文件/长内容；followup 后续跟进；busy_group 群里太吵"},
+        },
+        required=("topic",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="private",
+        keywords=("私聊", "私聊说", "私聊发我", "私信", "小窗", "私下说", "发我私聊"),
+    ),
+    ToolDefinition(
+        "add_to_my_assistant",
+        "替调用者本人在他的私聊小助手里记一笔：reminder 提醒（到点私聊提醒他，配 at 或 in_minutes）、todo 待办、note 笔记。"
+        "只能记他自己的事；记好后在群里只说记上了，不在群里列他的私人清单",
+        {
+            "kind": {"type": "string", "enum": ["reminder", "todo", "note"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": 120},
+            "at": {"type": "string", "maxLength": 32, "description": "提醒时间 YYYY-MM-DD HH:MM（北京时间）"},
+            "in_minutes": {"type": "integer", "minimum": 1, "maximum": 525600, "description": "多少分钟后提醒"},
+            "due": {"type": "string", "maxLength": 16, "description": "待办截止日期 YYYY-MM-DD"},
+        },
+        required=("kind", "content"),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="private",
+        keywords=("私聊提醒我", "记到我的待办", "帮我记一下", "记个笔记", "加个待办"),
+    ),
+    ToolDefinition(
+        "my_private_followups",
+        "查调用者本人从本群转到私聊的事办得怎么样、他托你在本群问的问题收到几条回复；只给源自本群的话题和状态，不含私聊内容",
+        {},
+        family="private",
+        keywords=("私聊那件事", "私聊说的", "办好了吗", "有人回吗", "回复了吗"),
+    ),
+    ToolDefinition(
         "get_my_relationship",
         "查看你（Bot）和某位成员之间的关系：熟悉程度、他怎么叫你、你们的梗、他的边界和共同经历；不传 user_id 时查当前发言人",
         {
