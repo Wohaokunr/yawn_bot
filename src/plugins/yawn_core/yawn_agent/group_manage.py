@@ -749,6 +749,12 @@ def create_pending(
     summary: str,
 ) -> Pending:
     _gc_pending()
+    same = find_pending(user_id, group_id, action, args)
+    if same is not None:
+        # 同一件事已经在等他确认：沿用原来的 confirm_id 和“问他时”的消息计数。
+        # 否则模型下一轮（看不到上一轮的 confirm_id）重新发起时会生成新的待确认，
+        # 新的计数把他那句“好”算进去了，永远确认不了——私聊里就会一直“要发吗？”“发”循环。
+        return same
     mine = sorted(
         (item for item in _pending.values() if item.user_id == int(user_id)),
         key=lambda item: item.created,
@@ -775,6 +781,54 @@ def create_pending(
     return item
 
 
+def _same_args(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    # reason 只是记录用的，不影响“是不是同一件事”
+    def core(raw: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in raw.items() if key != "reason"}
+
+    return core(left) == core(right)
+
+
+def find_pending(
+    user_id: int, group_id: int, action: str, args: dict[str, Any]
+) -> Pending | None:
+    """他名下内容完全相同、还没过期的待确认操作。"""
+
+    _gc_pending()
+    for item in _pending.values():
+        if (
+            item.user_id == int(user_id)
+            and item.group_id == int(group_id)
+            and item.action == action
+            and _same_args(item.args, args)
+        ):
+            return item
+    return None
+
+
+def replied_since(item: Pending) -> bool:
+    """问过他之后，他有没有发来新消息（有才允许 confirm）。"""
+
+    return _arrivals(item.user_id) > item.arrival
+
+
+def pending_view(user_id: int) -> list[dict[str, Any]]:
+    """给私聊本轮资料用：还在等他确认的群管操作（最多 3 条，最新的在前）。"""
+
+    now = time.monotonic()
+    rows = sorted(pending_for(user_id), key=lambda item: item.created, reverse=True)
+    return [
+        {
+            "confirm_id": item.id,
+            "summary": item.summary,
+            "asked_seconds_ago": int(max(0.0, now - item.created)),
+            "expires_in_seconds": int(max(0.0, item.expires - now)),
+            "he_replied_since": replied_since(item),
+        }
+        for item in rows[:3]
+    ]
+
+
 def pending_for(user_id: int) -> list[Pending]:
     _gc_pending()
     return [item for item in _pending.values() if item.user_id == int(user_id)]
@@ -784,6 +838,11 @@ def take_pending(user_id: int, pending_id: str) -> Pending:
     _gc_pending()
     item = _pending.get(str(pending_id or "").strip())
     if item is None or item.user_id != int(user_id):
+        # 没带 confirm_id（上一轮的工具结果不在历史里）：他名下只有一条在等时就是它。
+        # 带了却对不上时不猜，免得把另一件事当成他同意的这件。
+        mine = pending_for(user_id) if not str(pending_id or "").strip() else []
+        item = mine[0] if len(mine) == 1 else None
+    if item is None:
         raise ManageError(
             "没有这个待确认的操作（可能已过期或已处理）",
             code="not_found",
@@ -1422,14 +1481,17 @@ __all__ = [
     "deny",
     "describe",
     "execute",
+    "find_pending",
     "list_muted",
     "list_notices",
     "load",
     "manager_hint",
     "member_list",
     "pending_for",
+    "pending_view",
     "policy_for",
     "refresh_manager_hint",
+    "replied_since",
     "search_members",
     "sent_messages",
     "set_policy",
