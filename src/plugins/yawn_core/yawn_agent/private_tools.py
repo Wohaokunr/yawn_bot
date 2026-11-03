@@ -541,7 +541,8 @@ MANAGE_TOOLS: tuple[PrivateTool, ...] = (
         "做：mute 禁言（member + minutes）/unmute 解禁；whole_mute 全员禁言（enable）；announce 发群公告（content，可 pinned 置顶、confirm_required 要群员确认）；"
         "delete_notice 删公告（notice_id）；send 以你的身份在群里发一句（text）；todo 发一条并设为群待办（text）；todo_done/todo_cancel 完成/取消待办（message_id）；"
         "essence/unessence 设/取消精华（message_id，只限你代发的）；recall 撤回你代发的（message_id）；card 改群名片（member + text，空=清空）；title 专属头衔；kick 踢人（reject 拒绝再加群）；rename 改群名（text）。"
-        "很多操作会先返回 needs_confirm 和 summary：把 summary 原样问他，等他下一条回复同意后再用 confirm + confirm_id 执行；他不同意或改主意就 cancel。"
+        "很多操作会先返回 needs_confirm 和 summary：把 summary 原样问他，然后这一轮就结束、别再调 group_manage；等他下一条回复同意后再用 confirm + confirm_id 执行；他不同意或改主意就 cancel。"
+        "本轮资料里的 group_manage_waiting 是之前问过他、还在等确认的操作：他这句是同意就直接 confirm 那个 confirm_id，不要重新发起同一件事。"
         "绝不替他确认，也别在他没开口要时主动管群；管理员不能处置群主和其他管理员。group 写群名或群号，只有一个群时可省略",
         {
             "action": {"type": "string", "enum": list(MANAGE_ACTIONS)},
@@ -641,6 +642,9 @@ class PrivateToolContext:
     persona_changed: bool = False
     # 只放行这些工具（汇报/协调轮发同一份工具表保前缀缓存，越界的调用在这里拦下）；None 不限
     allowed_tools: frozenset[str] | None = None
+    # 本轮 group_manage 调用次数；以及“已经在等他回话，别再调工具了”的信号（主回合据此直接收尾）
+    manage_calls: int = 0
+    stop_tools: bool = False
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -1477,6 +1481,10 @@ _MANAGE_CODES = {
 }
 
 
+# 一轮里最多调几次 group_manage（查群 + 找人 + 发起 + 确认，正常 4 次以内）
+MANAGE_CALLS_PER_TURN = 6
+
+
 async def _manage_group(ctx: PrivateToolContext, raw: str | None) -> tuple[int, str]:
     from . import group_manage as gm
 
@@ -1503,13 +1511,22 @@ async def _manage_group(ctx: PrivateToolContext, raw: str | None) -> tuple[int, 
     return hits[0][0], hits[0][1]
 
 
-async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
+async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:  # noqa: PLR0915
     """群管代办。权限、确认、额度、审计全在 group_manage，这里只做群匹配和错误翻译。"""
 
     from . import group_manage as gm
 
     action = str(args.get("action") or "groups")
     group_id: int | None = None
+    ctx.manage_calls += 1
+    if ctx.manage_calls > MANAGE_CALLS_PER_TURN:
+        # 一轮里反复调（发起→自己确认→被拒→再发起……）：直接收尾，别让他一直等。
+        ctx.stop_tools = True
+        raise ToolError(
+            "这一轮已经调了很多次群管",
+            code=ERROR_QUOTA,
+            hint="别再调 group_manage，用现在的结果回他；需要他确认的就问他",
+        )
     try:
         if action == "cancel":
             count = gm.cancel_pending(ctx.user_id, str(args.get("confirm_id") or "") or None)
@@ -1527,7 +1544,40 @@ async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> d
             ]
             return {"groups": rows, "waiting_confirm": waiting, "used_today": gm.used_today(ctx.user_id)}
         if action == "confirm":
-            pending = gm.take_pending(ctx.user_id, str(args.get("confirm_id") or ""))
+            raw_id = str(args.get("confirm_id") or "").strip()
+            try:
+                pending = gm.take_pending(ctx.user_id, raw_id)
+            except gm.ManageError as exc:
+                waiting = gm.pending_view(ctx.user_id)
+                # 编号对不上、但在等的都还没等到他回话：和同一轮自己确认是一回事。
+                premature = exc.code == "needs_confirm" or (
+                    exc.code == "not_found"
+                    and bool(waiting)
+                    and not any(row["he_replied_since"] for row in waiting)
+                )
+                if not premature:
+                    if waiting and exc.code == "not_found":
+                        raise ToolError(
+                            str(exc),
+                            code=ERROR_NOT_FOUND,
+                            hint="还在等他确认的是："
+                            + "；".join(f"{row['confirm_id']} {row['summary']}" for row in waiting)
+                            + "。用对应的 confirm_id；都不是就重新发起",
+                        ) from exc
+                    raise
+                # 同一轮自己确认：不算错，告诉模型去问他并收尾（以前报错会让它一轮里反复重试）。
+                ctx.stop_tools = True
+                row = next((item for item in waiting if item["confirm_id"] == raw_id), None) or (
+                    waiting[0] if waiting else {}
+                )
+                return {
+                    "done": False,
+                    "waiting_for_reply": True,
+                    "confirm_id": row.get("confirm_id"),
+                    "summary": row.get("summary"),
+                    "note": "还没执行：他还没回复，你不能替他确认。本轮别再调 group_manage，"
+                    "用你自己的话把 summary 问他，等他下一条回复",
+                }
             group_id = pending.group_id
             access = await gm.verify(ctx.bot, pending.group_id, ctx.user_id, source="private")
             result = await gm.execute(
@@ -1547,7 +1597,29 @@ async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> d
             return {"group": group_name, "recent": gm.audit_rows(group_id, limit=10)}
         summary, normalized = await gm.describe(access, action, args, group_name)
         if action in access.policy["confirm_actions"]:
+            existing = gm.find_pending(ctx.user_id, group_id, action, normalized)
             pending = gm.create_pending(ctx.user_id, group_id, group_name, action, normalized, summary)
+            if existing is not None and gm.replied_since(existing):
+                # 上一轮问过他、他也回话了，模型却重新发起了同一件事（它看不到上一轮的 confirm_id）。
+                return {
+                    "needs_confirm": True,
+                    "confirm_id": pending.id,
+                    "summary": summary,
+                    "already_asked": True,
+                    "he_replied_since": True,
+                    "note": "这件事之前已经问过他，他也回话了：他那句是同意的话，直接用 confirm 执行这个 confirm_id，"
+                    "不用再问；不同意就 cancel；看不出来再问他一次",
+                }
+            if existing is not None:
+                # 同一轮里重复发起：已经在等他了。
+                ctx.stop_tools = True
+                return {
+                    "needs_confirm": True,
+                    "confirm_id": pending.id,
+                    "summary": summary,
+                    "already_asked": True,
+                    "note": "这件事已经在等他确认了。本轮别再调 group_manage，把 summary 问他，等他回复",
+                }
             return {
                 "needs_confirm": True,
                 "confirm_id": pending.id,

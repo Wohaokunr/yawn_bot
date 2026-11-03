@@ -341,7 +341,8 @@ def test_private_tool_confirm_flow(monkeypatch, _manage_env):
     confirm_id = asked["result"]["confirm_id"]
     # 同一轮自己确认：拒绝
     same_turn = run(ptools.execute_private_tool("group_manage", {"action": "confirm", "confirm_id": confirm_id}, ctx))
-    assert not same_turn["ok"] and "确认" in same_turn["error"]
+    assert same_turn["ok"] and same_turn["result"]["waiting_for_reply"] and not same_turn["result"]["done"]
+    assert "set_group_ban" not in bot.names()
     _manage_env["n"] = 1  # 他回了一句
     done = run(ptools.execute_private_tool("group_manage", {"action": "confirm", "confirm_id": confirm_id}, ctx))
     assert done["ok"] and done["result"]["done"]
@@ -496,3 +497,80 @@ def test_manage_routes_scope(web):
         assert client.get(f"{API}/me/groups/{group_id}/manage").status_code == 403
         assert client.post(f"{API}/me/groups/{group_id}/manage/actions", json={"action": "unmute", "member": "小明"}).status_code == 403
     assert client.get(f"{API}/groups/{G_OWNED}/manage/audit").status_code == 403
+
+
+# ── 确认循环（修复：私聊里“要发吗？”“发”反复问、一轮里自问自答卡住）────────
+
+
+def _announce_env(monkeypatch):
+    async def candidates(_session, _uid):
+        return [(GID, "猫猫群", "admin")]
+
+    monkeypatch.setattr(gm, "candidate_groups", candidates)
+    return FakeBot()
+
+
+ANNOUNCE = {"action": "announce", "content": "周六晚八点群语音，记得来"}
+
+
+def test_reissuing_same_announce_next_turn_keeps_confirm_id(monkeypatch, _manage_env):
+    bot = _announce_env(monkeypatch)
+    first = run(ptools.execute_private_tool("group_manage", dict(ANNOUNCE), _private_ctx(bot)))
+    confirm_id = first["result"]["confirm_id"]
+    _manage_env["n"] = 1  # 他回了“发吧”
+    # 下一轮模型看不到上一轮的 confirm_id，重新发起了同一件事
+    ctx = _private_ctx(bot)
+    again = run(ptools.execute_private_tool("group_manage", dict(ANNOUNCE), ctx))
+    assert again["result"]["confirm_id"] == confirm_id
+    assert again["result"]["he_replied_since"] is True
+    assert len(gm.pending_for(OWNER)) == 1
+    done = run(ptools.execute_private_tool("group_manage", {"action": "confirm", "confirm_id": confirm_id}, ctx))
+    assert done["ok"] and done["result"]["done"]
+    assert "_send_group_notice" in bot.names()
+
+
+def test_same_turn_self_confirm_stops_tools_without_error(monkeypatch, _manage_env):
+    bot = _announce_env(monkeypatch)
+    ctx = _private_ctx(bot)
+    asked = run(ptools.execute_private_tool("group_manage", dict(ANNOUNCE), ctx))
+    assert not ctx.stop_tools
+    early = run(ptools.execute_private_tool("group_manage", {"action": "confirm", "confirm_id": asked["result"]["confirm_id"]}, ctx))
+    assert early["ok"] and early["result"]["waiting_for_reply"] is True
+    assert early["result"]["summary"] == asked["result"]["summary"]
+    assert ctx.stop_tools
+    assert "_send_group_notice" not in bot.names()
+    # 同一轮重复发起同一件事：不再生成新的待确认
+    ctx2 = _private_ctx(bot)
+    dup = run(ptools.execute_private_tool("group_manage", dict(ANNOUNCE), ctx2))
+    assert dup["result"]["already_asked"] and ctx2.stop_tools
+    assert len(gm.pending_for(OWNER)) == 1
+
+
+def test_confirm_without_id_uses_only_pending_and_wrong_id_lists_waiting(monkeypatch, _manage_env):
+    bot = _announce_env(monkeypatch)
+    run(ptools.execute_private_tool("group_manage", dict(ANNOUNCE), _private_ctx(bot)))
+    _manage_env["n"] = 1
+    wrong = run(ptools.execute_private_tool("group_manage", {"action": "confirm", "confirm_id": "c0000"}, _private_ctx(bot)))
+    assert not wrong["ok"] and "还在等他确认的是" in wrong["hint"]
+    done = run(ptools.execute_private_tool("group_manage", {"action": "confirm"}, _private_ctx(bot)))
+    assert done["ok"] and done["result"]["done"]
+
+
+def test_manage_calls_capped_per_turn(monkeypatch, _manage_env):
+    bot = _announce_env(monkeypatch)
+    ctx = _private_ctx(bot)
+    for _ in range(ptools.MANAGE_CALLS_PER_TURN):
+        run(ptools.execute_private_tool("group_manage", {"action": "audit"}, ctx))
+    capped = run(ptools.execute_private_tool("group_manage", {"action": "audit"}, ctx))
+    assert not capped["ok"] and capped["error_code"] == "quota" and ctx.stop_tools
+
+
+def test_pending_view_reports_reply_state(_manage_env):
+    gm.create_pending(OWNER, GID, "g", "announce", {"content": "x"}, "发公告")
+    view = gm.pending_view(OWNER)
+    assert view[0]["he_replied_since"] is False and view[0]["summary"] == "发公告"
+    _manage_env["n"] = 2
+    assert gm.pending_view(OWNER)[0]["he_replied_since"] is True
+    # reason 不同也算同一件事
+    same = gm.create_pending(OWNER, GID, "g", "announce", {"content": "x", "reason": "r"}, "发公告")
+    assert same.id == view[0]["confirm_id"]

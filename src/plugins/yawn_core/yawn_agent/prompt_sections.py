@@ -792,7 +792,7 @@ SECTIONS: tuple[PromptSection, ...] = (
         "private_system",
         KIND_DATA,
         "本轮资料（JSON，排在最后一条消息后面）：现在的时间、签到、待办提醒、后台任务、刚做完的结果、"
-        "附件、他最近在群里说的话、之前聊到哪。",
+        "附件、他最近在群里说的话、之前聊到哪、还在等他确认的群管操作。",
         tasks=_PV,
     ),
     PromptSection(

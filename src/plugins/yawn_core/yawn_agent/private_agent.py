@@ -820,6 +820,13 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             context.payload["just_finished"] = [
                 report_payload(item) for item in just_finished
             ]
+    from .group_manage import pending_view
+
+    manage_waiting = pending_view(user_id)
+    if manage_waiting:
+        # 之前问过他、还在等确认的群管操作：工具结果不进历史，不放这里模型就不知道 confirm_id，
+        # 只能重新发起，又得再问一遍（“要发吗？”“发”……循环）。本轮层，不碰前缀。
+        context.payload["group_manage_waiting"] = manage_waiting
     cut = private_rhythm.cut_note(user_id)
     if cut:
         # 上一条分条被他打断了：只告诉模型发到第几条，没发出去的内容不给（也不在历史里）。
@@ -888,9 +895,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     repeat_checked = False
     text = ""
     for round_index in range(max_rounds + 1):
-        final = round_index == max_rounds
+        # 工具说“已经在等他回话了”（群管待确认）：下一轮直接收尾，不再给工具。
+        stop_early = ctx.stop_tools and round_index > 0
+        final = round_index == max_rounds or stop_early
         if final and round_index > 0:
-            handed = tasks and _auto_handoff(ctx, messages)
+            handed = tasks and not stop_early and _auto_handoff(ctx, messages)
             messages.append(
                 {
                     "role": "system",
