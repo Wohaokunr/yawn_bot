@@ -18,6 +18,7 @@ from .context_history import (
     EffectiveTurn,
     effective_turn_from_context,
 )
+from .group_rhythm import group_mix_instruction
 from .persona import persona_style_levels
 from .prompt_sections import apply_section
 from .speech import (
@@ -398,6 +399,8 @@ def build_speech_parts(
                 emotion=(context or {}).get("emotion_state"),
             ),
         ),
+        # 最近几次条数一模一样/每次都分条时提醒一句（易变层，不碰静态前缀）。
+        ("speech.rhythm_mix", group_mix_instruction(group_id)),
         (
             "speech.sticker",
             sticker_turn_instruction(

@@ -22,6 +22,7 @@ from typing import Any
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 from .execution_trace import trace_event
+from .group_rhythm import note_group_parts
 from .log import dbg, dbg_exc
 from .outbound import (
     DELIVERY_CONFIRMED_FAILURE,
@@ -188,6 +189,7 @@ async def deliver_parts(
         planned_delays = list(delays or ())
     if len(planned_delays) != len(messages):
         planned_delays = [0.0 for _ in messages]
+    planned_count = len(messages)
     spread_cap = (
         rhythm_settings().max_spread_seconds
         if max_spread_seconds is None
@@ -242,13 +244,16 @@ async def deliver_parts(
         index += 1
     outcome = DeliveryOutcome(
         results=tuple(results),
-        planned=len(prepared.messages) if isinstance(prepared, PreparedSpeechParts) else len(messages),
+        planned=planned_count,
         hurried=hurried,
         flushed=flushed,
         stopped=stopped,
         waited_seconds=waited,
         part_texts=tuple(texts),
     )
+    if outcome.results and outcome.results[0].sent:
+        # 记“模型这次打算发几条”（不受排队合并影响），用来发现条数套模板。
+        note_group_parts(group_id, outcome.planned)
     if outcome.planned > 1:
         trace_event(
             "outbound",
@@ -371,6 +376,8 @@ async def send_outbound_parts(
             actor_user_id=actor_user_id,
             source=source,
         )
+        if single.sent:
+            note_group_parts(group_id, 1)
         return DeliveryOutcome(results=(single,), planned=1, part_texts=(single.normalized_text,))
     caps = get_segment_capabilities(bot, group_id)
     try:

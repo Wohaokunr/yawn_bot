@@ -138,6 +138,7 @@
 - 每条单独落库（`persist_delivered`），`send_message` 的分条结果放在 `outbound_parts` 里由 `record_tool_send` 逐条写；去重指纹、近期发言、主动发言审计按整句记，主动/续聊的一次分条只记一条 `proactive_reply` 审计（`arguments.parts` 记条数），不计入多次 unanswered。
 - `break` 伪消息段只在 SpeechPlan 内部存在，发送前一定被 `segment_groups` / `strip_break_segments` 消费，绝不进 OneBot 校验。进度提示、历史文本等单条场景用 `strip_rhythm_markup` 去掉标记。
 - 节奏说明只放在易变的发言策略层（`rhythm_instruction`），不进 450 token 的静态前缀。
+- 条数（2026-11 修三段式，群聊与私聊同一口径）：说明里一条为主、两条其次、三条以上看情绪；示例必须覆盖不同条数（一条、两条、补一句、四条连发、蹦字、长内容分段、表情包），**不要再放回“2~N 条”区间说法或恰好三条的示例**。`DEFAULT_MAX_PARTS` 是 4（3 会把模型写的四条并成三条）。`group_rhythm` 按群记最近 8 次计划条数（`deliver_parts` / `send_outbound_parts` 发出第一条后记，进程内有界），`speech_rhythm.mix_streak`（连着 3 次同条数≥2 或连着 4 次都分条）成立时在易变层 `speech.rhythm_mix` 提醒一句；私聊 `private_rhythm` 共用同一判断。
 
 ## 主动发言与短会话
 
