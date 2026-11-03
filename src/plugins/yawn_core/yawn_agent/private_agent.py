@@ -25,7 +25,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from nonebot import get_driver, logger
+from nonebot import logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from .. import affinity, llm
@@ -39,7 +39,7 @@ from . import private_turn_taking as turn_taking
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .persona import prompt_persona
-from .private_context import build_private_context
+from .private_context import build_private_context, superuser_tool_groups
 from .private_memory import (
     consolidate_in_background,
     should_consolidate,
@@ -719,10 +719,9 @@ async def _send_parts(request: PrivateTurnRequest, text: str, now: datetime) -> 
 
 
 def _is_superuser(user_id: int) -> bool:
-    try:
-        return str(user_id) in get_driver().config.superusers
-    except Exception:  # noqa: BLE001
-        return False
+    from ..superuser import is_superuser
+
+    return is_superuser(user_id)
 
 
 async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
@@ -918,6 +917,12 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         user_id=user_id,
         bot_id=bot_id,
         groups=context.groups,
+        # 超级管理员点名时能查 Bot 在的其他群（只给点名单个群的只读工具，不进提示词）
+        superuser_groups=(
+            await superuser_tool_groups(session, user_id, context.groups)
+        )[len(context.groups):]
+        if is_superuser
+        else [],
         now=now,
         nickname=request.nickname,
         is_superuser=is_superuser,

@@ -17,7 +17,7 @@ export function MeHomePage(): React.JSX.Element {
   return <div className="me-page">
     <PageHeader
       title={title}
-      subtitle={me ? `QQ ${me.userId} · 你在 ${me.groupCount} 个群里，其中 ${me.managedGroupCount} 个是群主/管理员` : "正在读取你的信息"}
+      subtitle={me ? (me.isSuperuser ? `QQ ${me.userId} · 超级管理员，Bot 在的 ${me.managedGroupCount} 个群都能管` : `QQ ${me.userId} · 你在 ${me.groupCount} 个群里，其中 ${me.managedGroupCount} 个是群主/管理员`) : "正在读取你的信息"}
       onRefresh={() => { profile.reload(); groups.reload(); }}
       refreshing={profile.refreshing || groups.refreshing}
     />
@@ -58,7 +58,7 @@ export function MeHomePage(): React.JSX.Element {
     <section className="me-section">
       <div className="me-section-head">
         <Space size={8}><TeamOutlined /><strong>我管理的群</strong></Space>
-        <Text type="secondary" className="me-hint">只列出你是群主或管理员的群；打开时会再向 QQ 确认一次身份</Text>
+        <Text type="secondary" className="me-hint">{me?.isSuperuser ? "你是超级管理员：Bot 在的群都列在这里，不必是群主或管理员（Bot 自己是管理员的群才能做禁言等操作）" : "只列出你是群主或管理员的群；打开时会再向 QQ 确认一次身份"}</Text>
       </div>
       {groups.error && !groups.data && <QueryErrorAlert error={groups.error} onRetry={groups.reload} />}
       {groups.loading && !groups.data && <Skeleton active paragraph={{ rows: 3 }} />}

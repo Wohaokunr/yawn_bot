@@ -20,6 +20,8 @@ export interface MyProfile {
   nickname: string | null;
   account: MyAccount | null;
   managedGroupCount: number;
+  /** 超级管理员（后端 SUPERUSER_FULL_ACCESS 开着）：Bot 在的群都能管，不必是群主/管理员 */
+  isSuperuser?: boolean;
   groupCount: number;
   persona: { sourceLabel: string; summary: string; name: string | null; locked: boolean } | null;
   groupManage?: GroupManageFlags;
@@ -45,6 +47,8 @@ export interface MyGroupDetail {
   role: string;
   /** Bot 在线并实时确认过管理员身份；false 时只能看不能改 */
   verified: boolean;
+  /** 以超级管理员身份打开（身份来自配置，不必是群管，Bot 不在线也能改） */
+  superuser?: boolean;
   features: FeatureState[];
   featureHints: Record<string, string>;
   groupManage?: GroupManageFlags;
@@ -92,6 +96,9 @@ export interface ManageStatus {
   yourRole: string | null;
   botRole: string | null;
   isOwner: boolean;
+  /** 你是超级管理员：权限等同群主，不受本群代办策略限制；Bot 自己仍需是管理员 */
+  isSuperuser?: boolean;
+  yourRoleLabel?: string | null;
   allowedActions: string[];
   actions: ManageActionMeta[];
   policy: ManagePolicy;

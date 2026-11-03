@@ -31,7 +31,8 @@ WebUI 后端。全局规则（迁移、权限注入写法、Ruff 约定）见 [�
 
 | 模块 | 职责 |
 |---|---|
-| `permission.py` | 功能注册表 `FEATURE_REGISTRY`、三级权限解析链、`require_feature()` 依赖 |
+| `permission.py` | 功能注册表 `FEATURE_REGISTRY`、三级权限解析链、`require_feature()` 依赖；群管命令权限用 `can_manage_group(event)`（含超级管理员），`is_group_admin` 只表示 QQ 身份 |
+| `superuser.py` | 超级管理员统一判定：`is_superuser`（只看 SUPERUSERS）、`superuser_full_access`（再看 `SUPERUSER_FULL_ACCESS`）、`effective_role`（非群主的超级管理员记 `superuser`，权限等同群主）、`bot_role_hint`。新代码判“是不是群主/管理员”时必须把它考虑进去，Bot 自己的群身份不放宽 |
 | `command_definition.py` | 命令单一真相源：一份声明同时生成 matcher 与帮助元数据 |
 | `command_catalog.py` | 类型化指令目录与已加载插件注册表（子插件加载失败时 `unregister_command_group`） |
 | `command_access.py` | 命令权限与帮助可见性的共享上下文 |

@@ -73,8 +73,31 @@ function respond(path: string, init?: RequestInit) {
     handoffs: [], waiting_confirm: [{ confirm_id: "b1", summary: "在「猫猫群」替你转告：「晚点到」", asked_seconds_ago: 5, he_replied_since: false }],
     relays: [{ id: "r3c4d", group_id: 100, group_name: "猫猫群", kind: "ask", text: "周六谁有空？", created: "2026-11-03 10:05:00", status: "open", replies: [{ from_id: 2, from_name: "小红", text: "我可以", at: "2026-11-03 10:06:00", delivered: true }] }],
   } };
+  if (path === "/private-agent/memory-link") return { data: {
+    enabled: true, share_enabled: true, group_self_facts: true, tombstone_days: 180, group_fact_limit: 4,
+    totals: { sharing: 1, muting: 1, forgetting: 1 },
+    users: [{ user_id: "12345", shares: ["preferred_address"], share_groups: 0, muted_groups: 1, groups_in_private: true, tombstones: 1 }],
+    events: [{ at: "2026-11-03 10:00", what: "允许群里也知道", keys: ["preferred_address"], user_id: "12345" }],
+  } };
+  if (path === "/private-agent/memory-link/users/12345/unshare" && init?.method === "POST") return { data: memoryUser(false) };
+  if (path === "/private-agent/memory-link/users/12345") return { data: memoryUser(true) };
   if (path.startsWith("/private-agent/prompts/sections/") && init?.method === "PUT") return { data: { revision: 4 } };
   throw new Error(`unexpected ${path}`);
+}
+
+function memoryUser(shared: boolean) {
+  return {
+    user_id: "12345",
+    settings: { groups_in_private: true, muted_groups: ["101"], share_keys: shared ? ["preferred_address"] : [], share_groups: [] },
+    tombstones: [{ index: 0, what: "爱好", keyword: "香菜", scope: "私聊和各群", until: "2027-05-01 10:00" }],
+    ledger: [{ at: "2026-11-03 10:00", what: "允许群里也知道", keys: ["preferred_address"] }],
+    private_facts: [{ key: "preferred_address", label: "希望的称呼", content: "阿明", source: "你让我记的" }],
+    group_profile: [{ key: "hobby", content: "爬山", groups: ["猫猫群"], self_told: true, as_of: "2026-11-01" }],
+    groups: [
+      { group_id: "100", name: "猫猫群", agent_readable: true, in_private: true, group_sees_shared: shared ? [{ label: "希望的称呼", content: "阿明" }] : [] },
+      { group_id: "101", name: "摸鱼群", agent_readable: true, in_private: false, group_sees_shared: [] },
+    ],
+  };
 }
 
 function renderAt(url: string) {
@@ -163,5 +186,24 @@ describe("PrivateAgentPage", () => {
     expect(await screen.findByText("用户 12345 的协作记录")).toBeTruthy();
     expect(await screen.findByText("小红：我可以")).toBeTruthy();
     expect(screen.getByText(/在「猫猫群」替你转告/)).toBeTruthy();
+  });
+
+  it("summarizes who shares, mutes and asked to forget across group and private memory", async () => {
+    renderAt("/private-agent?pa.tab=memory");
+    expect(await screen.findByText(/群聊记忆 ↔ 私聊记忆/)).toBeTruthy();
+    expect(screen.getByText("开了共享 1 人")).toBeTruthy();
+    expect(screen.getByText(/私聊里聊的内容永远不进群/)).toBeTruthy();
+    expect(screen.getByText(/群里也知道：希望的称呼/)).toBeTruthy();
+  });
+
+  it("shows one user's flows per group and lets an admin revoke sharing", async () => {
+    renderAt("/private-agent?pa.tab=memory&pa.user=12345");
+    expect(await screen.findByText(/群里能看到：希望的称呼「阿明」/)).toBeTruthy();
+    expect(screen.getByText("他让私聊里别提这个群")).toBeTruthy();
+    expect(screen.getByText(/“香菜”/)).toBeTruthy();
+    expect(screen.getByText(/他亲口说的/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /撤掉共享/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^(OK|确定|确 定)$/ }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/private-agent/memory-link/users/12345/unshare", expect.objectContaining({ method: "POST" })));
   });
 });

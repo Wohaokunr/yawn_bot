@@ -220,9 +220,17 @@ def account_status_text(user_id: int, groups: list[str]) -> str:
         shown = "、".join(groups[:_GROUPS_SHOWN]) + (
             f" 等 {len(groups)} 个群" if len(groups) > _GROUPS_SHOWN else ""
         )
-        lines.append(
-            f"你是这些群的群主/管理员，网页上可以看群关系、开关群功能：{shown}"
-        )
+        from .superuser import superuser_full_access
+
+        if superuser_full_access(user_id):
+            lines.append(
+                "你是超级管理员，不必当群管，Bot 在的群网页上都能管"
+                f"（群关系、群功能、群 Agent 与人设、群管代办）：{shown}"
+            )
+        else:
+            lines.append(
+                f"你是这些群的群主/管理员，网页上可以看群关系、开关群功能：{shown}"
+            )
     else:
         lines.append("网页上可以调整我和你私聊时的人设；当了群管理员还能管理群。")
     lines.append("其他：/网页登录 下线（退出所有设备）、/网页登录 注销（删除账号）")

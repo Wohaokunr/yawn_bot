@@ -26,6 +26,7 @@ from ..data_models.bot_group import BotGroup
 from ..data_models.bot_user import BotUser
 from ..data_models.user_group import UserGroup
 from ..permission import FEATURE_REGISTRY
+from ..superuser import superuser_full_access
 from ..yawn_agent import private_persona
 from ..yawn_agent.config_store import get_or_create_config
 from ..yawn_agent.conversation import close_group_conversations
@@ -81,6 +82,8 @@ async def get_me(session: UserReadSession) -> dict[str, Any]:
             "nickname": user.nickname if user is not None else None,
             "account": account.as_dict() if account is not None else None,
             "managedGroupCount": len(groups),
+            # 超级管理员（全权开着）：Bot 在的群都能管，不必是群主/管理员
+            "isSuperuser": superuser_full_access(user_id),
             "groupCount": group_count,
             "persona": persona,
             "groupManage": _group_manage_flags(),
@@ -243,6 +246,7 @@ async def get_my_group(group_id: int, session: UserReadSession) -> dict[str, Any
             "lastActiveAt": iso(group.last_active_at) if group is not None else None,
             "role": access["role"],
             "verified": access["verified"],
+            "superuser": bool(access.get("superuser")),
             "features": features,
             "featureHints": _GROUP_FEATURE_HINTS,
             "groupManage": _group_manage_flags(),

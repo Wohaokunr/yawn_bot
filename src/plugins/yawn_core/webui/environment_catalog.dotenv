@@ -329,6 +329,12 @@ GROUP_MANAGE_CONFIRM_SECONDS=300
 GROUP_MANAGE_PROTECT_SUPERUSERS=true
 # 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
 GROUP_MANAGE_DATA_DIR=
+# 超级管理员（SUPERUSERS）不必是群主/管理员也能用全部能力：群命令、私聊代办群管理、网页管群 Agent/人设、私聊转告到群；Bot 自己仍需是管理员才能执行平台操作
+SUPERUSER_FULL_ACCESS=true
+# 超级管理员不计群管代办、私聊转告的每日/每小时额度
+SUPERUSER_SKIP_DAILY_LIMITS=true
+# 超级管理员不受群主设的代办/转告策略限制（关掉代办、禁用某操作、仅群主可用、关掉转告）
+SUPERUSER_BYPASS_GROUP_POLICY=true
 # 群聊 ↔ 私聊协作：群里答应私聊的事私聊接着办、私聊替他在群里转告/提问并把回复转回来、群里给私聊小助手记事
 AGENT_BRIDGE_ENABLED=true
 # 每人每天最多从群里转到私聊几次（0 不限）
@@ -347,6 +353,16 @@ AGENT_BRIDGE_REPLY_LIMIT=20
 AGENT_BRIDGE_REPLY_BATCH_SECONDS=20
 # 转告/提问发到群里前要他确认
 AGENT_BRIDGE_CONFIRM=true
+# 群聊记忆 ↔ 私聊记忆打通：忘掉的事两边都不再提、可静音某个群、私聊查得到流动记录
+MEMORY_LINK_ENABLED=true
+# 他明确允许时，把某些类别的私聊事实（称呼、爱好……）也给群里的 Bot 看
+MEMORY_LINK_SHARE=true
+# 让 Bot 忘掉的事多少天内不会被自动整理记回来
+MEMORY_LINK_TOMBSTONE_DAYS=180
+# 群里每位相关成员最多带几条他允许共享的私聊事实
+MEMORY_LINK_GROUP_FACTS=4
+# 群里亲口让 Bot 记住的关于自己的事，私聊里也记着
+MEMORY_LINK_GROUP_SELF_FACTS=true
 
 # ── 游戏 AI 开关 ─────────────────────────────────────────────────────────────
 

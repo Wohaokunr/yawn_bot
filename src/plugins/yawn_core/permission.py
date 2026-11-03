@@ -22,6 +22,7 @@ _DbSession = Union[AsyncSession, async_scoped_session]
 __all__ = [
     "FEATURE_REGISTRY",
     "SUPERUSER",
+    "can_manage_group",
     "check_feature_permission",
     "get_feature_display",
     "is_group_admin",
@@ -74,6 +75,16 @@ def resolve_feature_key(name: str) -> Optional[str]:
 def is_group_admin(event: GroupMessageEvent) -> bool:
     """检查事件发送者是否为群主或群管理员。"""
     return event.sender.role in ("owner", "admin")
+
+
+def can_manage_group(event: GroupMessageEvent) -> bool:
+    """群管命令的权限：群主、群管理员，或开了全权（SUPERUSER_FULL_ACCESS）的超级管理员。
+
+    ``is_group_admin`` 只回答“他在 QQ 里是不是群管”，判命令权限一律用这个。
+    """
+    from .superuser import event_can_manage_group
+
+    return event_can_manage_group(event)
 
 
 # ── 权限解析链 ──────────────────────────────────────────────

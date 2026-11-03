@@ -878,6 +878,17 @@ async def _prefetch_relations(
     }
 
 
+def _forgotten_by_member(
+    user_id: int, key: str, content: str, *, group_id: int, now: datetime
+) -> bool:
+    from .memory_link import suppressed
+
+    try:
+        return suppressed(user_id, key, content, now=now, scope="group", group_id=group_id)
+    except Exception:  # noqa: BLE001 - 读个人数据失败时按没忘掉处理，不挡整理
+        return False
+
+
 def _store_model_facts(
     session: Any,
     group_id: int,
@@ -924,6 +935,10 @@ def _store_model_facts(
         if key in _LIST_FACT_KEYS:
             content = normalize_list_fact(content, separator=_LIST_FACT_SEPARATOR)
         if not content:
+            continue
+        if _forgotten_by_member(user_id, key, content, group_id=group_id, now=now):
+            # 他让我忘掉的事（本群或“各处都忘掉”，memory_link 墓碑），整理时不再记回来。
+            dbg(f"群 {group_id} 记忆整理: 成员 {user_id} 的 {key} 他让我忘掉过，跳过")
             continue
         confidence = _bounded_float(item.get("confidence"), 0.5)
         if len(evidence) == 1:

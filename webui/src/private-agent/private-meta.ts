@@ -3,8 +3,23 @@ import { composeText } from "../agent-prompts/prompt-meta";
 import type { PromptOverride } from "../agent-prompts/prompt-meta";
 import type { PersonaMode, PrivatePromptIssue, PrivateScope, PrivateSectionRow, PrivateSnapshot } from "./private-api";
 
-export type PrivateTab = "prompts" | "persona" | "captures" | "bridge";
-export const PRIVATE_TABS: PrivateTab[] = ["prompts", "persona", "captures", "bridge"];
+export type PrivateTab = "prompts" | "persona" | "captures" | "bridge" | "memory";
+export const PRIVATE_TABS: PrivateTab[] = ["prompts", "persona", "captures", "bridge", "memory"];
+
+/** 可共享到群里的私聊事实类别（与后端 memory_link.SHAREABLE_KEYS / PRIVATE_MEMORY_LABELS 一致）。 */
+export const MEMORY_LINK_KEY_LABELS: Record<string, string> = {
+  display_name: "昵称",
+  preferred_address: "希望的称呼",
+  hobby: "爱好",
+  preference: "喜好",
+  dislike: "讨厌的",
+  skill: "擅长",
+  current_status: "近期状态",
+};
+
+export function memoryKeyLabel(key: string): string {
+  return MEMORY_LINK_KEY_LABELS[key] ?? key;
+}
 
 export function parsePrivateTab(value: string | null): PrivateTab {
   return PRIVATE_TABS.includes(value as PrivateTab) ? (value as PrivateTab) : "prompts";

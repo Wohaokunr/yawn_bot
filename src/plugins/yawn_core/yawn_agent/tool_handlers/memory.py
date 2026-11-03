@@ -1,4 +1,4 @@
-# ruff: noqa: TID252, TRY003
+# ruff: noqa: TID252, TRY003, E501
 from __future__ import annotations
 
 from typing import Any
@@ -69,6 +69,132 @@ _AGENT_RELATION_THIRD_PARTY_CONFIDENCE = 0.45
 _PROFILE_TYPE_ORDER = {"core": 0, "profile": 1}
 
 
+async def _shared_profile_items(
+    session: Any, group_id: int, subject_id: int, existing_keys: set[str], *, now: Any
+) -> list[dict[str, Any]]:
+    """他本人允许群里也知道的私聊事实（memory_link）；本群已有同类别画像的不重复给。"""
+
+    from .. import memory_link
+
+    try:
+        shared = await memory_link.shared_facts_for_group(
+            session, group_id, [subject_id], now=now
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    items: list[dict[str, Any]] = []
+    for row in shared.get(subject_id, []):
+        if str(row.memory_key) in existing_keys:
+            continue
+        view = memory_link.shared_view(row)
+        if view is not None:
+            items.append(
+                {
+                    "key": view["key"],
+                    "content": view["content"],
+                    "confidence": view["confidence"],
+                    "core": False,
+                    "self_reported": True,
+                    "shared_by_member": True,
+                    "last_confirmed": (row.updated_at or now).date().isoformat(),
+                }
+            )
+    return items
+
+
+async def _mirror_self_fact(
+    session: Any, group_id: int, user_id: int, result: dict[str, Any], *, now: Any
+) -> None:
+    """群里亲口让我记住的关于他自己的事，私聊里也记着（单向：群 → 私聊，memory_link）。
+
+    同时解除这件事的“忘掉”记录（他又亲口说了）。失败不影响群里的结果。
+    """
+
+    from .. import memory_link, private_memory
+
+    if not memory_link.enabled():
+        return
+    key = str(result.get("key") or "")
+    content = str(result.get("content") or "")
+    if not key or not content:
+        return
+    memory_link.clear_tombstones_for(
+        user_id, key, content, now=now, everywhere=True, group_id=group_id
+    )
+    if not memory_link.group_self_facts_enabled():
+        return
+    try:
+        async with session.begin_nested():
+            mirrored = await private_memory.remember(
+                session, user_id, key, content, now=now, source="agent"
+            )
+    except Exception:  # noqa: BLE001
+        dbg(f"群 {group_id} remember_about_me: 私聊侧没记上（成员 {user_id} key={key}）")
+        return
+    if mirrored.get("created") or mirrored.get("changed"):
+        memory_link.log_event(user_id, "group_self_fact", now=now, key=key)
+
+
+async def _forget_linked(  # noqa: PLR0913
+    session: Any,
+    group_id: int,
+    user_id: int,
+    *,
+    key: str | None,
+    keyword: str | None,
+    everywhere: bool,
+    now: Any,
+) -> dict[str, Any]:
+    """群里的“忘掉”：记墓碑挡住整理再学回来；everywhere 时连他别的群和私聊记忆一起删。
+
+    返回给群里的结果只说“别处也清了”，不报他在哪些群、私聊里记过什么。
+    """
+
+    from .. import memory_link, private_memory
+
+    if not memory_link.enabled():
+        return {}
+    extra: dict[str, Any] = {}
+    elsewhere = False
+    if everywhere:
+        others = (
+            await session.execute(
+                select(UserGroup.group_id).where(
+                    UserGroup.user_id == user_id,
+                    UserGroup.is_active.is_(True),
+                    UserGroup.group_id != group_id,
+                )
+            )
+        ).scalars().all()
+        for other in others:
+            privacy = await session.get(AgentPrivacy, (int(other), user_id))
+            if privacy is not None and privacy.opted_out:
+                continue
+            outcome = await forget_member_facts(
+                session, int(other), user_id, raw_key=key, keyword=keyword
+            )
+            elsewhere = elsewhere or bool(outcome.get("changed"))
+        try:
+            private = await private_memory.forget(session, user_id, key=key, keyword=keyword)
+            elsewhere = elsewhere or bool(private.get("changed"))
+        except ValueError:
+            pass
+        extra["everywhere"] = True
+        extra["cleared_elsewhere"] = elsewhere
+    tombstone = memory_link.add_tombstone(
+        user_id,
+        key=key,
+        keyword=keyword,
+        scope="everywhere" if everywhere else "group",
+        group_id=group_id,
+        now=now,
+        kind="group_forget_everywhere" if everywhere else "forget",
+    )
+    if tombstone:
+        extra["wont_relearn"] = True
+    return extra
+
+
 async def handle(  # noqa: C901, PLR0912, PLR0915
     name: str, args: dict[str, Any], context: ToolExecutionContext
 ) -> ToolHandlerResult:
@@ -135,6 +261,12 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             }
             for row in rows
         ]
+        if session is not None and (privacy is None or not privacy.opted_out):
+            result.extend(
+                await _shared_profile_items(
+                    session, group_id, subject_id, {str(item["key"]) for item in result}, now=now
+                )
+            )
     elif name == "search_group_memory":
         query = str(args.get("query", "")).strip()
         if not query:
@@ -370,6 +502,9 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             str(args.get("content") or ""),
             now=now,
         )
+        await _mirror_self_fact(
+            session, group_id, int(context.actor_user_id), result, now=now
+        )
         dbg(
             f"群 {group_id} remember_about_me: 成员 {context.actor_user_id} "
             f"key={result['key']} created={result['created']}"
@@ -488,6 +623,17 @@ async def handle(  # noqa: C901, PLR0912, PLR0915
             int(context.actor_user_id),
             raw_key=str(args.get("key") or "") or None,
             keyword=str(args.get("keyword") or "") or None,
+        )
+        result.update(
+            await _forget_linked(
+                session,
+                group_id,
+                int(context.actor_user_id),
+                key=str(args.get("key") or "") or None,
+                keyword=str(args.get("keyword") or "") or None,
+                everywhere=bool(args.get("everywhere")),
+                now=now,
+            )
         )
         if not args.get("key") and not args.get("keyword"):
             # “把我忘掉”不带范围时，连同他和 Bot 之间的关系一起忘掉。

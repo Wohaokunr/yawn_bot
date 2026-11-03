@@ -59,6 +59,18 @@ BOT = 9
 G_ON, G_OFF, G_OPT = 101, 102, 103
 
 
+@pytest.fixture(autouse=True)
+def _isolated_private_store(tmp_path, monkeypatch):
+    """个人数据（含记忆打通的“忘掉”记录）放临时目录，别写进仓库 data/ 跨用例残留。"""
+
+    memory_link = importlib.import_module(f"{_PKG}.yawn_agent.memory_link")
+
+    monkeypatch.setenv("PRIVATE_AGENT_DATA_DIR", str(tmp_path / "private_users"))
+    memory_link.reset()
+    yield
+    memory_link.reset()
+
+
 @pytest_asyncio.fixture
 async def maker():
     affinity.reset_ledger_state()

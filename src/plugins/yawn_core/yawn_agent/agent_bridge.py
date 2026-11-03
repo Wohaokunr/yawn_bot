@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from ..private_chat_bridge import private_agent_config
+from ..superuser import bypasses_group_policy, skips_daily_limits
 from .context import now_beijing
 from .log import dbg, dbg_exc
 from .memory_hygiene import looks_like_instruction
@@ -175,7 +176,8 @@ def create_handoff(
         raise BridgeError("话题像是给 AI 的指令，没有转", hint="用你自己的话概括他要的事")
     reason = reason if reason in HANDOFF_REASONS else "asked"
     asked = clean(asked, limit=ASKED_MAX_CHARS)
-    cap = int(_cfg("agent_bridge_handoff_daily", 10))
+    # 超级管理员不计每日转私聊次数
+    cap = 0 if skips_daily_limits(user_id) else int(_cfg("agent_bridge_handoff_daily", 10))
 
     def apply(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         items: list[dict[str, Any]] = data["handoffs"]
@@ -265,6 +267,9 @@ def _note_group_sent(group_id: int) -> None:
 
 def check_relay_quota(user_id: int, group_id: int, now: datetime | None = None) -> None:
     now = now or now_beijing()
+    if skips_daily_limits(user_id):
+        # 超级管理员不计每日/每群每小时转告额度（仍要他确认每一句）
+        return
     daily = int(_cfg("agent_bridge_relay_daily", 10))
     if daily and _today_count(_load_bridge(user_id)["relays"], now) >= daily:
         raise BridgeError(
@@ -809,9 +814,11 @@ async def opted_out(session: Any, group_id: int, user_id: int) -> bool:
     return bool(row is not None and row.opted_out)
 
 
-def relay_allowed_in_group(group_id: int) -> bool:
-    """群主可以在群管理策略里关掉本群的私聊转告。"""
+def relay_allowed_in_group(group_id: int, user_id: int | None = None) -> bool:
+    """群主可以在群管理策略里关掉本群的私聊转告；超级管理员不受这条策略限制。"""
 
+    if user_id is not None and bypasses_group_policy(user_id):
+        return True
     try:
         from .group_manage import policy_for
 

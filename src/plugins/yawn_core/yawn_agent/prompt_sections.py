@@ -277,6 +277,15 @@ SECTIONS: tuple[PromptSection, ...] = (
         tasks=_DP,
     ),
     PromptSection(
+        "core.shared_fact_guidance",
+        "成员共享事实使用规则",
+        "core",
+        "speaker",
+        default_ref="prompt:_SHARED_FACT_GUIDANCE",
+        when="成员资料里有本人允许群里也知道的私聊事实时（记忆打通）",
+        tasks=_DP,
+    ),
+    PromptSection(
         "layers.speaker_header",
         "成员资料层表头",
         "layers",

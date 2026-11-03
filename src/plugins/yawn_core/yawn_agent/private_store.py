@@ -66,6 +66,8 @@ def empty_record() -> dict[str, Any]:
         "recap": {},
         # 群聊 ↔ 私聊协作（agent_bridge）：从群里转来的事 handoffs、替他在群里转告/提问 relays
         "bridge": {},
+        # 群聊记忆 ↔ 私聊记忆打通（memory_link）：本人定的流动规则、让我忘掉的事、跨边流动记录
+        "memory_link": {},
     }
 
 

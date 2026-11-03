@@ -144,6 +144,15 @@ class PrivateAgentConfig(BaseModel):
     group_manage_protect_superusers: bool = True
     # 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
     group_manage_data_dir: str = ""
+    # ── 超级管理员全权（yawn_core/superuser.py）──
+    # 超级管理员（SUPERUSERS）不必是群主/管理员，也能用群命令、私聊代办群管理、
+    # 网页管群 Agent/人设、私聊转告到群等全部能力；Bot 自己仍需是管理员才能执行平台操作
+    superuser_full_access: bool = True
+    # 超级管理员不计群管代办、私聊转告的每日/每小时额度
+    superuser_skip_daily_limits: bool = True
+    # 超级管理员不受群主设的代办/转告策略限制
+    # （群里关掉了代办、禁用某操作、仅群主可用、关掉转告）
+    superuser_bypass_group_policy: bool = True
     # ── 群聊 ↔ 私聊协作（yawn_agent/agent_bridge.py）──
     # 群里答应“私聊说”的事私聊接着办；私聊里替他在群里转告/提问并把回复转回来；
     # 群里给他的私聊小助手记提醒/待办
@@ -164,6 +173,18 @@ class PrivateAgentConfig(BaseModel):
     agent_bridge_reply_batch_seconds: float = Field(default=20.0, ge=0, le=600)
     # 转告/提问发到群里之前要他确认（他发来下一条消息后才能确认）
     agent_bridge_confirm: bool = True
+    # ── 群聊记忆 ↔ 私聊记忆打通（yawn_agent/memory_link.py）──
+    # 总开关：忘掉的事两边都不再提/记回来、可静音某个群、私聊里查得到流动记录
+    memory_link_enabled: bool = True
+    # 他明确允许时，某些类别的私聊事实（称呼、爱好……）群里的我也知道；
+    # 关掉时他的设置保留但暂不生效
+    memory_link_share: bool = True
+    # 他让我忘掉的事，多少天内自动整理不会再记回来
+    memory_link_tombstone_days: int = Field(default=180, ge=1, le=3650)
+    # 群里每位相关成员最多带几条他允许共享的私聊事实
+    memory_link_group_facts: int = Field(default=4, ge=0, le=7)
+    # 他在群里亲口让我记住的关于自己的事，私聊里也记着（单向：群 → 私聊）
+    memory_link_group_self_facts: bool = True
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)

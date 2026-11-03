@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from random import randint
 from typing import Any
@@ -30,6 +30,7 @@ from ..checkin_service import (
 from ..command_catalog import get_registered_command_groups
 from ..data_models.agent_memory import AgentMemory
 from ..permission import check_feature_permission
+from ..superuser import superuser_full_access
 from . import private_memory
 from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .memory_self import SELF_FACT_KEYS, forget_member_facts, remember_member_fact
@@ -165,6 +166,23 @@ PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
             },
         },
         ("query",),
+    ),
+    PrivateTool(
+        "memory_link",
+        "群里的你和私聊里的你怎么共用记忆，由他本人定：view 看现在的设置和最近的记录（他问“你从哪知道的”“群里知道我什么”时用）；"
+        "share/unshare 让群里的你也知道/不再知道某几类他私聊里告诉你的事（keys，只有他明确同意才 share；group 可只限某个群）；"
+        "mute_group/unmute_group 某个群的事别带进/可以带进私聊；group_talk 设 on=false 就别在私聊里提群里的事。私聊里聊的其他内容永远不会带到群里",
+        {
+            "action": {
+                "type": "string",
+                "enum": ["view", "share", "unshare", "mute_group", "unmute_group", "group_talk"],
+            },
+            "keys": {"type": "array", "items": _FACT_KEY_SCHEMA, "minItems": 1, "maxItems": 7},
+            "group": {**_GROUP_SCHEMA, "description": "群名（可以只写一部分）或群号"},
+            "on": {"type": "boolean"},
+        },
+        ("action",),
+        writes=True,
     ),
     PrivateTool(
         "list_commands",
@@ -531,7 +549,7 @@ ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
 )
-# 群管代办（group_manage）：只给数据库里当群主/管理员的人；每次执行都实时确认他和 Bot 的身份。
+# 群管代办（group_manage）：只给数据库里当群主/管理员的人和超级管理员；每次执行都实时确认他和 Bot 的身份。
 MANAGE_ACTIONS = (
     "groups", "members", "muted", "notices", "audit",
     "mute", "unmute", "whole_mute", "announce", "delete_notice", "send", "todo",
@@ -541,7 +559,7 @@ MANAGE_ACTIONS = (
 MANAGE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "group_manage",
-        "替他管理他当群主/管理员、且你也是管理员的群（群里实时核对两边身份，不够就会被拒）。"
+        "替他管理他当群主/管理员、且你也是管理员的群（群里实时核对两边身份，不够就会被拒）；他是超级管理员时你在的群都能管，权限等同群主，但你自己不是管理员的群仍做不了。"
         "查：groups 他能管哪些群和能做什么；members 找成员（query 写名字/QQ）；muted 谁在禁言；notices 群公告；audit 最近的操作记录。"
         "做：mute 禁言（member + minutes）/unmute 解禁；whole_mute 全员禁言（enable）；announce 发群公告（content，可 pinned 置顶、confirm_required 要群员确认）；"
         "delete_notice 删公告（notice_id）；send 以你的身份在群里发一句（text）；todo 发一条并设为群待办（text）；todo_done/todo_cancel 完成/取消待办（message_id）；"
@@ -577,7 +595,7 @@ BRIDGE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "group_bridge",
         "群和私聊之间帮他接力（群里的你和私聊的你是同一个人）。"
-        "post 替他在他所在的群里转告一句（text，会带“〔他的名字 让我转告〕”）；ask 替他在群里问大家（text），群友引用回复会攒一会儿私聊转给他；"
+        "post 替他在他所在的群里（超级管理员可以是你在的任何群，用群号指定）转告一句（text，会带“〔他的名字 让我转告〕”）；ask 替他在群里问大家（text），群友引用回复会攒一会儿私聊转给他；"
         "replies 看提问收到的回复；close 不再收回复（id）；handoffs 看他从群里转到私聊的事；done 标记那件事办完了（id）。"
         "post/ask 会先返回 needs_confirm：把群名和要发的原话问他，然后这一轮就结束；他下一条同意后再 confirm（confirm_id），不同意就 cancel。"
         "只在他明确要你去群里说/问时用：不替他编内容、不发他没同意的话、不把你们私聊的其他内容带到群里。"
@@ -679,6 +697,9 @@ class PrivateToolContext:
     heavy_calls: int = 0
     # 本轮用 my_persona 改了私聊人设：发送前清词要用新的人设名
     persona_changed: bool = False
+    # 超级管理员（全权开着）：他不在、但 Bot 在的群。只在点名单个群时用
+    # （_single_group：群里最近在聊什么、签到榜），批量/“我所在的群”仍只看 groups
+    superuser_groups: list[SharedGroup] = field(default_factory=list)
     # 只放行这些工具（汇报/协调轮发同一份工具表保前缀缓存，越界的调用在这里拦下）；None 不限
     allowed_tools: frozenset[str] | None = None
     # 本轮 group_manage 调用次数；以及“已经在等他回话，别再调工具了”的信号（主回合据此直接收尾）
@@ -705,7 +726,12 @@ def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]
 
 
 def _single_group(ctx: PrivateToolContext, raw: str) -> SharedGroup:
-    hits = _match_groups(ctx, raw)
+    try:
+        hits = _match_groups(ctx, raw)
+    except ToolError:
+        if not ctx.superuser_groups:
+            raise
+        hits = _match_groups(replace(ctx, groups=ctx.superuser_groups), raw)
     if len(hits) > 1:
         names = "、".join(g.name for g in hits[:5])
         raise ToolError(
@@ -793,29 +819,60 @@ def _list_groups(ctx: PrivateToolContext) -> dict[str, Any]:
     }
 
 
+def _link(ctx: PrivateToolContext) -> Any:
+    from . import memory_link
+
+    return memory_link.load(ctx.user_id, now=ctx.now) if memory_link.enabled() else None
+
+
+def _visible(ctx: PrivateToolContext, link: Any) -> list[SharedGroup]:
+    from .private_context import visible_groups
+
+    return [g for g in visible_groups(ctx.groups, link) if g.agent_readable]
+
+
 async def _remembered(ctx: PrivateToolContext) -> dict[str, Any]:
+    from . import memory_link
+
     private = [
         private_memory.fact_view(row)
         for row in await private_memory.list_facts(
             ctx.session, ctx.user_id, now=ctx.now
         )
     ]
-    readable = [g for g in ctx.groups if g.agent_readable]
+    link = _link(ctx)
+    readable = _visible(ctx, link)
     names = {g.group_id: g.name for g in readable}
     facts = await group_profile_facts(
-        ctx.session, ctx.user_id, list(names), now=ctx.now
+        ctx.session, ctx.user_id, list(names), now=ctx.now, link=link
     )
-    return {
+    learned = []
+    for f in facts:
+        item: dict[str, Any] = {
+            "key": f["key"],
+            "content": f["content"],
+            "group": "、".join(sorted(names.get(gid, "") for gid in f.get("group_ids") or [f["group_id"]])),
+        }
+        item["how"] = "他在群里亲口说的" if f.get("self_told") else "群聊里看出来的"
+        if f.get("as_of"):
+            item["as_of"] = f["as_of"]
+        learned.append(item)
+    payload: dict[str, Any] = {
         "told_you_in_private": private,
-        "learned_in_groups": [
-            {
-                "key": f["key"],
-                "content": f["content"],
-                "group": names.get(f["group_id"], ""),
-            }
-            for f in facts
-        ],
+        "learned_in_groups": learned,
     }
+    if link is not None:
+        shared = [key for key in memory_link.SHAREABLE_KEYS if key in link.share_keys]
+        if shared and memory_link.share_enabled():
+            payload["groups_also_know"] = [
+                item["label"] for item in private if item["key"] in shared
+            ] or [private_memory.KEY_LABELS.get(key, key) for key in shared]
+        if link.tombstones:
+            payload["asked_to_forget"] = len(link.tombstones)
+        hidden = [g.name for g in ctx.groups if g.agent_readable and g not in readable and not link.group_visible_in_private(g.group_id)]
+        if hidden:
+            payload["not_brought_into_private"] = sorted(hidden)
+    return payload
 
 
 async def _remember(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -847,6 +904,14 @@ async def _remember(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, 
     payload: dict[str, Any] = {"key": key, "content": result["content"], "saved": True}
     if args.get("also_in_groups"):
         payload["synced_groups"] = synced
+        if synced:
+            from . import memory_link
+
+            # 他明确说“群里也这样”：解除“各处都忘掉”的旧记录，并记一笔流动。
+            memory_link.clear_tombstones_for(
+                ctx.user_id, key, result["content"], now=ctx.now, everywhere=True
+            )
+            memory_link.log_event(ctx.user_id, "share", now=ctx.now, keys=[key], groups=synced)
     return payload
 
 
@@ -864,24 +929,136 @@ async def _forget(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
             )
             if outcome.get("changed"):
                 groups_changed.append(group.name)
-    if result["changed"] or groups_changed:
+    from . import memory_link
+
+    everywhere = bool(args.get("include_groups"))
+    tombstone = memory_link.add_tombstone(
+        ctx.user_id,
+        key=key,
+        keyword=keyword,
+        scope="everywhere" if everywhere else "private",
+        now=ctx.now,
+        kind="forget_everywhere" if everywhere else "forget",
+        groups=groups_changed or None,
+    )
+    if result["changed"] or groups_changed or tombstone:
         ctx.mutated = True
     payload: dict[str, Any] = {
         "private_removed": result["removed"],
         "private_trimmed": result["trimmed"],
         "changed": bool(result["changed"] or groups_changed),
     }
+    if tombstone:
+        # 忘掉的事之后自动整理不会再记回来；只在私聊忘掉时，群画像在私聊里也不再提。
+        payload["wont_relearn"] = True
     if result["protected"]:
         payload["kept_admin_entries"] = result["protected"]
-    if args.get("include_groups"):
+    if everywhere:
         payload["groups_changed"] = groups_changed
+    else:
+        still = await _still_in_groups(ctx, key, keyword)
+        if still:
+            payload["still_in_groups"] = still
+            payload["hint"] = "群里的画像还记着，私聊里我不会再提；他要连群里一起删，再调一次并设 include_groups=true"
     return payload
 
 
+async def _still_in_groups(
+    ctx: PrivateToolContext, key: str | None, keyword: str | None
+) -> list[str]:
+    """只在私聊忘掉时：哪些群的画像里还有这件事（只报群名）。"""
+
+    readable = [g for g in ctx.groups if g.agent_readable]
+    if not readable or not (key or keyword):
+        return []
+    facts = await group_profile_facts(
+        ctx.session, ctx.user_id, [g.group_id for g in readable], now=ctx.now
+    )
+    names = {g.group_id: g.name for g in readable}
+    hit: set[str] = set()
+    for fact in facts:
+        if key and fact["key"] != key:
+            continue
+        if keyword and keyword not in fact["content"]:
+            continue
+        for gid in fact.get("group_ids") or [fact["group_id"]]:
+            if gid in names:
+                hit.add(names[gid])
+    return sorted(hit)
+
+
+async def _memory_link_tool(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """memory_link：他本人定群聊记忆和私聊记忆怎么流动。"""
+
+    from . import memory_link
+
+    if not memory_link.enabled():
+        raise ToolError("记忆打通功能没开", code=ERROR_PERMISSION)
+    action = str(args["action"])
+    if action == "view":
+        state = memory_link.load(ctx.user_id, now=ctx.now)
+        return {
+            "settings": memory_link.settings_view(state, ctx.groups),
+            "forgotten": memory_link.tombstone_view(state),
+            "recent_changes": memory_link.ledger_view(state),
+            "rule": "私聊里聊的内容不会带到群里；只有 shared_with_groups 里的类别，群里的我也知道",
+        }
+    if action in {"share", "unshare"}:
+        keys = [str(key) for key in args.get("keys") or []]
+        if not keys:
+            raise ToolError("要说清楚是哪几类", code=ERROR_INVALID_ARGS, hint="keys 填类别，比如 preferred_address、hobby")
+        if action == "share" and not memory_link.share_enabled():
+            raise ToolError("管理员关掉了“群里也知道”这个功能", code=ERROR_PERMISSION)
+        groups: list[SharedGroup] = []
+        if action == "share" and args.get("group"):
+            groups = [_single_group(ctx, str(args["group"]))]
+            if not groups[0].agent_readable:
+                raise ToolError(f"「{groups[0].name}」没开我的群聊功能，或你在那里关了我的记忆", code=ERROR_PERMISSION)
+        result = memory_link.set_share(
+            ctx.user_id,
+            keys,
+            on=action == "share",
+            now=ctx.now,
+            groups=[g.group_id for g in groups] or None,
+            group_names=[g.name for g in groups] or None,
+        )
+        ctx.mutated = True
+        names = {g.group_id: g.name for g in ctx.groups}
+        return {
+            "action": action,
+            "shared_with_groups": [private_memory.KEY_LABELS.get(k, k) for k in result["share_keys"]],
+            "only_in": [names.get(gid, str(gid)) for gid in result["share_groups"]],
+            "groups_that_see_it": [
+                g.name
+                for g in ctx.groups
+                if g.agent_readable and result["share_keys"] and (not result["share_groups"] or g.group_id in result["share_groups"])
+            ],
+        }
+    if action in {"mute_group", "unmute_group"}:
+        if not args.get("group"):
+            raise ToolError("要说是哪个群", code=ERROR_INVALID_ARGS)
+        group = _single_group(ctx, str(args["group"]))
+        muted = memory_link.set_muted(
+            ctx.user_id, group.group_id, muted=action == "mute_group", now=ctx.now, group_name=group.name
+        )
+        ctx.mutated = True
+        return {"action": action, "group": group.name, "muted": group.group_id in muted}
+    if action == "group_talk":
+        if "on" not in args:
+            raise ToolError("要说开还是关", code=ERROR_INVALID_ARGS, hint="on=false 表示别在私聊提群里的事")
+        on = memory_link.set_groups_in_private(ctx.user_id, on=bool(args["on"]), now=ctx.now)
+        ctx.mutated = True
+        return {"action": action, "bring_up_groups": on}
+    raise ToolError(f"不支持的动作：{action}", code=ERROR_INVALID_ARGS)
+
+
 async def _relationship(ctx: PrivateToolContext) -> dict[str, Any]:
+    from .private_context import visible_groups
+
     snap = await affinity.snapshot(ctx.session, ctx.user_id, now=ctx.now)
+    # 他让私聊里别提的群，那里的关系也不在私聊里讲（与私聊上下文同一口径）。
     bonds = await group_bonds(
-        ctx.session, ctx.user_id, ctx.bot_id, ctx.groups, now=ctx.now
+        ctx.session, ctx.user_id, ctx.bot_id, visible_groups(ctx.groups, _link(ctx)), now=ctx.now
     )
     return {"overall": snap.public_dict(), "in_groups": bonds}
 
@@ -932,7 +1109,12 @@ async def _group_recent(ctx: PrivateToolContext, raw: str) -> dict[str, Any]:
             )
         if len(summaries) >= _MAX_SUMMARIES:
             break
-    return {"group": group.name, "summaries": summaries, "empty": not summaries}
+    payload: dict[str, Any] = {"group": group.name, "summaries": summaries, "empty": not summaries}
+    link = _link(ctx)
+    if link is not None and not link.group_visible_in_private(group.group_id):
+        # 他自己点名问的才答；平时别主动提这个群。
+        payload["note"] = "他之前说过私聊里别提这个群，这次是他自己问的，答完别再主动提"
+    return payload
 
 
 _RECALL_PER_GROUP = 4
@@ -943,31 +1125,148 @@ _RECALL_SKIP_RECENT = 12
 
 
 async def _recall(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """按关键词回想群里的事、旧私聊和私聊记忆；全部只读、只看本人能看的部分。"""
+    """按关键词回想群里的事、旧私聊和私聊记忆；全部只读、只看本人能看的部分。
+
+    叠加他本人定的规则（``memory_link``）：私聊里不提的群不查、他让我忘掉的不返回。
+    """
 
     query = str(args.get("query") or "").strip()
     where = str(args.get("where") or "all")
+    link = _link(ctx)
     result: dict[str, Any] = {"query": query}
     if where in {"all", "groups"}:
-        result["in_groups"] = await _recall_groups(ctx, query)
+        result["in_groups"] = await _recall_groups(ctx, query, link=link)
+        people = await _recall_people(ctx, query, link)
+        if people:
+            result["people"] = people
     if where in {"all", "private_chat"}:
         result["in_private_chat"] = await _recall_chat(ctx, query)
         result["remembered"] = await _recall_facts(ctx, query)
+        earlier = _recall_recap(ctx, query)
+        if earlier:
+            result["earlier_chat"] = earlier
+    if where == "all":
+        relayed = _recall_bridge(ctx, query)
+        if relayed:
+            result["between_group_and_private"] = relayed
+    if link is not None:
+        _drop_forgotten(ctx, result, link)
     result["found"] = any(
-        result.get(key) for key in ("in_groups", "in_private_chat", "remembered")
+        result.get(key)
+        for key in (
+            "in_groups",
+            "in_private_chat",
+            "remembered",
+            "people",
+            "earlier_chat",
+            "between_group_and_private",
+        )
     )
     if not result["found"]:
         result["hint"] = "没找到相关的，直接告诉他不记得了，别编"
     return result
 
 
-async def _recall_groups(ctx: PrivateToolContext, query: str) -> list[dict[str, Any]]:
-    """可读群里与关键词相关的群摘要、以及关于他本人的画像（不返回别的成员的画像）。"""
+def _drop_forgotten(ctx: PrivateToolContext, result: dict[str, Any], link: Any) -> None:
+    """他让我忘掉的关键词：回想结果里含着的一律不返回。"""
+
+    from .memory_link import text_suppressed
+
+    for key in ("in_groups", "in_private_chat", "remembered", "people", "earlier_chat", "between_group_and_private"):
+        items = result.get(key)
+        if not isinstance(items, list):
+            continue
+        result[key] = [
+            item
+            for item in items
+            if not text_suppressed(
+                ctx.user_id,
+                " ".join(str(v) for v in item.values()) if isinstance(item, dict) else str(item),
+                now=ctx.now,
+                state=link,
+            )
+        ]
+
+
+def _terms(query: str) -> list[str]:
+    from .memory_retrieval import query_terms
+
+    return [term for term in dict.fromkeys([query, *query_terms(query)]) if term]
+
+
+def _recall_recap(ctx: PrivateToolContext, query: str) -> list[str]:
+    """记忆整理写下的“之前聊到哪”（窗口外更早的话题）。"""
+
+    from . import private_store
+
+    try:
+        recap = private_store.load(ctx.user_id).get("recap") or {}
+    except Exception:  # noqa: BLE001
+        return []
+    terms = _terms(query)
+    texts = [str(recap.get("summary") or ""), *(str(t) for t in recap.get("open_threads") or [])]
+    return [text for text in texts if text and any(term in text for term in terms)][:3]
+
+
+def _recall_bridge(ctx: PrivateToolContext, query: str) -> list[dict[str, Any]]:
+    """群里转到私聊的事、他让我在群里转告/问的事（agent_bridge）。"""
+
+    from . import agent_bridge
+
+    terms = _terms(query)
+    found: list[dict[str, Any]] = []
+    try:
+        handoffs = agent_bridge.handoffs(ctx.user_id)
+        relays = agent_bridge.relays(ctx.user_id)
+    except Exception:  # noqa: BLE001
+        return []
+    for item in reversed(handoffs):
+        text = str(item.get("topic") or "")
+        if any(term in text for term in terms):
+            found.append({"kind": "群里转来私聊的事", "group": item.get("group_name"), "what": text[:80], "when": item.get("created")})
+    for item in reversed(relays):
+        text = str(item.get("text") or "")
+        if any(term in text for term in terms):
+            found.append(
+                {
+                    "kind": "他让你在群里问的" if item.get("kind") == "ask" else "他让你在群里转告的",
+                    "group": item.get("group_name"),
+                    "what": text[:80],
+                    "when": item.get("created"),
+                    "replies": len(item.get("replies") or []),
+                }
+            )
+    return found[:4]
+
+
+async def _recall_people(ctx: PrivateToolContext, query: str, link: Any) -> list[dict[str, Any]]:
+    """他在群里和谁是什么关系：名字或关系词命中关键词的（只给名字和关系词）。"""
+
+    from .private_context import people_you_both_know, visible_groups
+
+    try:
+        people = await people_you_both_know(
+            ctx.session, ctx.user_id, visible_groups(ctx.groups, link), now=ctx.now
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    terms = _terms(query)
+    return [
+        item
+        for item in people
+        if any(term in item["name"] or term in item["relation"] or term in str(item.get("note") or "") for term in terms)
+    ][:4]
+
+
+async def _recall_groups(
+    ctx: PrivateToolContext, query: str, *, link: Any = None
+) -> list[dict[str, Any]]:
+    """可读群里与关键词相关的群摘要、关于他本人的画像和你们在群里的共同经历（不返回别的成员的画像）。"""
 
     from .memory_retrieval import search_group_memories
 
     found: list[dict[str, Any]] = []
-    for group in [item for item in ctx.groups if item.agent_readable]:
+    for group in _visible(ctx, link):
         try:
             rows = await search_group_memories(
                 ctx.session, group.group_id, query, limit=_RECALL_PER_GROUP * 3, now=ctx.now
@@ -981,7 +1280,7 @@ async def _recall_groups(ctx: PrivateToolContext, query: str) -> list[dict[str, 
             about_him = subject == ctx.user_id
             if not about_him and subject != 0:
                 continue
-            if row.memory_type not in {"summary", "core", "profile"}:
+            if row.memory_type not in {"summary", "core", "profile", "bond"}:
                 continue
             text = _clean_summary(str(row.content or ""))
             if not text:
@@ -992,6 +1291,9 @@ async def _recall_groups(ctx: PrivateToolContext, query: str) -> list[dict[str, 
                 item["period"] = key.split(":", 1)[-1]
                 if ctx.user_id in related:
                     item["you_were_there"] = True
+            elif row.memory_type == "bond":
+                # 你和他在群里的共同经历（bot_bond）
+                item["between_us"] = True
             else:
                 item["about_you"] = key
             found.append(item)
@@ -1175,6 +1477,8 @@ async def execute_private_tool(  # noqa: PLR0915
             result = await _group_recent(ctx, str(args["group"]))
         elif name == "recall":
             result = await _recall(ctx, args)
+        elif name == "memory_link":
+            result = await _memory_link_tool(ctx, args)
         elif name == "list_commands":
             result = await _commands(ctx, args)
         elif name in COMPUTER_NAMES:
@@ -1437,11 +1741,14 @@ async def _webui_onboarding_tool(
             "password_set_at": account.password_changed_at if account else None,
             "last_login_at": account.last_login_at if account else None,
             "can_do": (
-                ["看自己当群主/管理员的群的关系图", "开关这些群的功能", "调我们私聊里你的人设"]
+                ["Bot 在的所有群都能管（不必当群管）", "群关系图、群功能、群 Agent 和人设、群管代办", "调我们私聊里你的人设"]
+                if superuser_full_access(ctx.user_id)
+                else ["看自己当群主/管理员的群的关系图", "开关这些群的功能", "调我们私聊里你的人设"]
                 if groups
                 else ["调我们私聊里你的人设", "当了群主/管理员后还能在网页上管群"]
             ),
             "managed_groups": groups[:10],
+            "managed_group_total": len(groups),
         }
     if action == "ask_password":
         if account is not None and account.disabled:
@@ -1537,7 +1844,7 @@ async def _manage_group(ctx: PrivateToolContext, raw: str | None) -> tuple[int, 
 
     candidates = await gm.candidate_groups(ctx.session, ctx.user_id)
     if not candidates:
-        raise ToolError("他不是任何一个你所在群的群主或管理员", code=ERROR_PERMISSION, hint="照实告诉他")
+        raise ToolError("他不是任何一个你所在群的群主或管理员", code=ERROR_PERMISSION, hint="照实告诉他；超级管理员不受这条限制")
     if not raw:
         if len(candidates) == 1:
             return candidates[0][0], candidates[0][1]
@@ -1580,7 +1887,8 @@ async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> d
             return {"cancelled": count, "note": "已作废，没有执行" if count else "没有待确认的操作"}
         if action == "groups":
             rows = []
-            for gid, name, _role in (await gm.candidate_groups(ctx.session, ctx.user_id))[:8]:
+            candidates = await gm.candidate_groups(ctx.session, ctx.user_id)
+            for gid, name, _role in candidates[:8]:
                 try:
                     access = await gm.verify(ctx.bot, gid, ctx.user_id, source="private")
                     rows.append({"group": name, **access.as_dict()})
@@ -1589,7 +1897,14 @@ async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> d
             waiting = [
                 {"confirm_id": item.id, "summary": item.summary} for item in gm.pending_for(ctx.user_id)
             ]
-            return {"groups": rows, "waiting_confirm": waiting, "used_today": gm.used_today(ctx.user_id)}
+            out: dict[str, Any] = {"groups": rows, "waiting_confirm": waiting, "used_today": gm.used_today(ctx.user_id)}
+            if ctx.is_superuser and superuser_full_access(ctx.user_id):
+                # 超级管理员不必当群管：Bot 在的群都列出来（只展开前 8 个），其余用 group 指定
+                out["you_are_superuser"] = True
+                out["total_groups"] = len(candidates)
+                if len(candidates) > len(rows):
+                    out["note"] = "只展开了最近活跃的 8 个群，其余的用 group 写群名或群号直接操作"
+            return out
         if action == "confirm":
             raw_id = str(args.get("confirm_id") or "").strip()
             try:
