@@ -5,6 +5,56 @@ import type { PersonaCard, PersonaPreset } from "../types";
 
 export type PrivateScope = "global" | "user";
 
+// ── 群聊 ↔ 私聊协作 ──
+export interface BridgeHandoff {
+  id: string;
+  user_id?: string;
+  group_id: string | number;
+  group_name: string;
+  topic: string;
+  asked?: string;
+  reason: string;
+  created: string;
+  status: string;
+  opened_at?: string;
+}
+
+export interface BridgeReply {
+  from_id: number;
+  from_name: string;
+  text: string;
+  at: string;
+  delivered: boolean;
+}
+
+export interface BridgeRelay {
+  id: string;
+  user_id?: string;
+  group_id: string | number;
+  group_name: string;
+  kind: "post" | "ask";
+  text: string;
+  created: string;
+  status: string;
+  until?: string;
+  reply_count?: number;
+  replies?: BridgeReply[];
+}
+
+export interface BridgeOverview {
+  enabled: boolean;
+  today: { handoffs: number; relays: number; open_asks: number };
+  handoffs: BridgeHandoff[];
+  relays: BridgeRelay[];
+  limits: { handoff_daily: number; relay_daily: number; relay_group_hourly: number; ask_hours: number; reply_limit: number; confirm: boolean };
+}
+
+export interface BridgeUserDetail {
+  handoffs: BridgeHandoff[];
+  relays: BridgeRelay[];
+  waiting_confirm: Array<{ confirm_id: string; summary: string; asked_seconds_ago: number; he_replied_since: boolean }>;
+}
+
 export interface PrivatePipelineRef {
   pipeline: string;
   label: string;
@@ -318,6 +368,9 @@ export const privateApi = {
     data<{ revision: number; changed: number }>(`${BASE}/prompts/users/${encodeURIComponent(userId)}?expectedRevision=${expectedRevision}`, json("DELETE")),
 
   cacheStats: (signal?: AbortSignal) => data<CacheStats>(`${BASE}/cache`, { signal }),
+  bridge: (signal?: AbortSignal) => data<BridgeOverview>(`${BASE}/bridge`, { signal }),
+  bridgeUser: (userId: string, signal?: AbortSignal) =>
+    data<BridgeUserDetail>(`${BASE}/bridge/users/${encodeURIComponent(userId)}`, { signal }),
   rhythmStats: (userId?: string | null, signal?: AbortSignal) =>
     data<RhythmStats>(`${BASE}/rhythm${userId ? `?userId=${encodeURIComponent(userId)}` : ""}`, { signal }),
   captures: (signal?: AbortSignal) => data<CaptureStatus & { users: CaptureUser[] }>(`${BASE}/captures`, { signal }),

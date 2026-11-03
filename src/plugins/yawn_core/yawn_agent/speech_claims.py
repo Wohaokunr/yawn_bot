@@ -117,6 +117,21 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         ),
         frozenset({"cancel_scheduled_task", "update_scheduled_task"}),
     ),
+    # 私聊协作：没真的转过去就说“私聊你了/私聊发你了”，他等半天什么也收不到。
+    "private_handoff": (
+        re.compile(
+            r"(?:已经|已|我)?(?:私聊|私信|小窗)(?:你|发你|给你发|找你)(?:了|啦|咯)"
+            r"|(?:发|找)(?:你)?私聊(?:了|啦)"
+        ),
+        frozenset({"move_to_private", "add_to_my_assistant"}),
+    ),
+    # 私聊替他在群里转告/提问：没真的发到群里就说“在群里帮你问了”。
+    "group_relay": (
+        re.compile(
+            r"(?:已经|已|帮你|替你|我)(?:在|到|去)?群里(?:帮你|替你)?(?:转告|问|说|发)(?:了|好了|过了|啦)"
+        ),
+        frozenset({"relay_to_group"}),
+    ),
     # 表情包收藏：没真的存进库就说“收藏好了/存下来了”，下次根本发不出来。
     "sticker_save": (
         re.compile(

@@ -63,6 +63,16 @@ function respond(path: string, init?: RequestInit) {
   if (path === "/private-agent/cache") return { data: { cachedTokens: 900, missTokens: 100, hitRate: 0.9, anchoredUsers: 1, pipelines: { turn: { calls: 3, reported: 3, promptTokens: 1000, cachedTokens: 900, missTokens: 100, hitRate: 0.9, recent: [{ at: 1, round: 0, changed: "profile" }] } } } };
   if (path.startsWith("/private-agent/rhythm")) return { data: { settings: { interrupt: true, keepMedia: true, mixHint: true, maxParts: 4 }, stats: { deliveries: 10, interrupted: 2, skippedItems: 3, byParts: { "1": 5, "2": 3, "3": 1, "4": 1, "5+": 0 }, partsShare: { "1": 0.5, "2": 0.3, "3": 0.1, "4": 0.1, "5+": 0 }, byRhythm: { "整段": 5, "分条": 4, "连发": 1 }, withMedia: 1, mixHints: 1, cutNotes: 1 }, trackedUsers: 1, recent: [{ parts: 3, rhythm: "分条", media: 0, interrupted: true, at: 1 }], pattern: "", pendingCut: false } };
   if (path.startsWith("/private-agent/captures/12345")) return { data: { captureEnabled: true, paused: false, perUser: 8, maxUsers: 64, userId: "12345", prompts: [] } };
+  if (path === "/private-agent/bridge") return { data: {
+    enabled: true, today: { handoffs: 1, relays: 1, open_asks: 1 },
+    handoffs: [{ id: "h1a2b", user_id: "12345", group_id: "100", group_name: "猫猫群", topic: "把副本攻略整理好", asked: "私聊发我", reason: "files", created: "2026-11-03 10:00:00", status: "opened" }],
+    relays: [{ id: "r3c4d", user_id: "12345", group_id: "100", group_name: "猫猫群", kind: "ask", text: "周六谁有空？", created: "2026-11-03 10:05:00", status: "open", until: "2026-11-03 16:05:00", reply_count: 2 }],
+    limits: { handoff_daily: 10, relay_daily: 10, relay_group_hourly: 6, ask_hours: 6, reply_limit: 20, confirm: true },
+  } };
+  if (path === "/private-agent/bridge/users/12345") return { data: {
+    handoffs: [], waiting_confirm: [{ confirm_id: "b1", summary: "在「猫猫群」替你转告：「晚点到」", asked_seconds_ago: 5, he_replied_since: false }],
+    relays: [{ id: "r3c4d", group_id: 100, group_name: "猫猫群", kind: "ask", text: "周六谁有空？", created: "2026-11-03 10:05:00", status: "open", replies: [{ from_id: 2, from_name: "小红", text: "我可以", at: "2026-11-03 10:06:00", delivered: true }] }],
+  } };
   if (path.startsWith("/private-agent/prompts/sections/") && init?.method === "PUT") return { data: { revision: 4 } };
   throw new Error(`unexpected ${path}`);
 }
@@ -137,5 +147,21 @@ describe("PrivateAgentPage", () => {
     expect(screen.getByText(/1 条 · 5 次（50%）/)).toBeTruthy();
     expect(screen.getByText(/被打断 2 次，没发出去 3 条/)).toBeTruthy();
     expect(await screen.findByText(/3 条 · 分条 · 被打断/)).toBeTruthy();
+  });
+
+  it("shows group ↔ private hand-offs and relays with limits", async () => {
+    renderAt("/private-agent?pa.tab=bridge");
+    expect(await screen.findByText("群聊 ↔ 私聊协作")).toBeTruthy();
+    expect(screen.getByText("把副本攻略整理好")).toBeTruthy();
+    expect(screen.getByText("提问：周六谁有空？")).toBeTruthy();
+    expect(screen.getByText(/收到 2 条回复/)).toBeTruthy();
+    expect(screen.getByText(/没有私聊对话内容/)).toBeTruthy();
+  });
+
+  it("shows one user's relay replies and waiting confirmations", async () => {
+    renderAt("/private-agent?pa.tab=bridge&pa.user=12345");
+    expect(await screen.findByText("用户 12345 的协作记录")).toBeTruthy();
+    expect(await screen.findByText("小红：我可以")).toBeTruthy();
+    expect(screen.getByText(/在「猫猫群」替你转告/)).toBeTruthy();
   });
 });

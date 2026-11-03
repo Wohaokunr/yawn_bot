@@ -263,6 +263,22 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 
 群待办用的是 NapCat 扩展接口 `set_group_todo` / `complete_group_todo` / `cancel_group_todo`（需要启用 Packet 后端）；协议端不支持时会如实告知，并建议改用置顶公告。
 
+### 群聊 ↔ 私聊协作
+
+同一个“我”在群里和私聊里互相接力（`yawn_agent/agent_bridge.py`）：群里说“私聊你”的事私聊接着办（群聊工具 `move_to_private`），群里让 Bot 给他的私聊小助手记提醒/待办/笔记（`add_to_my_assistant`），私聊里替他在群里转告或提问、把群友引用回复转回私聊（私聊工具 `group_bridge`）。私聊内容不会进群聊提示词；发到群里的每一句都要他确认、带“〔某某 让我转告〕”前缀；群主可以在网页「群管理 → 策略」关掉本群的私聊转告。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AGENT_BRIDGE_ENABLED` | `true` | 协作总开关（三条线一起关） |
+| `AGENT_BRIDGE_HANDOFF_DAILY` | `10` | 每人每天最多从群里转到私聊几次，0 不限 |
+| `AGENT_BRIDGE_HANDOFF_DELAY_SECONDS` | `3` | 群里说完“私聊你”后等几秒再私聊开口 |
+| `AGENT_BRIDGE_RELAY_DAILY` | `10` | 每人每天最多让 Bot 在群里转告/提问几次，0 不限 |
+| `AGENT_BRIDGE_RELAY_GROUP_HOURLY` | `6` | 每个群每小时最多替私聊转告几条，0 不限 |
+| `AGENT_BRIDGE_ASK_HOURS` | `6` | 群里提问后收回复多少小时 |
+| `AGENT_BRIDGE_REPLY_LIMIT` | `20` | 一次提问最多转回几条回复 |
+| `AGENT_BRIDGE_REPLY_BATCH_SECONDS` | `20` | 群里的回复攒几秒合成一条私聊，0 收到就转 |
+| `AGENT_BRIDGE_CONFIRM` | `true` | 发到群里前要他确认（他发来下一条消息后才能确认） |
+
 ### 每用户私聊人设
 
 每位用户在私聊里可以有自己的人设，只影响和他的私聊，群聊不受影响。生效顺序：本人专属卡 → 本人选的人设库模板 → 私聊默认（策略里选的人设库模板）→ 群聊全局人设 → 内置默认。

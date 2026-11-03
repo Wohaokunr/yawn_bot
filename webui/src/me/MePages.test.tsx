@@ -35,7 +35,7 @@ import { MeHomePage } from "./MeHomePage";
 import { MyGroupPage } from "./MyGroupPage";
 
 const POLICY = {
-  enabled: true, privateEnabled: true, webuiEnabled: true, notifyGroup: false, maxMuteMinutes: 1440, maxMuteCeiling: 43200,
+  enabled: true, privateEnabled: true, webuiEnabled: true, notifyGroup: false, allowRelay: true, maxMuteMinutes: 1440, maxMuteCeiling: 43200,
   disabledActions: [], adminActions: ["mute", "unmute"], confirmActions: ["mute"], updatedAt: null, updatedBy: null,
 };
 const MANAGE = {

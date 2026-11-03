@@ -64,6 +64,8 @@ def empty_record() -> dict[str, Any]:
         "persona": {},
         # 对话回顾（private_memory.save_recap）：最近聊了什么、还没下文的事
         "recap": {},
+        # 群聊 ↔ 私聊协作（agent_bridge）：从群里转来的事 handoffs、替他在群里转告/提问 relays
+        "bridge": {},
     }
 
 
