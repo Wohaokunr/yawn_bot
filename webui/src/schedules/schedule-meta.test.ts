@@ -42,6 +42,13 @@ const settings: ScheduleSettings = {
   runTimeoutSeconds: 300,
   notifyPrefix: "⏰ ",
   historyLimit: 20,
+  crossCreate: true,
+  deliverToPrivate: true,
+  notifyCreatorOnPause: true,
+  privateAgentMode: true,
+  privateMaxActive: 30,
+  privateMinIntervalMinutes: 5,
+  privateRetryLimit: 3,
 };
 
 describe("schedule-meta", () => {

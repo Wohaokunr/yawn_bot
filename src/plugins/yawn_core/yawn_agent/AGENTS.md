@@ -228,6 +228,18 @@
 - 指令文本创建时过 `persona.text_overrides_policy`，拒绝 CQ 码与 @全体；指令只在到点时作为“创建者当时的请求”交给模型，不提升权限。
 - 不改 `dialogue.py`（已接近 1500 行上限）：唤醒语义全部通过 contextvar + `context_loader` + `prompt.py` + `tools.py` 接入。新增 schedule 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_schedule.py`。
 
+### 私聊 ↔ 群聊定时任务打通（2026-11）
+
+- **一套规则、两处存储**：群任务在 `AgentScheduledTask` 表；私聊提醒仍在个人数据 JSON（`reminders` 键，**无迁移**），但规则统一走 `schedule_spec`（`private_schedule.py` 纯函数：`build_rule`/`collect_due`/`finish`/`pause`/`resume`/`snooze`/`view`）。旧提醒（只有 `due`+`repeat`）照常读，`legacy_schedule` 现场换算；规则坏了标 `broken` 保留不删。
+- **统一引用**：`g<id>` = 群任务，`p<id>` = 私聊提醒（`schedule_hub.parse_ref`）。`schedule_hub.user_items` 是“他名下全部定时事项”的唯一聚合口径，私聊工具、私聊本轮资料、`/me/schedules` 都用它。
+- **私聊工具 `schedules`**（`private_schedule_tool.py`）：list/add/preview/edit/pause/resume/cancel/history/confirm/drop。给群设任务、或改群任务的**内容/方式**，必须先 `needs_confirm`，**下一句话**（`chat_state.arrival_count` 增长）才能 confirm，同一轮自确认设 `ctx.stop_tools`；同一请求复用同一 confirm_id。只改时间、暂停、恢复、取消直接执行。权限：只能动自己设的；群主/管理员经 `group_manage.live_role` 实时确认后可动本群别人设的；建群任务过 `check_group_create`（策略开放、`cross_create`、仍在群里、群开着 Agent、`who_can_create=admins` 时实时确认）。每次写群任务都记 `group_manage.audit`。
+- **群里 `schedule_task(deliver_to="private")`**：到点私聊提醒发言者本人；要 `deliver_to_private` 策略、私聊协作开着、他是好友且没 /退出（`bridge._reachable`）。`list_scheduled_tasks` 只列 origin 是**本群**的私聊提醒（`private_reminders_set_here`），`update/cancel` 的 `ref="p…"` 同样只认本群来源——私聊里设的提醒群里永远看不到。
+- **到点替他去办**（私聊提醒 `mode="agent"`）：`private_schedule_turn.run_scheduled_turn` 拿回合锁走完整主回合（`extra["scheduled"]`、pipeline `scheduled`、user 通知 `private.scheduled_notice` + system#3 `private.scheduled_turn`），不许沉默；这一轮 `WAKE_BLOCKED_TOOLS`（reminders/schedules/group_manage/group_bridge）一律拦，防自我繁殖、防无人值守发群；模型没回复回落发提醒原文。策略 `private_agent_mode` 关掉时只能建 notify；内容过 `validate_instruction`。
+- **失败重试**：私聊提醒发送失败按 2/5/15/30/60 分钟退避，最多 `private_retry_limit` 次；结果写 `history`（最近 6 条）和 `flags.reminder_log`（最近 30 条，WebUI 运行记录合并展示）；用量记 `private_<result>`。
+- **群任务自动暂停私聊告知**：`schedule_runner._record` 自动暂停后调 `schedule_hub.notify_creator_paused`（策略 `notify_creator_on_pause`、好友、没 /退出；创建者退群那种不发）。
+- **缓存与隐私**：私聊侧每轮变的状态（`group_schedule_waiting` 待确认、`group_tasks_next_24h`）只进 system#3 / 本轮资料层；`schedules` 工具始终在工具表里（40 个私聊工具），不按状态增删。群任务唤醒回合的 `set_via` 只写“他在私聊里让我给本群设的”，**不带任何私聊内容**。
+- 策略新增 7 项（`ScheduleSettings`）：`cross_create`、`deliver_to_private`、`notify_creator_on_pause`、`private_agent_mode`、`private_max_active`、`private_min_interval_minutes`、`private_retry_limit`。测试在 `tests/test_schedule_bridge.py`。
+
 ## 私聊 Agent
 
 - 入口只有一个：`ai_chat._process_chat` → `_try_private_agent` → `private_chat_bridge.get_private_handler()` → `private_agent.handle_private_turn`。处理函数返回 `None` 或抛异常时，`ai_chat` 回滚会话并退回原来的流式纯对话；私聊 Agent 不得自己另开发送通道或绕过 `ChatMessage` 落库。
@@ -247,7 +259,7 @@
 - 个人助理数据（笔记、待办、提醒、倒数日、心情、聊天偏好、调度标记）存在 `private_store`：`data/private_agent/users/<QQ>.json`（`PRIVATE_AGENT_DATA_DIR` 可改），**不建表、不需要迁移**；读改写一律走 `private_store.update` 持锁完成。用户文本入库前过 `private_organizer.clean_text`（去控制字符、限长、拒绝像指令的内容），因为它们之后会作为工具结果回到模型。
 - 带 `action` 的工具成功后，`ctx.succeeded` 同时记 `工具名` 和 `工具名.动作`；声明核验靠 `private_agent._CLAIM_ALIASES` 把它们映射到群聊声明族（如 `reminders.add` → `schedule_task`），只查过列表不能说“设好了”。
 - 私聊联网搜索复用群聊的 DeepSeek 客户端、后台总开关、屏蔽域名和全站日预算（`record_admin_call` 记账），但不占任何群/成员配额；私聊另有每人每日次数（`PRIVATE_AGENT_WEB_DAILY`，记在个人数据 `flags`），没搜到结果或失败时退还。
-- `private_scheduler` 只发两类私聊：用户自己设的提醒（不受免打扰/`proactive` 偏好影响，错过 12 小时以上的一次性提醒丢弃）和主动消息（早安、签到提醒、生日、倒数日当天；用户关了 `proactive`、暂停了自动回复、在免打扰时段都不发，每天每类最多一次，标记先写后发）。`PRIVATE_AGENT_PROACTIVE=false` 时全部停发。发出的消息记进最近的私聊会话。
+- `private_scheduler` 只发两类私聊：用户自己设的提醒（不受免打扰/`proactive` 偏好影响，错过 12 小时以上的一次性提醒丢弃；到点、重试、agent 模式见上文“私聊 ↔ 群聊定时任务打通”）和主动消息（早安、签到提醒、生日、倒数日当天；用户关了 `proactive`、暂停了自动回复、在免打扰时段都不发，每天每类最多一次，标记先写后发）。`PRIVATE_AGENT_PROACTIVE=false` 时全部停发。发出的消息记进最近的私聊会话。
 - 对话 worker 有连发合并（`PRIVATE_AGENT_MERGE_WINDOW_MS`）：等一个短窗口，把队列里紧跟着的普通消息并成一轮，用最后一条事件回复；带 `override_text` 的命令消息不参与合并。
 - `ai_chat._process_chat` 在 commit 前缓存 `chat_session.id`；生产会话 `expire_on_commit=True`，测试里涉及完整回合的要用 `prod_maker`（`tests/test_private_agent.py`）这种生产同款会话。
 - 私聊回复统一经 `private_delivery.deliver` 发出：先按 `speech_rhythm` 的 【节奏:…】/`|||` 分条，再把 `[表情:名字]`、`[图片:sandbox:路径]`、`[文件:sandbox:路径]` 拆成单独的消息。媒体发不出去时换成一句文字说明，不得静默吞掉；某条发送失败就停，只把已送达的部分落库。私聊表情包只用通用表情（scope 0），额度按人记在个人数据 `flags`（`sticker_*`），本人 `emoji` 偏好为 `none` 时不给菜单。

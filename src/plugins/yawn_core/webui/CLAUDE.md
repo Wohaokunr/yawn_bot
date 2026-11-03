@@ -34,7 +34,8 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `guest_access.py` / `guest_access_routes.py` | 持久化访客访问策略 |
 | `group_manage_routes.py` / `manager_audit.py` | 群管理员网页代办群管理 `/me/groups/{id}/manage*`（状态、成员、公告、操作记录、预览、执行、群主改策略）与运维只读 `/groups/{id}/manage/audit`；业务全在 `yawn_agent/group_manage.py`，和私聊工具共用 |
 | `self_service_routes.py` / `user_account_models.py` / `user_scope.py` | QQ 个人账号的 `/me`：资料、改密码、退出所有设备、我管理的群（详情/功能开关，Agent 开关同步 `agent_config`）、私聊人设（读写/预设/模板/重置/撤销，受私聊人设策略约束，`by=self`）；群管理员身份判定与缓存 |
-| `schedules.py` | 「定时任务」管理页：状态/任务列表与详情/手动新建（以某位群成员名义，不受数量上限）/编辑（`revision` 乐观锁，409）/暂停恢复取消/立即执行（后台）/批量/规则预览/运行记录/策略，全部仅管理员；表未迁移时只读接口返回 `ready:false`，写接口 503 |
+| `schedules.py` | 「定时任务」管理页：状态/任务列表与详情/手动新建（以某位群成员名义，不受数量上限）/编辑（`revision` 乐观锁，409）/暂停恢复取消/立即执行（后台）/批量/规则预览/运行记录（`channel` 合并私聊提醒）/策略（含 7 项私聊与跨端）/所有人的私聊提醒 `/schedules/private*`（查看、暂停恢复删除），全部仅管理员；表未迁移时只读接口返回 `ready:false`，写接口 503 |
+| `me_schedule_routes.py` | QQ 个人账号 `/me/schedules`：私聊提醒 + 自己设的群任务（`scope=managed` 加上自己管理的群里别人设的）统一列表（g/p 引用）、详情、预览、新建（私聊或群，群任务 `source_kind=webui_user`）、修改、暂停恢复取消；群任务权限走 `schedule_hub`，写操作记群管代办操作记录 |
 | `sandbox.py` | 「代码沙箱」管理页：状态/统计/运行历史/工作区文件/控制台/策略，全部仅管理员；runner 离线时只读接口降级为 200 + `online:false`，写接口 503；文件下载强制 `nosniff` + CSP sandbox，HTML/SVG 强制附件 |
 | `web_search.py` | 「网页搜索」管理页：状态（密钥只回显来源与掩码）/策略与限额/今日用量与费用/最近调用/试搜试读/清空缓存，全部仅管理员；试搜计入全站计费统计但不占群配额 |
 | `stickers.py` | 「表情包」管理页：库（上传/编辑/启停/审核/批量/删除、按群开放）、发送与收藏策略、今日用量、提示词预览，全部仅管理员 |
@@ -53,7 +54,8 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `sandbox.py` | `yawn_agent/sandbox_client.py`、`sandbox_policy.py`；runner 在仓库根 `sandbox/` | `sandbox/` |
 | `web_search.py` | `yawn_agent/web_search_client.py`、`web_search_policy.py`、`web_search_output.py`、`tool_handlers/web.py` | — |
 | `stickers.py` | `yawn_agent/sticker_library.py`、`sticker_policy.py`、`sticker_send.py` | — |
-| `schedules.py` | `yawn_agent/schedule_store.py`、`schedule_policy.py`、`schedule_runner.py`、`schedule_spec.py` | `schedules/` |
+| `schedules.py` | `yawn_agent/schedule_store.py`、`schedule_policy.py`、`schedule_runner.py`、`schedule_spec.py`、`private_schedule.py` | `schedules/` |
+| `me_schedule_routes.py` | `yawn_agent/schedule_hub.py`、`private_organizer.py`、`private_schedule.py` | `me/MySchedulesPage.tsx` |
 | `groups.py`、`users.py`、`directory.py`、`guest_access*` | `../permission.py`、`../checkin_service.py`、核心 data_models | `group-workspace.tsx`、`directory/`、`guest-*.tsx` |
 
 - 新增插件 `Config` 字段时，要登记进 `environment_catalog.dotenv`，`tests/test_webui_environment.py` 会检查。

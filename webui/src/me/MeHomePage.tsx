@@ -1,4 +1,4 @@
-import { ApartmentOutlined, AppstoreOutlined, LockOutlined, RightOutlined, SafetyCertificateOutlined, SmileOutlined, TeamOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, AppstoreOutlined, FieldTimeOutlined, LockOutlined, RightOutlined, SafetyCertificateOutlined, SmileOutlined, TeamOutlined } from "@ant-design/icons";
 import { Alert, Empty, Skeleton, Space, Tag, Typography } from "antd";
 import { Link } from "react-router-dom";
 import { PageHeader, QueryErrorAlert, useApiQuery } from "../shared";
@@ -32,6 +32,15 @@ export function MeHomePage(): React.JSX.Element {
             <span className="me-card-main">{me.persona.name || "默认人设"}{me.persona.locked && <Tag className="me-inline-tag">已锁定</Tag>}</span>
             <Text type="secondary" className="me-card-sub" ellipsis>{me.persona.sourceLabel} · {me.persona.summary}</Text>
           </> : <Text type="secondary" className="me-card-sub">调整 Bot 和你私聊时的自称、称呼和说话方式</Text>}
+        </span>
+        <RightOutlined className="me-card-arrow" />
+      </Link>
+      <Link to="/me/schedules" className="me-card me-card-link">
+        <span className="me-card-icon"><FieldTimeOutlined /></span>
+        <span className="me-card-body">
+          <strong>我的定时任务</strong>
+          <span className="me-card-main">私聊提醒 + 群定时任务</span>
+          <Text type="secondary" className="me-card-sub">一处查看、修改、暂停；也能从这里给你在的群设任务</Text>
         </span>
         <RightOutlined className="me-card-arrow" />
       </Link>

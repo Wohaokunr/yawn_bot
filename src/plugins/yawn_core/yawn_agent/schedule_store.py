@@ -534,6 +534,10 @@ def task_public_dict(task: AgentScheduledTask, *, now: datetime | None = None, p
         data["last_result"] = task.last_result
     if task.status_reason:
         data["status_reason"] = task.status_reason
+    if task.source_kind and task.source_kind != "agent":
+        from .schedule_wake import SOURCE_LABELS
+
+        data["set_via"] = SOURCE_LABELS.get(str(task.source_kind), str(task.source_kind))
     data["instruction"] = clip(task.instruction, 160)
     if preview_count and now is not None:
         data["upcoming"] = [format_datetime(item) for item in preview_runs(task, count=preview_count)]

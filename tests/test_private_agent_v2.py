@@ -58,8 +58,8 @@ async def _run(ctx, name, **args):
 def test_tool_table_is_complete_and_safe() -> None:
     names = [tool.name for tool in ptools.ALL_TOOLS]
     # 32 个 + 私聊人设 my_persona + 网页个人账号 webui_account + 新人引导 webui_onboarding
-    # + 群管代办 group_manage（只给群主/管理员）+ 记忆打通 memory_link
-    assert len(names) == len(set(names)) == 39
+    # + 群管代办 group_manage（只给群主/管理员）+ 记忆打通 memory_link + 定时任务 schedules
+    assert len(names) == len(set(names)) == 40
     # 虚拟电脑 4 个（含能力包目录与执行）+ 小助手任务 3 个，只在可用时才出现在 schema 里
     assert set(names) >= ptools.COMPUTER_NAMES | ptools.TASK_NAMES
     for tool in ptools.ALL_TOOLS:
@@ -140,7 +140,7 @@ def test_reminder_validation_and_repeat() -> None:
     weekly = org.reminders(
         USER, {"action": "add", "content": "开会", "at": "2026-11-02 09:00", "repeat": "weekdays"}, NOW
     )
-    assert weekly["scheduled"]["repeat"] == "工作日"
+    assert "工作日" in weekly["scheduled"]["repeat"]
     # 周五之后的下一个工作日是周一
     friday = datetime(2026, 11, 6, 9, 0)
     assert org.next_occurrence(friday, "weekdays", friday) == datetime(2026, 11, 9, 9, 0)

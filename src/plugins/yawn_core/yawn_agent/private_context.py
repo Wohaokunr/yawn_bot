@@ -879,6 +879,10 @@ async def build_private_context(
     tasks = _tasks_digest(user_id, now)
     if tasks:
         payload["tasks"] = tasks
+    group_soon = await _group_tasks_soon(session, user_id, now)
+    if group_soon:
+        # 他在各群设的、24 小时内要跑的群定时任务（本轮层；私聊提醒在 assistant 摘要里）。
+        payload["group_tasks_next_24h"] = group_soon
     assistant = _assistant_digest(user_id, now)
     style = (assistant.get("chat_style") or {}) if assistant else {}
     call_them = resolve_call_them(private_facts, style, profile_all)
@@ -1015,6 +1019,15 @@ def _tasks_digest(user_id: int, now: datetime) -> list[dict[str, Any]]:
 
     try:
         return context_digest(user_id, now)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def _group_tasks_soon(session: Any, user_id: int, now: datetime) -> list[str]:
+    from .schedule_hub import soon_digest
+
+    try:
+        return await soon_digest(session, user_id, now)
     except Exception:  # noqa: BLE001
         return []
 

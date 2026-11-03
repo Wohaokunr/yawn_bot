@@ -1,4 +1,4 @@
-# ruff: noqa: TID252,FAST002,E501,PLR0913,PLR0917,PLR2004,TC003
+# ruff: noqa: TID252, FAST002, E501, PLR0913, PLR0917, PLR2004, TC003, PERF401
 """「定时任务」管理页的后端：任务列表/详情、新建与编辑、暂停恢复取消、立即执行、
 规则预览、运行记录与策略。
 
@@ -23,6 +23,8 @@ from sqlalchemy import func, select
 from ..data_models.agent_scheduled_task import AgentScheduledTask
 from ..data_models.bot_group import BotGroup
 from ..data_models.user_group import UserGroup
+from ..yawn_agent import private_schedule as ps
+from ..yawn_agent import private_store
 from ..yawn_agent.context import now_beijing
 from ..yawn_agent.schedule_policy import (
     ScheduleSettings,
@@ -48,6 +50,7 @@ from ..yawn_agent.schedule_store import (
     resume_task,
     validate_draft,
 )
+from ..yawn_agent.schedule_wake import SOURCE_LABELS
 from .config import API_PATH
 from .deps import AdminReadSession, AdminWriteSession, ok
 from .hub import hub
@@ -102,6 +105,8 @@ def task_payload(task: AgentScheduledTask, *, group_name: str | None = None, det
         "lastOutput": task.last_output or None,
         "lastTraceId": task.last_trace_id,
         "sourceKind": task.source_kind,
+        "sourceLabel": SOURCE_LABELS.get(str(task.source_kind or "agent"), task.source_kind),
+        "channel": "group",
         "revision": int(task.revision or 0),
         "createdAt": _iso(task.created_at),
         "updatedAt": _iso(task.updated_at),
@@ -137,6 +142,150 @@ def _group_id(value: str | None) -> int | None:
     return int(text)
 
 
+# ── 私聊提醒（每人的个人数据 JSON）──────────────────────────────────────────
+
+
+def _private_rows() -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """(QQ, 提醒, 整份个人数据)；扫描所有有个人数据的用户。"""
+
+    rows: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for user_id in private_store.known_user_ids():
+        record = private_store.load(user_id)
+        for item in record.get("reminders", []):
+            if isinstance(item, dict) and "id" in item:
+                rows.append((user_id, item, record))
+    return rows
+
+
+def _private_counts() -> dict[str, Any]:
+    counts = {"active": 0, "paused": 0, "agent": 0, "fromGroups": 0, "users": 0}
+    users: set[int] = set()
+    with contextlib.suppress(Exception):
+        for user_id, item, _record in _private_rows():
+            if item.get("done") and not item.get("retry"):
+                continue
+            users.add(user_id)
+            counts["paused" if item.get("paused") else "active"] += 1
+            if str(item.get("mode") or "notify") == "agent":
+                counts["agent"] += 1
+            origin = ps.origin_of(item)
+            if origin.get("kind") == "group":
+                counts["fromGroups"] += 1
+    counts["users"] = len(users)
+    return counts
+
+
+def private_payload(user_id: int, item: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    origin = ps.origin_of(item)
+    status_value = ps.status_of(item)
+    data: dict[str, Any] = {
+        "key": f"{user_id}:{item['id']}",
+        "ref": f"p{item['id']}",
+        "channel": "private",
+        "userId": str(user_id),
+        "itemId": int(item["id"]),
+        "title": str(item.get("title") or ""),
+        "content": str(item.get("content") or ""),
+        "mode": str(item.get("mode") or "notify"),
+        "kindLabel": ps.kind_label(item),
+        "description": ps.describe_item(item),
+        "status": status_value,
+        "nextRunAt": None if item.get("paused") or item.get("done") else item.get("due"),
+        "runCount": int(item.get("runs") or 0),
+        "maxRuns": item.get("max_runs"),
+        "lastResult": item.get("last_result"),
+        "lastResultLabel": ps.RESULT_LABELS.get(str(item.get("last_result") or ""), item.get("last_result")),
+        "lastRunAt": item.get("last_run"),
+        "retryAt": (item.get("retry") or {}).get("at") if isinstance(item.get("retry"), dict) else None,
+        "sourceKind": str(origin.get("kind") or "private"),
+        "sourceLabel": ps.origin_label(item),
+        "originGroupId": str(origin["group_id"]) if origin.get("group_id") else None,
+        "createdAt": item.get("created"),
+    }
+    if detail:
+        data["schedule"] = item.get("schedule") or ps.legacy_schedule(ps.parse(item.get("due")) or now_beijing(), str(item.get("repeat") or "none"))
+        data["history"] = [
+            {**row, "label": ps.RESULT_LABELS.get(str(row.get("result") or ""), row.get("result"))}
+            for row in list(item.get("history") or [])
+            if isinstance(row, dict)
+        ]
+    return data
+
+
+@router.get("/private")
+async def schedule_private_list(
+    _session: AdminReadSession,
+    user: str | None = Query(default=None, max_length=12),
+    status_filter: Literal["active", "paused", "open", "all"] = Query(default="open", alias="status"),
+    mode: Literal["agent", "notify"] | None = None,
+    source: Literal["private", "group", "webui"] | None = None,
+    q: str = Query(default="", max_length=60),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """所有人的私聊提醒（管理员排查用；内容是他们自己设的提醒原话）。"""
+
+    needle = q.strip().casefold()
+    items: list[dict[str, Any]] = []
+    for user_id, item, _record in _private_rows():
+        if user and user.isdigit() and int(user) != user_id:
+            continue
+        payload = private_payload(user_id, item)
+        if status_filter == "open" and item.get("done") and not item.get("retry"):
+            continue
+        if status_filter in {"active", "paused"} and payload["status"] != status_filter:
+            continue
+        if mode and payload["mode"] != mode:
+            continue
+        if source and payload["sourceKind"] != source:
+            continue
+        if needle and needle not in f"{payload['content']} {payload['title']} {user_id}".casefold():
+            continue
+        items.append(payload)
+    items.sort(key=lambda row: (row["nextRunAt"] is None, str(row["nextRunAt"] or ""), row["key"]))
+    return ok({"items": items[:limit], "total": len(items), "counts": _private_counts()})
+
+
+@router.get("/private/{user_id}/{item_id}")
+async def schedule_private_detail(user_id: int, item_id: int, _session: AdminReadSession) -> dict[str, Any]:
+    item = private_store.find(private_store.load(user_id), "reminders", item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "私聊提醒不存在")
+    return ok(private_payload(user_id, item, detail=True))
+
+
+@router.post("/private/{user_id}/{item_id}/{action}")
+async def schedule_private_action(
+    user_id: int,
+    item_id: int,
+    action: Literal["pause", "resume", "cancel"],
+    _session: AdminWriteSession,
+) -> dict[str, Any]:
+    """管理员暂停/恢复/删除某人的私聊提醒（例如设错了、刷屏）。"""
+
+    now = now_beijing()
+
+    def run(record: dict[str, Any]) -> dict[str, Any] | None:
+        item = private_store.find(record, "reminders", item_id)
+        if item is None:
+            return None
+        if action == "pause":
+            ps.pause(item)
+        elif action == "resume":
+            if ps.resume(item, now) is None:
+                record["reminders"].remove(item)
+                return {"removed": True}
+        else:
+            record["reminders"].remove(item)
+            return {"removed": True}
+        return private_payload(user_id, item, detail=True)
+
+    result = private_store.update(user_id, run)
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "私聊提醒不存在")
+    await hub.notify_change("schedules")
+    return ok({"changed": True, "item": result})
+
+
 # ── 状态与列表 ──────────────────────────────────────────────────────────────
 
 
@@ -157,6 +306,7 @@ async def schedule_status(_session: AdminReadSession) -> dict[str, Any]:
         },
         "upcoming": [],
         "groups": 0,
+        "private": _private_counts(),
     }
     try:
         async with get_session() as session:
@@ -254,15 +404,20 @@ async def schedule_runs(
     _session: AdminReadSession,
     group: str | None = Query(default=None, max_length=12),
     result: str | None = Query(default=None, max_length=24),
+    channel: Literal["all", "group", "private"] = "all",
     limit: int = Query(default=100, ge=1, le=300),
 ) -> dict[str, Any]:
-    """把各任务的运行历史摊平成一条时间线（新的在前）。"""
+    """把各任务的运行历史摊平成一条时间线（新的在前）；私聊提醒的运行也并进来。"""
 
+    private_runs = _private_runs(result) if channel in {"all", "private"} and not group else []
+    if channel == "private":
+        private_runs.sort(key=lambda item: str(item.get("at") or ""), reverse=True)
+        return ok({"ready": True, "items": private_runs[:limit]})
     try:
         async with get_session() as session:
             rows, _total = await list_tasks(session, group_id=_group_id(group), limit=200)
     except ScheduleUnavailableError:
-        return ok({"ready": False, "items": []})
+        return ok({"ready": False, "items": private_runs[:limit]})
     names = await _group_names({int(row.group_id) for row in rows})
     items: list[dict[str, Any]] = []
     for row in rows:
@@ -280,10 +435,36 @@ async def schedule_runs(
                     "mode": row.mode,
                     "groupId": str(row.group_id),
                     "groupName": names.get(int(row.group_id)),
+                    "channel": "group",
                 }
             )
+    items.extend(private_runs)
     items.sort(key=lambda item: str(item.get("at") or ""), reverse=True)
     return ok({"ready": True, "items": items[:limit]})
+
+
+def _private_runs(result: str | None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    with contextlib.suppress(Exception):
+        for user_id in private_store.known_user_ids():
+            flags = private_store.load(user_id).get("flags") or {}
+            for row in list(flags.get("reminder_log") or []):
+                if not isinstance(row, dict) or (result and row.get("result") != result):
+                    continue
+                items.append(
+                    {
+                        "at": row.get("at"),
+                        "result": row.get("result"),
+                        "label": ps.RESULT_LABELS.get(str(row.get("result") or ""), row.get("result")),
+                        "taskId": None,
+                        "ref": f"p{row.get('id')}",
+                        "title": str(row.get("content") or ""),
+                        "mode": row.get("mode") or "notify",
+                        "userId": str(user_id),
+                        "channel": "private",
+                    }
+                )
+    return items
 
 
 # ── 写操作 ──────────────────────────────────────────────────────────────────
@@ -549,6 +730,13 @@ class SettingsBody(BaseModel):
     run_timeout_seconds: int
     notify_prefix: str = ""
     history_limit: int = 20
+    cross_create: bool = True
+    deliver_to_private: bool = True
+    notify_creator_on_pause: bool = True
+    private_agent_mode: bool = True
+    private_max_active: int = 30
+    private_min_interval_minutes: int = 5
+    private_retry_limit: int = 3
 
 
 def _settings_payload(settings: ScheduleSettings) -> dict[str, Any]:
@@ -596,4 +784,4 @@ async def schedule_update_settings(body: SettingsBody, _session: AdminWriteSessi
     return ok({"settings": _settings_payload(saved)})
 
 
-__all__ = ["router", "task_payload"]
+__all__ = ["private_payload", "router", "task_payload"]
