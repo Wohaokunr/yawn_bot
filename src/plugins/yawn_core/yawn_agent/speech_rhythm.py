@@ -61,7 +61,8 @@ SPLIT_MODE_OFF = "off"
 SPLIT_MODES = frozenset({SPLIT_MODE_AUTO, SPLIT_MODE_MARKED, SPLIT_MODE_OFF})
 
 PART_MARKER = "|||"
-DEFAULT_MAX_PARTS = 3
+# 以前是 3：模型写了四条也会被并成三条，条数天然往 3 堆（三段式）。
+DEFAULT_MAX_PARTS = 4
 MAX_SPLIT_PARTS = 4
 BURST_MAX_PARTS = 5
 POP_MAX_PARTS = 8
@@ -815,6 +816,9 @@ def rhythm_instruction(
 
     要模型每次先写【节奏:…】：节奏是它自己的选择，不再靠系统事后拆句兜底。
     节奏只决定“怎么发”，不是多说几句的理由，所以总字数口径和一条时一样。
+
+    条数（2026-11 修三段式）：一条为主、两条其次、三条以上看情绪。不要写“2~N 条”这类
+    区间，也不要放恰好三条的示例——模型会把区间填满、照抄示例的形状，回回 xxx|||xxx|||xxx。
     """
 
     resolved = settings or rhythm_settings()
@@ -829,19 +833,24 @@ def rhythm_instruction(
         )
     expressive = int(getattr(style, "expressiveness", 1) or 1) >= 3
     lines = [
-        "发送节奏（每次都要选）：回复最前面先写【节奏:整段/分条/连发/蹦字】，标签不会发出去，"
-        "||| 隔开的每段是一条 QQ 消息。节奏就是你此刻的心情，像真人一样挑：",
-        "分条照你的语气来，系统按你写的 ||| 原样发：想一个字一个字蹦，或者话说完再补一句俏皮的，"
-        "就自己用 ||| 隔开，如【节奏:分条】这题我会|||略略略～；几个字又没想好怎么断就【节奏:整段】，系统不会替你硬拆；",
-        "整段=认真讨论、争论、讲道理或给步骤，一条发完；内容长（一百多字以上）时用空行分好段，会按段落分成几条发；",
-        f"分条=平常闲聊，把同一句话在自然停顿处断成 2~{resolved.max_parts} 条，"
-        "如【节奏:分条】刚看到|||笑死 这也太巧了；",
-        "连发=激动、震惊、急了、强烈吐槽，3~5 条每条几个字的短句，"
-        "如【节奏:连发】不是吧|||真的假的|||我不信；",
-        "蹦字=搞怪卖萌、拖长音，只写一句 8 字以内的话，会一个字一个字蹦出去，"
-        "如【节奏:蹦字】你在干嘛呀。",
+        "发送节奏（每次都要选）：回复最前面先写【节奏:整段/分条/连发/蹦字】，标签不会发出去；"
+        "||| 隔开的每段是一条 QQ 消息，没写 ||| 就是一条。",
+        "条数跟着内容和心情走，不是固定格式：大多数回复一条就够——接一句话、回答一个问题、"
+        "给个反应、认真讨论讲道理，都用【节奏:整段】一条发完；有自然的停顿（先反应再说事、说完想补一句）才分两条；"
+        "三条及以上只在情绪真的上来（激动、震惊、连环吐槽）或者要一下下蹦字时用"
+        + ("，群里刷屏会打扰别人" if scene != "private" else "")
+        + "。别每次都分成同样的几条，上一条怎么发的这条不用照着来。",
+        "可以这样发（照抄格式，内容换成你的）：",
+        "一条：【节奏:整段】好耶 那我等你消息；",
+        "两条：【节奏:分条】刚看到|||笑死 这也太巧了；",
+        "说完补一句：【节奏:分条】这题我会|||略略略～；",
+        "连发（几个字一条，四五条也行）：【节奏:连发】不是吧|||真的假的|||你骗我|||我不信；",
+        "蹦字（8 字以内一句，会一个字一个字蹦出去）：【节奏:蹦字】你在干嘛呀；",
+        "长内容（讲步骤、认真讨论、一百多字以上）：【节奏:整段】写成一条，用空行分好段，会按段落分几条发；",
+        "表情包单独成一条，可以只发一个表情包，也可以放在文字前后，例如【节奏:分条】行吧|||[表情:名字]。",
+        f"分条最多 {resolved.max_parts} 条（连发、蹦字另算）；几个字又没想好怎么断就【节奏:整段】，系统不会替你硬拆。",
         "节奏不是多说话的理由：分几条，加起来的字数也和发一条时一样，守住上面的字数目标；"
-        "连发和蹦字通常比一条更短。按内容和心情挑，不必每次换花样；代码、列表、链接放同一条。",
+        "连发和蹦字通常比一条更短。代码、列表、链接放同一条。",
     ]
     if act in _NO_AUTO_ACTS:
         lines.append("本轮是短回应，整段一句或几个字的连发就够。")
@@ -850,8 +859,45 @@ def rhythm_instruction(
     if lean:
         lines.append(lean)
     if expressive:
-        lines.append("你的表现力较强，情绪明显时可以更放开地用连发和蹦字。")
+        lines.append("你的表现力较强，情绪明显时可以更放开地用连发和蹦字，平常照样一条为主。")
     return "".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 条数套模板
+# ---------------------------------------------------------------------------
+
+# 最近连着这么多次条数完全一样（且都 ≥2 条）就提醒一句。
+SAME_COUNT_STREAK = 3
+# 最近连着这么多次都分了条（≥2 条）就提醒一句。
+SPLIT_STREAK = 4
+
+
+def mix_streak(counts: list[int] | tuple[int, ...]) -> str:
+    """最近的条数是不是“套模板”了：``same``=连着几次条数一样（≥2 条）；
+    ``always_split``=连着几次都分了条；都不是返回空串。只看条数，不看内容。"""
+
+    counts = list(counts)
+    if len(counts) >= SAME_COUNT_STREAK:
+        tail = counts[-SAME_COUNT_STREAK:]
+        if tail[0] >= 2 and len(set(tail)) == 1:
+            return "same"
+    if len(counts) >= SPLIT_STREAK and all(item >= 2 for item in counts[-SPLIT_STREAK:]):
+        return "always_split"
+    return ""
+
+
+def rhythm_mix_instruction(counts: list[int] | tuple[int, ...]) -> str:
+    """最近几次条数套了模板时给一句提醒（易变层）；没套模板返回空串。"""
+
+    if not mix_streak(counts):
+        return ""
+    tail = list(counts)[-max(SAME_COUNT_STREAK, SPLIT_STREAK):]
+    shown = "、".join(str(item) for item in tail)
+    return (
+        f"你最近几次回复分别发了 {shown} 条，像在套模板。这次按内容来："
+        "一句话能说完就【节奏:整段】一条；真要分也不用和前几次一样多。"
+    )
 
 
 TOOL_RHYTHM_HINT = "text 里用 ||| 把要分开发的部分隔开会依次发成多条，rhythm 可选 block/split/burst/pop"
@@ -866,7 +912,9 @@ __all__ = [
     "RHYTHM_LABELS",
     "RHYTHM_POP",
     "RHYTHM_SPLIT",
+    "SAME_COUNT_STREAK",
     "SPLIT_MODES",
+    "SPLIT_STREAK",
     "TOOL_RHYTHM_HINT",
     "RhythmMarkup",
     "RhythmPlan",
@@ -875,6 +923,7 @@ __all__ = [
     "has_rhythm_markup",
     "is_structured_text",
     "long_reply_parts",
+    "mix_streak",
     "normalize_rhythm",
     "pacing_delays",
     "parse_rhythm_markup",
@@ -883,6 +932,7 @@ __all__ = [
     "plan_text_rhythm",
     "pop_pieces",
     "rhythm_instruction",
+    "rhythm_mix_instruction",
     "rhythm_settings",
     "segment_groups",
     "single_rhythm",

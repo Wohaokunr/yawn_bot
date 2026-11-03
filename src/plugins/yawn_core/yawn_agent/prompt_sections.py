@@ -577,6 +577,16 @@ SECTIONS: tuple[PromptSection, ...] = (
         tasks=_DP,
     ),
     PromptSection(
+        "speech.rhythm_mix",
+        "条数别套模板",
+        "speech",
+        "realtime",
+        KIND_GENERATED,
+        "Bot 最近在这个群连着几次回复条数一模一样（如三次三条）或每次都分条时追加一句：这次按内容来，一条也行（AGENT_REPLY_MIX_HINT）。",
+        when="最近几次回复条数套了模板时",
+        tasks=_DP,
+    ),
+    PromptSection(
         "speech.sticker",
         "表情包",
         "speech",

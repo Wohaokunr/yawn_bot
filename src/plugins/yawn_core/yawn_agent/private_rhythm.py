@@ -30,7 +30,10 @@ from .speech_rhythm import (
     MAX_SPLIT_PARTS,
     RHYTHM_BLOCK,
     RHYTHM_LABELS,
+    SAME_COUNT_STREAK,
+    SPLIT_STREAK,
     RhythmSettings,
+    mix_streak,
     rhythm_settings,
 )
 
@@ -44,10 +47,7 @@ CUT_TTL_SECONDS = 600.0
 # 每人记最近几次发送的形状；全站最多记多少人（超出时丢最久没说话的）。
 RECENT_SHAPES = 8
 MAX_TRACKED_USERS = 4096
-# 最近连着这么多次条数完全一样（且都 ≥2 条）就提醒一句。
-SAME_COUNT_STREAK = 3
-# 最近连着这么多次都分了条（≥2 条）就提醒一句。
-SPLIT_STREAK = 4
+# 套模板的判断（连着 3 次条数一样且 ≥2、连着 4 次都分条）与群聊共用 speech_rhythm.mix_streak。
 # 冷启动时（进程刚重启）用历史里最近几条回复的行数估一下条数。
 SEED_FROM_HISTORY = 4
 
@@ -257,19 +257,6 @@ def recent_counts(user_id: int, history: list[dict[str, Any]] | None = None) -> 
     if shapes:
         return [shape.parts for shape in shapes if shape.parts > 0]
     return _history_counts(history)
-
-
-def mix_streak(counts: list[int]) -> str:
-    """最近的条数是不是“套模板”了：``same``=连着几次条数一样（≥2 条）；
-    ``always_split``=连着几次都分了条；都不是返回空串。"""
-
-    if len(counts) >= SAME_COUNT_STREAK:
-        tail = counts[-SAME_COUNT_STREAK:]
-        if tail[0] >= 2 and len(set(tail)) == 1:
-            return "same"
-    if len(counts) >= SPLIT_STREAK and all(item >= 2 for item in counts[-SPLIT_STREAK:]):
-        return "always_split"
-    return ""
 
 
 def mix_note(user_id: int, history: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
