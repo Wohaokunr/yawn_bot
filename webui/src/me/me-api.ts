@@ -22,6 +22,7 @@ export interface MyProfile {
   managedGroupCount: number;
   groupCount: number;
   persona: { sourceLabel: string; summary: string; name: string | null; locked: boolean } | null;
+  groupManage?: GroupManageFlags;
   sessionExpiresAt: number;
 }
 
@@ -46,6 +47,105 @@ export interface MyGroupDetail {
   verified: boolean;
   features: FeatureState[];
   featureHints: Record<string, string>;
+  groupManage?: GroupManageFlags;
+}
+
+/** 群管代办总开关（后端 GROUP_MANAGE_ENABLED / GROUP_MANAGE_WEBUI） */
+export interface GroupManageFlags {
+  enabled: boolean;
+  webui: boolean;
+}
+
+export type ManageRisk = "low" | "mid" | "high";
+
+export interface ManageActionMeta {
+  key: string;
+  label: string;
+  risk: ManageRisk;
+  target: boolean;
+  botOwner: boolean;
+  confirm: boolean;
+  adminAllowed: boolean;
+  disabled: boolean;
+  /** 此刻为什么不能用；null 表示能用 */
+  blockedReason: string | null;
+}
+
+export interface ManagePolicy {
+  enabled: boolean;
+  privateEnabled: boolean;
+  webuiEnabled: boolean;
+  notifyGroup: boolean;
+  maxMuteMinutes: number;
+  maxMuteCeiling: number;
+  disabledActions: string[];
+  adminActions: string[];
+  confirmActions: string[];
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface ManageStatus {
+  available: boolean;
+  problem: string | null;
+  yourRole: string | null;
+  botRole: string | null;
+  isOwner: boolean;
+  allowedActions: string[];
+  actions: ManageActionMeta[];
+  policy: ManagePolicy;
+  usedToday: number;
+  dailyLimit: number;
+  sent: Array<{ messageId: string; kind: string; at: string; preview: string }>;
+}
+
+export interface ManageMember {
+  userId: string;
+  name: string;
+  nickname: string;
+  card: string;
+  role: string;
+  title: string | null;
+  mutedUntil: string | null;
+}
+
+export interface ManageNotice {
+  noticeId: string;
+  senderId: string;
+  publishTime: string | null;
+  content: string;
+}
+
+export interface ManageAuditRow {
+  id: number;
+  at: string;
+  actorId: string;
+  actorRole: string | null;
+  source: "private" | "webui" | string;
+  action: string;
+  label: string;
+  result: "success" | "failed" | "denied" | string;
+  targetId: string | null;
+  targetName: string | null;
+  detail: string | null;
+  error: string | null;
+  reason: string | null;
+}
+
+export interface ManageActionBody {
+  action: string;
+  member?: string;
+  minutes?: number;
+  enable?: boolean;
+  content?: string;
+  text?: string;
+  pinned?: boolean;
+  confirmRequired?: boolean;
+  reject?: boolean;
+  noticeId?: string;
+  messageId?: string;
+  reason?: string;
+  confirm?: boolean;
 }
 
 export interface MyPersonaState {
@@ -105,5 +205,18 @@ export const meApi = {
   undoPersona: () => api<PersonaWriteResult>("/me/persona/undo", json("POST")).then((r) => r.data),
   changePassword: (currentPassword: string, newPassword: string) =>
     api<{ account: MyAccount; csrfToken: string; expiresAt: number }>("/me/password", json("POST", { currentPassword, newPassword })).then((r) => r.data),
+  manage: (groupId: string) => api<ManageStatus>(`/me/groups/${encodeURIComponent(groupId)}/manage`).then((r) => r.data),
+  manageMembers: (groupId: string, query = "", refresh = false) =>
+    api<ManageMember[]>(`/me/groups/${encodeURIComponent(groupId)}/manage/members?limit=500&query=${encodeURIComponent(query)}${refresh ? "&refresh=true" : ""}`)
+      .then((r) => ({ rows: r.data, total: Number(r.meta.total ?? r.data.length), muted: Number(r.meta.muted ?? 0) })),
+  manageNotices: (groupId: string) => api<ManageNotice[]>(`/me/groups/${encodeURIComponent(groupId)}/manage/notices`).then((r) => r.data),
+  manageAudit: (groupId: string, params: { result?: string; mine?: boolean } = {}) =>
+    api<ManageAuditRow[]>(`/me/groups/${encodeURIComponent(groupId)}/manage/audit?limit=200${params.result ? `&result=${params.result}` : ""}${params.mine ? "&mine=true" : ""}`).then((r) => r.data),
+  managePreview: (groupId: string, body: ManageActionBody) =>
+    api<{ summary: string; risk: ManageRisk; label: string }>(`/me/groups/${encodeURIComponent(groupId)}/manage/preview`, json("POST", body)).then((r) => r.data),
+  manageAction: (groupId: string, body: ManageActionBody) =>
+    api<{ summary: string; result: Record<string, unknown> }>(`/me/groups/${encodeURIComponent(groupId)}/manage/actions`, json("POST", body)).then((r) => r.data),
+  managePolicy: (groupId: string, changes: Partial<ManagePolicy>) =>
+    api<ManagePolicy>(`/me/groups/${encodeURIComponent(groupId)}/manage/policy`, json("PUT", changes)).then((r) => r.data),
   logoutAll: () => api<{ authenticated: false }>("/me/logout-all", json("POST")).then((r) => r.data),
 };

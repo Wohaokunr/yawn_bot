@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PersonaCard } from "../types";
 import { homePathForRole, navForRole, selectedNavKey, USER_NAV } from "../nav-config";
-import { groupRoleLabel, isQqNumber, normalizeSetupCode, passwordProblem, passwordStrength, personaDiff, personaFieldKey } from "./me-meta";
+import { MUTE_PRESETS, groupRoleLabel, isQqNumber, manageMinutesLabel, manageResultMeta, manageSourceLabel, normalizeSetupCode, passwordProblem, passwordStrength, personaDiff, personaFieldKey } from "./me-meta";
 
 describe("passwordProblem mirrors the backend policy", () => {
   it("rejects weak passwords without echoing them", () => {
@@ -52,5 +52,22 @@ describe("user navigation", () => {
     expect(selectedNavKey("/", "guest")).toBe("/guest");
     expect(selectedNavKey("/agent/1", "admin")).toBe("/groups");
     expect(USER_NAV.every((entry) => entry.key.startsWith("/me"))).toBe(true);
+  });
+});
+
+describe("群管代办文案", () => {
+  it("分钟数换算和后端一致", () => {
+    expect(manageMinutesLabel(10)).toBe("10 分钟");
+    expect(manageMinutesLabel(60)).toBe("1 小时");
+    expect(manageMinutesLabel(90)).toBe("90 分钟");
+    expect(manageMinutesLabel(1440)).toBe("1 天");
+    expect(manageMinutesLabel(43200)).toBe("30 天");
+  });
+  it("结果与来源", () => {
+    expect(manageResultMeta("denied").label).toBe("被拒");
+    expect(manageResultMeta("weird").label).toBe("weird");
+    expect(manageSourceLabel("private")).toBe("私聊");
+    expect(manageSourceLabel("webui")).toBe("网页");
+    expect(MUTE_PRESETS[0]).toBe(10);
   });
 });

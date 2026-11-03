@@ -101,6 +101,62 @@ async def require_relation_view_access(group_id: int, request: Request) -> Sessi
     raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看这个群")
 
 
+def _manager_webui_enabled() -> bool:
+    from ..private_chat_bridge import private_agent_config
+
+    return bool(private_agent_config.group_manage_enabled) and bool(
+        private_agent_config.group_manage_webui
+    )
+
+
+async def _group_agent_access(
+    group_id: int, request: Request, *, write: bool
+) -> Session:
+    """群 Agent 配置/人设：运维管理员任意群；个人账号只限自己当群主/管理员的群。
+
+    个人账号写入时还要求 Bot 在线并实时确认身份
+    （``ensure_group_manager(write=True)``）。
+    """
+
+    session = await authenticated_session(request)
+    if write:
+        require_csrf(request, session)
+    if session.role == "admin":
+        return session
+    if session.role == "user" and session.user_id is not None:
+        if not _manager_webui_enabled():
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "管理员没有开放群管理员在网页上改 Agent"
+            )
+        async with get_session() as db:
+            await ensure_group_manager(db, group_id, session.user_id, write=write)
+        return session
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+
+
+async def group_agent_read_access(group_id: int, request: Request) -> Session:
+    return await _group_agent_access(group_id, request, write=False)
+
+
+async def group_agent_write_access(group_id: int, request: Request) -> Session:
+    return await _group_agent_access(group_id, request, write=True)
+
+
+async def admin_or_manager_read_session(request: Request) -> Session:
+    """不属于某个群的只读资料（如人设库列表）：运维管理员，或开着网页群管理的个人账号。"""
+
+    session = await authenticated_session(request)
+    if session.role == "admin":
+        return session
+    if (
+        session.role == "user"
+        and session.user_id is not None
+        and _manager_webui_enabled()
+    ):
+        return session
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+
+
 async def require_group_view_access(group_id: int, request: Request) -> Session:
     """Allow admins to view any group and guests only allowlisted groups."""
     session = await authenticated_session(request)
@@ -117,6 +173,9 @@ AdminReadSession = Annotated[Session, Depends(admin_read_session)]
 AdminWriteSession = Annotated[Session, Depends(admin_write_session)]
 GroupViewSession = Annotated[Session, Depends(require_group_view_access)]
 RelationViewSession = Annotated[Session, Depends(require_relation_view_access)]
+GroupAgentReadSession = Annotated[Session, Depends(group_agent_read_access)]
+GroupAgentWriteSession = Annotated[Session, Depends(group_agent_write_access)]
+AdminOrManagerReadSession = Annotated[Session, Depends(admin_or_manager_read_session)]
 UserReadSession = Annotated[Session, Depends(user_read_session)]
 UserWriteSession = Annotated[Session, Depends(user_write_session)]
 

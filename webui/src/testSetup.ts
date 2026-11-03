@@ -5,6 +5,8 @@ import { afterEach } from "vitest";
 afterEach(async () => {
   cleanup();
   // React 19 may schedule passive work with Node's setImmediate after unmount.
-  // Give that work one event-loop turn before Vitest destroys the jsdom window.
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  // antd Form's error-list debounce (useDelayState) also sets an uncancelled
+  // 10ms timer on unmount. Wait past it before Vitest destroys the jsdom window,
+  // otherwise a busy CI runner can fire it after teardown ("window is not defined").
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
 });

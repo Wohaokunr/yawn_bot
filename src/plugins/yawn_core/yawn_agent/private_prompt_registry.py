@@ -719,8 +719,13 @@ async def preview(
             # 预览不动真实回合的历史锚点（否则预览一次就可能让下一轮缓存不命中）。
             anchor=False,
         )
+        from .group_manage import refresh_manager_hint
+
         tools = tool_schemas(
-            is_superuser=_is_superuser(user_id), computer=computer, tasks=use_tasks
+            is_superuser=_is_superuser(user_id),
+            computer=computer,
+            tasks=use_tasks,
+            manage=await refresh_manager_hint(session, user_id),
         )
         snapshot = build_snapshot(
             {

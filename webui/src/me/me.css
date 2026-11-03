@@ -341,3 +341,243 @@
     flex-direction: column;
   }
 }
+
+/* ── 群管理（GroupManagePanel）──────────────────────────────────────── */
+.me-manage {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.me-manage-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.me-manage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  min-width: 0;
+}
+
+.me-manage-stat strong {
+  color: var(--ink);
+  font-size: 16px;
+  font-family: var(--font-heading, inherit);
+}
+
+.me-manage-stat-label {
+  font-size: 12px;
+  color: var(--ink-tertiary);
+}
+
+.me-manage-meter {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  overflow: hidden;
+}
+
+.me-manage-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--brand);
+}
+
+.me-manage-tabs {
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+/* 窄屏时横向滚动，不把标签挤成省略号 */
+.me-manage-tabs .ant-segmented-group {
+  flex-wrap: nowrap;
+}
+
+.me-manage-tabs .ant-segmented-item {
+  flex: none;
+}
+
+.me-manage-tabs .ant-segmented-item-label {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.me-manage-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.me-manage-toolbar,
+.me-manage-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.me-manage-row {
+  margin-top: 10px;
+}
+
+.me-manage-toolbar-spacer {
+  flex: 1;
+}
+
+.me-manage-search {
+  width: 260px;
+  max-width: 100%;
+}
+
+.me-manage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.me-manage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.me-manage-card .me-section-head {
+  margin-bottom: 2px;
+}
+
+.me-manage-wide {
+  grid-column: 1 / -1;
+}
+
+.me-manage-subhead {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.me-manage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.me-manage-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.me-manage-list-item:last-child {
+  border-bottom: none;
+}
+
+.me-manage-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  color: var(--ink);
+}
+
+.me-manage-notice-text {
+  margin-bottom: 0 !important;
+  white-space: pre-wrap;
+}
+
+.me-manage-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.me-manage-member-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.me-manage-member-main strong {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.me-manage-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 260px;
+  max-width: calc(100vw - 48px);
+}
+
+.me-manage-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.me-manage-guard {
+  display: inline-block;
+  cursor: not-allowed;
+}
+
+.me-manage-confirm p {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.me-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+/* 嵌入运维的 Agent 设置 / 人设面板：去掉它们为工作台准备的外边距 */
+.me-agent-embed {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .me-manage-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .me-manage-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .me-manage-search {
+    width: 100%;
+  }
+
+  .me-manage-list-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

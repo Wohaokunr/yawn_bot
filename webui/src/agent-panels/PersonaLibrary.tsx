@@ -15,12 +15,15 @@ export function PersonaLibrary({
   version,
   dirty,
   onApplied,
+  readOnly = false,
 }: {
   groupId: string;
   draft: () => PersonaCard;
   version: () => string | undefined;
   dirty: boolean;
   onApplied: (persona: Persona) => void;
+  /** 群管理员视图：只能“用于本群”，不能存库、覆盖、删除或设全局 */
+  readOnly?: boolean;
 }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [name, setName] = useState("");
@@ -100,7 +103,7 @@ export function PersonaLibrary({
   const items = query.data?.filter((item) => !needle || `${item.name} ${item.summary}`.toLowerCase().includes(needle));
   return (
     <div className="persona-library">
-      <div className="persona-library-create">
+      {!readOnly && <div className="persona-library-create">
         <Input
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -110,14 +113,14 @@ export function PersonaLibrary({
         />
         <Checkbox checked={makeGlobal} onChange={(event) => setMakeGlobal(event.target.checked)}>设为全局人设</Checkbox>
         <Button type="primary" ghost loading={busy === "create"} onClick={saveDraft}>存入人设库</Button>
-      </div>
+      </div>}
       {(query.data?.length ?? 0) > 4 && (
         <Input.Search allowClear value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索人设库" />
       )}
       {!items
         ? (query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />)
         : items.length === 0
-          ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={needle ? "没有匹配的人设" : "人设库还是空的。把调好的草稿存进来，其它群就能一键套用。"} />
+          ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={needle ? "没有匹配的人设" : readOnly ? "人设库还是空的，可以直接在上面调本群人设。" : "人设库还是空的。把调好的草稿存进来，其它群就能一键套用。"} />
           : (
             <div className="persona-library-list">
               {items.map((item) => (
@@ -137,6 +140,7 @@ export function PersonaLibrary({
                         </Popconfirm>
                       )
                       : <Button size="small" type="primary" loading={busy === `apply-${item.id}`} onClick={() => apply(item)}>用于本群</Button>}
+                    {!readOnly && <>
                     <Button size="small" loading={busy === `global-${item.id}`} onClick={() => setGlobal(item, !item.isGlobal)}>
                       {item.isGlobal ? "取消全局" : "设为全局"}
                     </Button>
@@ -153,6 +157,7 @@ export function PersonaLibrary({
                     >
                       <Button size="small" danger loading={busy === `delete-${item.id}`}>删除</Button>
                     </Popconfirm>
+                    </>}
                   </Space>
                 </div>
               ))}

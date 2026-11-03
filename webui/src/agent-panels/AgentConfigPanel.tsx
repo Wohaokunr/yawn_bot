@@ -30,7 +30,19 @@ function participationIntensity(warmup: number, interject: number): Participatio
   return (entry?.[0] as ParticipationIntensity | undefined) ?? "custom";
 }
 
-export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.Element {
+/**
+ * 群级运行配置。``manager`` 为群管理员（个人账号）视图：不显示全站识图诊断，
+ * “从其它群复制”只列他自己管理的群；可改的字段和运维一致。
+ */
+export function AgentConfigPanel({
+  groupId,
+  manager = false,
+  loadGroups,
+}: {
+  groupId: string;
+  manager?: boolean;
+  loadGroups?: (search: string, signal: AbortSignal) => Promise<Array<{ groupId: string; groupName: string | null }>>;
+}): React.JSX.Element {
   const { message } = AntApp.useApp();
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
@@ -134,7 +146,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
               </div>
               <div className="agent-config-title-actions">
                 <SaveStatus dirty={dirty} saving={saving} />
-                <ConfigTransferBar groupId={groupId} getValues={() => form.getFieldsValue(true)} onApply={applyDraft} />
+                <ConfigTransferBar groupId={groupId} getValues={() => form.getFieldsValue(true)} onApply={applyDraft} loadGroups={loadGroups} />
               </div>
             </div>
             <div className="agent-config-metrics">
@@ -302,7 +314,7 @@ export function AgentConfigPanel({ groupId }: { groupId: string }): React.JSX.El
                   <Switch />
                 </Form.Item>
               </div>
-              <VisionStatusCard />
+              {!manager && <VisionStatusCard />}
             </section>
 
             <section className="agent-config-section liquid-glass agent-config-floating">

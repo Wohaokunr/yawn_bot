@@ -1,26 +1,50 @@
-import { ApartmentOutlined, AppstoreOutlined, ArrowLeftOutlined, SafetyCertificateOutlined, WarningOutlined } from "@ant-design/icons";
+import {
+  ApartmentOutlined,
+  AppstoreOutlined,
+  ArrowLeftOutlined,
+  ControlOutlined,
+  RobotOutlined,
+  SafetyCertificateOutlined,
+  SmileOutlined,
+  WarningOutlined,
+} from "@ant-design/icons";
 import { Alert, App as AntApp, Button, Skeleton, Tabs, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { AgentConfigPanel } from "../agent-panels/AgentConfigPanel";
+import { PersonaPanel } from "../agent-panels/PersonaPanel";
 import { RelationsPanel } from "../agent-panels/RelationsPanel";
 import { ApiError } from "../api";
 import { FeatureTable } from "../directory/components";
 import { PageHeader, QueryErrorAlert, useApiQuery } from "../shared";
 import type { FeatureState } from "../types";
+import { GroupManagePanel } from "./GroupManagePanel";
 import { meApi } from "./me-api";
 import { groupRoleLabel } from "./me-meta";
 import "./me.css";
 
 const { Text } = Typography;
-const TABS = new Set(["relations", "features"]);
+const TABS = new Set(["manage", "agent", "persona", "features", "relations"]);
+const MANAGER_TABS = new Set(["manage", "agent", "persona"]);
+
+// “从其它群复制运行配置”只列自己管理的群
+const myGroupsForCopy = (search: string) => meApi.groups().then((rows) => {
+  const needle = search.trim().toLowerCase();
+  return rows
+    .filter((row) => !needle || `${row.groupName ?? ""} ${row.groupId}`.toLowerCase().includes(needle))
+    .map((row) => ({ groupId: row.groupId, groupName: row.groupName }));
+});
 
 export function MyGroupPage(): React.JSX.Element {
   const { groupId = "" } = useParams();
   const { message } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
-  const requested = searchParams.get("tab") ?? "relations";
-  const tab = TABS.has(requested) ? requested : "relations";
   const query = useApiQuery({ queryKey: ["me", "group", groupId], fetcher: () => meApi.group(groupId) });
+  // 网页群管理关着时（GROUP_MANAGE_WEBUI=false）只剩原来的两个标签
+  const managerTabs = query.data?.groupManage?.webui ?? true;
+  const fallback = managerTabs ? "manage" : "relations";
+  const requested = searchParams.get("tab") ?? fallback;
+  const tab = TABS.has(requested) && (managerTabs || !MANAGER_TABS.has(requested)) ? requested : fallback;
   const [features, setFeatures] = useState<FeatureState[] | null>(null);
 
   useEffect(() => setFeatures(query.data?.features ?? null), [query.data]);
@@ -42,7 +66,7 @@ export function MyGroupPage(): React.JSX.Element {
         showIcon
         icon={<WarningOutlined />}
         message="你不是这个群的群主或管理员"
-        description="只有群主和管理员能在这里查看群关系、开关群功能。如果你刚被设为管理员，在群里说句话让 Bot 同步一下身份再来。"
+        description="只有群主和管理员能在这里管理群、调本群 Agent 和人设。如果你刚被设为管理员，在群里说句话让 Bot 同步一下身份再来。"
         action={<Link to="/me"><Button size="small">返回我的主页</Button></Link>}
       />
     </div>;
@@ -78,7 +102,7 @@ export function MyGroupPage(): React.JSX.Element {
         type="warning"
         showIcon
         message="Bot 暂时不在线，没法向 QQ 实时确认你的管理员身份"
-        description="现在可以查看，但群功能开关要等 Bot 上线后才能修改。"
+        description="现在可以查看，但群管理、Agent 设置、人设和群功能开关要等 Bot 上线后才能修改。"
       />
     )}
     <Tabs
@@ -90,6 +114,33 @@ export function MyGroupPage(): React.JSX.Element {
         setSearchParams(next, { replace: true });
       }}
       items={[
+        ...(managerTabs ? [
+          {
+            key: "manage",
+            label: <span><ControlOutlined /> 群管理</span>,
+            children: <GroupManagePanel groupId={groupId} groupName={name} />,
+          },
+          {
+            key: "agent",
+            label: <span><RobotOutlined /> Agent 设置</span>,
+            children: <div className="me-agent-embed">
+              <Text type="secondary" className="me-hint me-tab-hint">
+                本群 Agent 怎么回话、主动参与多少、能用哪些管理工具。和运维在管理台看到的是同一份设置，你的修改会记进「群管理 → 操作记录」。
+              </Text>
+              <AgentConfigPanel groupId={groupId} manager loadGroups={myGroupsForCopy} />
+            </div>,
+          },
+          {
+            key: "persona",
+            label: <span><SmileOutlined /> 群人设</span>,
+            children: <div className="me-agent-embed">
+              <Text type="secondary" className="me-hint me-tab-hint">
+                Bot 在本群的名字、性格和说话方式，只影响这个群。人设里不能写让 Bot 无视规则的话；人设库里的模板可以一键套用。
+              </Text>
+              <PersonaPanel groupId={groupId} manager />
+            </div>,
+          },
+        ] : []),
         {
           key: "relations",
           label: <span><ApartmentOutlined /> 群关系洞悉</span>,
