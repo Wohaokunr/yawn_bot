@@ -301,7 +301,13 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
 
         cancelled = cancel_all(ctx.user_id)
         had_persona = bool(store.load(ctx.user_id).get("persona"))
+        from . import memory_link
+
+        # 他让我忘掉的记录（memory_link 墓碑）是他的隐私要求，清空个人数据时留着：
+        # 聊天记录本身还在，没有它们自动整理可能把忘掉的事又记回来。
+        kept_tombstones = memory_link.load(ctx.user_id, now=ctx.now).tombstones
         removed_store = store.delete_all(ctx.user_id)
+        memory_link.restore_tombstones(ctx.user_id, kept_tombstones)
         removed_memories = await delete_private_memories(ctx.session, ctx.user_id)
         from .private_cache import forget_user
 
@@ -325,8 +331,19 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
         "has_prefs": bool(record.get("prefs")),
         "has_private_persona": bool(record.get("persona")),
         "auto_reply_paused": auto_paused(ctx.user_id),
-        "where": "这些只在私聊里用，不会出现在群里",
+        "where": _where_note(ctx.user_id),
     }
+
+
+def _where_note(user_id: int) -> str:
+    from . import memory_link
+    from .private_memory import KEY_LABELS
+
+    state = memory_link.load(user_id)
+    if state.share_keys and memory_link.share_enabled():
+        labels = "、".join(KEY_LABELS.get(key, key) for key in memory_link.SHAREABLE_KEYS if key in state.share_keys)
+        return f"这些只在私聊里用；只有你允许的「{labels}」群里的我也知道"
+    return "这些只在私聊里用，不会出现在群里"
 
 
 def _task_stats(now: Any) -> dict[str, int]:

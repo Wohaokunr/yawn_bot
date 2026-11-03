@@ -34,6 +34,7 @@ from .memory import (
 )
 from .memory_access import record_access
 from .memory_hygiene import contains_pii, looks_like_instruction
+from .memory_link import shared_facts_for_group
 from .persona import effective_persona_card
 from .schedule_wake import current_wake
 
@@ -357,6 +358,29 @@ async def load_context(
             position + 1 < len(rows) for rows in focus_by_member.values()
         ):
             break
+    # 成员本人允许“群里也知道”的私聊事实（memory_link）：只进发言人/相关成员层（易变层），
+    # 同类别的群里自动画像让位给他亲口说的版本；管理员手工维护的不让。
+    shared_by_member = await shared_facts_for_group(
+        session, group_id, focus_ids, now=now, opted_out=opted_out
+    )
+    shared_ids: set[int] = set()
+    if shared_by_member:
+        shared_keys = {
+            (uid, str(row.memory_key)) for uid, rows_ in shared_by_member.items() for row in rows_
+        }
+        focused_profiles = [
+            row
+            for row in focused_profiles
+            if (int(row.subject_user_id or 0), str(row.memory_key)) not in shared_keys
+            or row.source_kind == "manual"
+        ]
+        kept_keys = {(int(row.subject_user_id or 0), str(row.memory_key)) for row in focused_profiles}
+        for member_id in focus_ids:
+            for row in shared_by_member.get(member_id, []):
+                if (member_id, str(row.memory_key)) in kept_keys:
+                    continue
+                focused_profiles.append(row)
+                shared_ids.add(int(row.id or 0))
     summaries = [row for row in local_rows if row.memory_type == "summary"]
     # 话题记忆必须与近期消息/活跃话题至少有一点交集：旧实现在无关时也按
     # 显著度塞进 3 条，白占预算还会把模型带偏到旧话题；同时 MMR 去掉与
@@ -435,8 +459,10 @@ async def load_context(
         if len(memories) >= _MEMORY_CONTEXT_LIMIT:
             break
         subject_id = int(row.subject_user_id or 0)
+        shared_fact = int(row.id or 0) in shared_ids
         item: dict[str, Any] = {
-            "type": row.memory_type,
+            # 成员允许共享的私聊事实在群里统一叫 shared_by_member（不暴露 private_fact 这类内部类型）
+            "type": "shared_by_member" if shared_fact else row.memory_type,
             "subject_user_id": subject_id or None,
             "subject_name": name_by_id.get(subject_id) if subject_id else None,
             "key": row.memory_key,
@@ -444,7 +470,7 @@ async def load_context(
             # 两位小数足够模型判断强弱，长浮点只是浪费 token 并让稳定层抖动。
             "salience": round(float(row.salience or 0.0), 2),
             "confidence": round(float(row.confidence or 0.0), 2),
-            "source": row.source_kind,
+            "source": "shared_by_member" if shared_fact else row.source_kind,
             "evidence_count": len(row.evidence_message_ids or []),
             "first_observed_date": (row.created_at or now).date().isoformat(),
             "last_confirmed_date": (row.updated_at or row.created_at or now).date().isoformat(),
