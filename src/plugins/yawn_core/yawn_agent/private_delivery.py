@@ -13,6 +13,11 @@
 
 发不出去的媒体退回成一句文字说明（“图表没发出去：…”），不让整轮沉默，也不假装发了。
 返回实际送达部分的文字（媒体写成 ``[图片]`` 之类的占位），由调用方写进历史。
+
+**打断**：传入 ``private_rhythm.InterruptWatch`` 时，逐条发送（包括条与条之间的停顿）
+期间他又发来新消息，剩下的文字和表情包就不发了，也不出现在返回的 ``delivered`` 里，
+所以不会进历史；虚拟电脑里的图片/文件是他要的东西，默认照发。条数上限用私聊自己的
+``PRIVATE_AGENT_REPLY_MAX_PARTS``（见 ``private_rhythm``）。
 """
 
 from __future__ import annotations
@@ -28,6 +33,13 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 from . import private_store as store
 from .log import dbg, dbg_exc
+from .private_rhythm import (
+    InterruptWatch,
+    keep_media_on_interrupt,
+    note_cut,
+    note_delivery,
+    private_rhythm_settings,
+)
 from .speech_format import normalize_qq_text
 from .speech_rhythm import RhythmPlan, parse_rhythm_markup, plan_text_rhythm
 from .sticker_library import (
@@ -180,7 +192,11 @@ def plan_private_reply(text: str) -> tuple[RhythmPlan, list[OutItem]]:
 
     markup = parse_rhythm_markup(text)
     plan = plan_text_rhythm(
-        markup.text, parts=markup.parts, declared=markup.rhythm, scene="private"
+        markup.text,
+        parts=markup.parts,
+        declared=markup.rhythm,
+        scene="private",
+        settings=private_rhythm_settings(),
     )
     items: list[OutItem] = []
     for part, delay in zip(plan.parts, plan.delays, strict=False):
@@ -233,6 +249,14 @@ class Delivery:
     images: int = 0
     files: int = 0
     dropped: int = 0
+    # 分条发到一半他插话：后面没发的条数（文字/表情包）。没发的内容不在 delivered 里。
+    interrupted: bool = False
+    skipped: int = 0
+    skipped_stickers: int = 0
+    # 实际送达的文字条数与本次节奏（统计与 Trace 用）
+    text_parts: int = 0
+    rhythm: str = ""
+    planned: int = 0
 
     @property
     def text(self) -> str:
@@ -271,15 +295,39 @@ async def deliver(
     upload_file: Any = None,
     today: str = "",
     sleep: Any = asyncio.sleep,
+    interrupt: InterruptWatch | None = None,
+    pipeline: str = "turn",
 ) -> Delivery:
-    """规划并依次发送；某条发送失败就停（后面的不发），返回已送达的部分。"""
+    """规划并依次发送；某条发送失败就停（后面的不发），返回已送达的部分。
+
+    ``interrupt`` 触发后（他发了新消息）剩下的文字/表情包不再发送，图片/文件按
+    ``PRIVATE_AGENT_INTERRUPT_KEEP_MEDIA`` 决定是否照发；第一条永远会发。
+    """
 
     from .private_computer import read_for_send
 
-    _plan, items = plan_private_reply(text)
-    result = Delivery([])
+    plan, items = plan_private_reply(text)
+    result = Delivery([], rhythm=plan.rhythm, planned=len(items))
     budget = [private_sticker_left(user_id, today) if today else 0]
-    for item in items:
+    keep_media = keep_media_on_interrupt()
+    for index, item in enumerate(items):
+        if index and interrupt is not None and not result.interrupted:
+            if await interrupt.pause(item.delay, sleep):
+                result.interrupted = True
+                dbg(
+                    f"私聊用户 {user_id} 分条发到第 {len(result.delivered)} 条时发来新消息，"
+                    "剩下的不发了"
+                )
+            delay = 0.0
+        else:
+            delay = item.delay
+        if result.interrupted and not (keep_media and item.kind in {"image", "file"}):
+            result.skipped += 1
+            if item.kind == "sticker":
+                result.skipped_stickers += 1
+            continue
+        if result.interrupted:
+            delay = min(delay, MEDIA_PAUSE_SECONDS)
         message: Message | None = None
         record = _placeholder(item)
         note: str | None = None
@@ -309,8 +357,8 @@ async def deliver(
                 )
                 if upload_file is None:
                     raise RuntimeError("当前协议端不支持私聊传文件")
-                if item.delay:
-                    await sleep(item.delay)
+                if delay:
+                    await sleep(delay)
                 await upload_file(name, data)
                 result.files += 1
                 result.delivered.append(f"[文件: {name}]")
@@ -321,8 +369,8 @@ async def deliver(
             message = Message(MessageSegment.text(note))
             record = note
             result.dropped += 1
-        if item.delay:
-            await sleep(item.delay)
+        if delay:
+            await sleep(delay)
         try:
             await send(message)
         except Exception:  # noqa: BLE001
@@ -331,7 +379,9 @@ async def deliver(
             )
             break
         result.delivered.append(record)
-        if item.kind == "sticker":
+        if item.kind == "text":
+            result.text_parts += 1
+        elif item.kind == "sticker":
             result.stickers += 1
         elif item.kind == "image" and note is None:
             result.images += 1
@@ -342,7 +392,52 @@ async def deliver(
             dbg_exc("私聊表情包计数失败(忽略)")
     if result.dropped:
         dbg(f"私聊用户 {user_id} 回复里有 {result.dropped} 个媒体没发出去")
+    _after_delivery(user_id, result, pipeline)
     return result
+
+
+def _after_delivery(user_id: int, result: Delivery, pipeline: str) -> None:
+    """记条数分布；被打断时记下“说到一半”（只记条数）并写 Trace。都不影响发送结果。"""
+
+    try:
+        note_delivery(
+            user_id,
+            parts=result.text_parts,
+            rhythm=result.rhythm,
+            media=result.stickers + result.images + result.files,
+            interrupted=result.interrupted,
+            skipped=result.skipped,
+        )
+        if result.interrupted and result.skipped:
+            note_cut(
+                user_id,
+                sent_parts=len(result.delivered),
+                unsent_parts=result.skipped - result.skipped_stickers,
+                unsent_media=result.skipped_stickers,
+                pipeline=pipeline,
+            )
+    except Exception:  # noqa: BLE001
+        dbg_exc("私聊分条统计失败(忽略)")
+    try:
+        from .execution_trace import trace_event
+
+        trace_event(
+            "decision",
+            "私聊分条发送",
+            status="success",
+            output={
+                "user_id": user_id,
+                "pipeline": pipeline,
+                "rhythm": result.rhythm,
+                "planned": result.planned,
+                "sent": len(result.delivered),
+                "text_parts": result.text_parts,
+                "interrupted": result.interrupted,
+                "skipped": result.skipped,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        dbg_exc("私聊分条 Trace 记录失败(忽略)")
 
 
 def _reason(exc: BaseException) -> str:

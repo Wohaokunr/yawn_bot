@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nonebot import get_driver, logger
 from nonebot.adapters.onebot.v11 import MessageSegment
@@ -34,6 +34,7 @@ from ..private_chat_bridge import (
     private_agent_config,
     turns_today,
 )
+from . import private_rhythm
 from . import private_turn_taking as turn_taking
 from .context import now_beijing
 from .log import dbg, dbg_exc
@@ -63,9 +64,11 @@ from .private_prompt import (
     PRIVATE_MEDIA,
     PRIVATE_PERSONA_SCOPE,
     PRIVATE_REPEAT_GUARD,
+    PRIVATE_REPLY_CUT,
     PRIVATE_REPORT_NOTICE,
     PRIVATE_REPORT_TURN,
     PRIVATE_RESUMED_NOTE,
+    PRIVATE_RHYTHM_MIX,
     PRIVATE_ROLE,
     PRIVATE_RULES,
     PRIVATE_SAFETY,
@@ -89,6 +92,9 @@ from .prompt_sections import (
 )
 from .speech_claims import check_action_claims
 from .speech_format import normalize_qq_text
+
+if TYPE_CHECKING:
+    from .private_delivery import Delivery
 
 # 私聊里分条的标记，与群聊一致。
 SPLIT_MARK = "|||"
@@ -263,6 +269,18 @@ def build_messages(
         turn.add(
             "private.just_finished",
             apply_section("private.just_finished", "\n" + PRIVATE_JUST_FINISHED),
+        )
+    payload = getattr(context, "payload", None)
+    payload = payload if isinstance(payload, dict) else {}
+    if payload.get("last_reply_cut"):
+        # 上一条分条被他打断：没发的不在历史里，告诉模型说到哪了（本轮层，不碰前缀）。
+        turn.add(
+            "private.reply_cut", apply_section("private.reply_cut", "\n" + PRIVATE_REPLY_CUT)
+        )
+    if payload.get("recent_rhythm"):
+        turn.add(
+            "private.rhythm_mix",
+            apply_section("private.rhythm_mix", "\n" + PRIVATE_RHYTHM_MIX),
         )
     if round_note:
         section_id, note = round_note
@@ -568,18 +586,20 @@ FILES_HINT = PRIVATE_FILES_HINT
 
 
 def rhythm_style(persona: dict[str, Any] | None = None) -> str:
-    """节奏标签用法（按他人设的表现力/详略）。只随人设变，所以放在开头那层（前缀缓存）。"""
+    """节奏标签用法（按他人设的表现力/详略）。只随人设变，所以放在开头那层（前缀缓存）。
 
-    from types import SimpleNamespace
+    私聊用自己的说明（``private_rhythm``）：一条为主、两条其次、三条以上看情绪，
+    示例覆盖各种条数和表情包/图片，不再让模型每次都写成三段式。
+    """
 
     from .persona import persona_style_levels
-    from .speech_rhythm import rhythm_instruction
+    from .private_rhythm import private_rhythm_instruction
 
-    levels = persona_style_levels(persona)
-    style = SimpleNamespace(expressiveness=levels.get("expressiveness", 1)) if levels else None
-    # 详略档位最低（只说一句）的人设：按“短回应”给节奏说明。
-    act = "acknowledge" if levels.get("verbosity", 1) <= 0 else "continue"
-    return rhythm_instruction(scene="private", act=act, complexity="normal", style=style)
+    levels = persona_style_levels(persona) or {}
+    return private_rhythm_instruction(
+        expressiveness=int(levels.get("expressiveness", 1)),
+        verbosity=int(levels.get("verbosity", 1)),
+    )
 
 
 def turn_style(
@@ -630,23 +650,36 @@ def one_voice(text: str, user_id: int | None = None) -> str:
 
 
 async def _deliver_text(
-    bot: Any, user_id: int, text: str, send: Any, now: datetime
-) -> list[str]:
+    bot: Any,
+    user_id: int,
+    text: str,
+    send: Any,
+    now: datetime,
+    *,
+    pipeline: str = "turn",
+) -> Delivery:
+    """依次发出去；分条期间他发来新消息就停（``PRIVATE_AGENT_INTERRUPT``）。
+
+    返回的 ``delivered`` 只有真正发出去的部分，调用方只把它写进历史。
+    """
+
     from .private_delivery import deliver, file_uploader
+    from .private_rhythm import InterruptWatch
 
     text = one_voice(text, user_id)
-    result = await deliver(
+    return await deliver(
         user_id,
         text,
         send,
         upload_file=file_uploader(bot, user_id) if bot is not None else None,
         today=now.date().isoformat(),
         sleep=asyncio.sleep,
+        interrupt=InterruptWatch.start(user_id),
+        pipeline=pipeline,
     )
-    return result.delivered
 
 
-async def _send_parts(request: PrivateTurnRequest, text: str, now: datetime) -> list[str]:
+async def _send_parts(request: PrivateTurnRequest, text: str, now: datetime) -> Delivery:
     async def send(message: Any) -> None:
         if request.event is None:
             # 没有触发事件的回合（等他说完后自己接话）：直接发私聊。
@@ -775,6 +808,13 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             context.payload["just_finished"] = [
                 report_payload(item) for item in just_finished
             ]
+    cut = private_rhythm.cut_note(user_id)
+    if cut:
+        # 上一条分条被他打断了：只告诉模型发到第几条，没发出去的内容不给（也不在历史里）。
+        context.payload["last_reply_cut"] = cut
+    mix = private_rhythm.mix_note(user_id, request.history)
+    if mix:
+        context.payload["recent_rhythm"] = mix
     emoji_pref = (private_store.load(user_id).get("prefs") or {}).get("emoji")
     persona = resolve_private_persona(user_id)
     meta: dict[str, Any] = {}
@@ -965,10 +1005,16 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     text = verify_claims(text, ctx.succeeded)
     if not split_reply(text):
         return None
-    delivered = await _send_parts(request, text, now)
+    # 这一轮要开口了：上一条被打断的记录用过了（这轮自己被打断会重新记）。
+    private_rhythm.clear_cut(user_id)
+    sent = await _send_parts(request, text, now)
+    delivered = sent.delivered
     if not delivered:
         return None
-    if just_finished:
+    if just_finished and sent.interrupted and sent.skipped:
+        # 结果可能正好在没发出去的那几条里：不标记，下一轮顺着聊天再告诉他。
+        dbg(f"私聊用户 {user_id} 顺带告知结果时被打断，结果留到下一轮")
+    elif just_finished:
         from .private_tasks import mark_reported
 
         try:
@@ -1484,13 +1530,19 @@ async def _report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
         async def send(message: Any) -> None:
             await bot.send_private_msg(user_id=user_id, message=message)
 
-        delivered = await _deliver_text(bot, user_id, text, send, now)
+        sent = await _deliver_text(bot, user_id, text, send, now, pipeline="report")
+        delivered = sent.delivered
         if not delivered:
             return False
         try:
             await record_outgoing(user_id, "\n".join(delivered), now)
         except Exception:  # noqa: BLE001
             dbg_exc(f"私聊用户 {user_id} 汇报入库失败(忽略)")
+        if sent.interrupted and sent.skipped:
+            # 汇报说到一半他插话了：不算汇报完，这件事留在“还没告诉他”里，
+            # 他这条消息那一轮会顺着聊天把结果说完（just_finished）。
+            dbg(f"私聊用户 {user_id} 汇报被打断，结果留给下一轮顺着说")
+            return False
         return True
 
 
@@ -1596,7 +1648,9 @@ async def _coordinate(bot: Any, user_id: int) -> None:
         async def send(message: Any) -> None:
             await bot.send_private_msg(user_id=user_id, message=message)
 
-        delivered = await _deliver_text(bot, user_id, text, send, now)
+        delivered = (
+            await _deliver_text(bot, user_id, text, send, now, pipeline="coordinate")
+        ).delivered
         if delivered:
             await record_outgoing(user_id, "\n".join(delivered), now)
 

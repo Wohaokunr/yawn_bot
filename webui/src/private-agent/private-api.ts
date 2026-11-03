@@ -132,6 +132,33 @@ export interface CacheStats {
   anchoredUsers: number;
 }
 
+export interface RhythmShape {
+  parts: number;
+  rhythm: string;
+  media: number;
+  interrupted: boolean;
+  at: number;
+}
+
+export interface RhythmStats {
+  settings: { interrupt: boolean; keepMedia: boolean; mixHint: boolean; maxParts: number };
+  stats: {
+    deliveries: number;
+    interrupted: number;
+    skippedItems: number;
+    byParts: Record<string, number>;
+    partsShare: Record<string, number>;
+    byRhythm: Record<string, number>;
+    withMedia: number;
+    mixHints: number;
+    cutNotes: number;
+  };
+  trackedUsers: number;
+  recent?: RhythmShape[];
+  pattern?: string;
+  pendingCut?: boolean;
+}
+
 export interface CaptureStatus {
   captureEnabled: boolean;
   paused: boolean;
@@ -291,6 +318,8 @@ export const privateApi = {
     data<{ revision: number; changed: number }>(`${BASE}/prompts/users/${encodeURIComponent(userId)}?expectedRevision=${expectedRevision}`, json("DELETE")),
 
   cacheStats: (signal?: AbortSignal) => data<CacheStats>(`${BASE}/cache`, { signal }),
+  rhythmStats: (userId?: string | null, signal?: AbortSignal) =>
+    data<RhythmStats>(`${BASE}/rhythm${userId ? `?userId=${encodeURIComponent(userId)}` : ""}`, { signal }),
   captures: (signal?: AbortSignal) => data<CaptureStatus & { users: CaptureUser[] }>(`${BASE}/captures`, { signal }),
   userCaptures: (userId: string, signal?: AbortSignal) =>
     data<CaptureStatus & { userId: string; prompts: PrivateSnapshot[] }>(`${BASE}/captures/${encodeURIComponent(userId)}`, { signal }),

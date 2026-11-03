@@ -77,6 +77,8 @@ _GROUP_OF: dict[str, str] = {
     "private.time_note": "context",
     "private.turn_style": "context",
     "private.rhythm": "rules",
+    "private.reply_cut": "context",
+    "private.rhythm_mix": "rules",
     "private.turn_taking": "context",
     "private.resumed_note": "context",
     "private.media": "files",
@@ -151,6 +153,8 @@ _TAIL_STEPS = (
     _S("private.turn_context", "system#3"),
     _S("private.time_note", "system#3", "久别重聊"),
     _S("private.just_finished", "system#3", "有刚做完、还没汇报的结果"),
+    _S("private.reply_cut", "system#3", "上一条分条发到一半被他打断"),
+    _S("private.rhythm_mix", "system#3", "最近几次回复条数套了模板"),
     _S("private.turn_style", "system#3"),
 )
 _CORE_STEPS = (*_HEAD_STEPS, *_TAIL_STEPS)

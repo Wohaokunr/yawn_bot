@@ -118,6 +118,16 @@ class PrivateAgentConfig(BaseModel):
     private_agent_group_lines_hours: int = Field(default=24, ge=1, le=168)
     # 私聊记忆整理时顺便写一段“之前聊到哪”的回顾，窗口外的旧话题也接得上
     private_agent_recap: bool = True
+    # ── 分条发送 ──
+    # 分条逐条发的时候他又发来新消息：剩下没发的文字和表情包就不发了，
+    # 没发的部分不进历史，下一轮告诉模型上一条说到哪了
+    private_agent_interrupt: bool = True
+    # 被打断后，虚拟电脑里的图片/文件（他要的东西）仍然照发
+    private_agent_interrupt_keep_media: bool = True
+    # 私聊“分条”最多几条（1 到 4；连发、蹦字另算）。群聊仍用 AGENT_REPLY_MAX_PARTS
+    private_agent_reply_max_parts: int = Field(default=4, ge=1, le=4)
+    # 最近几次回复条数一模一样（如连着三次三条）或每次都分条时，在本轮资料里提醒一句
+    private_agent_rhythm_mix_hint: bool = True
 
 
 private_agent_config = get_plugin_config(PrivateAgentConfig)
