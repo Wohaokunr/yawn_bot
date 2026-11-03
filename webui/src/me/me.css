@@ -196,6 +196,12 @@
   border-color: transparent;
 }
 
+.me-role-tag.is-superuser {
+  color: var(--success, #16a34a);
+  background: var(--success-bg, #ecfdf3);
+  border-color: transparent;
+}
+
 .me-safety-note .ant-alert-description {
   font-size: 13px;
 }

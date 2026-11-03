@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent
 
 from .game_registry import GameKind, resolve_game_access
 from .permission import get_user_feature_status, is_group_admin
+from .superuser import full_access_enabled, superuser_full_access
+from .superuser import is_superuser as check_superuser
 
 if TYPE_CHECKING:
     from nonebot_plugin_orm import async_scoped_session
@@ -62,7 +63,8 @@ class CommandAccessContext:
         permission_allowed = {
             "everyone": True,
             "superuser": self.is_superuser,
-            "group_admin": self.is_group_admin or self.is_superuser,
+            "group_admin": self.is_group_admin
+            or (self.is_superuser and full_access_enabled()),
             "room_host_or_admin": self.can_manage_room,
             "player": self.is_player,
         }
@@ -77,7 +79,7 @@ async def resolve_command_access_context(
 
     user_id = int(event.get_user_id())
     group_id = int(event.group_id) if isinstance(event, GroupMessageEvent) else None
-    is_superuser = str(user_id) in get_driver().config.superusers
+    is_superuser = check_superuser(user_id)
     feature_status = await get_user_feature_status(user_id, group_id, session)
     game_access = resolve_game_access(group_id, user_id)
     return CommandAccessContext(
@@ -87,7 +89,8 @@ async def resolve_command_access_context(
             key for key, _display, enabled, _source in feature_status if enabled
         ),
         is_superuser=is_superuser,
-        is_group_admin=is_superuser
+        # 超级管理员按群管对待（受 SUPERUSER_FULL_ACCESS 控制），与 handler 口径一致
+        is_group_admin=superuser_full_access(user_id)
         or (isinstance(event, GroupMessageEvent) and is_group_admin(event)),
         is_room_host=bool(game_access and game_access.is_room_host),
         is_player=bool(game_access and game_access.is_player),

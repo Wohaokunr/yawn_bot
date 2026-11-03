@@ -45,6 +45,7 @@ from ..metrics import (
     record_agent_tool_rounds,
     record_agent_tool_selection,
 )
+from ..superuser import effective_role
 from .capabilities import (
     BotGroupCapabilities,
     cached_bot_role,
@@ -665,7 +666,7 @@ async def _prepare_turn(
         message_id=int(message_id) if message_id is not None else None,
         user_id=actor_user_id,
         name=event.sender.card or event.sender.nickname,
-        role=str(event.sender.role or "member"),
+        role=effective_role(event.sender.role, actor_user_id),  # 超级管理员记 superuser
         title=event.sender.title,
         content=user_prompt,
         mentions=normalized.mentions,

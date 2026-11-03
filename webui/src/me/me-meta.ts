@@ -48,7 +48,7 @@ export function isQqNumber(raw: string): boolean {
   return /^[1-9][0-9]{4,11}$/.test(raw.trim());
 }
 
-export const GROUP_ROLE_LABEL: Record<string, string> = { owner: "群主", admin: "管理员", member: "成员" };
+export const GROUP_ROLE_LABEL: Record<string, string> = { owner: "群主", admin: "管理员", member: "成员", superuser: "超级管理员" };
 
 export function groupRoleLabel(role: string): string {
   return GROUP_ROLE_LABEL[role] ?? role;

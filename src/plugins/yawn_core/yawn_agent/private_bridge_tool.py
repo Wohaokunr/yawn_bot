@@ -1,4 +1,4 @@
-# ruff: noqa: E501, TRY003, PLR0911, PLR0912, C901, PLR0915, PLR2004
+# ruff: noqa: E501, TID252, TRY003, PLR0911, PLR0912, C901, PLR0915, PLR2004
 """私聊工具 ``group_bridge``：替他在群里转告/提问、看回复、看从群里转来的事。
 
 规则在 ``agent_bridge``：发到群里前要他确认（他发来下一条消息后才能确认）；
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..superuser import SUPERUSER_ROLE, superuser_full_access
 from . import agent_bridge as bridge
 from .log import dbg, dbg_exc
 from .tool_args import (
@@ -32,10 +33,39 @@ def _error(exc: bridge.BridgeError) -> ToolError:
     return ToolError(str(exc), code=_CODES.get(exc.code, ERROR_INVALID_ARGS), hint=exc.hint)
 
 
-def _pick_group(ctx: Any, raw: str | None) -> Any:
+async def _superuser_groups(ctx: Any, raw: str | None) -> list[Any]:
+    """超级管理员：他不在的群也能转告（Bot 认识、并开着 Agent 的群）。"""
+
+    from .private_context import superuser_tool_groups
+
+    needle = str(raw or "").strip().casefold()
+    if not needle:
+        return []
+    groups = await superuser_tool_groups(ctx.session, ctx.user_id, [])
+    if needle.isdigit():
+        return [group for group in groups if str(group.group_id) == needle]
+    exact = [group for group in groups if group.name.casefold() == needle]
+    return exact or [group for group in groups if needle in group.name.casefold()]
+
+
+async def _pick_group(ctx: Any, raw: str | None) -> Any:
     from .private_tools import _match_groups  # pyright: ignore[reportPrivateUsage]
 
-    groups = [group for group in _match_groups(ctx, raw) if group.agent_readable]
+    try:
+        matched = _match_groups(ctx, raw)
+    except ToolError:
+        if not superuser_full_access(ctx.user_id):
+            raise
+        matched = []
+    if not matched and superuser_full_access(ctx.user_id):
+        matched = await _superuser_groups(ctx, raw)
+        if not matched:
+            raise ToolError(
+                f"Bot 不在叫「{raw or ''}」的群里",
+                code=ERROR_NOT_FOUND,
+                hint="让他给群号，或者先确认 Bot 在那个群",
+            )
+    groups = [group for group in matched if group.agent_readable]
     if not groups:
         raise ToolError(
             "这个群我没开着，或者他在那个群退出了 Agent 记忆",
@@ -57,7 +87,7 @@ async def _send(ctx: Any, item: bridge.PendingRelay) -> dict[str, Any]:
 
     if ctx.bot is None:
         raise ToolError("现在连不上 QQ", code=ERROR_UNSUPPORTED, hint="稍后再试")
-    if not bridge.relay_allowed_in_group(item.group_id):
+    if not bridge.relay_allowed_in_group(item.group_id, ctx.user_id):
         raise ToolError("这个群的群主关掉了私聊转告", code=ERROR_PERMISSION, hint="照实告诉他，可以自己去群里说")
     if await bridge.opted_out(ctx.session, item.group_id, ctx.user_id):
         raise ToolError("他在这个群退出了 Agent 记忆", code=ERROR_PERMISSION, hint="照实告诉他")
@@ -98,7 +128,7 @@ async def _send(ctx: Any, item: bridge.PendingRelay) -> dict[str, Any]:
         audit(
             item.group_id,
             actor_id=ctx.user_id,
-            actor_role="member",
+            actor_role=SUPERUSER_ROLE if superuser_full_access(ctx.user_id) else "member",
             source="private",
             action=f"bridge_{item.kind}",
             result="success",
@@ -214,8 +244,8 @@ async def group_bridge_tool(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         return await _send(ctx, item)
     if action not in {"post", "ask"}:
         raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS)
-    group = _pick_group(ctx, args.get("group"))
-    if not bridge.relay_allowed_in_group(group.group_id):
+    group = await _pick_group(ctx, args.get("group"))
+    if not bridge.relay_allowed_in_group(group.group_id, ctx.user_id):
         raise ToolError("这个群的群主关掉了私聊转告", code=ERROR_PERMISSION, hint="照实告诉他，可以自己去群里说")
     try:
         body = bridge.normalize_relay(action, args.get("text"))

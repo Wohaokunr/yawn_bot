@@ -329,6 +329,12 @@ GROUP_MANAGE_CONFIRM_SECONDS=300
 GROUP_MANAGE_PROTECT_SUPERUSERS=true
 # 群策略与操作记录目录（每群一个 JSON），留空用 data/group_manage
 GROUP_MANAGE_DATA_DIR=
+# 超级管理员（SUPERUSERS）不必是群主/管理员也能用全部能力：群命令、私聊代办群管理、网页管群 Agent/人设、私聊转告到群；Bot 自己仍需是管理员才能执行平台操作
+SUPERUSER_FULL_ACCESS=true
+# 超级管理员不计群管代办、私聊转告的每日/每小时额度
+SUPERUSER_SKIP_DAILY_LIMITS=true
+# 超级管理员不受群主设的代办/转告策略限制（关掉代办、禁用某操作、仅群主可用、关掉转告）
+SUPERUSER_BYPASS_GROUP_POLICY=true
 # 群聊 ↔ 私聊协作：群里答应私聊的事私聊接着办、私聊替他在群里转告/提问并把回复转回来、群里给私聊小助手记事
 AGENT_BRIDGE_ENABLED=true
 # 每人每天最多从群里转到私聊几次（0 不限）

@@ -9,7 +9,7 @@
 | `HOST` | `127.0.0.1` | 原生部署监听地址；Compose 会覆盖为 `0.0.0.0`。 |
 | `PORT` | `8080` | YawnBot HTTP、OneBot 反向 WS 和 WebUI 共用端口。 |
 | `LOG_LEVEL` | `INFO` | NoneBot 日志级别。 |
-| `SUPERUSERS` | `["123456789"]` | 超级用户 QQ，必须是 JSON 字符串数组。 |
+| `SUPERUSERS` | `["123456789"]` | 超级用户 QQ，必须是 JSON 字符串数组。默认不必是群主/管理员也能用全部群管能力（见 [超级管理员全权](ai-agent.md#超级管理员全权)，`SUPERUSER_FULL_ACCESS` 控制）。 |
 | `SESSION_EXPIRE_TIMEOUT` | `00:02:00` | NoneBot 多轮会话过期时间。 |
 
 健康检查固定为 `GET /healthz`。它只表示 YawnBot FastAPI 进程可响应，不等价于 QQ 账号已经上线。

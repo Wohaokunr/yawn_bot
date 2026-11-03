@@ -19,6 +19,7 @@ from nonebot_plugin_orm import get_session
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..data_models.bot_group import BotGroup
+from ..superuser import role_label, superuser_full_access
 from ..yawn_agent import group_manage as gm
 from .config import API_PATH
 from .deps import AdminReadSession, UserReadSession, UserWriteSession, ok
@@ -215,7 +216,10 @@ async def manage_status(group_id: int, session: UserReadSession) -> dict[str, An
             "problem": problem,
             "yourRole": access.user_role if access else None,
             "botRole": access.bot_role if access else None,
-            "isOwner": bool(access and access.is_owner),
+            "isOwner": bool(access and access.is_owner)
+            or (access is None and superuser_full_access(user_id)),
+            "isSuperuser": superuser_full_access(user_id),
+            "yourRoleLabel": role_label(access.user_role) if access else None,
             "allowedActions": access.allowed_actions() if access else [],
             "actions": _catalog(access, policy),
             "policy": _policy_payload(policy),
@@ -376,9 +380,11 @@ async def manage_policy(
     async with get_session() as db:
         await ensure_group_manager(db, group_id, user_id, write=True)
     bot = _bot()
-    role = await gm.live_role(bot, group_id, user_id) if bot is not None else None
-    if role != "owner":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "只有群主能改群管代办策略")
+    if not superuser_full_access(user_id):
+        # 超级管理员权限等同群主，可以直接改；其他人要实时确认是群主本人
+        role = await gm.live_role(bot, group_id, user_id) if bot is not None else None
+        if role != "owner":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "只有群主能改群管代办策略")
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
     for key in ("disabled_actions", "admin_actions", "confirm_actions"):
         unknown = [
@@ -403,7 +409,7 @@ async def manage_policy(
     gm.audit(
         group_id,
         actor_id=user_id,
-        actor_role="owner",
+        actor_role="superuser" if superuser_full_access(user_id) else "owner",
         source="webui",
         action="manage_policy",
         result="success",

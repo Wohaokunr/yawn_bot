@@ -145,6 +145,44 @@ async def shared_groups(session: Any, user_id: int) -> list[SharedGroup]:
     ]
 
 
+async def superuser_tool_groups(
+    session: Any, user_id: int, known: list[SharedGroup]
+) -> list[SharedGroup]:
+    """超级管理员的私聊工具范围：他所在的群 + Bot 认识的其他群（只给工具，不进提示词）。
+
+    普通用户原样返回 ``known``。补进来的群按 Agent 是否开着标 ``agent_readable``，
+    他本人在那些群没有隐私退出记录（不在群里），群名后不带他的群名片。
+    """
+
+    from ..superuser import superuser_full_access
+
+    if session is None or not superuser_full_access(user_id):
+        return list(known)
+    seen = {group.group_id for group in known}
+    try:
+        rows = (
+            await session.execute(
+                select(BotGroup.group_id, BotGroup.group_name, GroupAgentConfig.enabled)
+                .outerjoin(
+                    GroupAgentConfig, GroupAgentConfig.group_id == BotGroup.group_id
+                )
+                .order_by(BotGroup.last_active_at.desc().nullslast(), BotGroup.group_id)
+            )
+        ).all()
+    except Exception:  # noqa: BLE001
+        return list(known)
+    extra = [
+        SharedGroup(
+            group_id=int(group_id),
+            name=str(group_name or f"群 {group_id}"),
+            agent_readable=bool(enabled),
+        )
+        for group_id, group_name, enabled in rows
+        if int(group_id) not in seen
+    ]
+    return [*known, *extra]
+
+
 def _safe_text(text: object, limit: int = _FACT_CHARS) -> str | None:
     value = str(text or "").strip()
     if not value or looks_like_instruction(value):

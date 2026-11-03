@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from ..metrics import record_agent_capability_probe
+from ..superuser import superuser_full_access
 from .log import dbg, dbg_exc
 
 
@@ -497,8 +498,15 @@ def reset_capability_cache() -> None:
 
 
 async def user_can_manage_group(bot: Any, group_id: int, user_id: int) -> bool:
-    """实时确认调用者仍是群主或管理员；单 action 失败时走成员列表后备。"""
+    """实时确认调用者仍是群主或管理员；单 action 失败时走成员列表后备。
 
+    开了全权的超级管理员（``SUPERUSER_FULL_ACCESS``）直接放行：身份来自配置，
+    不必是群成员、也不用向 QQ 查询。Bot 自己的群权限仍由调用方单独校验。
+    """
+
+    if superuser_full_access(user_id):
+        dbg(f"群 {group_id} 用户 {user_id} 是超级管理员,按群管理身份放行")
+        return True
     try:
         role, source = await _probe_member_role(bot, group_id, user_id)
     except Exception:  # noqa: BLE001
@@ -523,6 +531,22 @@ async def actor_can_act_on_target(
 
     if actor_user_id is None:
         return False
+    if superuser_full_access(actor_user_id):
+        # 超级管理员权限等同群主：只有群主本人不能处置；Bot 身份够不够另由
+        # ``target_can_be_muted`` 判断。
+        try:
+            target_role, _source = await _probe_member_role(
+                bot, group_id, target_user_id
+            )
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"群 {group_id} 超级管理员处置目标 {target_user_id} 角色读取失败")
+            return False
+        allowed = target_role != "owner"
+        dbg(
+            f"群 {group_id} 超级管理员 {actor_user_id} 处置判定: "
+            f"target_role={target_role!r} → {allowed}"
+        )
+        return allowed
     try:
         actor_role, _source = await _probe_member_role(bot, group_id, actor_user_id)
         target_role, _source = await _probe_member_role(bot, group_id, target_user_id)
@@ -548,10 +572,15 @@ async def actor_can_act_on_target(
 async def actor_is_group_owner(
     bot: Any, group_id: int, actor_user_id: int | None
 ) -> bool:
-    """实时确认调用者本人是群主；读取失败按否处理。"""
+    """实时确认调用者本人是群主；读取失败按否处理。
+
+    开了全权的超级管理员按群主对待（例如设/撤群管理员），平台层面仍要求 Bot 是群主。
+    """
 
     if actor_user_id is None:
         return False
+    if superuser_full_access(actor_user_id):
+        return True
     try:
         role, _source = await _probe_member_role(bot, group_id, actor_user_id)
     except Exception:  # noqa: BLE001
