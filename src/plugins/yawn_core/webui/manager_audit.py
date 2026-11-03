@@ -17,12 +17,13 @@ def note_manager_change(
     if getattr(session, "role", None) != "user" or session.user_id is None:
         return
     try:
+        from ..superuser import is_superuser
         from ..yawn_agent import group_manage
 
         group_manage.audit(
             group_id,
             actor_id=int(session.user_id),
-            actor_role=None,
+            actor_role="superuser" if is_superuser(session.user_id) else None,
             source="webui",
             action=action,
             result="success",

@@ -262,6 +262,18 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 | `GROUP_MANAGE_PROTECT_SUPERUSERS` | `true` | 不允许通过 Bot 处置 Bot 的超级管理员 |
 | `GROUP_MANAGE_DATA_DIR` | 空 | 群策略与操作记录目录，留空为 `data/group_manage` |
 
+### 超级管理员全权
+
+`SUPERUSERS` 里的人是 Bot 的维护者：不需要在某个群当群主或管理员（甚至不需要在群里），也能用 Bot 的全部群管能力——群里的 `/群聊Agent`、`/Agent设置`、`/Agent人设`、`/Agent清理`、`/Agent导出` 等命令，群聊 Agent 的禁言/踢人/公告等管理工具，私聊代办群管理（Bot 在的群都能选），网页「我管理的群」里所有群的 Agent 配置、群人设、群管代办和代办策略，以及私聊转告到他不在的群。判定统一在 `yawn_core/superuser.py`：超级管理员在群里本来就是群主时仍记“群主”，否则记“超级管理员”，权限等同群主（群主本人仍不能被处置），操作记录里看得出是谁。
+
+**Bot 自己的身份不放宽**：禁言、发公告这类平台操作仍要求 Bot 在那个群是管理员；设头衔、处置管理员仍要求 Bot 是群主。做不了时会直接说明“超级管理员身份替代不了 Bot 的群权限”。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `SUPERUSER_FULL_ACCESS` | `true` | 超级管理员免群管身份用全部能力的总开关；关掉后回到“只有群主/管理员能管群”（狼人杀/跑团/番茄/定时提醒等原本就允许超级管理员的地方不受影响） |
+| `SUPERUSER_SKIP_DAILY_LIMITS` | `true` | 超级管理员不计群管代办、私聊转告、群转私聊的每日/每小时额度（仍保留一分钟内的防连发） |
+| `SUPERUSER_BYPASS_GROUP_POLICY` | `true` | 超级管理员不受群主设的代办/转告策略限制：群里关掉了代办或私聊/网页代办、禁用了某个操作、某操作仅群主可用、关掉了私聊转告 |
+
 群待办用的是 NapCat 扩展接口 `set_group_todo` / `complete_group_todo` / `cancel_group_todo`（需要启用 Packet 后端）；协议端不支持时会如实告知，并建议改用置顶公告。
 
 ### 群聊 ↔ 私聊协作

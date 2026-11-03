@@ -184,7 +184,7 @@ async def test_agent_settings_session_rejects_bad_value_before_save(
         return True
 
     monkeypatch.setattr(commands, "GroupMessageEvent", SimpleNamespace)
-    monkeypatch.setattr(commands, "is_group_admin", lambda _event: True)
+    monkeypatch.setattr(commands, "can_manage_group", lambda _event: True)
     monkeypatch.setattr(commands, "get_or_create_config", fake_get_config)
     monkeypatch.setattr(commands.agent_settings, "reject_arg", fake_reject)
     monkeypatch.setattr(commands, "_commit", fake_commit)
@@ -236,7 +236,7 @@ async def test_agent_persona_session_previews_before_commit(
         return True
 
     monkeypatch.setattr(commands, "GroupMessageEvent", SimpleNamespace)
-    monkeypatch.setattr(commands, "is_group_admin", lambda _event: True)
+    monkeypatch.setattr(commands, "can_manage_group", lambda _event: True)
     monkeypatch.setattr(commands, "get_or_create_config", fake_get_config)
     monkeypatch.setattr(commands.agent_persona, "reject_arg", fake_reject)
     monkeypatch.setattr(commands.agent_persona, "finish", fake_finish)
@@ -282,7 +282,7 @@ async def test_agent_clear_never_deletes_from_same_command_message(
         return 10
 
     monkeypatch.setattr(commands, "GroupMessageEvent", SimpleNamespace)
-    monkeypatch.setattr(commands, "is_group_admin", lambda _event: True)
+    monkeypatch.setattr(commands, "can_manage_group", lambda _event: True)
     monkeypatch.setattr(commands.agent_clear, "send", fake_send)
     monkeypatch.setattr(commands, "delete_group_memories", fake_delete)
 

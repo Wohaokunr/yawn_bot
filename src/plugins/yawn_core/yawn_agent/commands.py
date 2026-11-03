@@ -20,7 +20,7 @@ from ..command_ux import (
     validation_failed,
 )
 from .command_definitions import COMMAND_BY_NAME
-from ..permission import is_group_admin, require_feature
+from ..permission import can_manage_group, require_feature
 from ..session_interaction import (
     SessionChoice,
     SessionIntent,
@@ -563,11 +563,11 @@ async def handle_agent_command(
         f"群 {event.group_id} 命令 /群聊Agent: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
-    if not is_group_admin(event):
+    if not can_manage_group(event):
         dbg(f"群 {event.group_id} /群聊Agent 拒绝: 非群管理")
         await agent_command.finish(
             permission_required(
-                "群聊 Agent 管理", "群主或群管理员", "请群管理员执行此操作"
+                "群聊 Agent 管理", "群主、群管理员或超级管理员", "请群管理员执行此操作"
             )
         )
     config = await get_or_create_config(session, int(event.group_id))
@@ -615,11 +615,11 @@ async def handle_agent_settings(
         f"群 {event.group_id} 命令 /Agent设置: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
-    if not is_group_admin(event):
+    if not can_manage_group(event):
         dbg(f"群 {event.group_id} /Agent设置 拒绝: 非群管理")
         await agent_settings.finish(
             permission_required(
-                "Agent 设置", "群主或群管理员", "请群管理员执行此操作"
+                "Agent 设置", "群主、群管理员或超级管理员", "请群管理员执行此操作"
             )
         )
     config = await get_or_create_config(session, int(event.group_id))
@@ -689,10 +689,10 @@ async def handle_agent_settings_input(
     intent = resolve_session_intent(choice)
     if intent is SessionIntent.NEW_COMMAND:
         await pass_through_new_command(matcher, choice)
-    if not isinstance(event, GroupMessageEvent) or not is_group_admin(event):
+    if not isinstance(event, GroupMessageEvent) or not can_manage_group(event):
         await agent_settings.finish(
             permission_required(
-                "Agent 设置", "群主或群管理员", "重新进入时会再次检查权限"
+                "Agent 设置", "群主、群管理员或超级管理员", "重新进入时会再次检查权限"
             )
         )
     if intent is SessionIntent.EXIT:
@@ -878,9 +878,9 @@ async def handle_agent_clear(
         f"群 {event.group_id} 命令 /Agent清理: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
-    if not is_group_admin(event):
+    if not can_manage_group(event):
         dbg(f"群 {event.group_id} /Agent清理 拒绝: 非群管理")
-        await agent_clear.finish("清理群记忆仅限群主或管理员")
+        await agent_clear.finish("清理群记忆仅限群主、管理员或超级管理员")
 
     # 即便用户把确认短语直接写在命令后面，也不在同一条消息中执行删除。
     matcher.state["agent_clear_waiting_confirm"] = True
@@ -896,7 +896,7 @@ async def handle_agent_clear_confirm(
     session: async_scoped_session,
     confirm: str = ArgPlainText("agent_clear_confirm"),
 ) -> None:
-    if not isinstance(event, GroupMessageEvent) or not is_group_admin(event):
+    if not isinstance(event, GroupMessageEvent) or not can_manage_group(event):
         await agent_clear.finish("当前已无权继续清理群记忆")
     if is_cancel(confirm):
         await agent_clear.finish("已取消清理。")
@@ -921,9 +921,9 @@ async def handle_agent_export(
     if not isinstance(event, GroupMessageEvent):
         await agent_export.finish(scope_required("Agent 记忆导出", "群聊", "请在目标群发送 /Agent导出"))
     dbg(f"群 {event.group_id} 命令 /Agent导出: user={event.get_user_id()}")
-    if not is_group_admin(event):
+    if not can_manage_group(event):
         dbg(f"群 {event.group_id} /Agent导出 拒绝: 非群管理")
-        await agent_export.finish("导出群聊 Agent 数据仅限群主或管理员")
+        await agent_export.finish("导出群聊 Agent 数据仅限群主、管理员或超级管理员")
     rows = await list_memories(session, int(event.group_id), limit=200)
     payload = [
         {
@@ -966,11 +966,11 @@ async def handle_agent_persona(
         f"群 {event.group_id} 命令 /Agent人设: user={event.get_user_id()} "
         f"args={args.extract_plain_text()!r}"
     )
-    if not is_group_admin(event):
+    if not can_manage_group(event):
         dbg(f"群 {event.group_id} /Agent人设 拒绝: 非群管理")
         await agent_persona.finish(
             permission_required(
-                "Agent 人设管理", "群主或群管理员", "请群管理员执行此操作"
+                "Agent 人设管理", "群主、群管理员或超级管理员", "请群管理员执行此操作"
             )
         )
     config = await get_or_create_config(session, int(event.group_id))
@@ -1076,10 +1076,10 @@ async def handle_agent_persona_input(
     intent = resolve_session_intent(value)
     if intent is SessionIntent.NEW_COMMAND:
         await pass_through_new_command(matcher, value)
-    if not isinstance(event, GroupMessageEvent) or not is_group_admin(event):
+    if not isinstance(event, GroupMessageEvent) or not can_manage_group(event):
         await agent_persona.finish(
             permission_required(
-                "Agent 人设修改", "群主或群管理员", "重新进入时会再次检查权限"
+                "Agent 人设修改", "群主、群管理员或超级管理员", "重新进入时会再次检查权限"
             )
         )
     if intent is SessionIntent.EXIT:

@@ -498,6 +498,7 @@ function PolicyView({ groupId, status, onSaved }: { groupId: string; status: Man
   ];
   return <div className="me-manage-view">
     {!editable && <Alert type="info" showIcon message="只有群主能改这里的策略" description="你可以看到本群对管理员开放了哪些操作；需要调整请联系群主。" />}
+    {editable && status.isSuperuser && status.yourRole !== "owner" && <Alert type="info" showIcon message="你在以超级管理员身份改本群策略" description="改动会记进操作记录（身份记为超级管理员），群主也看得到。" />}
     <div className="me-manage-grid">
       <section className="me-section me-manage-card me-manage-wide">
         <div className="me-section-head"><strong><SettingOutlined /> 总开关</strong>{policy.updatedAt && <Text type="secondary" className="me-hint">上次修改 {policy.updatedAt}</Text>}</div>
@@ -572,6 +573,7 @@ export function GroupManagePanel({ groupId, groupName }: { groupId: string; grou
     <Text type="secondary" className="me-hint me-tab-hint">
       让 Bot 替你做群管理：每次执行前都会向 QQ 实时核对你和 Bot 都是群主或管理员；管理员不能处置群主和其他管理员。也可以直接私聊 Bot 说“把某某禁言 10 分钟”。
     </Text>
+    {data.isSuperuser && <Alert className="me-banner" type="success" showIcon message="你以超级管理员身份管理这个群" description="不需要是群主或管理员，权限等同群主，不受本群代办策略和每日次数限制；但 Bot 自己仍需是管理员（设头衔、处置管理员需要 Bot 是群主）。" />}
     {!data.available && <Alert className="me-banner" type="warning" showIcon message="现在不能代办" description={data.problem} action={<Button size="small" onClick={status.reload}>重试</Button>} />}
     <StatusStrip status={data} />
     <Segmented

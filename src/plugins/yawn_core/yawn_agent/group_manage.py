@@ -35,6 +35,17 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..private_chat_bridge import private_agent_config
+from ..superuser import (
+    ROLE_LABELS,
+    SUPERUSER_ROLE,
+    bot_role_hint,
+    bypasses_group_policy,
+    effective_role,
+    is_owner_level,
+    skips_daily_limits,
+    superuser_full_access,
+    superuser_ids,
+)
 from .capabilities import (
     _probe_member_role,  # pyright: ignore[reportPrivateUsage]
     actor_can_act_on_target,
@@ -48,7 +59,6 @@ from .memory_hygiene import looks_like_instruction
 T = TypeVar("T")
 
 MANAGER_ROLES = frozenset({"owner", "admin"})
-ROLE_LABELS = {"owner": "群主", "admin": "管理员", "member": "成员"}
 
 # 本功能写给群里的文字长度上限
 ANNOUNCE_MAX_CHARS = 600
@@ -420,7 +430,8 @@ def _reserve(user_id: int) -> None:
     today = now_beijing().date()
     key = (int(user_id), today)
     limit = daily_limit()
-    if limit and _daily.get(key, 0) >= limit:
+    # 超级管理员不计每日额度（仍照常计数、仍受一分钟防连发限制）
+    if limit and not skips_daily_limits(user_id) and _daily.get(key, 0) >= limit:
         raise ManageError(
             f"今天的群管代办次数用完了（每天 {limit} 次）",
             code="quota_exceeded",
@@ -461,7 +472,17 @@ class Access:
 
     @property
     def is_owner(self) -> bool:
-        return self.user_role == "owner"
+        """群主本人，或权限等同群主的超级管理员。"""
+
+        return is_owner_level(self.user_role)
+
+    @property
+    def is_superuser(self) -> bool:
+        return self.user_role == SUPERUSER_ROLE
+
+    @property
+    def bypass_policy(self) -> bool:
+        return self.is_superuser and bypasses_group_policy(self.user_id)
 
     def allowed_actions(self) -> list[str]:
         """这个人此刻在这个群能用的写操作（策略 + 他的角色 + Bot 身份 + 协议端支持）。"""
@@ -476,18 +497,14 @@ class Access:
         return {
             "group_id": str(self.group_id),
             "your_role": self.user_role,
+            "your_role_label": ROLE_LABELS.get(self.user_role, self.user_role),
             "bot_role": self.bot_role,
             "allowed_actions": self.allowed_actions(),
         }
 
 
 def _superusers() -> set[str]:
-    try:
-        from nonebot import get_driver
-
-        return {str(item) for item in get_driver().config.superusers}
-    except Exception:  # noqa: BLE001
-        return set()
+    return set(superuser_ids())
 
 
 async def live_role(bot: Any, group_id: int, user_id: int) -> str | None:
@@ -500,7 +517,11 @@ async def live_role(bot: Any, group_id: int, user_id: int) -> str | None:
 
 
 async def verify(bot: Any, group_id: int, user_id: int, *, source: str) -> Access:
-    """双重实时校验：他此刻是群主/管理员，Bot 此刻也是群主/管理员。"""
+    """双重实时校验：他此刻是群主/管理员（或开了全权的超级管理员），Bot 此刻也是群主/管理员。
+
+    超级管理员不必是群成员，也不受群主设的“关掉代办/关掉私聊或网页代办”限制
+    （``SUPERUSER_BYPASS_GROUP_POLICY``）；但 Bot 自己必须是管理员，这一条不放宽。
+    """
 
     if not enabled():
         raise ManageError("管理员关闭了群管代办", status=403)
@@ -512,20 +533,25 @@ async def verify(bot: Any, group_id: int, user_id: int, *, source: str) -> Acces
             hint="等 Bot 上线后再试",
         )
     policy = policy_for(group_id)
-    if not policy["enabled"]:
+    is_su = superuser_full_access(user_id)
+    skip_policy = is_su and bypasses_group_policy(user_id)
+    if not policy["enabled"] and not skip_policy:
         raise ManageError(
             "这个群的群主关掉了群管代办", hint="可以请群主在网页「群管理」里打开"
         )
-    if source == "private" and not policy["private_enabled"]:
+    if source == "private" and not policy["private_enabled"] and not skip_policy:
         raise ManageError(
             "这个群不允许通过私聊代办群管理",
             hint="可以在网页上操作，或者直接在 QQ 里操作",
         )
-    if source == "webui" and not policy["webui_enabled"]:
+    if source == "webui" and not policy["webui_enabled"] and not skip_policy:
         raise ManageError(
             "这个群不允许通过网页代办群管理", hint="可以私聊 Bot 或者直接在 QQ 里操作"
         )
     role = await live_role(bot, group_id, user_id)
+    if is_su:
+        # 超级管理员可以不在群里（读不到角色）；是群主时仍记作群主
+        role = effective_role(role, user_id)
     if role is None:
         raise ManageError(
             "没法向 QQ 确认你在这个群的身份",
@@ -533,7 +559,7 @@ async def verify(bot: Any, group_id: int, user_id: int, *, source: str) -> Acces
             status=503,
             hint="稍后再试",
         )
-    if role not in MANAGER_ROLES:
+    if role not in MANAGER_ROLES and role != SUPERUSER_ROLE:
         raise ManageError(
             "你不是这个群的群主或管理员", hint="只有群主和管理员能让 Bot 代办群管理"
         )
@@ -541,7 +567,7 @@ async def verify(bot: Any, group_id: int, user_id: int, *, source: str) -> Acces
     if capabilities.role not in MANAGER_ROLES:
         raise ManageError(
             "Bot 在这个群不是管理员，做不了管理操作",
-            hint="先在 QQ 里把 Bot 设为管理员",
+            hint=bot_role_hint(capabilities.role) or "先在 QQ 里把 Bot 设为管理员",
         )
     return Access(
         group_id=int(group_id),
@@ -563,11 +589,13 @@ def action_block_reason(access: Access, action: str) -> str | None:
     if not spec.write:
         return None
     policy = access.policy
-    if action in policy["disabled_actions"]:
+    if action in policy["disabled_actions"] and not access.bypass_policy:
         return f"这个群关掉了「{spec.label}」"
     if not access.is_owner and action not in policy["admin_actions"]:
         return f"这个群只允许群主用「{spec.label}」"
     if spec.bot_owner and access.bot_role != "owner":
+        if access.is_superuser:
+            return f"「{spec.label}」需要 Bot 是群主（超级管理员身份替代不了 Bot 的群权限）"
         return f"「{spec.label}」需要 Bot 是群主"
     return None
 
@@ -698,14 +726,17 @@ async def _check_target(access: Access, member: dict[str, Any], action: str) -> 
     if not await target_can_be_muted(bot, access.group_id, target_id, access.bot_role):
         raise ManageError(
             f"Bot 的身份不够处置{ROLE_LABELS.get(member['role'], '这位成员')}",
-            hint="群主不能被处置；处置管理员需要 Bot 是群主",
+            hint="群主不能被处置；处置管理员需要 Bot 是群主"
+            + ("（超级管理员身份只放宽你的权限，不放宽 Bot 的）" if access.is_superuser else ""),
         )
     if not await actor_can_act_on_target(
         bot, access.group_id, access.user_id, target_id
     ):
         raise ManageError(
             "你没有权限处置这位成员",
-            hint="管理员不能处置群主和其他管理员；处置管理员需要群主本人",
+            hint="群主不能被处置"
+            if access.is_superuser
+            else "管理员不能处置群主和其他管理员；处置管理员需要群主本人",
         )
     return target_id
 
@@ -1418,12 +1449,37 @@ _manager_hint: dict[int, bool] = {}
 
 
 async def candidate_groups(session: Any, user_id: int) -> list[tuple[int, str, str]]:
-    """数据库里他是群主/管理员的群：(群号, 群名, 角色)。只是候选，执行前一律实时确认。"""
+    """数据库里他是群主/管理员的群：(群号, 群名, 角色)。只是候选，执行前一律实时确认。
+
+    开了全权的超级管理员：Bot 认识的所有群都是候选（最近活跃在前），角色按
+    ``effective_role`` 记（他是群主的群仍记群主，其余记 superuser）。
+    """
 
     from sqlalchemy import select
 
     from ..data_models.bot_group import BotGroup
     from ..data_models.user_group import UserGroup
+
+    if superuser_full_access(user_id):
+        rows = (
+            await session.execute(
+                select(BotGroup.group_id, BotGroup.group_name, UserGroup.role)
+                .outerjoin(
+                    UserGroup,
+                    (UserGroup.group_id == BotGroup.group_id)
+                    & (UserGroup.user_id == int(user_id)),
+                )
+                .order_by(
+                    BotGroup.last_active_at.desc().nullslast(), BotGroup.group_id
+                )
+            )
+        ).all()
+        result = [
+            (int(gid), str(name or f"群 {gid}"), effective_role(role, user_id))
+            for gid, name, role in rows
+        ]
+        _manager_hint[int(user_id)] = bool(result)
+        return result
 
     rows = (
         await session.execute(
@@ -1444,9 +1500,16 @@ async def candidate_groups(session: Any, user_id: int) -> list[tuple[int, str, s
 
 
 def manager_hint(user_id: int) -> bool:
-    """上一次查到他是不是某个群的群主/管理员（只决定给不给工具，不决定能不能做）。"""
+    """上一次查到他是不是某个群的群主/管理员（只决定给不给工具，不决定能不能做）。
 
-    return enabled() and _manager_hint.get(int(user_id), False)
+    超级管理员（全权开着）始终给工具：他不必在任何群当管理员。
+    """
+
+    if not enabled():
+        return False
+    if superuser_full_access(user_id):
+        return True
+    return _manager_hint.get(int(user_id), False)
 
 
 async def refresh_manager_hint(session: Any, user_id: int) -> bool:

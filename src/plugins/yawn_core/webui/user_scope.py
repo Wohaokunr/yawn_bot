@@ -7,11 +7,15 @@
 - Bot 在线时再用 OneBot 实时确认（``yawn_agent.capabilities.user_can_manage_group``），
   结果缓存一小会儿；被撤掉管理员后最多 ``_POSITIVE_TTL`` 秒就看不到了。
 - Bot 不在线时：只读接口按数据库角色放行，写接口一律 503（确认不了身份就不改）。
+- 超级管理员（``SUPERUSER_FULL_ACCESS`` 开着）：Bot 认识的所有群都在范围内，不需要
+  在群里当群主/管理员，也不需要 Bot 在线确认（身份来自配置）；角色记作 ``superuser``，
+  在群里本来就是群主时仍记群主。
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -20,6 +24,7 @@ from sqlalchemy import select
 
 from ..data_models.bot_group import BotGroup
 from ..data_models.user_group import UserGroup
+from ..superuser import SUPERUSER_ROLE, effective_role, superuser_full_access
 
 MANAGER_ROLES = ("owner", "admin")
 _POSITIVE_TTL = 120.0
@@ -27,9 +32,61 @@ _NEGATIVE_TTL = 15.0
 _live_cache: dict[tuple[int, int], tuple[float, bool]] = {}
 
 
-async def managed_group_rows(db: Any, user_id: int) -> list[tuple[UserGroup, BotGroup]]:
-    """数据库里这位用户是群主/管理员的群（候选，还没实时确认）。"""
+@dataclass(slots=True)
+class SuperuserMembership:
+    """超级管理员在他不是群管（或不在群里）的群上的“成员关系”。
 
+    字段对齐 ``UserGroup``，调用方按同样的方式读 ``role``/``group_id``。
+    """
+
+    group_id: int
+    user_id: int
+    role: str = SUPERUSER_ROLE
+    group_nickname: str | None = None
+    first_seen_at: Any = None
+    last_seen_at: Any = None
+
+
+async def _superuser_rows(db: Any, user_id: int) -> list[tuple[Any, BotGroup]]:
+    rows = (
+        await db.execute(
+            select(BotGroup, UserGroup)
+            .outerjoin(
+                UserGroup,
+                (UserGroup.group_id == BotGroup.group_id)
+                & (UserGroup.user_id == user_id),
+            )
+            .order_by(BotGroup.last_active_at.desc(), BotGroup.group_id)
+        )
+    ).all()
+    result: list[tuple[Any, BotGroup]] = []
+    for group, membership in rows:
+        if membership is not None and str(membership.role) == "owner":
+            result.append((membership, group))
+            continue
+        result.append(
+            (
+                SuperuserMembership(
+                    group_id=int(group.group_id),
+                    user_id=int(user_id),
+                    group_nickname=getattr(membership, "group_nickname", None),
+                    first_seen_at=getattr(membership, "first_seen_at", None),
+                    last_seen_at=getattr(membership, "last_seen_at", None),
+                ),
+                group,
+            )
+        )
+    return result
+
+
+async def managed_group_rows(db: Any, user_id: int) -> list[tuple[Any, BotGroup]]:
+    """数据库里这位用户是群主/管理员的群（候选，还没实时确认）。
+
+    超级管理员（全权开着）返回 Bot 认识的所有群。
+    """
+
+    if superuser_full_access(user_id):
+        return await _superuser_rows(db, int(user_id))
     rows = (
         await db.execute(
             select(UserGroup, BotGroup)
@@ -58,8 +115,13 @@ def _bot() -> Any | None:
 
 
 async def live_manager_check(group_id: int, user_id: int) -> bool | None:
-    """实时确认是不是群主/管理员；Bot 不在线或 Agent 子插件没加载时返回 None。"""
+    """实时确认是不是群主/管理员；Bot 不在线或 Agent 子插件没加载时返回 None。
 
+    超级管理员直接返回 True（身份来自配置，不用问 QQ，Bot 不在线也能确认）。
+    """
+
+    if superuser_full_access(user_id):
+        return True
     key = (int(group_id), int(user_id))
     now = time.monotonic()
     cached = _live_cache.get(key)
@@ -97,6 +159,13 @@ async def ensure_group_manager(
     denied = HTTPException(status.HTTP_403_FORBIDDEN, "你不是这个群的群主或管理员")
     group = await db.get(BotGroup, group_id)
     role = await db_role(db, group_id, user_id) if group is not None else None
+    if group is not None and superuser_full_access(user_id):
+        # 超级管理员：Bot 认识的群都能管，写入也不用等 Bot 在线确认
+        return {
+            "role": effective_role(role, user_id),
+            "verified": True,
+            "superuser": True,
+        }
     if group is None or role not in MANAGER_ROLES:
         raise denied
     live = await live_manager_check(group_id, user_id)
@@ -116,6 +185,7 @@ def reset_for_tests() -> None:
 
 __all__ = [
     "MANAGER_ROLES",
+    "SuperuserMembership",
     "db_role",
     "ensure_group_manager",
     "forget_live_checks",

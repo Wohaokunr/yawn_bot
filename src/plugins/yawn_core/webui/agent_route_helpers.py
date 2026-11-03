@@ -8,12 +8,19 @@ from typing import Any
 from sqlalchemy import BigInteger, cast, exists, func, select
 
 from ..data_models.agent_memory import AgentMemory
+from ..superuser import superuser_full_access
 
 
 def is_guest_view(session: Any) -> bool:
-    """访客和个人账号（群管理员）都只看精简投影：没有来源、证据数等治理字段。"""
+    """访客和个人账号（群管理员）都只看精简投影：没有来源、证据数等治理字段。
 
-    return getattr(session, "role", "admin") in {"guest", "user"}
+    超级管理员用 QQ 个人账号登录时和运维管理员一样看完整字段（全权开着时）。
+    """
+
+    role = getattr(session, "role", "admin")
+    if role == "user" and superuser_full_access(getattr(session, "user_id", None)):
+        return False
+    return role in {"guest", "user"}
 
 
 def memory_privacy_clauses(user_ids: set[int]) -> tuple[Any, ...]:

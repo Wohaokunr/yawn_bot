@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from random import randint
 from typing import Any
@@ -30,6 +30,7 @@ from ..checkin_service import (
 from ..command_catalog import get_registered_command_groups
 from ..data_models.agent_memory import AgentMemory
 from ..permission import check_feature_permission
+from ..superuser import superuser_full_access
 from . import private_memory
 from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .memory_self import SELF_FACT_KEYS, forget_member_facts, remember_member_fact
@@ -526,7 +527,7 @@ ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
 )
-# 群管代办（group_manage）：只给数据库里当群主/管理员的人；每次执行都实时确认他和 Bot 的身份。
+# 群管代办（group_manage）：只给数据库里当群主/管理员的人和超级管理员；每次执行都实时确认他和 Bot 的身份。
 MANAGE_ACTIONS = (
     "groups", "members", "muted", "notices", "audit",
     "mute", "unmute", "whole_mute", "announce", "delete_notice", "send", "todo",
@@ -536,7 +537,7 @@ MANAGE_ACTIONS = (
 MANAGE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "group_manage",
-        "替他管理他当群主/管理员、且你也是管理员的群（群里实时核对两边身份，不够就会被拒）。"
+        "替他管理他当群主/管理员、且你也是管理员的群（群里实时核对两边身份，不够就会被拒）；他是超级管理员时你在的群都能管，权限等同群主，但你自己不是管理员的群仍做不了。"
         "查：groups 他能管哪些群和能做什么；members 找成员（query 写名字/QQ）；muted 谁在禁言；notices 群公告；audit 最近的操作记录。"
         "做：mute 禁言（member + minutes）/unmute 解禁；whole_mute 全员禁言（enable）；announce 发群公告（content，可 pinned 置顶、confirm_required 要群员确认）；"
         "delete_notice 删公告（notice_id）；send 以你的身份在群里发一句（text）；todo 发一条并设为群待办（text）；todo_done/todo_cancel 完成/取消待办（message_id）；"
@@ -572,7 +573,7 @@ BRIDGE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "group_bridge",
         "群和私聊之间帮他接力（群里的你和私聊的你是同一个人）。"
-        "post 替他在他所在的群里转告一句（text，会带“〔他的名字 让我转告〕”）；ask 替他在群里问大家（text），群友引用回复会攒一会儿私聊转给他；"
+        "post 替他在他所在的群里（超级管理员可以是你在的任何群，用群号指定）转告一句（text，会带“〔他的名字 让我转告〕”）；ask 替他在群里问大家（text），群友引用回复会攒一会儿私聊转给他；"
         "replies 看提问收到的回复；close 不再收回复（id）；handoffs 看他从群里转到私聊的事；done 标记那件事办完了（id）。"
         "post/ask 会先返回 needs_confirm：把群名和要发的原话问他，然后这一轮就结束；他下一条同意后再 confirm（confirm_id），不同意就 cancel。"
         "只在他明确要你去群里说/问时用：不替他编内容、不发他没同意的话、不把你们私聊的其他内容带到群里。"
@@ -668,6 +669,9 @@ class PrivateToolContext:
     heavy_calls: int = 0
     # 本轮用 my_persona 改了私聊人设：发送前清词要用新的人设名
     persona_changed: bool = False
+    # 超级管理员（全权开着）：他不在、但 Bot 在的群。只在点名单个群时用
+    # （_single_group：群里最近在聊什么、签到榜），批量/“我所在的群”仍只看 groups
+    superuser_groups: list[SharedGroup] = field(default_factory=list)
     # 只放行这些工具（汇报/协调轮发同一份工具表保前缀缓存，越界的调用在这里拦下）；None 不限
     allowed_tools: frozenset[str] | None = None
     # 本轮 group_manage 调用次数；以及“已经在等他回话，别再调工具了”的信号（主回合据此直接收尾）
@@ -694,7 +698,12 @@ def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]
 
 
 def _single_group(ctx: PrivateToolContext, raw: str) -> SharedGroup:
-    hits = _match_groups(ctx, raw)
+    try:
+        hits = _match_groups(ctx, raw)
+    except ToolError:
+        if not ctx.superuser_groups:
+            raise
+        hits = _match_groups(replace(ctx, groups=ctx.superuser_groups), raw)
     if len(hits) > 1:
         names = "、".join(g.name for g in hits[:5])
         raise ToolError(
@@ -1422,11 +1431,14 @@ async def _webui_onboarding_tool(
             "password_set_at": account.password_changed_at if account else None,
             "last_login_at": account.last_login_at if account else None,
             "can_do": (
-                ["看自己当群主/管理员的群的关系图", "开关这些群的功能", "调我们私聊里你的人设"]
+                ["Bot 在的所有群都能管（不必当群管）", "群关系图、群功能、群 Agent 和人设、群管代办", "调我们私聊里你的人设"]
+                if superuser_full_access(ctx.user_id)
+                else ["看自己当群主/管理员的群的关系图", "开关这些群的功能", "调我们私聊里你的人设"]
                 if groups
                 else ["调我们私聊里你的人设", "当了群主/管理员后还能在网页上管群"]
             ),
             "managed_groups": groups[:10],
+            "managed_group_total": len(groups),
         }
     if action == "ask_password":
         if account is not None and account.disabled:
@@ -1522,7 +1534,7 @@ async def _manage_group(ctx: PrivateToolContext, raw: str | None) -> tuple[int, 
 
     candidates = await gm.candidate_groups(ctx.session, ctx.user_id)
     if not candidates:
-        raise ToolError("他不是任何一个你所在群的群主或管理员", code=ERROR_PERMISSION, hint="照实告诉他")
+        raise ToolError("他不是任何一个你所在群的群主或管理员", code=ERROR_PERMISSION, hint="照实告诉他；超级管理员不受这条限制")
     if not raw:
         if len(candidates) == 1:
             return candidates[0][0], candidates[0][1]
@@ -1565,7 +1577,8 @@ async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> d
             return {"cancelled": count, "note": "已作废，没有执行" if count else "没有待确认的操作"}
         if action == "groups":
             rows = []
-            for gid, name, _role in (await gm.candidate_groups(ctx.session, ctx.user_id))[:8]:
+            candidates = await gm.candidate_groups(ctx.session, ctx.user_id)
+            for gid, name, _role in candidates[:8]:
                 try:
                     access = await gm.verify(ctx.bot, gid, ctx.user_id, source="private")
                     rows.append({"group": name, **access.as_dict()})
@@ -1574,7 +1587,14 @@ async def _group_manage_tool(args: dict[str, Any], ctx: PrivateToolContext) -> d
             waiting = [
                 {"confirm_id": item.id, "summary": item.summary} for item in gm.pending_for(ctx.user_id)
             ]
-            return {"groups": rows, "waiting_confirm": waiting, "used_today": gm.used_today(ctx.user_id)}
+            out: dict[str, Any] = {"groups": rows, "waiting_confirm": waiting, "used_today": gm.used_today(ctx.user_id)}
+            if ctx.is_superuser and superuser_full_access(ctx.user_id):
+                # 超级管理员不必当群管：Bot 在的群都列出来（只展开前 8 个），其余用 group 指定
+                out["you_are_superuser"] = True
+                out["total_groups"] = len(candidates)
+                if len(candidates) > len(rows):
+                    out["note"] = "只展开了最近活跃的 8 个群，其余的用 group 写群名或群号直接操作"
+            return out
         if action == "confirm":
             raw_id = str(args.get("confirm_id") or "").strip()
             try:
