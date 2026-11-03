@@ -70,6 +70,57 @@ function CacheStatsPanel(): React.JSX.Element | null {
   </section>;
 }
 
+const PART_BUCKETS = ["1", "2", "3", "4", "5+"] as const;
+const PATTERN_LABELS: Record<string, string> = {
+  same: "最近几次条数一模一样",
+  always_split: "最近几次都分了条",
+};
+
+function percent(value: number | undefined): string {
+  return `${Math.round((value ?? 0) * 100)}%`;
+}
+
+export function RhythmStatsPanel({ userId }: { userId?: string | null }): React.JSX.Element | null {
+  const query = useApiQuery({
+    queryKey: ["private-rhythm-stats", userId ?? ""],
+    fetcher: (signal) => privateApi.rhythmStats(userId, signal),
+  });
+  if (query.error && !query.data) return <QueryErrorAlert error={query.error} onRetry={query.reload} />;
+  if (!query.data) return null;
+  const { stats, settings } = query.data;
+  const recent = query.data.recent ?? [];
+  return <section className="dbg-panel" aria-label="分条发送">
+    <div className="pst-section-head">
+      <Text strong>分条发送</Text>
+      <Tag color={settings.interrupt ? "green" : "default"}>{settings.interrupt ? "可打断" : "不可打断"}</Tag>
+      <Text type="secondary" className="dbg-small">实际发了几条的分布（进程内，重启清零）；分条上限 {settings.maxParts} 条，连发/蹦字另算。</Text>
+      <span className="dbg-grow" />
+      <Button size="small" icon={<ReloadOutlined />} onClick={query.reload} loading={query.refreshing}>刷新</Button>
+    </div>
+    {stats.deliveries === 0
+      ? <Empty description="还没有私聊回复" />
+      : <>
+        <div className="pa-capture-tags" aria-label="条数分布">
+          {PART_BUCKETS.map((key) => <Tag key={key} className="dbg-tag-soft">{key} 条 · {stats.byParts[key] ?? 0} 次（{percent(stats.partsShare[key])}）</Tag>)}
+        </div>
+        <div className="pa-capture-tags" aria-label="节奏分布">
+          {Object.entries(stats.byRhythm).map(([label, count]) => <Tag key={label}>{label} {count}</Tag>)}
+          {stats.withMedia > 0 && <Tag>带表情包/图片/文件 {stats.withMedia}</Tag>}
+        </div>
+        <Text type="secondary" className="dbg-small">
+          被打断 {stats.interrupted} 次，没发出去 {stats.skippedItems} 条（不进历史）· 提醒“别套模板” {stats.mixHints} 次
+        </Text>
+      </>}
+    {userId && <div className="pa-capture-tags" aria-label="这位用户最近几次">
+      <Text type="secondary" className="dbg-small">用户 {userId} 最近：</Text>
+      {recent.length === 0
+        ? <Text type="secondary" className="dbg-small">还没有记录</Text>
+        : recent.map((shape) => <Tag key={shape.at} color={shape.interrupted ? "orange" : undefined}>{shape.parts} 条 · {shape.rhythm}{shape.interrupted ? " · 被打断" : ""}</Tag>)}
+      {query.data.pattern && <Tag color="gold">{PATTERN_LABELS[query.data.pattern] ?? query.data.pattern}</Tag>}
+    </div>}
+  </section>;
+}
+
 export function CapturesTab({ userId, onPickUser, onOpenSection }: { userId: string; onPickUser: (userId: string | null) => void; onOpenSection: (sectionId: string) => void }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const query = useApiQuery({
@@ -106,6 +157,7 @@ export function CapturesTab({ userId, onPickUser, onOpenSection }: { userId: str
         </ul>}
     </section>
     <CacheStatsPanel />
+    <RhythmStatsPanel userId={userId || null} />
     {userId && <UserCaptures key={userId} userId={userId} onOpenSection={onOpenSection} />}
   </Space>;
 }

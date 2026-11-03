@@ -299,6 +299,14 @@ PRIVATE_AGENT_GROUP_LINES=4
 PRIVATE_AGENT_GROUP_LINES_HOURS=24
 # 私聊记忆整理时顺便写“之前聊到哪”的回顾
 PRIVATE_AGENT_RECAP=true
+# 分条逐条发时他插话就停下，没发出去的不进历史，下一轮告诉模型说到哪了
+PRIVATE_AGENT_INTERRUPT=true
+# 被打断后虚拟电脑里的图片/文件仍然照发（他要的东西）
+PRIVATE_AGENT_INTERRUPT_KEEP_MEDIA=true
+# 私聊“分条”最多几条（1 到 4；连发、蹦字另算），群聊仍用 AGENT_REPLY_MAX_PARTS
+PRIVATE_AGENT_REPLY_MAX_PARTS=4
+# 最近几次回复条数套模板（如连着三次三条、每次都分条）时提醒模型按内容来
+PRIVATE_AGENT_RHYTHM_MIX_HINT=true
 # 私聊个人数据目录（笔记、待办、提醒等，每人一个 JSON），留空用 data/private_agent/users
 PRIVATE_AGENT_DATA_DIR=
 # 私聊 Agent 状态文件（成员是否暂停自动回复），留空用 data/private_agent/state.json

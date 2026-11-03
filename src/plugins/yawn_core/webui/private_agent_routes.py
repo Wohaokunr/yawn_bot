@@ -18,6 +18,7 @@ from ..yawn_agent import (
     private_cache,
     private_persona,
     private_prompt_registry,
+    private_rhythm,
     prompt_capture,
     prompt_sections,
 )
@@ -391,6 +392,17 @@ async def get_private_cache_stats(_session: AdminReadSession) -> dict[str, Any]:
     """前缀缓存命中：各链路累计命中/未命中 token 与最近几次明细（进程内，重启清零）。"""
 
     return ok(private_cache.usage_snapshot())
+
+
+@router.get("/rhythm")
+async def get_private_rhythm_stats(
+    _session: AdminReadSession,
+    user_id: int | None = Query(default=None, alias="userId", gt=0),
+) -> dict[str, Any]:
+    """分条发送：全站实际发了几条的分布、各节奏次数、被打断次数（进程内，重启清零）；
+    给了 userId 时附他最近几次的条数和是否套了模板。"""
+
+    return ok(private_rhythm.snapshot(user_id))
 
 
 @router.put("/captures/settings")

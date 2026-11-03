@@ -217,6 +217,17 @@ PRIVATE_RESUMED_NOTE = (
     "（他停下来有一会儿没再发消息了。把他刚才连着说的几条当成一件事回应；真的不需要回就只写【不回】。）"
 )
 
+PRIVATE_REPLY_CUT = (
+    "（资料里的 last_reply_cut：你上一条是分条发的，发到第 sent_parts 条他就发来了新消息，"
+    "后面 unsent_parts 条没发出去，他没看到、历史里也没有。先回应他刚说的；"
+    "没说完的话还要紧就换个说法简短带一句，不要原样重发，也别说“刚才被打断了”。）"
+)
+
+PRIVATE_RHYTHM_MIX = (
+    "（资料里的 recent_rhythm：你最近几次回复都分成了好几条，last_reply_parts 是每次的条数。"
+    "这次按内容来，一句话能说完就【节奏:整段】一条；真要分也不用和前几次一样多。）"
+)
+
 PRIVATE_FILES_HINT = "（他这次发了文件：要加工处理它（总结整理、转格式、做成表格/PPT/文档）就放到后台做，你先回他一句。）"
 
 PRIVATE_ATTACHMENTS_UNREAD = (
@@ -278,9 +289,11 @@ __all__ = [
     "PRIVATE_MEMORY_SYSTEM",
     "PRIVATE_PERSONA_SCOPE",
     "PRIVATE_REPEAT_GUARD",
+    "PRIVATE_REPLY_CUT",
     "PRIVATE_REPORT_NOTICE",
     "PRIVATE_REPORT_TURN",
     "PRIVATE_RESUMED_NOTE",
+    "PRIVATE_RHYTHM_MIX",
     "PRIVATE_ROLE",
     "PRIVATE_RULES",
     "PRIVATE_SAFETY",
