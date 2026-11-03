@@ -13,13 +13,14 @@ export function RunsTab({ onOpenTask }: { onOpenTask: (taskId: number) => void }
   const [searchParams, setSearchParams] = useSearchParams();
   const group = searchParams.get("schedules.runGroup") ?? "";
   const result = searchParams.get("schedules.result") ?? "";
+  const channel = searchParams.get("schedules.channel") ?? "";
   const [draftGroup, setDraftGroup] = useState(group);
   useEffect(() => setDraftGroup(group), [group]);
   const patch = (values: Record<string, string | null>) => setSearchParams(updateSearchParams(searchParams, values), { replace: true });
 
   const runsQuery = useApiQuery<{ ready: boolean; items: ScheduleRunItem[] }>({
-    queryKey: ["schedule-runs", group, result],
-    fetcher: (signal) => scheduleApi.runs({ group, result, limit: 200 }, signal),
+    queryKey: ["schedule-runs", group, result, channel],
+    fetcher: (signal) => scheduleApi.runs({ group, result, channel, limit: 200 }, signal),
     invalidation: { resources: ["schedules"] },
   });
 
@@ -38,9 +39,14 @@ export function RunsTab({ onOpenTask }: { onOpenTask: (taskId: number) => void }
     {
       title: "任务",
       key: "task",
-      render: (_, row) => (
+      render: (_, row) => row.channel === "private" ? (
         <div className="sch-task-cell">
-          <button type="button" className="sch-link" onClick={() => onOpenTask(row.taskId)}>#{row.taskId} {row.title}</button>
+          <span><Tag color="blue">私聊</Tag>{row.ref} {row.title}</span>
+          <span className="sbx-muted">QQ {row.userId} · {row.mode === "agent" ? "到点替他去办" : "到点提醒"}</span>
+        </div>
+      ) : (
+        <div className="sch-task-cell">
+          <button type="button" className="sch-link" onClick={() => row.taskId != null && onOpenTask(row.taskId)}>#{row.taskId} {row.title}</button>
           <span className="sbx-muted">{row.groupName ?? row.groupId} · {MODE_META[row.mode]?.label ?? row.mode}</span>
         </div>
       ),
@@ -61,7 +67,7 @@ export function RunsTab({ onOpenTask }: { onOpenTask: (taskId: number) => void }
           <span className="sbx-muted">
             {row.ms != null ? formatDurationMs(row.ms) : ""}
             {row.late ? ` · 迟到 ${row.late} 分钟` : ""}
-            {row.trace && <> · <Link to={traceLink(row.groupId, row.trace)}>执行轨迹</Link></>}
+            {row.trace && row.groupId && <> · <Link to={traceLink(row.groupId, row.trace)}>执行轨迹</Link></>}
           </span>
         </div>
       ),
@@ -82,12 +88,14 @@ export function RunsTab({ onOpenTask }: { onOpenTask: (taskId: number) => void }
           aria-label="按群筛选运行记录"
         />
         <Select value={result} onChange={(value) => patch({ "schedules.result": value || null })} options={RESULT_FILTERS} style={{ width: 170 }} aria-label="按结果筛选" />
+        <Select value={channel} onChange={(value) => patch({ "schedules.channel": value || null })} style={{ width: 130 }} aria-label="按渠道筛选"
+          options={[{ value: "", label: "群 + 私聊" }, { value: "group", label: "只看群任务" }, { value: "private", label: "只看私聊提醒" }]} />
         <span className="sbx-muted">每个任务保留最近若干条记录（策略里可调）</span>
       </div>
       {runsQuery.error && <QueryErrorAlert error={runsQuery.error} onRetry={runsQuery.reload} />}
       <Table
         size="small"
-        rowKey={(row) => `${row.taskId}-${row.at}-${row.result}`}
+        rowKey={(row) => `${row.channel ?? "group"}-${row.userId ?? ""}-${row.taskId ?? row.ref ?? ""}-${row.at}-${row.result}`}
         loading={runsQuery.loading}
         columns={columns}
         dataSource={runsQuery.data?.items ?? []}

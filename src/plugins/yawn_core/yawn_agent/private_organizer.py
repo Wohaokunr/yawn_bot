@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, RUF003, PERF203, TRY003
+# ruff: noqa: E501, C901, RUF003, PERF203, TRY003, PLR0911
 """私聊个人助理工具：笔记、待办、提醒、倒数日、心情、聊天偏好。
 
 数据都在 ``private_store``（每人一个 JSON），只作用于发消息的本人。
@@ -278,51 +278,159 @@ def next_occurrence(due: datetime, repeat: str, after: datetime) -> datetime | N
     return nxt
 
 
-def _reminder_view(item: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": item["id"],
-        "content": item["content"],
-        "due": item["due"],
-        "repeat": REPEAT_LABELS.get(item.get("repeat", "none"), "一次"),
+def _reminder_view(item: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    from .private_schedule import view
+
+    return view(item, detail=detail)
+
+
+def _schedule_settings() -> Any:
+    from .schedule_policy import load_settings
+
+    return load_settings()
+
+
+def _rule_error(exc: Exception) -> ToolError:
+    code = getattr(exc, "code", "")
+    return ToolError(
+        str(exc),
+        code=ERROR_QUOTA if code == "too_frequent" else ERROR_INVALID_ARGS,
+        hint=getattr(exc, "hint", "") or "确认日期，或用 in_minutes",
+    )
+
+
+def _reminder_rule(args: dict[str, Any], now: datetime) -> tuple[dict[str, Any], datetime, list[datetime], str]:
+    from .private_schedule import RuleError, build_rule
+
+    settings = _schedule_settings()
+    try:
+        return build_rule(
+            args,
+            now,
+            min_interval=int(settings.private_min_interval_minutes),
+            max_lead=MAX_LEAD,
+            min_lead=MIN_LEAD,
+        )
+    except RuleError as exc:
+        raise _rule_error(exc) from exc
+
+
+def _reminder_mode(args: dict[str, Any]) -> str:
+    mode = str(args.get("mode") or "notify")
+    if mode not in {"notify", "agent"}:
+        raise ToolError("mode 只能是 notify 或 agent", code=ERROR_INVALID_ARGS)
+    if mode == "agent" and not _schedule_settings().private_agent_mode:
+        raise ToolError(
+            "管理员没开放“到点替你去办”，只能设普通提醒",
+            code=ERROR_INVALID_ARGS,
+            hint="改用 mode=notify，content 写成到时候提醒他的话",
+        )
+    return mode
+
+
+def _reminder_room(record: dict[str, Any]) -> None:
+    cap = min(int(_schedule_settings().private_max_active), store.LIMITS["reminders"])
+    if len(record["reminders"]) >= cap:
+        raise ToolError(f"提醒已经有 {cap} 条了，先删掉一些", code=ERROR_QUOTA)
+
+
+def add_reminder(
+    record: dict[str, Any],
+    args: dict[str, Any],
+    now: datetime,
+    *,
+    origin: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """新建一条私聊提醒（原地改 ``record``）；同内容同规则的有效提醒直接复用。"""
+
+    from .schedule_store import ScheduleRuleError, validate_instruction
+
+    schedule, due, fires, rule = _reminder_rule(args, now)
+    mode = _reminder_mode(args)
+    content = clean_text(args.get("content"), limit=300 if mode == "agent" else 120)
+    if mode == "agent":
+        # 到点要交给私聊的我执行：和群定时任务同一套安全检查（不许覆盖规则、伪造消息）。
+        try:
+            content = validate_instruction(content)
+        except ScheduleRuleError as exc:
+            raise ToolError(str(exc), code=ERROR_INVALID_ARGS, hint=exc.hint) from exc
+    for existing in record["reminders"]:
+        same_rule = existing.get("schedule") == schedule or (
+            not existing.get("schedule") and existing.get("due") == fmt(due)
+        )
+        if existing.get("content") == content and same_rule and not existing.get("done"):
+            return {"scheduled": _reminder_view(existing), "reused": True, "note": "同样的提醒已经有了，没有重复设"}
+    _reminder_room(record)
+    item: dict[str, Any] = {
+        "id": store.next_id(record),
+        "content": content,
+        "due": fmt(due),
+        "repeat": "custom" if schedule.get("kind") != "once" else "none",
+        "created": fmt(now),
+        "anchor": fmt(now),
+        "schedule": schedule,
+        "rule": rule[:120],
     }
+    if mode != "notify":
+        item["mode"] = mode
+    if args.get("title"):
+        item["title"] = clean_text(args.get("title"), limit=40, field="标题")
+    if args.get("max_runs") and schedule.get("kind") != "once":
+        item["max_runs"] = int(args["max_runs"])
+    if origin:
+        item["origin"] = dict(origin)
+    record["reminders"].append(item)
+    result: dict[str, Any] = {
+        "scheduled": _reminder_view(item),
+        "minutes_from_now": int((due - now).total_seconds() // 60),
+    }
+    if len(fires) > 1:
+        result["next_times"] = [fmt(when) for when in fires[:3]]
+    return result
 
 
-def reminders(user_id: int, args: dict[str, Any], now: datetime) -> dict[str, Any]:
+def _edit_reminder(item: dict[str, Any], args: dict[str, Any], now: datetime) -> None:
+    if args.get("content"):
+        limit = 300 if str(item.get("mode") or "notify") == "agent" else 120
+        item["content"] = clean_text(args.get("content"), limit=limit)
+    if args.get("mode"):
+        item["mode"] = _reminder_mode(args)
+    if args.get("title"):
+        item["title"] = clean_text(args.get("title"), limit=40, field="标题")
+    timing = any(args.get(key) not in (None, "", []) for key in ("kind", "at", "in_minutes", "repeat"))
+    if timing:
+        schedule, due, _fires, rule = _reminder_rule(args, now)
+        item.update({"schedule": schedule, "due": fmt(due), "rule": rule[:120], "anchor": fmt(now), "runs": 0})
+        item["repeat"] = "custom" if schedule.get("kind") != "once" else "none"
+        for key in ("base", "retry", "done", "broken", "paused"):
+            item.pop(key, None)
+    if args.get("max_runs"):
+        item["max_runs"] = int(args["max_runs"])
+    if not (timing or args.get("content") or args.get("mode") or args.get("title") or args.get("max_runs")):
+        raise ToolError("没有要改的内容", code=ERROR_INVALID_ARGS, hint="传 content 或新的时间（at/in_minutes/kind…）")
+
+
+def reminders(
+    user_id: int,
+    args: dict[str, Any],
+    now: datetime,
+    *,
+    origin: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from . import private_schedule as ps
+
     action = str(args.get("action") or "list")
+    if action == "preview":
+        _schedule, due, fires, rule = _reminder_rule(args, now)
+        return {"preview": True, "rule": rule, "first": fmt(due), "next_times": [fmt(when) for when in fires[:5]], "note": "还没设；他确认后用 add"}
 
     def run(record: dict[str, Any]) -> dict[str, Any]:
         items = record["reminders"]
         if action == "add":
-            _check_room(record, "reminders", "提醒")
-            if args.get("in_minutes") is not None:
-                due = now + timedelta(minutes=int(args["in_minutes"]))
-            elif args.get("at"):
-                due = parse_time(args["at"])
-            else:
-                raise ToolError(
-                    "要给提醒时间",
-                    code=ERROR_INVALID_ARGS,
-                    hint="at（YYYY-MM-DD HH:MM）或 in_minutes 二选一",
-                )
-            if due - now < MIN_LEAD - timedelta(seconds=1):
-                raise ToolError("提醒时间已经过了", code=ERROR_INVALID_ARGS, hint="确认日期，或用 in_minutes")
-            if due - now > MAX_LEAD:
-                raise ToolError("最远只能提醒一年以内的事", code=ERROR_INVALID_ARGS)
-            repeat = str(args.get("repeat") or "none")
-            if repeat == "weekdays" and due.weekday() >= 5:  # noqa: PLR2004
-                due = next_occurrence(due, "weekdays", due) or due
-            item = {
-                "id": store.next_id(record),
-                "content": clean_text(args.get("content"), limit=120),
-                "due": fmt(due),
-                "repeat": repeat,
-                "created": fmt(now),
-            }
-            items.append(item)
-            return {"scheduled": _reminder_view(item), "minutes_from_now": int((due - now).total_seconds() // 60)}
+            return add_reminder(record, args, now, origin=origin)
         if action == "list":
-            ordered = sorted(items, key=lambda r: r["due"])
-            return {"reminders": [_reminder_view(r) for r in ordered], "total": len(items)}
+            ordered = sorted((r for r in items if not r.get("done") or r.get("retry")), key=lambda r: (bool(r.get("paused")), r.get("due") or ""))
+            return {"reminders": [_reminder_view(r) for r in ordered], "total": len(ordered)}
         item_id = _require_id(args)
         item = store.find(record, "reminders", item_id)
         if item is None:
@@ -332,8 +440,22 @@ def reminders(user_id: int, args: dict[str, Any], now: datetime) -> dict[str, An
             return {"cancelled": item_id}
         if action == "snooze":
             minutes = int(args.get("snooze_minutes") or 10)
-            item["due"] = fmt(max(parse_time(item["due"]), now) + timedelta(minutes=minutes))
+            ps.snooze(item, minutes, now)
             return {"reminder": _reminder_view(item)}
+        if action == "pause":
+            ps.pause(item)
+            return {"paused": item_id, "reminder": _reminder_view(item)}
+        if action == "resume":
+            nxt = ps.resume(item, now)
+            if nxt is None:
+                items.remove(item)
+                return {"resumed": False, "note": "这条是一次性的，时间已经过了，已删掉；需要的话重新设"}
+            return {"resumed": True, "reminder": _reminder_view(item)}
+        if action == "edit":
+            _edit_reminder(item, args, now)
+            return {"updated": True, "reminder": _reminder_view(item, detail=True)}
+        if action == "history":
+            return {"reminder": _reminder_view(item, detail=True)}
         raise ToolError("未知操作", code=ERROR_INVALID_ARGS)
 
     return store.update(user_id, run)
@@ -548,7 +670,11 @@ def prompt_digest(record: dict[str, Any], now: datetime) -> dict[str, Any]:
         }
     soon = fmt(now + timedelta(hours=24))
     upcoming = sorted(
-        (r for r in record.get("reminders", []) if r.get("due", "") <= soon),
+        (
+            r
+            for r in record.get("reminders", [])
+            if r.get("due", "") <= soon and not r.get("paused") and not r.get("done")
+        ),
         key=lambda r: r["due"],
     )
     if upcoming:

@@ -54,6 +54,7 @@ export const GUEST_NAV: NavEntry[] = [
 // QQ 个人账号（群管理员 / 普通用户）只看自己的东西：管理的群、私聊人设、账号安全。
 export const USER_NAV: NavEntry[] = [
   { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "我的空间", description: "我管理的群与账号概况", keywords: "home 主页 群 管理" },
+  { key: "/me/schedules", label: "我的定时任务", icon: <FieldTimeOutlined />, group: "我的空间", description: "私聊提醒和我在群里设的定时任务", keywords: "schedule 定时 提醒 闹钟 cron 群任务" },
   { key: "/me/persona", label: "私聊人设", icon: <SmileOutlined />, group: "我的空间", description: "调整 Bot 和我私聊时的人设", keywords: "persona 人设 私聊 自称 称呼 性格" },
   { key: "/me/account", label: "账号安全", icon: <LockOutlined />, group: "我的空间", description: "改密码、退出所有设备", keywords: "password 密码 安全 退出 设备" },
 ];
@@ -77,9 +78,9 @@ const NAV_ALIASES: Record<string, string> = { "/agent": "/groups" };
 export function selectedNavKey(pathname: string, role: boolean | SessionRole): string {
   const resolved: SessionRole = role === true ? "guest" : role === false ? "admin" : role;
   if (resolved === "user") {
-    // /me/groups/… 属于“我的主页”；/me/persona、/me/account 各自高亮
+    // /me/groups/… 属于“我的主页”；/me/persona、/me/account、/me/schedules 各自高亮
     const second = pathname.split("/")[2] ?? "";
-    return second === "persona" || second === "account" ? `/me/${second}` : "/me";
+    return second === "persona" || second === "account" || second === "schedules" ? `/me/${second}` : "/me";
   }
   const root = `/${pathname.split("/")[1] || homePathForRole(resolved).slice(1)}`;
   return NAV_ALIASES[root] ?? root;

@@ -62,6 +62,20 @@ class ScheduleSettings(BaseModel):
     run_timeout_seconds: int = Field(default=300, ge=30, le=1800)
     notify_prefix: str = Field(default="⏰ ", max_length=8)
     history_limit: int = Field(default=20, ge=5, le=100)
+    # ── 私聊 ↔ 群聊打通（schedule_hub）──────────────────────────────
+    # 私聊里给自己所在的群设定时任务（会发到群里，必须他下一句确认）。
+    cross_create: bool = True
+    # 群里让 Bot 设“到点私聊提醒我”（写进他的私聊提醒，只对好友、没 /退出 的人）。
+    deliver_to_private: bool = True
+    # 群任务因连续失败/设任务的人退群被自动暂停时，私聊告诉设任务的人一声。
+    notify_creator_on_pause: bool = True
+    # 私聊提醒可以用“到点由私聊的我去执行”（agent 模式）：查天气、整理资料等。
+    private_agent_mode: bool = True
+    # 私聊提醒（每人）同时有效的上限与循环最小间隔。
+    private_max_active: int = Field(default=30, ge=1, le=200)
+    private_min_interval_minutes: int = Field(default=5, ge=1, le=1440)
+    # 私聊提醒发送失败后的重试次数（2/5/15 分钟退避），用完才放弃这一次。
+    private_retry_limit: int = Field(default=3, ge=0, le=10)
 
     @field_validator("allowed_groups", "blocked_groups")
     @classmethod
@@ -208,12 +222,19 @@ def exposure_reason(group_id: int, *, actor_is_admin: bool) -> str | None:
     return None
 
 
+def record_private_usage(result: str) -> None:
+    """私聊提醒的执行结果也记进当日用量（WebUI 今日统计两边合在一起看）。"""
+
+    _store.record(0, f"private_{result}", counts=False)
+
+
 __all__ = [
     "STATE_DIR",
     "ScheduleSettings",
     "exposure_reason",
     "group_runs_today",
     "load_settings",
+    "record_private_usage",
     "record_run_usage",
     "reset_settings_cache",
     "save_settings",

@@ -55,6 +55,9 @@ const StickersPage = lazy(() =>
 const GuestGroupsPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupsPage: Page }) => ({ default: Page })),
 );
+const MySchedulesPage = lazy(() =>
+  import("./me/MySchedulesPage").then(({ MySchedulesPage: Page }) => ({ default: Page })),
+);
 const MeHomePage = lazy(() =>
   import("./me/MeHomePage").then(({ MeHomePage: Page }) => ({ default: Page })),
 );
@@ -114,6 +117,7 @@ function App(): React.JSX.Element {
             <Route path="me" element={<MeHomePage />} />
             <Route path="me/groups/:groupId" element={<MyGroupPage />} />
             <Route path="me/persona" element={<MyPersonaPage />} />
+            <Route path="me/schedules" element={<MySchedulesPage />} />
             <Route path="me/account" element={<MyAccountPage onLoggedOut={logout} />} />
           </Route>
           <Route path="*" element={<Navigate to="/me" replace />} />

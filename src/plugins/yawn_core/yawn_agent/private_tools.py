@@ -35,6 +35,8 @@ from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .memory_self import SELF_FACT_KEYS, forget_member_facts, remember_member_fact
 from .private_computer import COMPUTER_TOOL_SPECS
 from .private_context import SharedGroup, group_bonds, group_profile_facts
+from .private_schedule_tool import TOOL_DESCRIPTION as _SCHEDULES_DESCRIPTION
+from .private_schedule_tool import TOOL_PROPERTIES as _SCHEDULES_PROPERTIES
 from .prompt_sections import PRIVATE_TOOL_SECTION_PREFIX, apply_section
 from .tool_args import (
     ERROR_INVALID_ARGS,
@@ -210,10 +212,13 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "reminders",
-        "到点在私聊里提醒这位用户：add 设提醒（at 绝对时间或 in_minutes 相对分钟二选一，repeat 可每天/工作日/每周）、list 列出、cancel 取消、snooze 推迟。时间按资料里的 now 推算",
+        "到点在私聊里提醒这位用户：add 设提醒（at 绝对时间或 in_minutes 相对分钟二选一，repeat 可每天/工作日/每周）、list 列出、cancel 取消、snooze 推迟这一次、"
+        "pause/resume 暂停/恢复、edit 改内容或时间。mode=agent 表示到点由你去办（如“每天 8 点帮我查天气”）。"
+        "每月/每年/间隔/cron 这类复杂规则、给群设、查他在群里设的任务用 schedules。时间按资料里的 now 推算",
         {
-            "action": {"type": "string", "enum": ["add", "list", "cancel", "snooze"]},
-            "content": {"type": "string", "minLength": 1, "maxLength": 120, "description": "到时候提醒他的内容"},
+            "action": {"type": "string", "enum": ["add", "list", "cancel", "snooze", "pause", "resume", "edit"]},
+            "content": {"type": "string", "minLength": 1, "maxLength": 300, "description": "到时候提醒他的内容（mode=agent 时是到点要你去办的事）"},
+            "mode": {"type": "string", "enum": ["notify", "agent"]},
             "at": {"type": "string", "maxLength": 19, "description": "YYYY-MM-DD HH:MM（北京时间）"},
             "in_minutes": {"type": "integer", "minimum": 1, "maximum": 527040},
             "repeat": {"type": "string", "enum": ["none", "daily", "weekdays", "weekly"]},
@@ -589,6 +594,11 @@ BRIDGE_TOOLS: tuple[PrivateTool, ...] = (
     ),
 )
 BRIDGE_NAMES = frozenset(tool.name for tool in BRIDGE_TOOLS)
+# 私聊提醒 ↔ 群定时任务一起管（schedule_hub）：编号 p…/g…，给群设要他确认。
+SCHEDULE_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool("schedules", _SCHEDULES_DESCRIPTION, _SCHEDULES_PROPERTIES, ("action",), writes=True),
+)
+SCHEDULE_NAMES = frozenset(tool.name for tool in SCHEDULE_TOOLS)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
@@ -598,6 +608,7 @@ ALL_TOOLS: tuple[PrivateTool, ...] = (
     + ACCOUNT_TOOLS
     + MANAGE_TOOLS
     + BRIDGE_TOOLS
+    + SCHEDULE_TOOLS
     + COMPUTER_TOOLS
     + TASK_TOOLS
 )
@@ -1188,12 +1199,16 @@ async def execute_private_tool(  # noqa: PLR0915
             from .private_bridge_tool import group_bridge_tool
 
             result = await group_bridge_tool(args, ctx)
+        elif name in SCHEDULE_NAMES:
+            from .private_schedule_tool import schedules_tool
+
+            result = await schedules_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
         return tool_error_payload(exc)
     ctx.succeeded.add(name)
-    if name in (MANAGE_NAMES | BRIDGE_NAMES) and isinstance(result, dict) and result.get("done"):
+    if name in (MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES) and isinstance(result, dict) and result.get("done"):
         # 声明核验：只有真正执行了（不是“待确认”）才算办成
         ctx.succeeded.add(f"{name}.done")
         ctx.succeeded.add(f"{name}.{result.get('action')}")
@@ -1327,7 +1342,7 @@ def _hand_context(ctx: PrivateToolContext) -> dict[str, Any]:
 _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "notes": frozenset({"add", "delete", "pin", "unpin"}),
     "todos": frozenset({"add", "done", "undo", "delete", "clear_done"}),
-    "reminders": frozenset({"add", "cancel", "snooze"}),
+    "reminders": frozenset({"add", "cancel", "snooze", "pause", "resume", "edit"}),
     "countdowns": frozenset({"add", "delete"}),
     "mood": frozenset({"log"}),
     "chat_prefs": frozenset({"set"}),
@@ -1711,6 +1726,8 @@ __all__ = [
     "MANAGE_TOOLS",
     "PERSONA_TOOLS",
     "PRIVATE_TOOLS",
+    "SCHEDULE_NAMES",
+    "SCHEDULE_TOOLS",
     "SUPERUSER_TOOLS",
     "TASK_NAMES",
     "TASK_TOOLS",

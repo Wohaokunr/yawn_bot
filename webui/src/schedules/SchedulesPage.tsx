@@ -1,4 +1,4 @@
-import { HistoryOutlined, ReloadOutlined, SafetyCertificateOutlined, UnorderedListOutlined } from "@ant-design/icons";
+import { HistoryOutlined, MessageOutlined, ReloadOutlined, SafetyCertificateOutlined, UnorderedListOutlined } from "@ant-design/icons";
 import { Alert, Button, Skeleton, Tabs, Tag, Tooltip } from "antd";
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -8,6 +8,7 @@ import { scheduleApi } from "./schedule-api";
 import { formatLocal, parseScheduleTab, relativeTo, resultTone } from "./schedule-meta";
 import type { ScheduleTab } from "./schedule-meta";
 import { PolicyTab } from "./PolicyTab";
+import { PrivateTab } from "./PrivateTab";
 import { RunsTab } from "./RunsTab";
 import { TasksTab } from "./TasksTab";
 import type { ScheduleSettings, ScheduleStatusData } from "./types";
@@ -43,6 +44,11 @@ export function ScheduleStatusBar({ status, refreshing, onRefresh }: { status: S
           <Tag color={status.today.runs ? "processing" : undefined}>今日执行 {status.today.runs}</Tag>
         </Tooltip>
         {failedToday > 0 && <Tag color="red">今日失败 {failedToday}</Tag>}
+        {status.private && (
+          <Tooltip title={`${status.private.users} 人的私聊提醒；其中 ${status.private.fromGroups} 条是在群里设的`}>
+            <Tag color={status.private.active ? "blue" : undefined}>私聊提醒 {status.private.active + status.private.paused}</Tag>
+          </Tooltip>
+        )}
       </div>
       <div className="sbx-status-actions">
         <Button size="small" icon={<ReloadOutlined />} loading={refreshing} onClick={onRefresh}>刷新</Button>
@@ -93,7 +99,7 @@ export function SchedulesPage(): React.JSX.Element {
     <div className="sbx-page">
       <div className="sbx-heading">
         <h2 className="sbx-title">定时任务</h2>
-        <p>群友在聊天里让 Agent 设的提醒和定时工作：到点直接提醒，或唤醒 Agent 去查资料、跑代码再回复</p>
+        <p>群里和私聊里设的提醒与定时工作，一处查看：到点直接提醒，或唤醒 Agent 去查资料、跑代码再回复；私聊里也能给群设任务</p>
       </div>
       <ScheduleStatusBar status={status} refreshing={statusQuery.refreshing} onRefresh={reload} />
       {!status.ready && (
@@ -114,6 +120,11 @@ export function SchedulesPage(): React.JSX.Element {
             key: "tasks",
             label: <span><UnorderedListOutlined /> 任务</span>,
             children: <TasksTab status={status} agentModeAllowed={settingsQuery.data?.settings.allowAgentMode ?? true} />,
+          },
+          {
+            key: "private",
+            label: <span><MessageOutlined /> 私聊提醒</span>,
+            children: <PrivateTab now={status.now} />,
           },
           {
             key: "runs",

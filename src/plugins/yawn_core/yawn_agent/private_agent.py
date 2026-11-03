@@ -73,6 +73,7 @@ from .private_prompt import (
     PRIVATE_ROLE,
     PRIVATE_RULES,
     PRIVATE_SAFETY,
+    PRIVATE_SCHEDULED_TURN,
     PRIVATE_TEAM,
     PRIVATE_TOOLKITS,
     PRIVATE_TURN_HEADER,
@@ -123,6 +124,15 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "reminders.add": ("schedule_task",),
     "reminders.snooze": ("update_scheduled_task",),
     "reminders.cancel": ("cancel_scheduled_task",),
+    "reminders.pause": ("update_scheduled_task",),
+    "reminders.resume": ("update_scheduled_task",),
+    "reminders.edit": ("update_scheduled_task",),
+    # 私聊提醒 ↔ 群定时任务一起管：只有 done（真的设好/改好/取消了，不是待确认）才算
+    "schedules.add": ("schedule_task",),
+    "schedules.edit": ("update_scheduled_task",),
+    "schedules.pause": ("update_scheduled_task",),
+    "schedules.resume": ("update_scheduled_task",),
+    "schedules.cancel": ("cancel_scheduled_task",),
     "my_data.wipe": ("forget_about_me",),
     # 群管代办：只有真正执行了（group_manage.<动作>）才允许说“禁言好了/公告发了”
     "group_manage.mute": ("mute_member",),
@@ -151,6 +161,8 @@ _WRITE_RESULTS = frozenset(
         "todos.done",
         "reminders.add",
         "reminders.cancel",
+        "schedules.add",
+        "schedules.cancel",
         "countdowns.add",
         "mood.log",
         "chat_prefs.set",
@@ -719,7 +731,8 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
     整轮绑定这位用户：私聊分段按“本人覆盖 → 全局”解析，真实请求按用户抓取。
     """
 
-    with use_private_user(request.user_id, pipeline="turn"):
+    pipeline = "scheduled" if isinstance(request.extra.get("scheduled"), dict) else "turn"
+    with use_private_user(request.user_id, pipeline=pipeline):
         return await _handle_private_turn(request)
 
 
@@ -730,6 +743,10 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     resumed = bool(request.extra.get("resumed"))
     # 群里答应了私聊他：这一轮是我主动开口（没有他刚发的消息），一定要说话。
     handoff = request.extra.get("handoff") if isinstance(request.extra.get("handoff"), dict) else None
+    # 到点替他去办（agent 模式的私聊提醒）：同样是我主动开口、不许沉默，只是工具收窄。
+    scheduled = request.extra.get("scheduled") if isinstance(request.extra.get("scheduled"), dict) else None
+    if scheduled is not None and handoff is None:
+        handoff = scheduled
     # 发言判断说明照常放（和普通回合同一份开头，保住前缀缓存），只是这一轮不许选择不说话。
     silence_ok = turn_taking.enabled()
     if not resumed and handoff is None:
@@ -840,6 +857,12 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         # 之前问过他、还在等确认的群管操作：工具结果不进历史，不放这里模型就不知道 confirm_id，
         # 只能重新发起，又得再问一遍（“要发吗？”“发”……循环）。本轮层，不碰前缀。
         context.payload["group_manage_waiting"] = manage_waiting
+    from .schedule_hub import pending_view as schedule_pending_view
+
+    schedule_waiting = schedule_pending_view(user_id)
+    if schedule_waiting:
+        # 等他确认的“给群设定时任务”：同样只进本轮层，免得重新发起又问一遍。
+        context.payload["group_schedule_waiting"] = schedule_waiting
     cut = private_rhythm.cut_note(user_id)
     if cut:
         # 上一条分条被他打断了：只告诉模型发到第几条，没发出去的内容不给（也不在历史里）。
@@ -865,7 +888,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         ),
         allow_silence=silence_ok,
         just_finished=bool(just_finished),
-        round_note=("private.handoff_turn", PRIVATE_HANDOFF_TURN) if handoff else None,
+        round_note=(
+            ("private.scheduled_turn", PRIVATE_SCHEDULED_TURN)
+            if scheduled is not None
+            else ("private.handoff_turn", PRIVATE_HANDOFF_TURN) if handoff else None
+        ),
         meta_out=meta,
     )
     if resumed:
@@ -902,6 +929,12 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         computer=bool(computer),
         attachment_refs=[str(row["ref"]) for row in attachments if row.get("ref")],
     )
+    if scheduled is not None:
+        # 定时代办的一轮：不许再设提醒/定时任务（防自我繁殖），不许无人值守地去群里说话或管群。
+        from .private_schedule_turn import WAKE_BLOCKED_TOOLS
+        from .private_tools import TOOLS_BY_NAME as _ALL_TOOL_NAMES
+
+        ctx.allowed_tools = frozenset(_ALL_TOOL_NAMES) - WAKE_BLOCKED_TOOLS
     max_rounds = int(private_agent_config.private_agent_max_tool_rounds)
     handoff_after = int(private_agent_config.private_agent_handoff_after)
     nudged = False

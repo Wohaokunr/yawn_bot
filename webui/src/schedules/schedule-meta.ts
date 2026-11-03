@@ -2,8 +2,8 @@
 // 规则的最终校验与“下次触发”计算只在后端（schedule_spec.py）做，这里只挡明显的输入错误。
 import type { ScheduleKind, ScheduleMode, ScheduleRule, ScheduleSettings, ScheduleStatus } from "./types";
 
-export type ScheduleTab = "tasks" | "runs" | "policy";
-const TABS: ScheduleTab[] = ["tasks", "runs", "policy"];
+export type ScheduleTab = "tasks" | "private" | "runs" | "policy";
+const TABS: ScheduleTab[] = ["tasks", "private", "runs", "policy"];
 
 export function parseScheduleTab(value: string | null): ScheduleTab {
   return TABS.includes(value as ScheduleTab) ? (value as ScheduleTab) : "tasks";
@@ -84,7 +84,39 @@ export function resultTone(result: string | null | undefined): Tone {
 export function sourceLabel(source: string): string {
   if (source === "manual") return "管理台创建";
   if (source === "agent") return "群聊里让 Agent 创建";
+  if (source === "private") return "私聊里让 Bot 给群设的";
+  if (source === "webui_user") return "成员在网页上设的";
   return source || "—";
+}
+
+/** 私聊提醒的状态（后端 private_schedule.status_of）。 */
+export const PRIVATE_STATUS_META: Record<string, { label: string; color: string }> = {
+  active: { label: "等着到点", color: "green" },
+  paused: { label: "已暂停", color: "gold" },
+  retrying: { label: "等待重试", color: "orange" },
+  completed: { label: "已完成", color: "default" },
+  broken: { label: "规则坏了", color: "red" },
+};
+
+export const PRIVATE_SOURCE_META: Record<string, { label: string; color: string }> = {
+  private: { label: "私聊里设的", color: "blue" },
+  group: { label: "群里设的", color: "purple" },
+  webui: { label: "网页上设的", color: "cyan" },
+};
+
+export function privateStatusMeta(status: string): { label: string; color: string } {
+  return PRIVATE_STATUS_META[status] ?? { label: status || "—", color: "default" };
+}
+
+export function privateSourceMeta(source: string): { label: string; color: string } {
+  return PRIVATE_SOURCE_META[source] ?? { label: source || "—", color: "default" };
+}
+
+/** 统一引用：g12 = 群定时任务 #12；p3 = 私聊提醒 #3。 */
+export function parseRef(ref: string): { channel: "group" | "private"; id: number } | null {
+  const match = /^([gp])(\d+)$/.exec(ref.trim().toLowerCase());
+  if (!match) return null;
+  return { channel: match[1] === "g" ? "group" : "private", id: Number(match[2]) };
 }
 
 // ── 时间显示 ──────────────────────────────────────────────────────────────
@@ -349,6 +381,9 @@ export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: numbe
   concurrency: { min: 1, max: 8, unit: "个群", label: "同时执行的群数" },
   runTimeoutSeconds: { min: 30, max: 1800, unit: "秒", label: "单次唤醒时限" },
   historyLimit: { min: 5, max: 100, unit: "条", label: "每个任务保留的运行记录" },
+  privateMaxActive: { min: 1, max: 200, unit: "个", label: "每人私聊提醒上限" },
+  privateMinIntervalMinutes: { min: 1, max: 1440, unit: "分钟", label: "私聊循环提醒最小间隔" },
+  privateRetryLimit: { min: 0, max: 10, unit: "次", label: "私聊提醒发送失败重试" },
 };
 
 const GROUP_ID_RE = /^\d{4,12}$/;

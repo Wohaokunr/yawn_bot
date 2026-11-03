@@ -82,6 +82,8 @@ export interface ScheduleStatusData {
   today: { day: string | null; runs: number; results: Record<string, number> };
   upcoming: ScheduleTask[];
   groups: number;
+  /** 私聊提醒汇总（和群定时任务同一套规则引擎，存在每人的个人数据里） */
+  private?: PrivateReminderCounts;
 }
 
 export interface ScheduleTasksPage {
@@ -93,11 +95,16 @@ export interface ScheduleTasksPage {
 }
 
 export interface ScheduleRunItem extends ScheduleHistoryEntry {
-  taskId: number;
+  /** 私聊提醒的运行记录没有群任务编号，用 ref（p3）定位 */
+  taskId: number | null;
+  ref?: string;
   title: string;
   mode: ScheduleMode;
   groupId: string;
   groupName: string | null;
+  /** group：群定时任务；private：某人的私聊提醒（此时 userId 有值、taskId 是提醒编号） */
+  channel?: "group" | "private";
+  userId?: string;
 }
 
 export interface SchedulePreview {
@@ -147,4 +154,64 @@ export interface ScheduleSettings {
   runTimeoutSeconds: number;
   notifyPrefix: string;
   historyLimit: number;
+  /** 私聊里能给群设/改群定时任务 */
+  crossCreate: boolean;
+  /** 群里能让 Bot 到点私聊提醒自己 */
+  deliverToPrivate: boolean;
+  /** 群任务被自动暂停时私聊告诉设的人 */
+  notifyCreatorOnPause: boolean;
+  /** 私聊提醒可选“到点替他去办” */
+  privateAgentMode: boolean;
+  privateMaxActive: number;
+  privateMinIntervalMinutes: number;
+  privateRetryLimit: number;
+}
+
+// ── 私聊提醒（每人的个人助理数据；后端 /schedules/private）────────────────
+
+export type PrivateReminderStatus = "active" | "paused" | "retrying" | "completed" | "broken" | string;
+
+export interface PrivateReminder {
+  key: string;
+  ref: string;
+  channel: "private";
+  userId: string;
+  itemId: number;
+  title: string;
+  content: string;
+  mode: ScheduleMode;
+  kindLabel: string;
+  description: string;
+  status: PrivateReminderStatus;
+  nextRunAt: string | null;
+  runCount: number;
+  maxRuns: number | null;
+  lastResult: string | null;
+  lastResultLabel: string | null;
+  lastRunAt: string | null;
+  retryAt: string | null;
+  /** private：私聊里设的；group：群里让 Bot 私聊提醒；webui：网页上设的 */
+  sourceKind: "private" | "group" | "webui" | string;
+  sourceLabel: string;
+  originGroupId: string | null;
+  createdAt: string | null;
+}
+
+export interface PrivateReminderDetail extends PrivateReminder {
+  schedule: ScheduleRule;
+  history: ScheduleHistoryEntry[];
+}
+
+export interface PrivateReminderCounts {
+  active: number;
+  paused: number;
+  agent: number;
+  fromGroups: number;
+  users: number;
+}
+
+export interface PrivateRemindersPage {
+  items: PrivateReminder[];
+  total: number;
+  counts: PrivateReminderCounts;
 }

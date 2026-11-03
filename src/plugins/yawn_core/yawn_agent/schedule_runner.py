@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, TID252, PLR0913, PLR0917, PERF203
+# ruff: noqa: E501, C901, TID252, PLR0913, PLR0917, PERF203, PLR0912
 """Agent 定时任务调度器：到点领取任务、唤醒 Agent 或直接发提醒、记录结果。
 
 每 ``TICK_SECONDS`` 秒扫一次 ``next_run_at`` 到期的有效任务：
@@ -186,6 +186,7 @@ class _RunSnapshot:
     planned_at: datetime
     late_minutes: int
     once: bool
+    source_kind: str = "agent"
 
 
 @dataclass(slots=True)
@@ -316,6 +317,7 @@ async def _run_agent(bot: Any, snapshot: _RunSnapshot, member: dict[str, Any], s
         late_minutes=snapshot.late_minutes,
         previous_output=clip(snapshot.previous_output, 160),
         mention_creator=snapshot.mention_creator,
+        source_kind=snapshot.source_kind,
     )
     started_at = now_beijing().replace(microsecond=0)
     bot_id = _bot_id(bot)
@@ -438,6 +440,7 @@ async def _prepare(task_id: int, settings: ScheduleSettings, now: datetime) -> t
             planned_at=plan.planned_at,
             late_minutes=plan.late_minutes,
             once=task.schedule_kind == "once",
+            source_kind=str(task.source_kind or "agent"),
         )
         # 执行前推进下一次并提交：执行中途进程退出也不会重复触发同一次。
         task.next_run_at = plan.next_run_at
@@ -520,8 +523,17 @@ async def _record(snapshot: _RunSnapshot, outcome: RunOutcome, settings: Schedul
         )
         task.updated_at = now
         task.revision = int(task.revision or 0) + 1
+        auto_paused = task.status == "paused" and not ran
+        pause_reason = str(task.status_reason or "")
         await session.commit()
     record_run_usage(snapshot.group_id, outcome.result, counts=outcome.result in RAN_RESULTS or outcome.result == RESULT_FAILED)
+    if auto_paused:
+        # 自动暂停（连续失败/设任务的人退群）：私聊告诉设任务的人一声（策略可关，只对好友）。
+        from .schedule_hub import notify_creator_paused
+
+        reason = "设任务的人已经不在群里，已自动暂停" if outcome.result == RESULT_CREATOR_LEFT else (pause_reason or "已自动暂停")
+        if outcome.result != RESULT_CREATOR_LEFT:
+            await notify_creator_paused(snapshot.group_id, snapshot.task_id, snapshot.title, snapshot.creator_user_id, reason.replace("已自动暂停", "被自动暂停了"))
 
 
 async def execute_task(task_id: int, *, now: datetime | None = None, force: bool = False) -> RunOutcome | None:
@@ -594,6 +606,7 @@ async def _prepare_forced(task_id: int, settings: ScheduleSettings, now: datetim
             planned_at=now_beijing().replace(second=0, microsecond=0),
             late_minutes=0,
             once=task.schedule_kind == "once",
+            source_kind=str(task.source_kind or "agent"),
         )
         # 手动执行不改规则：单次任务的 next_run_at 保持原样（还会按时再跑）。
     del settings

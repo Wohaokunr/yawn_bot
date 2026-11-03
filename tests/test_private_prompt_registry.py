@@ -127,7 +127,7 @@ def test_catalog_rows_cover_every_private_section_and_pipeline():
     assert rules["userOverride"]["mode"] == "append"
     assert rules["effectiveScope"] == "user"
     assert rules["userOverrideCount"] == 1
-    assert {pipe["key"] for pipe in data["pipelines"]} == {"turn", "report", "handoff", "coordinate", "worker", "memory"}
+    assert {pipe["key"] for pipe in data["pipelines"]} == {"turn", "report", "handoff", "coordinate", "worker", "memory", "scheduled"}
     for pipe in data["pipelines"]:
         for step in pipe["steps"]:
             assert step["sectionId"] in ids, step

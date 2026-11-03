@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 WAKE_TRIGGER_SOURCE = "scheduled_task"
 # 唤醒回合里禁止的工具：再建任务会让一个任务无限繁殖。
 WAKE_BLOCKED_TOOLS = frozenset({"schedule_task"})
+SOURCE_LABELS = {
+    "agent": "群里让我设的",
+    "private": "他在私聊里让我给本群设的",
+    "manual": "管理员在网页上设的",
+    "webui_user": "他在网页上给本群设的",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,8 @@ class ScheduledWake:
     late_minutes: int = 0
     previous_output: str = ""
     mention_creator: bool = True
+    # 在哪设的：agent（群里让我设的）/ private（他在私聊里让我给本群设的）/ manual（网页）。
+    source_kind: str = "agent"
 
     def prompt_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -63,6 +71,9 @@ class ScheduledWake:
             payload["previous_output"] = self.previous_output
         if self.mention_creator:
             payload["remind_set_by"] = True
+        if self.source_kind in SOURCE_LABELS and self.source_kind != "agent":
+            # 只说“在哪设的”，不带任何私聊内容（私聊内容永远不进群聊提示词）。
+            payload["set_via"] = SOURCE_LABELS[self.source_kind]
         return payload
 
 
@@ -87,6 +98,7 @@ def scheduled_wake(wake: ScheduledWake) -> Iterator[ScheduledWake]:
 
 
 __all__ = [
+    "SOURCE_LABELS",
     "WAKE_BLOCKED_TOOLS",
     "WAKE_TRIGGER_SOURCE",
     "ScheduledWake",

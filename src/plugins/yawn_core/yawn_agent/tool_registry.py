@@ -1073,6 +1073,7 @@ TOOL_DEFINITIONS = (
         _SCHEDULE_FIELDS
         | {
             "dry_run": {"type": "boolean", "description": "true 时只校验并返回接下来几次触发时间，不真正创建；时间不确定时先预览给成员确认"},
+            "deliver_to": {"type": "string", "enum": ["group", "private"], "description": "group 到点在本群（默认）；private 到点私聊提醒他本人（“到时候私聊叫我”），会进他的私聊提醒，私聊里也能查改"},
         },
         required=("instruction", "kind"),
         permission_level=TOOL_PERMISSION_STATE_WRITE,
@@ -1082,7 +1083,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "list_scheduled_tasks",
-        "查看本群的定时任务（谁设的、规则、下次触发、已运行次数、上次结果）",
+        "查看本群的定时任务（谁设的、在哪设的、规则、下次触发、已运行次数、上次结果）；scope=mine 时还会列出调用者在本群让你设的私聊提醒（编号 p…）",
         {
             "scope": {"type": "string", "enum": ["mine", "group"], "description": "mine 只看调用者自己设的（默认），group 看全群"},
             "include_finished": {"type": "boolean", "description": "是否包括已完成/已取消的任务"},
@@ -1097,11 +1098,11 @@ TOOL_DEFINITIONS = (
         "修改、暂停或恢复一个定时任务（只能改调用者自己设的；群主/管理员可以改任何人的）。改时间时传 kind 和对应字段，整条规则会被替换",
         {
             "task_id": {"type": "integer", "minimum": 1},
+            "ref": {"type": "string", "maxLength": 12, "description": "改他在本群设的私聊提醒时用编号 p…（list_scheduled_tasks 的 private_reminders_set_here）"},
             "action": {"type": "string", "enum": ["edit", "pause", "resume"], "description": "edit 修改内容/规则（默认）；pause 暂停；resume 恢复"},
         }
         | {key: value for key, value in _SCHEDULE_FIELDS.items() if key != "kind"}
         | {"kind": {**_SCHEDULE_FIELDS["kind"], "description": "要改时间规则时才传；不传则保留原规则"}},
-        required=("task_id",),
         permission_level=TOOL_PERMISSION_STATE_WRITE,
         family="schedule",
         keywords=("改提醒", "改成", "推迟提醒", "暂停提醒", "恢复提醒", "修改定时", "换个时间"),
@@ -1112,6 +1113,7 @@ TOOL_DEFINITIONS = (
         "取消定时任务（只能取消调用者自己设的；群主/管理员可以取消任何人的）。all_mine=true 取消调用者在本群的全部任务",
         {
             "task_id": {"type": "integer", "minimum": 1},
+            "ref": {"type": "string", "maxLength": 12, "description": "取消他在本群设的私聊提醒时用编号 p…"},
             "all_mine": {"type": "boolean"},
         },
         permission_level=TOOL_PERMISSION_STATE_WRITE,

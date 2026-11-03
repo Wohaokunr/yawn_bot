@@ -124,7 +124,8 @@ async def _assist(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
     try:
         if kind == "reminder":
             payload.update({key: args[key] for key in ("at", "in_minutes") if args.get(key) is not None})
-            result = organizer.reminders(actor, payload, now)
+            origin = {"kind": "group", "group_id": int(context.group_id), "group_name": await _group_name(context)}
+            result = organizer.reminders(actor, payload, now, origin=origin)
             view = result.get("scheduled") or {}
             out = {"saved": "reminder", "when": view.get("due") or view.get("when"), "minutes_from_now": result.get("minutes_from_now")}
         elif kind == "todo":

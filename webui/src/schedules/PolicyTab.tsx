@@ -27,6 +27,15 @@ const SECTIONS: Array<{ title: string; description: string; keys: NumericKey[] }
   },
 ];
 
+const PRIVATE_KEYS: NumericKey[] = ["privateMaxActive", "privateMinIntervalMinutes", "privateRetryLimit"];
+
+const CROSS_SWITCHES: Array<{ key: "crossCreate" | "deliverToPrivate" | "notifyCreatorOnPause" | "privateAgentMode"; title: string; hint: string }> = [
+  { key: "crossCreate", title: "私聊里能管群定时任务", hint: "成员私聊时可以让 Bot 给他在的群设任务、改自己设的群任务；发到群里之前一定先等他下一句确认。群主/管理员还能管本群别人设的。" },
+  { key: "deliverToPrivate", title: "群里能设“到点私聊我”", hint: "群里说“明早 8 点私聊提醒我”时，提醒发到他的私聊，不在群里刷屏。需要他是好友、没有用 /退出。" },
+  { key: "notifyCreatorOnPause", title: "群任务被自动暂停时私聊告诉设的人", hint: "连续失败等原因自动暂停时，私聊说一声原因（同样只发给好友、没用 /退出 的人）。" },
+  { key: "privateAgentMode", title: "私聊提醒可选“到点替他去办”", hint: "到点让私聊的 Bot 自己开口去办（查天气、整理新闻等），会消耗模型额度；这一轮不能再设提醒、不能替他去群里说话。" },
+];
+
 function GroupListField({ label, value, error, placeholder, onChange }: { label: string; value: string[]; error?: string; placeholder: string; onChange: (ids: string[]) => void }): React.JSX.Element {
   const [text, setText] = useState(value.join("\n"));
   const [invalid, setInvalid] = useState<string[]>([]);
@@ -137,6 +146,32 @@ export function PolicyTab(): React.JSX.Element {
             <strong>允许“唤醒 Agent”方式</strong>
             <span className="sbx-muted">到点让 Agent 思考并可调用工具（会消耗模型额度）。关掉后只能建“直接提醒”。</span>
           </div>
+        </div>
+      </Card>
+
+      <Card size="small" title="私聊与跨端">
+        <p className="sbx-muted">私聊提醒和群定时任务共用同一套规则（每天/每周/每月/cron/时间窗/起止日期）；私聊提醒存在每人的个人数据里，私聊内容不会进任何群的提示词。</p>
+        {CROSS_SWITCHES.map((item) => (
+          <div className="sbx-switch-row" key={item.key}>
+            <Switch checked={draft[item.key]} onChange={(value) => set(item.key, value)} aria-label={item.title} />
+            <div>
+              <strong>{item.title}{draft[item.key] !== server[item.key] && <Tag color="gold">已修改</Tag>}</strong>
+              <span className="sbx-muted">{item.hint}</span>
+            </div>
+          </div>
+        ))}
+        <div className="sbx-field-grid sch-field-grid-3">
+          {PRIVATE_KEYS.map((key) => {
+            const range = SETTING_RANGES[key];
+            return (
+              <label className="sbx-field" key={key}>
+                <span className="sbx-field-label">{range.label}{draft[key] !== server[key] && <Tag color="gold">原 {server[key]}</Tag>}</span>
+                <InputNumber min={range.min} max={range.max} value={draft[key]} status={errors[key] ? "error" : undefined}
+                  onChange={(value) => set(key, typeof value === "number" ? Math.round(value) : range.min)} addonAfter={range.unit} style={{ width: "100%" }} aria-label={range.label} />
+                {errors[key] && <span className="sbx-field-error">{errors[key]}</span>}
+              </label>
+            );
+          })}
         </div>
       </Card>
 

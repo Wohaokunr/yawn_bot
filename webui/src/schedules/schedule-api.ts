@@ -1,6 +1,8 @@
 // 定时任务页的接口封装。
 import { api } from "../api";
 import type {
+  PrivateReminderDetail,
+  PrivateRemindersPage,
   SchedulePreview,
   ScheduleRule,
   ScheduleRunItem,
@@ -27,6 +29,17 @@ function query(params: Record<string, string | number | null | undefined>): stri
 export type TaskAction = "pause" | "resume" | "cancel" | "run";
 export type BulkAction = "pause" | "resume" | "cancel" | "delete";
 
+export type PrivateAction = "pause" | "resume" | "cancel";
+
+export interface PrivateFilters {
+  user?: string;
+  status?: string;
+  mode?: string;
+  source?: string;
+  q?: string;
+  limit?: number;
+}
+
 export interface TaskFilters {
   group?: string;
   status?: string;
@@ -42,7 +55,13 @@ export const scheduleApi = {
   tasks: (filters: TaskFilters, signal?: AbortSignal) =>
     api<ScheduleTasksPage>(`${BASE}/tasks${query({ ...filters })}`, { signal }).then((r) => r.data),
   task: (id: number, signal?: AbortSignal) => api<ScheduleTaskDetail>(`${BASE}/tasks/${id}`, { signal }).then((r) => r.data),
-  runs: (filters: { group?: string; result?: string; limit?: number }, signal?: AbortSignal) =>
+  privateList: (filters: PrivateFilters, signal?: AbortSignal) =>
+    api<PrivateRemindersPage>(`${BASE}/private${query({ ...filters })}`, { signal }).then((r) => r.data),
+  privateDetail: (userId: string, itemId: number, signal?: AbortSignal) =>
+    api<PrivateReminderDetail>(`${BASE}/private/${userId}/${itemId}`, { signal }).then((r) => r.data),
+  privateAction: (userId: string, itemId: number, action: PrivateAction) =>
+    api<{ changed: boolean; item: PrivateReminderDetail | { removed: true } }>(`${BASE}/private/${userId}/${itemId}/${action}`, { method: "POST" }).then((r) => r.data),
+  runs: (filters: { group?: string; result?: string; channel?: string; limit?: number }, signal?: AbortSignal) =>
     api<{ ready: boolean; items: ScheduleRunItem[] }>(`${BASE}/runs${query(filters)}`, { signal }).then((r) => r.data),
   preview: (schedule: ScheduleRule, maxRuns: number | null, mode: string, signal?: AbortSignal) =>
     api<SchedulePreview>(`${BASE}/preview`, { method: "POST", body: JSON.stringify({ schedule, maxRuns, mode }), signal }).then((r) => r.data),

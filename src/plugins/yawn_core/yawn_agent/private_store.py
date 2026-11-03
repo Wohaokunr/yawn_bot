@@ -25,7 +25,7 @@ T = TypeVar("T")
 LIMITS: dict[str, int] = {
     "notes": 100,
     "todos": 100,
-    "reminders": 30,
+    "reminders": 200,
     "countdowns": 20,
     "moods": 120,
 }

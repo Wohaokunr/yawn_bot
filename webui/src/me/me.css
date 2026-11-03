@@ -581,3 +581,79 @@
     align-items: stretch;
   }
 }
+
+/* 我的定时任务 */
+.me-schedule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.me-schedule-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.me-schedule-icon {
+  flex: none;
+  font-size: 18px;
+  color: var(--accent, #1677ff);
+  padding-top: 2px;
+}
+
+.me-schedule-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.me-schedule-title {
+  overflow-wrap: anywhere;
+}
+
+.me-schedule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.me-schedule-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+}
+
+.me-schedule-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.me-inline-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 560px) {
+  .me-schedule-row {
+    flex-wrap: wrap;
+  }
+
+  .me-schedule-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

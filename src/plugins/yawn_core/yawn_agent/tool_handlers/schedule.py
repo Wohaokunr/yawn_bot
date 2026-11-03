@@ -161,6 +161,8 @@ async def _create(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
     if context.actor_user_id is None:
         raise ToolError("定时任务需要明确的群成员调用者", code=ERROR_PERMISSION)
     settings = load_settings()
+    if str(args.get("deliver_to") or "group") == "private":
+        return await _create_private(args, context, settings)
     if not settings.enabled or not settings.group_open(context.group_id):
         raise ToolError("管理员没有在本群开放定时任务", code=ERROR_PERMISSION, hint="如实说明，不要假装设好了")
     is_admin = await _actor_is_admin(context)
@@ -213,6 +215,65 @@ async def _create(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
     return ToolHandlerResult(result, mutated_db=True, needs_commit=True)
 
 
+async def _group_name(context: ToolExecutionContext) -> str:
+    if context.session is not None:
+        try:
+            from ...data_models.bot_group import BotGroup
+
+            row = await context.session.get(BotGroup, int(context.group_id))
+            if row is not None and row.group_name:
+                return str(row.group_name)
+        except Exception:  # noqa: BLE001
+            dbg(f"群 {context.group_id} 读群名失败(忽略)")
+    return str(context.group_id)
+
+
+async def _create_private(args: dict[str, Any], context: ToolExecutionContext, settings: Any) -> ToolHandlerResult:
+    """在群里设“到点私聊提醒我”：写进他本人的私聊提醒（来源记成本群），到点私聊发。"""
+
+    from .. import agent_bridge as bridge
+    from .. import private_organizer as organizer
+    from .bridge import _reachable  # pyright: ignore[reportPrivateUsage]
+
+    if context.actor_user_id is None:
+        raise ToolError("私聊提醒只能替当前发言的成员本人设", code=ERROR_PERMISSION)
+    if not settings.deliver_to_private:
+        raise ToolError("管理员没开放在群里设私聊提醒", code=ERROR_PERMISSION, hint="改成在群里提醒（去掉 deliver_to），或请他私聊我")
+    actor = int(context.actor_user_id)
+    if not bridge.enabled():
+        raise ToolError("私聊协作没开，私聊提醒发不过去", code=ERROR_UNSUPPORTED, hint="改成在群里提醒")
+    await _reachable(context, actor)
+    payload: dict[str, Any] = {
+        "action": "preview" if args.get("dry_run") else "add",
+        "content": args.get("instruction"),
+        "schedule": schedule_from_args(args),
+        "mode": "agent" if str(args.get("mode") or "notify") == "agent" else "notify",
+    }
+    for key in ("title", "max_runs"):
+        if args.get(key):
+            payload[key] = args[key]
+    origin = {"kind": "group", "group_id": int(context.group_id), "group_name": await _group_name(context)}
+    now = now_beijing()
+    try:
+        result = organizer.reminders(actor, payload, now, origin=origin)
+    except ToolError:
+        raise
+    except Exception as exc:
+        raise ToolError(str(exc) or "没设上", code=ERROR_INVALID_ARGS, hint="照实告诉他没设上") from exc
+    if args.get("dry_run"):
+        return ToolHandlerResult({"dry_run": True, "deliver_to": "private", **result})
+    view = result.get("scheduled") or {}
+    dbg(f"群 {context.group_id} 成员 {actor} 设了私聊提醒 {view.get('ref')}")
+    return ToolHandlerResult(
+        {
+            "created": not result.get("reused"),
+            "deliver_to": "private",
+            "task": {"ref": view.get("ref"), "next_run": view.get("due"), "schedule": view.get("repeat"), "mode": "agent" if payload["mode"] == "agent" else "notify"},
+            "note": "到点我会私聊他（不在群里发）。群里只说设好了，他在私聊里也能查、能改（编号 " + str(view.get("ref")) + "）",
+        }
+    )
+
+
 async def _list(args: dict[str, Any], context: ToolExecutionContext) -> ToolHandlerResult:
     now = now_beijing()
     try:
@@ -241,16 +302,65 @@ async def _list(args: dict[str, Any], context: ToolExecutionContext) -> ToolHand
         "count": total,
         "tasks": [task_public_dict(row, now=now) for row in rows],
     }
+    if scope == "mine" and context.actor_user_id is not None:
+        # 他在本群让我设的私聊提醒（内容本来就是他在群里说的；私聊里设的其他提醒群里看不到）。
+        from ..schedule_hub import group_private_items
+
+        try:
+            mine_private = group_private_items(int(context.actor_user_id), int(context.group_id))
+        except Exception:  # noqa: BLE001
+            mine_private = []
+        if mine_private:
+            payload["private_reminders_set_here"] = [
+                {key: item[key] for key in ("ref", "what", "rule", "next", "status_label") if item.get(key)}
+                for item in mine_private[:10]
+            ]
     if total > len(rows):
         payload["truncated"] = True
-    if not rows:
+    if not rows and not payload.get("private_reminders_set_here"):
         payload["note"] = "没有符合条件的定时任务" + ("（只看了调用者自己的，scope=group 可看全群）" if scope == "mine" else "")
     return ToolHandlerResult(payload)
+
+
+async def _private_ref_op(args: dict[str, Any], context: ToolExecutionContext, action: str) -> ToolHandlerResult:
+    """群里改/停/取消“在本群设的私聊提醒”（ref=p…）：只能是他本人的、来源是本群的。"""
+
+    from .. import private_organizer as organizer
+    from ..schedule_hub import HubError, group_private_items, parse_ref
+
+    if context.actor_user_id is None:
+        raise ToolError("需要明确的调用者", code=ERROR_PERMISSION)
+    try:
+        channel, number = parse_ref(args.get("ref"))
+    except HubError as exc:
+        raise ToolError(str(exc), code=ERROR_INVALID_ARGS, hint=exc.hint) from exc
+    if channel == "group":
+        return await (_update if action != "cancel" else _cancel)({**args, "task_id": number, "ref": None}, context)
+    actor = int(context.actor_user_id)
+    if not any(item["ref"] == f"p{number}" for item in group_private_items(actor, int(context.group_id), include_finished=True)):
+        raise ToolError(
+            f"他在本群没有设过编号 p{number} 的私聊提醒",
+            code=ERROR_NOT_FOUND,
+            hint="群里只能动在本群设的私聊提醒；别的请他私聊我",
+        )
+    payload: dict[str, Any] = {"action": action, "id": number}
+    if action == "edit":
+        if args.get("instruction"):
+            payload["content"] = args["instruction"]
+        if args.get("kind"):
+            payload["schedule"] = schedule_from_args(args)
+            payload["kind"] = args["kind"]
+    result = organizer.reminders(actor, payload, now_beijing())
+    return ToolHandlerResult({"deliver_to": "private", **({"cancelled": 1} if action == "cancel" else {"updated": True}), "result": result})
 
 
 async def _update(args: dict[str, Any], context: ToolExecutionContext) -> ToolHandlerResult:
     now = now_beijing()
     action = str(args.get("action") or "edit")
+    if args.get("ref") and not args.get("task_id"):
+        return await _private_ref_op(args, context, action)
+    if not args.get("task_id"):
+        raise ToolError("要给 task_id（群任务）或 ref（p… 私聊提醒）", code=ERROR_INVALID_ARGS, hint="先用 list_scheduled_tasks 查看")
     try:
         task = await _owned_task(context, int(args["task_id"]))
         if task.status not in OPEN_STATUSES and action != "edit":
@@ -330,6 +440,8 @@ async def _cancel(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
                 mutated_db=bool(rows),
                 needs_commit=bool(rows),
             )
+        if args.get("ref") and not args.get("task_id"):
+            return await _private_ref_op(args, context, "cancel")
         if not args.get("task_id"):
             raise ToolError("要给 task_id 或 all_mine=true", code=ERROR_INVALID_ARGS, hint="先用 list_scheduled_tasks 找到 task_id")
         task = await _owned_task(context, int(args["task_id"]))
