@@ -444,20 +444,27 @@ async def get_memory_link(
     return ok(memory_link.overview(limit))
 
 
+async def _memory_link_detail(user_id: int) -> dict[str, Any]:
+    # 注意：路由参数里的 session 是 WebUI 登录会话，不是数据库会话；
+    # 之前直接传进 user_detail 会在 session.execute 处 500，页面就打不开某位用户。
+    async with get_session() as db:
+        return await memory_link.user_detail(db, user_id)
+
+
 @router.get("/memory-link/users/{user_id}")
 async def get_memory_link_user(
-    user_id: int, session: AdminReadSession
+    user_id: int, _session: AdminReadSession
 ) -> dict[str, Any]:
     """一位用户的记忆打通：设置、忘掉的记录、流动记录、私聊事实、各群画像、每个群看得到的共享事实。"""
 
     if user_id <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "userId 不对")
-    return ok(await memory_link.user_detail(session, user_id))
+    return ok(await _memory_link_detail(user_id))
 
 
 @router.post("/memory-link/users/{user_id}/unshare")
 async def post_memory_link_unshare(
-    user_id: int, session: AdminWriteSession
+    user_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     """撤掉他全部“群里也知道”的共享（管理员只能收紧，不能替他打开）。"""
 
@@ -468,24 +475,24 @@ async def post_memory_link_unshare(
         memory_link.set_share(
             user_id, list(state.share_keys), on=False, now=now_beijing()
         )
-    return ok(await memory_link.user_detail(session, user_id))
+    return ok(await _memory_link_detail(user_id))
 
 
 @router.post("/memory-link/users/{user_id}/reset")
 async def post_memory_link_reset(
-    user_id: int, session: AdminWriteSession
+    user_id: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     """恢复默认（不共享、不静音、私聊里可以提群里的事）；“忘掉”的记录保留。"""
 
     from ..yawn_agent.context import now_beijing
 
     memory_link.admin_reset(user_id, now=now_beijing())
-    return ok(await memory_link.user_detail(session, user_id))
+    return ok(await _memory_link_detail(user_id))
 
 
 @router.delete("/memory-link/users/{user_id}/tombstones/{index}")
 async def delete_memory_link_tombstone(
-    user_id: int, index: int, session: AdminWriteSession
+    user_id: int, index: int, _session: AdminWriteSession
 ) -> dict[str, Any]:
     """删掉一条“忘掉”记录（之后自动整理可能重新记起这件事）。"""
 
@@ -493,7 +500,7 @@ async def delete_memory_link_tombstone(
 
     if not memory_link.drop_tombstone(user_id, index, now=now_beijing()):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "没有这条记录")
-    return ok(await memory_link.user_detail(session, user_id))
+    return ok(await _memory_link_detail(user_id))
 
 
 @router.put("/captures/settings")

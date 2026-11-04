@@ -1,9 +1,9 @@
 import { DeleteOutlined, HistoryOutlined, LinkOutlined, ReloadOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
-import { Alert, App as AntApp, Button, Empty, Popconfirm, Skeleton, Space, Tag, Typography } from "antd";
+import { Alert, App as AntApp, Button, Empty, Input, Popconfirm, Skeleton, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 import { QueryErrorAlert, useApiQuery } from "../shared";
 import { privateApi, type MemoryLinkEvent, type MemoryLinkUserDetail } from "./private-api";
-import { memoryKeyLabel } from "./private-meta";
+import { cleanUserId, memoryKeyLabel } from "./private-meta";
 
 const { Text, Paragraph } = Typography;
 
@@ -141,6 +141,20 @@ export function MemoryLinkTab({ userId, onPickUser }: { userId: string; onPickUs
         <Tag color={data.totals.muting ? "orange" : "default"}>静音了群 {data.totals.muting} 人</Tag>
         <Tag>让 Bot 忘掉过 {data.totals.forgetting} 人</Tag>
         <span className="dbg-grow" />
+        <Input.Search
+          size="small"
+          allowClear
+          key={userId}
+          defaultValue={userId}
+          placeholder="查某位用户的 QQ"
+          aria-label="查某位用户的记忆打通"
+          style={{ width: 180 }}
+          onSearch={(value) => {
+            const qq = cleanUserId(value);
+            if (qq) onPickUser(qq);
+            else if (!value.trim()) onPickUser(null);
+          }}
+        />
         {userId && <Button size="small" onClick={() => onPickUser(null)}>看全部</Button>}
         <Button size="small" icon={<ReloadOutlined />} onClick={query.reload} loading={query.refreshing}>刷新</Button>
       </div>
@@ -154,7 +168,7 @@ export function MemoryLinkTab({ userId, onPickUser }: { userId: string; onPickUs
     {userId ? <UserMemoryLink userId={userId} /> : <>
       <section className="dbg-panel">
         <Text strong><UserOutlined /> 改过设置的用户</Text>
-        {data.users.length === 0 ? <Empty description="还没有人改过记忆打通设置" /> : <ul className="pa-user-list pa-bridge-list" aria-label="改过设置的用户">
+        {data.users.length === 0 ? <Empty description="还没有人改过记忆打通设置（默认都不共享）。在上方输入 QQ 可以查看某位用户私聊里记得什么、各群带进私聊什么" /> : <ul className="pa-user-list pa-bridge-list" aria-label="改过设置的用户">
           {data.users.map((row) => <li key={row.user_id}>
             <div className="pa-bridge-main">
               <Button size="small" type="link" onClick={() => onPickUser(row.user_id)}>{row.user_id}</Button>

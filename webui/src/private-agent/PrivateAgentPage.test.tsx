@@ -196,6 +196,14 @@ describe("PrivateAgentPage", () => {
     expect(screen.getByText(/群里也知道：希望的称呼/)).toBeTruthy();
   });
 
+  it("lets an admin look up any user by QQ from the memory tab", async () => {
+    renderAt("/private-agent?pa.tab=memory");
+    const box = await screen.findByRole("searchbox", { name: "查某位用户的记忆打通" });
+    fireEvent.change(box, { target: { value: "12345" } });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(await screen.findByText(/群里能看到：希望的称呼「阿明」/)).toBeTruthy();
+  });
+
   it("shows one user's flows per group and lets an admin revoke sharing", async () => {
     renderAt("/private-agent?pa.tab=memory&pa.user=12345");
     expect(await screen.findByText(/群里能看到：希望的称呼「阿明」/)).toBeTruthy();
