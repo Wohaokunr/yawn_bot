@@ -363,6 +363,8 @@ async def my_affinity(session: UserReadSession) -> dict[str, Any]:
     async with get_session() as db:
         payload = await _affinity_payload(db, user_id)
     payload["tones"] = dict(affinity.LEVEL_TONE)
+    # payload["today"] 是 {来源: 今天已得}（和管理台同口径）；页面另要一个合计
+    payload["todayTotal"] = sum(payload["today"].values())
     return ok(payload)
 
 

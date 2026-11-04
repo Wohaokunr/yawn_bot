@@ -33,7 +33,7 @@ export function MyAffinityPage(): React.JSX.Element {
           <strong className="me-level-name">{data.level}</strong>
           <Text type="secondary" className="me-hint">{data.tones[data.level] ?? ""}</Text>
           <Progress percent={Math.round(data.progress * 100)} showInfo={false} strokeColor="var(--brand)" aria-label="升级进度" />
-          <Text type="secondary" className="me-hint">{data.nextLevel ? `再 ${data.toNext ?? 0} 点升到「${data.nextLevel}」` : "已经是最高等级啦"} · 今天 +{data.today}</Text>
+          <Text type="secondary" className="me-hint">{data.nextLevel ? `再 ${data.toNext ?? 0} 点升到「${data.nextLevel}」` : "已经是最高等级啦"} · 今天 +{data.todayTotal}</Text>
         </div>
         <ol className="me-level-ladder" aria-label="等级">
           {data.levels.map((level, index) => (
@@ -46,7 +46,7 @@ export function MyAffinityPage(): React.JSX.Element {
 
       <div className="me-stat-row">
         <StatTile label="好感点数" value={data.points} tone="brand" />
-        <StatTile label="今天获得" value={`+${data.today}`} />
+        <StatTile label="今天获得" value={`+${data.todayTotal}`} />
         <StatTile label="签到的群" value={data.groups.filter((group) => group.totalDays > 0).length} sub={`共 ${data.groups.length} 个群`} />
         <StatTile label="最长连签" value={`${Math.max(0, ...data.groups.map((group) => group.streakDays))} 天`} tone="warning" />
       </div>
@@ -64,7 +64,7 @@ export function MyAffinityPage(): React.JSX.Element {
               ))}
             </ul>
           )}
-          <Text type="secondary" className="me-hint">每天每种来源有上限：{Object.values(data.sources).filter((rule) => rule.dailyCap !== null).map((rule) => `${rule.label} ${rule.dailyCap}`).join("、")}</Text>
+          <Text type="secondary" className="me-hint">每天每种来源有上限（今天已得/上限）：{Object.entries(data.sources).filter(([, rule]) => rule.dailyCap !== null).map(([source, rule]) => `${rule.label} ${data.today[source] ?? 0}/${rule.dailyCap}`).join("、")}</Text>
         </MeSection>
         <MeSection icon={<CalendarOutlined />} title="各群签到" hint="群里发 /签到；连签越久奖励越多。">
           {data.groups.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还不在任何群里" /> : (

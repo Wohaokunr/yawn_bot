@@ -93,7 +93,7 @@ describe("我的空间 2.0", () => {
       if (path === "/me/chats") return ok([{ id: "5", title: null, where: "private", groupId: null, groupName: null, messages: 2, mine: 1, createdAt: null, updatedAt: null, firstAt: "2026-11-04T09:00:00", lastAt: "2026-11-04T09:01:00", preview: "早呀" }]);
       if (path.startsWith("/me/chats/5/messages")) return ok([{ id: "1", role: "user", content: "早", at: "2026-11-04T09:00:00" }, { id: "2", role: "assistant", content: "早呀", at: "2026-11-04T09:01:00" }], { hasMore: false, before: "1" });
       if (path.startsWith("/me/chats/search")) return ok([{ chatId: "5", messageId: "2", role: "assistant", at: "2026-11-04T09:01:00", snippet: "早呀", chatTitle: null, where: "private" }]);
-      if (path === "/me/affinity") return ok({ userId: "1", points: 70, level: "熟人", levelIndex: 2, nextLevel: "朋友", toNext: 80, progress: 0.11, today: 2, available: true, levels: [{ floor: 0, name: "陌生" }, { floor: 20, name: "面熟" }, { floor: 60, name: "熟人" }, { floor: 150, name: "朋友" }], sources: { checkin: { label: "签到", dailyCap: 5 } }, breakdown30d: { checkin: 12 }, events: [{ id: 1, group_id: 900001, source: "checkin", source_label: "签到", delta: 2, balance_after: 70, note: "", day: "2026-11-04", created_at: "2026-11-04T08:00:00" }], groups: [{ groupId: "900001", groupName: "猫猫群", groupAffinity: 3, checkedToday: true, streakDays: 4, totalDays: 10, points: 100, exp: 50, lastCheckinDate: "2026-11-04" }], tones: { 熟人: "比较熟了，可以开开玩笑" } });
+      if (path === "/me/affinity") return ok({ userId: "1", points: 70, level: "熟人", levelIndex: 2, nextLevel: "朋友", toNext: 80, progress: 0.11, today: { checkin: 2 }, todayTotal: 2, available: true, levels: [{ floor: 0, name: "陌生" }, { floor: 20, name: "面熟" }, { floor: 60, name: "熟人" }, { floor: 150, name: "朋友" }], sources: { checkin: { label: "签到", dailyCap: 5 } }, breakdown30d: { checkin: 12 }, events: [{ id: 1, group_id: 900001, source: "checkin", source_label: "签到", delta: 2, balance_after: 70, note: "", day: "2026-11-04", created_at: "2026-11-04T08:00:00" }], groups: [{ groupId: "900001", groupName: "猫猫群", groupAffinity: 3, checkedToday: true, streakDays: 4, totalDays: 10, points: 100, exp: 50, lastCheckinDate: "2026-11-04" }], tones: { 熟人: "比较熟了，可以开开玩笑" } });
       if (path === "/me/tasks") return ok({ tasksEnabled: true, taskLimits: { perUser: 2, daily: 10, timeoutSeconds: 600 }, tasks: [{ id: "t3", title: "查天气", goal: "查本周天气", state: "running", status: "进行中", toolsets: [], createdAt: null, startedAt: null, finishedAt: null, progress: [{ at: "2026-11-04 09:00", note: "在查", step: 1, total: 2 }], summary: null, error: null, question: null, files: [], reported: false, held: false }], tasksToday: 1, computer: null, projects: [] });
       if (path === "/me/tasks/t3") return ok({ tasksEnabled: true, taskLimits: { perUser: 2, daily: 10, timeoutSeconds: 600 }, tasks: [], tasksToday: 1, computer: null, projects: [], cancelled: true });
       if (path === "/me/joined-groups") return ok([
@@ -178,6 +178,7 @@ describe("我的空间 2.0", () => {
     expect(screen.getByText("比较熟了，可以开开玩笑")).toBeInTheDocument();
     expect(screen.getByText("再 80 点升到「朋友」 · 今天 +2")).toBeInTheDocument();
     expect(screen.getByText("连签 4")).toBeInTheDocument();
+    expect(screen.getByText(/签到 2\/5/)).toBeInTheDocument();
   });
 
   it("cancels a running helper task", async () => {

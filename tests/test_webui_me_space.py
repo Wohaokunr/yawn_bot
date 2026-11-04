@@ -297,3 +297,25 @@ def test_personal_werewolf_stats_pure():
 def test_games_endpoint_degrades(me):
     data = _get(me, "/me/games")
     assert "available" in data
+
+
+
+def test_affinity_today_is_per_source_with_total(me):
+    """回归：today 是 {来源: 今天已得}，页面曾把它当数字渲染直接崩掉。"""
+
+    affinity_mod = importlib.import_module(f"{_PKG}.affinity")
+    # 别的测试可能留下“流水表缺失”的进程级缓存，那样 grant 会直接跳过
+    affinity_mod.reset_ledger_state()
+
+    async def seed():
+        async with me.factory() as session:
+            await affinity_mod.grant(session, OWNER, "checkin", 5, group_id=G_OWNED)
+            await affinity_mod.grant(session, OWNER, "private_chat", 2)
+            await session.commit()
+
+    asyncio.run(seed())
+    data = _get(me, "/me/affinity")
+    assert data["today"] == {"checkin": 5, "private_chat": 2}
+    assert data["todayTotal"] == 7
+    assert _get(me, "/me/dashboard")["affinity"]["today"] == 7
+    affinity_mod.reset_ledger_state()
