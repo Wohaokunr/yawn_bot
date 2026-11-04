@@ -260,7 +260,8 @@ async def my_dashboard(session: UserReadSession) -> dict[str, Any]:
                 "level": level.name,
                 "nextLevel": level.next_name,
                 "progress": level.progress(snap.points),
-                "today": snap.today,
+                # snapshot.today 是 {来源: 今天已得}，概览只要合计
+                "today": sum(snap.today.values()),
             },
             "checkin": {
                 "groups": len(checkins),

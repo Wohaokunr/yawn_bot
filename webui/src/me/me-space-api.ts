@@ -210,7 +210,9 @@ export interface AffinityState {
   nextLevel: string | null;
   toNext: number | null;
   progress: number;
-  today: number;
+  /** 今天各来源已得的好感，和管理台同口径 */
+  today: Record<string, number>;
+  todayTotal: number;
   available: boolean;
   levels: Array<{ floor: number; name: string }>;
   sources: Record<string, { label: string; dailyCap: number | null }>;
