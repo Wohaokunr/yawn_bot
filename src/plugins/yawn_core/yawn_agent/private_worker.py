@@ -5,7 +5,7 @@
 以及续做时用户的回答。**看不到**聊天记录、用户资料、好感、群数据和记忆——这正是
 “避免上下文腐烂”的做法：主智能体的上下文里只会出现任务单和有长度上限的结果。
 
-工具按任务单的 ``toolsets`` 发：web（联网）、computer（他的虚拟电脑）、toolbox
+工具按任务单的 ``toolsets`` 发：web（联网）、computer（他的虚拟电脑）、toolbox（电脑用不了时的备用）
 （小工具），外加永远有的 finish / ask_user / report_progress。子智能体没有任何会
 改个人数据或发消息的工具；联网和电脑次数与主智能体共用同一份每人配额。
 
@@ -193,6 +193,36 @@ def _private_tool_spec(name: str) -> dict[str, Any]:
     }
 
 
+# 子智能体里可以去重的只读调用（computer_files 只算 list/read/info）。
+# 小工具箱不算：掷骰子、抛硬币、随机选每次都该是新结果。
+_READ_ONLY_WORKER_TOOLS = frozenset({"web_search", "web_fetch", "computer_kits"})
+
+
+def _read_key(name: str, args: dict[str, Any]) -> str | None:
+    """只读调用的去重键；会改东西的（跑代码、能力、删文件）返回 None。"""
+
+    readonly = name in _READ_ONLY_WORKER_TOOLS or (
+        name == "computer_files" and str(args.get("action") or "") in {"list", "read", "info"}
+    )
+    if not readonly:
+        return None
+    return name + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _effective_toolsets(raw: list[str] | tuple[str, ...]) -> list[str]:
+    """小工具箱只是电脑用不了时的备用：有电脑就用电脑现场算（旧任务单里的 toolbox 也换掉）。"""
+
+    toolsets = [key for key in raw if key in TOOLSETS]
+    if "toolbox" in toolsets:
+        from .private_computer import computer_ready
+
+        if "computer" in toolsets or computer_ready():
+            toolsets = [key for key in toolsets if key != "toolbox"]
+            if "computer" not in toolsets:
+                toolsets.append("computer")
+    return toolsets
+
+
 def tool_specs(toolsets: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     for key in toolsets:
@@ -326,6 +356,16 @@ async def _execute(
     return await execute_private_tool(name, args, ctx)
 
 
+# 子智能体单个工具结果进上下文的字符上限（以前不限，读一个长网页就能占掉几万字）。
+WORKER_TOOL_RESULT_CHARS = 16000
+
+
+def _worker_tool_content(payload: dict[str, Any]) -> str:
+    from .private_agent import tool_content
+
+    return tool_content(payload, WORKER_TOOL_RESULT_CHARS)
+
+
 def _clip(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
@@ -447,7 +487,9 @@ def compact_history(
             stub += f" 文件：{' '.join(refs)}"
         item["content"] = stub
         compacted += 1
-        if _context_chars(history) <= budget * 3 // 4:
+        # 一次压到预算的一半：压缩会改动前面的消息（前缀缓存从这里断），
+        # 压得狠一点，接下来很多轮都不用再压，前缀又能连续命中。
+        if _context_chars(history) <= budget // 2:
             break
     return compacted
 
@@ -518,7 +560,7 @@ async def _run_worker(
     续期前提示它看计划和备忘接着做；整体仍受 ``private_tasks`` 的总时限约束。
     """
 
-    toolsets = [key for key in task.get("toolsets") or [] if key in TOOLSETS]
+    toolsets = _effective_toolsets(task.get("toolsets") or [])
     if messages:
         history = list(messages)
         if answer:
@@ -533,9 +575,10 @@ async def _run_worker(
             )
     else:
         history = build_worker_messages(task, now)
-    schemas = [_schema(spec) for spec in tool_specs(toolsets)]
+    specs = tool_specs(toolsets)
+    schemas = [_schema(spec) for spec in specs]
     finish_only = [_schema(CONTROL_SPECS[0])]
-    by_name = {spec["name"]: spec for spec in tool_specs(toolsets)}
+    by_name = {spec["name"]: spec for spec in specs}
     state: dict[str, Any] = {"runs": 0}
     seen_refs: set[str] = set(task.get("seen_refs") or [])
     # 任务单（含队友成果）里出现的文件引用也算“见过”，可以交付。
@@ -698,16 +741,31 @@ async def _run_worker(
                         )
                         payload = {"ok": True, "result": "已交付"}
             else:
-                payload = await _execute(
-                    name, args, user_id=user_id, now=now, toolsets=toolsets, state=state
-                )
+                key = _read_key(name, args)
+                seen_calls: dict[str, int] = state.setdefault("seen_calls", {})
+                if key is not None and key in seen_calls:
+                    # 一模一样的只读调用（同一个搜索词、同一页、同一个文件）：不再执行、不再塞一遍。
+                    payload = {
+                        "ok": True,
+                        "result": f"和第 {seen_calls[key]} 轮同样的调用一样，结果见上文",
+                        "same_as_before": True,
+                    }
+                else:
+                    payload = await _execute(
+                        name, args, user_id=user_id, now=now, toolsets=toolsets, state=state
+                    )
+                    if key is None:
+                        # 跑过代码、删过文件：文件列表/内容可能变了，之前的只读结果作废。
+                        seen_calls.clear()
+                    elif payload.get("ok"):
+                        seen_calls[key] = round_index + 1
                 if payload.get("ok"):
                     seen_refs.update(_refs_in(payload.get("result")))
             history.append(
                 {
                     "role": "tool",
                     "tool_call_id": call["id"],
-                    "content": json.dumps(payload, ensure_ascii=False, default=str),
+                    "content": _worker_tool_content(payload),
                 }
             )
         if stop is not None:

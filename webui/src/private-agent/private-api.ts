@@ -365,12 +365,29 @@ export interface CachePipelineStats {
   recent: CacheCall[];
 }
 
+export interface ToolDisclosure {
+  mode: "progressive" | "full";
+  direct: string[];
+  available: number;
+  tableChars: number;
+  fullChars: number;
+}
+
+export interface ToolUsage {
+  open?: Record<string, number>;
+  use?: Record<string, number>;
+  direct?: Record<string, number>;
+  fixed?: Record<string, number>;
+}
+
 export interface CacheStats {
   pipelines: Record<string, CachePipelineStats>;
   cachedTokens: number;
   missTokens: number;
   hitRate: number | null;
   anchoredUsers: number;
+  tools?: ToolUsage;
+  disclosure?: ToolDisclosure | null;
 }
 
 export interface RhythmShape {

@@ -102,9 +102,9 @@ COMPUTER_TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "name": "run_code",
         "description": (
-            "在这位用户专属的虚拟电脑（Linux 沙箱，有 Python 3 和常用科学计算库，matplotlib 已配好中文字体；能否联网看 computer_files info）里运行代码："
-            "数据分析、画图表、处理他发来的文件、做表格、作曲、精确计算都用它。language=python 运行 Python，shell 运行 bash 命令。"
-            "文件在他的工作区里会一直保留；他发来的图片/文件在 inbox/ 下。运行结果的 files 里会给出新文件的 sandbox: 引用"
+            "在他专属的虚拟电脑（Linux，Python 3 + 常用科学计算库，matplotlib 已配好中文字体）里跑代码："
+            "精确计算、单位换算、日期、随机、别处几点，数据分析、画图、处理他发来的文件、做表格都用它。"
+            "language=python 或 shell（bash）。工作区文件一直保留，他发来的在 inbox/；结果的 files 是新文件的 sandbox: 引用"
         ),
         "properties": {
             "language": {"type": "string", "enum": ["python", "shell"]},

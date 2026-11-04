@@ -278,6 +278,9 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
     from ..private_chat_bridge import auto_paused, private_memory_query
 
     action = str(args.get("action") or "summary")
+    if action == "chat":
+        # 原 chat_history 的 stats（搜索并进了 recall）。
+        return await chat_history(ctx, {"action": "stats"})
     if action == "quota":
         cap = int(private_agent_config.private_agent_daily_turns)
         used = await turns_today(ctx.session, ctx.user_id, ctx.now)

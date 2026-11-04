@@ -564,7 +564,7 @@ def _clean_members(raw: Any) -> list[dict[str, Any]]:
         )
         if not tools:
             raise ToolError(
-                f"成员 {name} 的 tools 只能选 web/computer/toolbox",
+                f"成员 {name} 的 tools 只能选 web/computer",
                 code=ERROR_INVALID_ARGS,
             )
         members.append(

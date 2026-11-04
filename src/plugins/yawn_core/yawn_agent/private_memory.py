@@ -54,7 +54,7 @@ MAX_FACTS = len(SELF_FACT_KEYS)
 # 每多少条用户消息整理一次。
 CONSOLIDATE_EVERY = 6
 # 整理时最多看最近多少条私聊消息。
-CONSOLIDATE_WINDOW = 30
+CONSOLIDATE_WINDOW = 20
 _CONTENT_LIMIT = 100
 
 KEY_LABELS = PRIVATE_MEMORY_LABELS
@@ -261,6 +261,7 @@ async def user_message_count(session: Any, user_id: int) -> int:
 
 
 _KNOWN_FACT_CHARS = 60
+_BOT_LINE_CHARS = 120
 
 
 async def _consolidate_input(
@@ -324,7 +325,9 @@ async def _recent_user_lines(session: Any, user_id: int) -> list[str]:
     lines = []
     for role, content in reversed(rows):
         speaker = "user" if role == "user" else "bot"
-        lines.append(f"{speaker}: {str(content or '')[:300]}")
+        # 只从他说的话里整理事实；Bot 的话只用来看上下文和写回顾，截短一些省 token。
+        limit = 300 if role == "user" else _BOT_LINE_CHARS
+        lines.append(f"{speaker}: {str(content or '')[:limit]}")
     return lines
 
 

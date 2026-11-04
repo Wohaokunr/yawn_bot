@@ -57,9 +57,11 @@ async def _run(ctx, name, **args):
 
 def test_tool_table_is_complete_and_safe() -> None:
     names = [tool.name for tool in ptools.ALL_TOOLS]
-    # 32 个 + 私聊人设 my_persona + 网页个人账号 webui_account + 新人引导 webui_onboarding
-    # + 群管代办 group_manage（只给群主/管理员）+ 记忆打通 memory_link + 定时任务 schedules + 主动提议 offers
-    assert len(names) == len(set(names)) == 41
+    # 2026-11 精简：六个状态查询并成 my_status，what_you_remember/chat_history 并进 recall/my_data，
+    # webui_onboarding 并进 webui_account，toolbox 只在电脑用不了时出现 → 33 个
+    assert len(names) == len(set(names)) == 33
+    for old in ptools.LEGACY_ALIASES:
+        assert old not in names and ptools.LEGACY_ALIASES[old][0] in names
     # 虚拟电脑 4 个（含能力包目录与执行）+ 小助手任务 3 个，只在可用时才出现在 schema 里
     assert set(names) >= ptools.COMPUTER_NAMES | ptools.TASK_NAMES
     for tool in ptools.ALL_TOOLS:
@@ -273,11 +275,13 @@ async def test_chat_history_search_and_stats(maker) -> None:
         )
         await session.commit()
         ctx = await _tool_ctx(session)
-        hits = (await _run(ctx, "chat_history", action="search", keyword="杭州"))["result"]["hits"]
+        # chat_history 合并了：搜索并进 recall（窗口外的旧私聊），统计并进 my_data chat；旧名照样能调。
+        searched = (await _run(ctx, "chat_history", action="search", keyword="杭州"))["result"]
         stats = (await _run(ctx, "chat_history", action="stats"))["result"]
-    # 本轮刚说的那句被跳过
-    assert [h["who"] for h in hits] == ["你", "他"]
+        chat = (await _run(ctx, "my_data", action="chat"))["result"]
+    assert searched["query"] == "杭州" and "in_private_chat" in searched
     assert stats["your_messages"] == 2 and stats["days_chatted"] == 2
+    assert chat == stats
 
 
 @pytest.mark.asyncio

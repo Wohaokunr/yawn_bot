@@ -246,6 +246,28 @@ class _Stats:
 
 
 _STATS: dict[str, _Stats] = {}
+# 渐进式工具披露的用量（进程内）：展开了哪些族、经 use_tool 调了什么、直达工具、参数被纠正几次。
+_TOOL_USE: dict[str, dict[str, int]] = {"open": {}, "use": {}, "direct": {}, "fixed": {}}
+
+
+def record_tool(kind: str, name: str) -> None:
+    """记一次工具披露事件（kind: open / use / direct / fixed）。"""
+
+    with _LOCK:
+        bucket = _TOOL_USE.setdefault(kind, {})
+        bucket[name] = bucket.get(name, 0) + 1
+
+
+def _tool_usage_unlocked() -> dict[str, Any]:
+    return {
+        kind: dict(sorted(bucket.items(), key=lambda item: -item[1])[:20])
+        for kind, bucket in _TOOL_USE.items()
+    }
+
+
+def tool_usage() -> dict[str, Any]:
+    with _LOCK:
+        return _tool_usage_unlocked()
 
 
 def record_usage(
@@ -316,6 +338,7 @@ def usage_snapshot() -> dict[str, Any]:
             "missTokens": total_miss,
             "hitRate": round(total_hit / grand, 4) if grand else None,
             "anchoredUsers": len(_ANCHORS),
+            "tools": _tool_usage_unlocked(),
         }
 
 
@@ -326,6 +349,8 @@ def reset() -> None:
         _ANCHORS.clear()
         _PREFIXES.clear()
         _STATS.clear()
+        for bucket in _TOOL_USE.values():
+            bucket.clear()
 
 
 __all__ = [
@@ -336,7 +361,9 @@ __all__ = [
     "forget_user",
     "layer_digest",
     "note_prefix",
+    "record_tool",
     "record_usage",
     "reset",
+    "tool_usage",
     "usage_snapshot",
 ]

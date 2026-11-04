@@ -71,6 +71,18 @@ def _isolated_private_store(tmp_path, monkeypatch):
     memory_link.reset()
 
 
+def tool_names(tools: list[dict[str, Any]]) -> set[str]:
+    """工具表里模型能用的全部工具名：直达工具 + use_tool 能调的。"""
+
+    names: set[str] = set()
+    for tool in tools:
+        function = tool.get("function") or {}
+        names.add(str(function.get("name")))
+        if function.get("name") == "use_tool":
+            names.update(function["parameters"]["properties"]["tool"]["enum"])
+    return names
+
+
 @pytest_asyncio.fixture
 async def maker():
     affinity.reset_ledger_state()
@@ -620,10 +632,9 @@ async def test_turn_runs_tools_then_replies_in_parts(maker, monkeypatch) -> None
     first = seen[0]["messages"]
     assert first[0]["role"] == "system" and "私聊" in first[0]["content"]
     assert "关于这位用户" in first[1]["content"]
-    assert {t["function"]["name"] for t in seen[0]["tools"]} >= {
-        "checkin",
-        "group_recent",
-    }
+    # 渐进式披露：族里的工具不单独列出，经 use_tool 调用（它的 tool 枚举里有）。
+    assert tool_names(seen[0]["tools"]) >= {"checkin", "group_recent"}
+    assert {t["function"]["name"] for t in seen[0]["tools"]} >= {"open_tools", "use_tool"}
     tool_msg = seen[1]["messages"][-1]
     assert tool_msg["role"] == "tool" and json.loads(tool_msg["content"])["ok"] is True
 
