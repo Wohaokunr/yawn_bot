@@ -37,7 +37,7 @@ JOB_ID = "yawn_private_offer_tick"
 TICK_SECONDS = 60
 # 提议回合只放行这些只读工具：能查一查再问，但不能真的开始做（等他答应了再做）。
 OFFER_ALLOWED_TOOLS = frozenset(
-    {"recall", "what_you_remember", "my_overview", "checkin_status", "our_relationship", "group_recent"}
+    {"recall", "my_status", "group_recent"}
 )
 
 

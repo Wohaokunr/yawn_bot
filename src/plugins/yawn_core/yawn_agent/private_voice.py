@@ -173,11 +173,11 @@ def natural_progress(
 
 
 def infer_toolsets(*, computer: bool, has_refs: bool = False) -> list[str]:
-    """派活没写 tools 时的默认：联网 + 小工具，电脑可用或有文件要处理时加上电脑。"""
+    """派活没写 tools 时的默认：联网 + 虚拟电脑（算数、换算、处理文件都现场写代码）；
+    电脑用不了时才换成备用的小工具箱。"""
 
-    tools = {"web", "toolbox"}
-    if computer or has_refs:
-        tools.add("computer")
+    tools = {"web"}
+    tools.add("computer" if computer or has_refs else "toolbox")
     return sorted(tools)
 
 
@@ -202,9 +202,14 @@ def handoff_findings(messages: list[dict[str, Any]]) -> str:
     used = 0
     for item in messages[start:]:
         if item.get("role") == "assistant":
+            from .private_tool_catalog import inner_name
+
             for call in item.get("tool_calls") or []:
                 function = call.get("function") or {}
-                names[str(call.get("id"))] = str(function.get("name") or "")
+                # use_tool 包着的显示真实工具名，后台那边才看得懂查过什么。
+                names[str(call.get("id"))] = inner_name(
+                    str(function.get("name") or ""), function.get("arguments")
+                )
         elif item.get("role") == "tool":
             name = names.get(str(item.get("tool_call_id")), "工具")
             content = " ".join(str(item.get("content") or "").split())

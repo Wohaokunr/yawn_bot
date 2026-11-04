@@ -11,7 +11,7 @@
   命令优先级高于对话监听并阻断传播，不会进对话历史、Agent 上下文或记忆。
 - 回复里从不复述密码。
 
-新人引导（私聊 Agent 的 ``webui_onboarding`` 工具）：
+新人引导（私聊 Agent 的 ``webui_account`` 工具 guide/ask_password/cancel）：
 - Agent 调 ``ask_password`` 时只是“开一次收密码的窗口”（``arm_password_capture``），
   提示由 Bot 直接私发；他接下来发的那一条私聊由本模块 ``capture_listener``
   （优先级 -3，先于一切私聊监听）直接收走：校验、scrypt 哈希、回结果和登录链接。

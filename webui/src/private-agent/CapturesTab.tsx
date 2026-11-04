@@ -2,7 +2,7 @@ import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Alert, App as AntApp, Button, Empty, Popconfirm, Skeleton, Space, Switch, Tag, Typography } from "antd";
 import { PromptSnapshotView } from "../agent-prompts/PromptSnapshotView";
 import { formatTime, QueryErrorAlert, useApiQuery } from "../shared";
-import { privateApi } from "./private-api";
+import { privateApi, type CacheStats } from "./private-api";
 import { formatHitRate, pipelineLabel, PERSONA_SOURCE_LABELS, PREFIX_LAYER_LABELS, withPipelineTask } from "./private-meta";
 
 const { Text, Paragraph } = Typography;
@@ -34,6 +34,33 @@ function UserCaptures({ userId, onOpenSection }: { userId: string; onOpenSection
   </section>;
 }
 
+function sumCounts(bucket: Record<string, number> | undefined): number {
+  return Object.values(bucket ?? {}).reduce((total, value) => total + value, 0);
+}
+
+function topNames(bucket: Record<string, number> | undefined, limit = 4): string {
+  return Object.entries(bucket ?? {}).slice(0, limit).map(([name, count]) => `${name}×${count}`).join("、");
+}
+
+function ToolDisclosureLine({ data }: { data: CacheStats }): React.JSX.Element | null {
+  const info = data.disclosure;
+  if (!info) return null;
+  const saved = info.fullChars > 0 ? Math.round((1 - info.tableChars / info.fullChars) * 100) : 0;
+  const tools = data.tools ?? {};
+  const opened = topNames(tools.open);
+  const used = topNames(tools.use);
+  return <div className="pa-tool-disclosure" aria-label="工具披露">
+    <Tag color={info.mode === "progressive" ? "green" : "default"}>{info.mode === "progressive" ? "工具渐进式披露" : "工具全量披露"}</Tag>
+    <Text type="secondary" className="dbg-small">
+      普通好友这一轮能用 {info.available} 个工具；工具表 {info.tableChars.toLocaleString()} 字
+      {info.mode === "progressive" ? `（全量要 ${info.fullChars.toLocaleString()} 字，省 ${saved}%）` : ""}
+      · 展开 {sumCounts(tools.open)} 次{opened ? `（${opened}）` : ""}
+      · 族内调用 {sumCounts(tools.use)} 次{used ? `（${used}）` : ""}
+      · 直达 {sumCounts(tools.direct)} 次 · 参数纠正 {sumCounts(tools.fixed)} 次
+    </Text>
+  </div>;
+}
+
 function CacheStatsPanel(): React.JSX.Element | null {
   const query = useApiQuery({
     queryKey: ["private-cache-stats"],
@@ -51,6 +78,7 @@ function CacheStatsPanel(): React.JSX.Element | null {
       <span className="dbg-grow" />
       <Button size="small" icon={<ReloadOutlined />} onClick={query.reload} loading={query.refreshing}>刷新</Button>
     </div>
+    <ToolDisclosureLine data={data} />
     {rows.length === 0
       ? <Empty description="还没有私聊请求" />
       : <ul className="pa-user-list">

@@ -256,7 +256,7 @@ PIPELINES: tuple[Pipeline, ...] = (
     Pipeline(
         "worker",
         "后台小助手",
-        "子智能体只看任务单：自己的 system + 任务单 + 工作台，用 web/computer/toolbox 干活。",
+        "子智能体只看任务单：自己的 system + 任务单 + 工作台，用 web/computer 干活（电脑用不了时才用小工具箱）。",
         "派出小助手任务",
         (
             _S("private.worker_role", "system#1"),
@@ -716,13 +716,13 @@ async def preview(
         _is_superuser,
         _recent_history,
         build_messages,
+        tool_table,
         turn_style,
     )
     from .private_context import build_private_context
     from .private_persona import resolve_private_persona, resolve_user_persona
     from .private_store import load as load_record
     from .private_tasks import tasks_enabled
-    from .private_tools import tool_schemas
     from .prompt_capture import build_snapshot
 
     now = now_beijing()
@@ -765,7 +765,7 @@ async def preview(
         )
         from .group_manage import refresh_manager_hint
 
-        tools = tool_schemas(
+        tools, _available = tool_table(
             is_superuser=_is_superuser(user_id),
             computer=computer,
             tasks=use_tasks,

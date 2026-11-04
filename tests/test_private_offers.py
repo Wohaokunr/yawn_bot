@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
-from test_private_agent import NOW, USER, maker  # noqa: F401 - pytest fixture
+from test_private_agent import (  # noqa: F401 - pytest fixture
+    NOW,
+    USER,
+    maker,
+    tool_names,
+)
 
 _PKG = "src.plugins.yawn_core"
 store = importlib.import_module(f"{_PKG}.yawn_agent.private_store")
@@ -435,7 +440,7 @@ def test_offer_turn_asks_strips_marker_and_blocks_doing(maker, monkeypatch) -> N
     system3 = seen[0]["messages"][-1]["content"]
     assert "主动私聊他（他没有发消息）" in system3
     # 和主回合同一份工具表（前缀缓存）
-    assert {t["function"]["name"] for t in seen[0]["tools"]} >= {"offers", "todos", "recall"}
+    assert tool_names(seen[0]["tools"]) >= {"offers", "todos", "recall"}
 
 
 def test_offer_turn_can_skip_and_yields_when_he_speaks(maker, monkeypatch) -> None:
@@ -499,7 +504,7 @@ def test_user_turn_sees_offer_waiting_and_can_resolve(maker, monkeypatch) -> Non
     assert asyncio.run(go())
     system3 = seen[0]["messages"][-1]["content"]
     assert "offer_waiting" in system3 and "要不要我帮你把报告拆一下" in system3
-    assert "offers 工具 resolve" in system3
+    assert "use_tool 调 offers（action=resolve" in system3
     row = po.state(store.load(USER))["log"][-1]
     assert row["outcome"] == "accepted" and row["replied_at"]
 

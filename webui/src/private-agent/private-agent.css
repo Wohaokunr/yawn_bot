@@ -298,3 +298,11 @@
 .pa-offers .pst-section-head > .ant-typography:first-child {
   white-space: nowrap;
 }
+
+.pa-tool-disclosure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 10px;
+}

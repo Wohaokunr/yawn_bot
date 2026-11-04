@@ -60,7 +60,7 @@ function respond(path: string, init?: RequestInit) {
   }
   if (path === "/private-agent/persona/preview") return { data: { compiled: "角色：小橘", promptTokens: 20, promptTokenLimit: 700, trimmed: false, summary: "", unsafe: null } };
   if (path === "/private-agent/captures") return { data: { captureEnabled: true, paused: false, perUser: 8, maxUsers: 64, users: [{ userId: "12345", count: 2, lastAt: null, lastPipeline: "turn" }] } };
-  if (path === "/private-agent/cache") return { data: { cachedTokens: 900, missTokens: 100, hitRate: 0.9, anchoredUsers: 1, pipelines: { turn: { calls: 3, reported: 3, promptTokens: 1000, cachedTokens: 900, missTokens: 100, hitRate: 0.9, recent: [{ at: 1, round: 0, changed: "profile" }] } } } };
+  if (path === "/private-agent/cache") return { data: { cachedTokens: 900, missTokens: 100, hitRate: 0.9, anchoredUsers: 1, pipelines: { turn: { calls: 3, reported: 3, promptTokens: 1000, cachedTokens: 900, missTokens: 100, hitRate: 0.9, recent: [{ at: 1, round: 0, changed: "profile" }] } }, tools: { open: { assistant: 2 }, use: { notes: 3 }, direct: { recall: 1 }, fixed: {} }, disclosure: { mode: "progressive", direct: ["recall"], available: 30, tableChars: 5000, fullChars: 25000 } } };
   if (path.startsWith("/private-agent/rhythm")) return { data: { settings: { interrupt: true, keepMedia: true, mixHint: true, maxParts: 4 }, stats: { deliveries: 10, interrupted: 2, skippedItems: 3, byParts: { "1": 5, "2": 3, "3": 1, "4": 1, "5+": 0 }, partsShare: { "1": 0.5, "2": 0.3, "3": 0.1, "4": 0.1, "5+": 0 }, byRhythm: { "整段": 5, "分条": 4, "连发": 1 }, withMedia: 1, mixHints: 1, cutNotes: 1 }, trackedUsers: 1, recent: [{ parts: 3, rhythm: "分条", media: 0, interrupted: true, at: 1 }], pattern: "", pendingCut: false } };
   if (path.startsWith("/private-agent/captures/12345")) return { data: { captureEnabled: true, paused: false, perUser: 8, maxUsers: 64, userId: "12345", prompts: [] } };
   if (path === "/private-agent/bridge") return { data: {
@@ -161,6 +161,13 @@ describe("PrivateAgentPage", () => {
     expect(await screen.findByText("前缀缓存命中")).toBeTruthy();
     expect(screen.getByText("总命中率 90%")).toBeTruthy();
     expect(screen.getByText(/最近一次没命中是因为长期资料变了/)).toBeTruthy();
+  });
+
+  it("shows tool disclosure savings and usage", async () => {
+    renderAt("/private-agent?pa.tab=captures");
+    expect(await screen.findByText("工具渐进式披露")).toBeTruthy();
+    expect(screen.getByText(/省 80%/)).toBeTruthy();
+    expect(screen.getByText(/族内调用 3 次（notes×3）/)).toBeTruthy();
   });
 
   it("shows how many parts replies were sent in and interruptions", async () => {

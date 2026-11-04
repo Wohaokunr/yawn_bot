@@ -393,7 +393,40 @@ async def clear_private_captures(
 async def get_private_cache_stats(_session: AdminReadSession) -> dict[str, Any]:
     """前缀缓存命中：各链路累计命中/未命中 token 与最近几次明细（进程内，重启清零）。"""
 
-    return ok(private_cache.usage_snapshot())
+    snapshot = private_cache.usage_snapshot()
+    try:
+        snapshot["disclosure"] = _disclosure_summary()
+    except Exception:  # noqa: BLE001 - 只是展示，算不出来不影响命中统计
+        snapshot["disclosure"] = None
+    return ok(snapshot)
+
+
+def _disclosure_summary() -> dict[str, Any]:
+    """工具披露方式和一位普通好友这一轮的工具表大小（渐进式 vs 全量），看省了多少。"""
+
+    import json
+
+    from ..yawn_agent.private_agent import tool_table
+    from ..yawn_agent.private_computer import computer_ready
+    from ..yawn_agent.private_tasks import tasks_enabled
+    from ..yawn_agent.private_tool_catalog import direct_names, disclosure_mode
+    from ..yawn_agent.private_tools import tool_schemas
+
+    flags = {
+        "is_superuser": False,
+        "computer": computer_ready(),
+        "tasks": tasks_enabled(),
+        "manage": False,
+    }
+    table, available = tool_table(**flags)
+    full = tool_schemas(**flags)
+    return {
+        "mode": disclosure_mode(),
+        "direct": list(direct_names()),
+        "available": len(available),
+        "tableChars": len(json.dumps(table, ensure_ascii=False)),
+        "fullChars": len(json.dumps(full, ensure_ascii=False)),
+    }
 
 
 @router.get("/rhythm")

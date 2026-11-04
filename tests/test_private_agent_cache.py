@@ -35,6 +35,7 @@ from test_private_agent import (
     pctx,
     pmem,
     ptools,
+    tool_names,
 )
 
 _PKG = "src.plugins.yawn_core"
@@ -821,6 +822,15 @@ async def test_coordinate_turn_runs_with_shared_prefix_and_tasks_only(maker, mon
     assert bot.sent == []
     blocked = json.loads(seen[1]["messages"][-1]["content"])
     assert blocked["error_code"] == "not_allowed"
-    names = {tool["function"]["name"] for tool in seen[0]["tools"]}
-    assert {"tasks", "my_overview"} <= names
+    names = tool_names(seen[0]["tools"])
+    assert {"tasks", "my_status"} <= names
     assert prompt.PRIVATE_COORDINATE_TURN in seen[0]["messages"][-1]["content"]
+
+
+def test_usage_snapshot_includes_tool_disclosure_counts():
+    """快照里带工具披露计数，且不会在锁内重入卡死。"""
+
+    pcache.record_tool("open", "time")
+    pcache.record_tool("open", "time")
+    snap = pcache.usage_snapshot()
+    assert snap["tools"]["open"] == {"time": 2}

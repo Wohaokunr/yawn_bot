@@ -649,9 +649,8 @@ async def test_agent_tool_sends_setup_code_out_of_band(monkeypatch):
     ctx = ptools.PrivateToolContext(
         session=None, user_id=OWNER, bot_id=None, groups=[], now=NOW, bot=FakeBot()
     )
-    assert "password" not in json.dumps(
-        ptools.TOOLS_BY_NAME["webui_account"].properties
-    )
+    # 只有 action 一个参数：没有任何能塞密码的字段
+    assert set(ptools.TOOLS_BY_NAME["webui_account"].properties) == {"action"}
     result = await ptools.execute_private_tool(
         "webui_account", {"action": "setup_code"}, ctx
     )
@@ -707,10 +706,11 @@ def _onboarding(monkeypatch):
 async def test_onboarding_guide_gives_login_url_and_next_step(_onboarding):
     sent: list[dict[str, Any]] = []
     ctx = _onboarding_ctx(sent)
-    tool = ptools.TOOLS_BY_NAME["webui_onboarding"]
+    tool = ptools.TOOLS_BY_NAME["webui_account"]
     assert set(tool.properties) == {"action"}
+    assert "webui_onboarding" not in ptools.TOOLS_BY_NAME
     guide = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "guide"}, ctx
+        "webui_account", {"action": "guide"}, ctx
     )
     assert guide["ok"] is True
     assert guide["result"]["step"] == "no_password"
@@ -718,14 +718,19 @@ async def test_onboarding_guide_gives_login_url_and_next_step(_onboarding):
     assert str(OWNER) in guide["result"]["username"]
     accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
     guide = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "guide"}, ctx
+        "webui_account", {"action": "guide"}, ctx
     )
     assert guide["result"]["step"] == "never_logged_in"
     accounts.record_login(OWNER)
     guide = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "guide"}, ctx
+        "webui_account", {"action": "guide"}, ctx
     )
     assert guide["result"]["step"] == "ready"
+    # 历史里模型可能还喊旧名 webui_onboarding，走别名照样能用
+    legacy = await ptools.execute_private_tool(
+        "webui_onboarding", {"action": "guide"}, ctx
+    )
+    assert legacy["ok"] is True and legacy["result"]["step"] == "ready"
     assert sent == []
 
 
@@ -735,14 +740,14 @@ async def test_onboarding_ask_password_captures_next_message_out_of_band(_onboar
     sent: list[dict[str, Any]] = []
     ctx = _onboarding_ctx(sent)
     result = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "ask_password"}, ctx
+        "webui_account", {"action": "ask_password"}, ctx
     )
     assert result["ok"] is True and result["result"]["waiting"] is True
-    assert "webui_onboarding.ask_password" in ctx.succeeded
+    assert "webui_account.ask_password" in ctx.succeeded
     assert len(sent) == 1 and "直接把你想用的密码发给我" in str(sent[0]["message"])
     assert commands.capture_pending(OWNER)
     guide = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "guide"}, ctx
+        "webui_account", {"action": "guide"}, ctx
     )
     assert guide["result"]["step"] == "waiting_password"
 
@@ -774,7 +779,7 @@ async def test_onboarding_capture_cancel_media_failures_and_expiry(_onboarding):
     sent: list[dict[str, Any]] = []
     ctx = _onboarding_ctx(sent)
     await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "ask_password"}, ctx
+        "webui_account", {"action": "ask_password"}, ctx
     )
     out = await commands.consume_capture_message(OWNER, "取消")
     assert out.done and not out.success and not commands.capture_pending(OWNER)
@@ -791,7 +796,7 @@ async def test_onboarding_capture_cancel_media_failures_and_expiry(_onboarding):
 
     commands.arm_password_capture(OWNER)
     cancelled = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "cancel"}, ctx
+        "webui_account", {"action": "cancel"}, ctx
     )
     assert cancelled["result"]["cancelled"] is True
 
@@ -840,6 +845,6 @@ async def test_onboarding_respects_feature_switch(_onboarding, monkeypatch):
     ctx = _onboarding_ctx(sent)
     monkeypatch.setattr(auth.config, "webui_user_login_enabled", False)
     out = await ptools.execute_private_tool(
-        "webui_onboarding", {"action": "ask_password"}, ctx
+        "webui_account", {"action": "ask_password"}, ctx
     )
     assert out["ok"] is False and sent == [] and not commands.capture_pending(OWNER)

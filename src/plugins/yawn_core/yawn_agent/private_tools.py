@@ -95,33 +95,41 @@ class PrivateTool:
         }
 
 
+STATUS_VIEWS = (
+    "overview",
+    "checkin",
+    "board",
+    "relationship",
+    "affinity_progress",
+    "affinity_sources",
+    "affinity_history",
+    "groups",
+)
 PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
-        "my_overview",
-        "查这位用户的概况：和你的关系等级、在几个群、各群签到/连签/积分合计、你什么时候认识他",
+        "my_status",
+        "查他在你这里的各种状态（只读，以这里为准，别凭印象说）：overview 概况（关系等级、几个群、签到合计、认识多久）；"
+        "checkin 各群今天签没签、连签、积分；board 某个群今天的签到顺序和他排第几（要写 group）；"
+        "relationship 你们的关系（整体等级、各群熟悉程度、他怎么叫你、你们的梗）；"
+        "affinity_progress 离下一级还差多少、affinity_sources 最近 30 天好感主要来自哪、affinity_history 最近的变化（只说等级和方向，不报数值）；"
+        "groups 你们共同在的群和群里的 Agent 开没开",
+        {
+            "view": {"type": "string", "enum": list(STATUS_VIEWS)},
+            "group": _GROUP_SCHEMA,
+            "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+        },
+        ("view",),
     ),
     PrivateTool(
         "checkin",
-        "替这位用户签到（等同他在群里发 /签到）。不指定群时在他所在的所有群里签；今天签过的返回 already",
+        "替他签到（等同他在群里发 /签到）。不写 group 就在他所在的所有群里签；今天签过的返回 already",
         {"group": _GROUP_SCHEMA},
         writes=True,
     ),
     PrivateTool(
-        "checkin_status",
-        "查这位用户在各群的签到情况：今天签没签、连签、累计天数、积分",
-        {"group": _GROUP_SCHEMA},
-    ),
-    PrivateTool(
-        "list_my_groups",
-        "列出你和这位用户共同在的群，以及每个群里你的 Agent 有没有开",
-    ),
-    PrivateTool(
-        "what_you_remember",
-        "查你记得关于这位用户的事：私聊里他告诉你的、你在各群里了解到的画像",
-    ),
-    PrivateTool(
         "remember_about_me",
-        "按这位用户的明确要求记住关于他自己的一件事。also_in_groups 只有他明确说“群里也这样”时才设为 true，会同步到他所在且开了 Agent 的群",
+        "他明确让你记住关于他自己的长期特征时用（称呼、爱好、讨厌什么、近况……；一次性的事记进 notes）。"
+        "also_in_groups 只有他说“群里也这样”时才为 true",
         {
             "key": _FACT_KEY_SCHEMA,
             "content": {"type": "string", "minLength": 1, "maxLength": 100},
@@ -132,7 +140,7 @@ PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "forget_about_me",
-        "按这位用户的要求忘掉关于他的记忆；可按类别或关键词只删一部分。include_groups=true 时连他在各群的画像也一起删",
+        "他让你忘掉关于他的事时用：按 key 类别或 keyword 只删一部分，都不写就是全忘；include_groups=true 连各群里的画像一起删",
         {
             "key": _FACT_KEY_SCHEMA,
             "keyword": {"type": "string", "minLength": 1, "maxLength": 40},
@@ -141,39 +149,36 @@ PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
         writes=True,
     ),
     PrivateTool(
-        "our_relationship",
-        "查你和这位用户的关系：整体好感等级、各群里的熟悉程度、他怎么叫你、你们的梗",
-    ),
-    PrivateTool(
         "group_recent",
-        "看这位用户所在的某个群最近在聊什么（读你整理的群聊日摘要）",
+        "某个他在的群最近几天聊了什么（你整理的群聊日摘要）",
         {"group": {**_GROUP_SCHEMA, "description": "群名（可以只写一部分）或群号"}},
         ("group",),
     ),
     PrivateTool(
         "recall",
-        "按关键词回想：他在群里的事（你整理的群聊摘要、群里记下的他的画像）、你们以前的私聊（聊天记录窗口之外的旧消息）、"
-        "你在私聊里记住的他的事。他问“你还记得…吗”“群里那天聊的…”“我上次跟你说的…”时先用它查；查不到就直说不记得",
+        "回想：他问“你还记得…吗”“群里那天聊的…”“我上次跟你说的…”时先查再答，查不到就直说不记得。"
+        "写 query 按关键词查群里的事（摘要、关于他的画像）、聊天记录窗口外的旧私聊、你记住的他的事；"
+        "不写 query 就列出你记得他的全部（私聊里他告诉你的 + 群里了解到的）",
         {
             "query": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 40,
-                "description": "要回想的关键词，比如“考研”“上周的聚餐”",
+                "description": "关键词，如 考研、上周的聚餐",
             },
             "where": {
                 "type": "string",
                 "enum": ["all", "groups", "private_chat"],
-                "description": "all 都查（默认）；groups 只查群里的；private_chat 只查你们的私聊",
+                "description": "默认 all",
             },
         },
-        ("query",),
     ),
     PrivateTool(
         "memory_link",
-        "群里的你和私聊里的你怎么共用记忆，由他本人定：view 看现在的设置和最近的记录（他问“你从哪知道的”“群里知道我什么”时用）；"
-        "share/unshare 让群里的你也知道/不再知道某几类他私聊里告诉你的事（keys，只有他明确同意才 share；group 可只限某个群）；"
-        "mute_group/unmute_group 某个群的事别带进/可以带进私聊；group_talk 设 on=false 就别在私聊里提群里的事。私聊里聊的其他内容永远不会带到群里",
+        "群里的你和私聊里的你怎么共用记忆，由他本人定：view 看设置和最近的流动记录（他问“你从哪知道的”“群里知道我什么”）；"
+        "share/unshare 让群里的你也知道/不再知道某几类他私聊说的事（keys，他明确同意才 share，group 可限定群）；"
+        "mute_group/unmute_group 某个群的事别带进/可以带进私聊；group_talk on=false 别在私聊里提群里的事。"
+        "私聊里聊的其他内容永远不会带到群里",
         {
             "action": {
                 "type": "string",
@@ -188,7 +193,7 @@ PRIVATE_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "list_commands",
-        "查现在私聊/群里有哪些命令可用、各自做什么；query 可按关键词筛选",
+        "他问有什么命令、某个功能怎么用时查：现在私聊/群里能用的命令和说明，query 按关键词筛",
         {
             "query": {"type": "string", "minLength": 1, "maxLength": 20},
             "scene": {"type": "string", "enum": ["private", "group", "all"]},
@@ -203,11 +208,12 @@ _CLOCK = {"type": "string", "maxLength": 5, "description": "HH:MM（北京时间
 EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "notes",
-        "这位用户的私人笔记本：add 记一条、list 列出（置顶在前）、search 按关键词找、delete 删、pin/unpin 置顶。他说“帮我记一下/存一下”且不是关于他本人的长期特征时用这个",
+        "他的私人笔记本：他说“帮我记一下/存一下”而且不是关于他本人的长期特征时用。"
+        "add 记一条（可带 tag）、list 列出（置顶在前）、search 按 keyword 找、delete 删、pin/unpin 置顶",
         {
             "action": {"type": "string", "enum": ["add", "list", "search", "delete", "pin", "unpin"]},
             "content": {"type": "string", "minLength": 1, "maxLength": 300},
-            "tag": {"type": "string", "minLength": 1, "maxLength": 12, "description": "可选标签，如 书单/密码提示/灵感"},
+            "tag": {"type": "string", "minLength": 1, "maxLength": 12, "description": "如 书单/灵感"},
             "keyword": {"type": "string", "minLength": 1, "maxLength": 30},
             "id": _ID,
             "limit": _LIMIT,
@@ -217,11 +223,11 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "todos",
-        "这位用户的待办清单：add 加一项（可带截止日期 due 和优先级）、list 列出、done 完成、undo 撤销完成、delete 删除、clear_done 清掉已完成的",
+        "他的待办清单：add 加一项（due 截止日期、priority）、list 列出、done 完成、undo 撤销完成、delete 删除、clear_done 清掉已完成的",
         {
             "action": {"type": "string", "enum": ["add", "list", "done", "undo", "delete", "clear_done"]},
             "content": {"type": "string", "minLength": 1, "maxLength": 120},
-            "due": {"type": "string", "maxLength": 10, "description": "截止日期 YYYY-MM-DD"},
+            "due": {"type": "string", "maxLength": 10, "description": "YYYY-MM-DD"},
             "priority": {"type": "string", "enum": ["high", "normal", "low"]},
             "include_done": {"type": "boolean"},
             "id": _ID,
@@ -232,12 +238,12 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "reminders",
-        "到点在私聊里提醒这位用户：add 设提醒（at 绝对时间或 in_minutes 相对分钟二选一，repeat 可每天/工作日/每周）、list 列出、cancel 取消、snooze 推迟这一次、"
-        "pause/resume 暂停/恢复、edit 改内容或时间。mode=agent 表示到点由你去办（如“每天 8 点帮我查天气”）。"
-        "每月/每年/间隔/cron 这类复杂规则、给群设、查他在群里设的任务用 schedules。时间按资料里的 now 推算",
+        "到点私聊提醒他（简单的一次性/每天/工作日/每周）：add 设提醒（at 或 in_minutes 二选一，时间按资料里的 now 推算，说不清就先问）、"
+        "list、cancel、snooze 推迟这一次、pause/resume、edit 改内容或时间。mode=agent 是到点由你去办（如“每天 8 点帮我查天气”）。"
+        "每月/每年/间隔/cron、给群设、查群里的定时任务用 schedules",
         {
             "action": {"type": "string", "enum": ["add", "list", "cancel", "snooze", "pause", "resume", "edit"]},
-            "content": {"type": "string", "minLength": 1, "maxLength": 300, "description": "到时候提醒他的内容（mode=agent 时是到点要你去办的事）"},
+            "content": {"type": "string", "minLength": 1, "maxLength": 300, "description": "提醒他的话；mode=agent 时是到点要办的事"},
             "mode": {"type": "string", "enum": ["notify", "agent"]},
             "at": {"type": "string", "maxLength": 19, "description": "YYYY-MM-DD HH:MM（北京时间）"},
             "in_minutes": {"type": "integer", "minimum": 1, "maximum": 527040},
@@ -263,7 +269,7 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "mood",
-        "心情记录：log 记下他此刻的心情（score 1很差~5很好，可带一句 note），history 看最近几天的心情和趋势。只在他愿意时记",
+        "心情记录（他愿意记时才记）：log 记下此刻心情（score 1很差~5很好，note 一句话）；history 看最近几天的心情和趋势",
         {
             "action": {"type": "string", "enum": ["log", "history"]},
             "score": {"type": "integer", "minimum": 1, "maximum": 5},
@@ -275,36 +281,25 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "chat_prefs",
-        "这位用户和你私聊的偏好：get 查看；set 修改他明确提出的项——回复长短、表情多少、希望你怎么称呼他、免打扰时段、每天早安问候时间、签到提醒时间、生日（月-日）、是否接受你主动发消息",
+        "他对私聊的偏好：get 查看；set 只改他明确提出的项（回复长短、表情多少、怎么称呼他、免打扰时段、早安问候和签到提醒时间、生日、要不要你主动发消息）",
         {
             "action": {"type": "string", "enum": ["get", "set"]},
             "reply_length": {"type": "string", "enum": ["short", "normal", "long"]},
             "emoji": {"type": "string", "enum": ["none", "some", "lots"]},
-            "call_me": {"type": "string", "maxLength": 16, "description": "传 off 清除"},
+            "call_me": {"type": "string", "maxLength": 16, "description": "off 清除"},
             "quiet_start": _CLOCK,
             "quiet_end": _CLOCK,
             "morning_greeting": _CLOCK,
-            "checkin_nudge": {**_CLOCK, "description": "每天几点还没签到就私聊提醒他；off 关闭"},
-            "birthday": {"type": "string", "maxLength": 5, "description": "MM-DD，传 off 清除"},
-            "proactive": {"type": "boolean", "description": "false 表示除了他自己设的提醒，你都不要主动发消息"},
+            "checkin_nudge": {**_CLOCK, "description": "几点还没签到就提醒他；off 关闭"},
+            "birthday": {"type": "string", "maxLength": 5, "description": "MM-DD，off 清除"},
+            "proactive": {"type": "boolean", "description": "false：除了他自己设的提醒，你都不主动发消息"},
         },
         ("action",),
         writes=True,
     ),
     PrivateTool(
-        "affinity_detail",
-        "你和他关系的细节：progress 离下一级还有多远（只有词语）、sources 最近 30 天好感主要来自哪里、history 最近的变化记录",
-        {"view": {"type": "string", "enum": ["progress", "sources", "history"]}, "limit": _LIMIT},
-    ),
-    PrivateTool(
-        "checkin_board",
-        "某个群今天的签到顺序（前 10 名）、他今天排第几、连签和下一个里程碑",
-        {"group": {**_GROUP_SCHEMA, "description": "群名（可以只写一部分）或群号"}},
-        ("group",),
-    ),
-    PrivateTool(
         "toolbox",
-        "小工具：calc 算式计算、convert 单位换算（长度/重量/体积/面积/时间/数据/速度/温度）、date_diff 两个日期差几天、date_add 某天加减几天是哪天星期几、dice 掷骰子、coin 抛硬币、pick 帮他从选项里随机选一个、fortune 今日运势（娱乐）、world_time 某城市现在几点。需要精确数字时用它，别心算",
+        "（虚拟电脑用不了时的备用）小工具：calc 算式、convert 单位换算、date_diff 日期差、date_add 日期加减、dice 骰子、coin 硬币、pick 随机选一个、fortune 今日运势、world_time 某城市几点",
         {
             "op": {"type": "string", "enum": ["calc", "convert", "date_diff", "date_add", "dice", "coin", "pick", "fortune", "world_time"]},
             "expression": {"type": "string", "maxLength": 200},
@@ -322,23 +317,15 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
         ("op",),
     ),
     PrivateTool(
-        "chat_history",
-        "你们的私聊记录：search 按关键词找以前聊过的内容（他问“我之前跟你说过的那个…”时用）、stats 聊了多久多少条",
-        {
-            "action": {"type": "string", "enum": ["search", "stats"]},
-            "keyword": {"type": "string", "minLength": 1, "maxLength": 30},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-        },
-    ),
-    PrivateTool(
         "my_data",
-        "他在你这里存了什么：summary 各类数据条数、quota 今天还能和你聊几轮/搜几次、wipe 清空他的全部个人数据和私聊记忆（必须他明确确认后才带 confirm=true）",
-        {"action": {"type": "string", "enum": ["summary", "quota", "wipe"]}, "confirm": {"type": "boolean"}},
+        "他在你这里的数据：summary 存了什么（各类条数）、chat 你们聊了多久多少条、quota 今天还能聊几轮/搜几次/派几件事、"
+        "wipe 清空他的全部个人数据和私聊记忆（先告诉他会删掉什么，他明确确认后才带 confirm=true）",
+        {"action": {"type": "string", "enum": ["summary", "chat", "quota", "wipe"]}, "confirm": {"type": "boolean"}},
         writes=True,
     ),
     PrivateTool(
         "feedback",
-        "把他对机器人的建议、bug 或投诉转给管理员（每天最多 3 条）。只有他明确想反馈时才用",
+        "他明确想给机器人提建议、报 bug 或投诉时，转给管理员（每天最多 3 条）",
         {
             "content": {"type": "string", "minLength": 1, "maxLength": 300},
             "kind": {"type": "string", "enum": ["bug", "suggestion", "complaint", "other"]},
@@ -348,13 +335,13 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "web_search",
-        "联网搜索（新闻、实时信息、你不确定的事实）。返回标题、摘要和编号 w1、w2…；需要细节再用 web_fetch",
+        "联网搜索新闻、实时信息、你拿不准的事实。返回标题、摘要和编号 w1、w2…；要细节再用 web_fetch 打开",
         {"query": {"type": "string", "minLength": 1, "maxLength": 100, "description": "几个关键词"}},
         ("query",),
     ),
     PrivateTool(
         "web_fetch",
-        "打开 web_search 结果（编号如 w1）或网址读正文",
+        "打开搜索结果（编号如 w1）或网址读正文；正文长时用 offset 接着读",
         {
             "target": {"type": "string", "minLength": 1, "maxLength": 500},
             "offset": {"type": "integer", "minimum": 0, "maximum": 200000},
@@ -363,7 +350,7 @@ EXTRA_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "bot_status",
-        "（仅超级管理员）机器人运行状态：运行时长、今天私聊人数和回复数、反馈条数",
+        "（仅超级管理员）机器人运行状态：运行时长、今天私聊人数和回复数、后台任务、反馈条数",
     ),
 )
 # 虚拟电脑（private_computer）：schema 在那边定义，这里包成 PrivateTool。
@@ -381,42 +368,25 @@ COMPUTER_TOOLS: tuple[PrivateTool, ...] = tuple(
 TASK_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "delegate_task",
-        "把费时间的活放到后台做，你这边马上回他一句：联网查好几处再整理对比、写代码算数据画图、处理他发来的文件、做表格/PPT/文档、写长文，"
-        "估计要调三次以上工具或半分钟以上的都适合。只要写 goal；最近的聊天、本轮附件、他的称呼会自动带过去，brief 只补聊天里没有的要求。"
-        "做的过程中会用你的口吻给他报进度，做完你收到结果再用自己的话告诉他。对他来说都是你在做，别提后台和小助手",
+        "把费时间的活放到后台做，你马上回他一句：要联网查好几处再整理、写代码处理数据或画图、处理他发来的文件、做表格/PPT/文档、写长文，"
+        "估计要三次以上工具或半分钟以上的都放这里。只写 goal 就行（最近的聊天、本轮附件、他的称呼会自动带上），brief 只补聊天里没有的要求。"
+        "做的时候会用你的口吻报进度，做完你收到结果再用自己的话告诉他；对他来说都是你在做",
         {
-            "title": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 20,
-                "description": "短标题，如 查周末天气；不写就从 goal 里截",
-            },
-            "goal": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 600,
-                "description": "要交付什么、做到什么程度",
-            },
-            "brief": {
-                "type": "string",
-                "maxLength": 1500,
-                "description": "小助手需要的背景：他的要求、已知信息、格式偏好、相关文件的 sandbox: 引用",
-            },
+            "goal": {"type": "string", "minLength": 1, "maxLength": 600, "description": "要交付什么、做到什么程度"},
+            "brief": {"type": "string", "maxLength": 1500, "description": "聊天里没有的要求、格式、已知信息"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 20, "description": "短标题；不写就从 goal 截"},
             "tools": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 3,
-                "items": {"type": "string", "enum": ["web", "computer", "toolbox"]},
-                "description": "web 联网搜索、computer 他的虚拟电脑（算、画图、处理文件）、toolbox 小工具；不写就按情况自动选",
+                "maxItems": 2,
+                "items": {"type": "string", "enum": ["web", "computer"]},
+                "description": "不写就自动选",
             },
-            "save_to_notes": {
-                "type": "boolean",
-                "description": "他说要存下来时为 true：做完自动存进他的笔记",
-            },
+            "save_to_notes": {"type": "boolean", "description": "他说要存下来时为 true"},
             "follow_up_of": {
                 "type": "string",
                 "maxLength": 12,
-                "description": "接着之前做完的哪件事做（tasks 里的编号，如 t3）：他说“展开第二点”“换成表格”时用，上次的结论和文件会带过去",
+                "description": "接着之前做完的哪件事（编号如 t3），他说“展开第二点”“换成表格”时用",
             },
         },
         ("goal",),
@@ -424,31 +394,23 @@ TASK_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "delegate_project",
-        "大活组队做：拆成 2~6 个成员分头干，成员之间能互相发消息、共用他的虚拟电脑，依赖别人结果的成员用 depends_on 等对方做完再开工"
-        "（比如 调研A、调研B 并行，汇总 depends_on 两者）。全部做完后你会收到合并的结果再转述。一个人能做完的用 delegate_task",
+        "一个人做不完的大活：拆成 2~6 个成员分头做，成员能互相发消息、共用他的虚拟电脑；要用别人结果的成员写 depends_on 等对方做完"
+        "（如 调研A、调研B 并行，汇总 depends_on 两者）。全部做完你收到合并结果再转述",
         {
-            "title": {"type": "string", "minLength": 1, "maxLength": 20, "description": "给他看的项目名"},
-            "goal": {"type": "string", "minLength": 1, "maxLength": 600, "description": "整个项目要交付什么"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 20},
+            "goal": {"type": "string", "minLength": 1, "maxLength": 600},
             "brief": {"type": "string", "maxLength": 1500, "description": "所有成员都需要的背景"},
             "members": {
                 "type": "array",
                 "minItems": 2,
                 "maxItems": 6,
-                "description": "成员列表",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "maxLength": 12, "description": "成员名，如 调研员/写手/程序员"},
-                        "goal": {"type": "string", "maxLength": 600, "description": "这个成员负责交付什么"},
-                        "tools": {
-                            "type": "array",
-                            "items": {"type": "string", "enum": ["web", "computer", "toolbox"]},
-                        },
-                        "depends_on": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "要等哪些成员（写 name）做完才开工",
-                        },
+                        "name": {"type": "string", "maxLength": 12, "description": "如 调研员/写手"},
+                        "goal": {"type": "string", "maxLength": 600},
+                        "tools": {"type": "array", "items": {"type": "string", "enum": ["web", "computer"]}},
+                        "depends_on": {"type": "array", "items": {"type": "string"}, "description": "要等的成员 name"},
                     },
                     "required": ["name", "goal", "tools"],
                 },
@@ -460,16 +422,11 @@ TASK_TOOLS: tuple[PrivateTool, ...] = (
     ),
     PrivateTool(
         "tasks",
-        "你在后台做的事：list 看最近在做/做完的和进度；result 看某件事的完整结果（他追问细节时用）；cancel 取消（他说不要了）；"
-        "answer 把他的回答转给正在等回答的那件事；message 给正在做的那件补充要求、改方向、回答 helper_messages 里问你的事"
-        "（id 写编号/成员名，all 发给所有在做的）",
+        "你在后台做的事：list 看在做/做完的和进度；result 看某件的完整结果（他追问细节时）；cancel 他说不要了；"
+        "answer 把他的回答转给在等回答的那件；message 给在做的那件补充要求、改方向、回答 helper_messages（id 写编号/成员名，all 发给所有在做的）",
         {
             "action": {"type": "string", "enum": ["list", "result", "cancel", "answer", "message"]},
-            "id": {
-                "type": "string",
-                "maxLength": 12,
-                "description": "任务编号（如 t12）、项目成员名，message 时也可以写 all",
-            },
+            "id": {"type": "string", "maxLength": 12, "description": "编号如 t12、成员名或 all"},
             "answer": {"type": "string", "minLength": 1, "maxLength": 500},
             "text": {"type": "string", "minLength": 1, "maxLength": 600, "description": "message 的内容"},
         },
@@ -507,10 +464,9 @@ _PERSONA_FIELDS_SCHEMA = {
 PERSONA_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "my_persona",
-        "你在你们私聊里的人设（只在和他的私聊里生效，群里不变）：view 看现在的人设、来源和今天还能改几次；options 看能套的模板；"
-        "set 按他的要求改（fields 只写要改的）；preset 套内置模板（name 写模板名）；template 用人设库里的人设（name 写名字）；"
-        "reset 回到默认人设；undo 撤销上一次修改；history 看改过什么。只有他明确要你换自称、称呼、说话方式、性格时才改，别自作主张；"
-        "改完下一句就按新人设说话",
+        "你在和他私聊时的人设（群里不变）。只有他明确要你换自称、称呼、说话方式、性格时才改，改完下一句就按新人设说话。"
+        "view 现在的人设、来源和今天还能改几次；options 能套的模板；set 改（fields 只写要改的）；preset 套内置模板、template 用人设库的（name 写名字）；"
+        "reset 回默认；undo 撤销上一次；history 改过什么",
         {
             "action": {
                 "type": "string",
@@ -528,25 +484,17 @@ PERSONA_TOOLS: tuple[PrivateTool, ...] = (
 ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "webui_account",
-        "他的网页（WebUI）个人账号：登录后能看自己当群主/管理员的群的关系图、开关群功能、调你们私聊的人设。"
-        "view 看有没有开通、能管哪些群、怎么登录；setup_code 把一次性设置码直接私聊发给他（你看不到码），"
-        "他去登录页“用设置码设密码”；logout_all 让他的网页账号在所有设备退出。"
-        "他想设密码、改密码、忘了密码时优先用 webui_onboarding 的 ask_password（他自己定密码，系统直接收走）；"
-        "也可以用 setup_code 让他去网页上设。绝不要让他把密码发在普通聊天里给你；"
-        "他已经把密码发在聊天里了就提醒他撤回并换一个",
-        {"action": {"type": "string", "enum": ["view", "setup_code", "logout_all"]}},
-        ("action",),
-        writes=True,
-    ),
-    PrivateTool(
-        "webui_onboarding",
-        "新人引导：帮他开通网页（WebUI）账号并登录。guide 看他进行到哪一步、登录网址、账号怎么填、下一步做什么；"
-        "ask_password 帮他设他自己想要的登录密码：系统会直接私聊提示他把密码发过来，他下一条消息由系统收走、校验、加密保存，"
-        "不经过你、你也看不到（你这句只需简短告诉他照提示发就行，别复述规则、别猜密码）；"
-        "cancel 他不想设了时关掉收密码的窗口。设好后系统会直接把登录网址发给他，结果也会出现在聊天记录里。"
-        "他问怎么用网页、想登录后台、想在网页上管群或改人设、刚认识你想开通时用；"
-        "给网址时用 guide 返回的 login_url 原样发，别自己编",
-        {"action": {"type": "string", "enum": ["guide", "ask_password", "cancel"]}},
+        "他的网页（WebUI）个人账号，登录后能管自己当群主/管理员的群、调你们私聊的人设。"
+        "guide 新人引导：进行到哪一步、登录网址（login_url 原样发，别自己编）、下一步做什么；view 开没开通、能管哪些群；"
+        "ask_password 帮他设自己想要的密码：系统直接私聊提示他把密码发过来，下一条由系统收走加密保存，你看不到（只需简短说照提示发）；"
+        "cancel 他不想设了时关掉收密码的窗口；setup_code 把一次性设置码直接私发给他，去登录页用设置码设密码；logout_all 所有设备退出。"
+        "绝不让他把密码发在普通聊天里；他已经发了就提醒他撤回并换一个",
+        {
+            "action": {
+                "type": "string",
+                "enum": ["guide", "view", "ask_password", "cancel", "setup_code", "logout_all"],
+            }
+        },
         ("action",),
         writes=True,
     ),
@@ -561,14 +509,13 @@ MANAGE_ACTIONS = (
 MANAGE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "group_manage",
-        "替他管理他当群主/管理员、且你也是管理员的群（群里实时核对两边身份，不够就会被拒）；他是超级管理员时你在的群都能管，权限等同群主，但你自己不是管理员的群仍做不了。"
-        "查：groups 他能管哪些群和能做什么；members 找成员（query 写名字/QQ）；muted 谁在禁言；notices 群公告；audit 最近的操作记录。"
-        "做：mute 禁言（member + minutes）/unmute 解禁；whole_mute 全员禁言（enable）；announce 发群公告（content，可 pinned 置顶、confirm_required 要群员确认）；"
-        "delete_notice 删公告（notice_id）；send 以你的身份在群里发一句（text）；todo 发一条并设为群待办（text）；todo_done/todo_cancel 完成/取消待办（message_id）；"
-        "essence/unessence 设/取消精华（message_id，只限你代发的）；recall 撤回你代发的（message_id）；card 改群名片（member + text，空=清空）；title 专属头衔；kick 踢人（reject 拒绝再加群）；rename 改群名（text）。"
-        "很多操作会先返回 needs_confirm 和 summary：把 summary 原样问他，然后这一轮就结束、别再调 group_manage；等他下一条回复同意后再用 confirm + confirm_id 执行；他不同意或改主意就 cancel。"
-        "本轮资料里的 group_manage_waiting 是之前问过他、还在等确认的操作：他这句是同意就直接 confirm 那个 confirm_id，不要重新发起同一件事。"
-        "绝不替他确认，也别在他没开口要时主动管群；管理员不能处置群主和其他管理员。group 写群名或群号，只有一个群时可省略",
+        "替他管理他当群主/管理员、你也是管理员的群（每次实时核对两边身份；超级管理员等同群主，但你不是管理员的群仍做不了）。只在他开口要时用。"
+        "查：groups 能管哪些群和能做什么、members 找成员（query）、muted 谁在禁言、notices 群公告、audit 最近操作记录。"
+        "做：mute（member+minutes）/unmute、whole_mute（enable）、announce 发公告（content，可 pinned、confirm_required）、delete_notice（notice_id）、"
+        "send 以你的身份发一句（text）、todo 发一条并设为群待办、todo_done/todo_cancel（message_id）、essence/unessence/recall（只限你代发的 message_id）、"
+        "card 改群名片（member+text，空=清空）、title 专属头衔、kick（reject 拒绝再加群）、rename 改群名。"
+        "返回 needs_confirm 时把 summary 原样问他，这一轮就结束；他下一条同意再 confirm（confirm_id），不同意就 cancel。"
+        "本轮资料里的 group_manage_waiting 是还在等他确认的：他同意就直接 confirm 那个 confirm_id，别重新发起。绝不替他确认；管理员不能处置群主和其他管理员",
         {
             "action": {"type": "string", "enum": list(MANAGE_ACTIONS)},
             "group": {"type": "string", "minLength": 1, "maxLength": 60, "description": "群名（可以只写一部分）或群号"},
@@ -596,12 +543,11 @@ BRIDGE_ACTIONS = ("post", "ask", "replies", "close", "handoffs", "done", "confir
 BRIDGE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "group_bridge",
-        "群和私聊之间帮他接力（群里的你和私聊的你是同一个人）。"
-        "post 替他在他所在的群里（超级管理员可以是你在的任何群，用群号指定）转告一句（text，会带“〔他的名字 让我转告〕”）；ask 替他在群里问大家（text），群友引用回复会攒一会儿私聊转给他；"
-        "replies 看提问收到的回复；close 不再收回复（id）；handoffs 看他从群里转到私聊的事；done 标记那件事办完了（id）。"
-        "post/ask 会先返回 needs_confirm：把群名和要发的原话问他，然后这一轮就结束；他下一条同意后再 confirm（confirm_id），不同意就 cancel。"
-        "只在他明确要你去群里说/问时用：不替他编内容、不发他没同意的话、不把你们私聊的其他内容带到群里。"
-        "本轮资料里 from_groups 是他刚在群里找你、转到私聊来的事（接着办就好），asks_in_groups 是还在收回复的提问，group_relay_waiting 是等他确认的转告",
+        "他明确要你去群里说/问时用（群里的你和私聊的你是同一个人）：post 替他在群里转告一句（会带“〔他的名字 让我转告〕”）、"
+        "ask 替他在群里问大家（群友引用回复会攒一会儿私聊转给他）、replies 看提问收到的回复、close 不再收回复（id）、"
+        "handoffs 看他从群里转到私聊的事、done 标记那件事办完了（id）。post/ask 先返回 needs_confirm：把群名和原话问他，这一轮就结束；"
+        "他下一条同意再 confirm（confirm_id），不同意就 cancel。不替他编内容，不把私聊里的其他内容带到群里。"
+        "本轮资料里 from_groups 是他刚从群里转来的事，asks_in_groups 是还在收回复的提问，group_relay_waiting 是等他确认的转告",
         {
             "action": {"type": "string", "enum": list(BRIDGE_ACTIONS)},
             "group": {"type": "string", "minLength": 1, "maxLength": 60, "description": "群名（可以只写一部分）或群号；他只在一个群时可省略"},
@@ -642,6 +588,74 @@ COMPUTER_NAMES = frozenset(tool.name for tool in COMPUTER_TOOLS)
 TASK_NAMES = frozenset(tool.name for tool in TASK_TOOLS)
 TOOLS_BY_NAME: dict[str, PrivateTool] = {tool.name: tool for tool in ALL_TOOLS}
 WRITE_TOOLS = frozenset(tool.name for tool in ALL_TOOLS if tool.writes)
+# 小工具箱只是虚拟电脑用不了时的备用：电脑在时算数/换算/日期/随机都现场写代码跑。
+FALLBACK_TOOLS = frozenset({"toolbox"})
+# 合并/删掉的旧工具名 → (新工具, 补上的参数)。模型按老习惯叫、WebUI 旧覆盖、测试都还能用。
+LEGACY_ALIASES: dict[str, tuple[str, dict[str, Any]]] = {
+    "my_overview": ("my_status", {"view": "overview"}),
+    "checkin_status": ("my_status", {"view": "checkin"}),
+    "checkin_board": ("my_status", {"view": "board"}),
+    "list_my_groups": ("my_status", {"view": "groups"}),
+    "our_relationship": ("my_status", {"view": "relationship"}),
+    "affinity_detail": ("my_status", {}),
+    "what_you_remember": ("recall", {}),
+    "chat_history": ("recall", {"where": "private_chat"}),
+    "webui_onboarding": ("webui_account", {}),
+}
+
+
+def resolve_alias(name: str, args: Any) -> tuple[str, Any]:
+    """旧工具名换成合并后的新工具；参数按旧语义改写。不是旧名原样返回。"""
+
+    target = LEGACY_ALIASES.get(name)
+    if target is None or not isinstance(args, dict):
+        return (target[0] if target else name), args
+    new_name, extra = target
+    data = {**args, **extra}
+    if name == "affinity_detail":
+        data = {
+            "view": f"affinity_{args.get('view') or 'progress'}",
+            **({"limit": args["limit"]} if args.get("limit") else {}),
+        }
+    elif name == "chat_history":
+        if str(args.get("action") or "stats") != "search":
+            return "my_data", {"action": "chat"}
+        data = {"where": "private_chat"}
+        if args.get("keyword"):
+            data["query"] = args["keyword"]
+    elif name == "what_you_remember":
+        data = {}
+    return new_name, data
+
+
+def available_tools(
+    *,
+    is_superuser: bool = False,
+    computer: bool = False,
+    tasks: bool = False,
+    manage: bool = False,
+) -> list[PrivateTool]:
+    """这位用户这一轮能用的工具（虚拟电脑、后台任务、群管代办只在可用时出现）。"""
+
+    from .agent_bridge import enabled as bridge_enabled
+
+    bridge = bridge_enabled()
+    # 能放后台时把派活工具排在最前面：模型更容易想到“交出去”，而不是自己一路调工具。
+    ordered = (
+        [*TASK_TOOLS, *(tool for tool in ALL_TOOLS if tool.name not in TASK_NAMES)]
+        if tasks
+        else list(ALL_TOOLS)
+    )
+    return [
+        tool
+        for tool in ordered
+        if (is_superuser or tool.name not in SUPERUSER_TOOLS)
+        and (computer or tool.name not in COMPUTER_NAMES)
+        and (not computer or tool.name not in FALLBACK_TOOLS)
+        and (tasks or tool.name not in TASK_NAMES)
+        and (manage or tool.name not in MANAGE_NAMES)
+        and (bridge or tool.name not in BRIDGE_NAMES)
+    ]
 
 
 def tool_schemas(
@@ -651,25 +665,16 @@ def tool_schemas(
     tasks: bool = False,
     manage: bool = False,
 ) -> list[dict[str, Any]]:
-    """本轮给模型的工具；虚拟电脑、小助手任务、群管代办只在可用时出现。"""
+    """能用的工具的**完整** schema（全量披露模式、WebUI 预览、子智能体取用）。
 
-    # 能放后台时把派活工具排在最前面：模型更容易想到“交出去”，而不是自己一路调工具。
-    from .agent_bridge import enabled as bridge_enabled
+    私聊主回合默认不发这一份，而是 ``private_tool_catalog.request_tools`` 的渐进式工具表。
+    """
 
-    bridge = bridge_enabled()
-    ordered = (
-        [*TASK_TOOLS, *(tool for tool in ALL_TOOLS if tool.name not in TASK_NAMES)]
-        if tasks
-        else list(ALL_TOOLS)
-    )
     return [
         tool.schema()
-        for tool in ordered
-        if (is_superuser or tool.name not in SUPERUSER_TOOLS)
-        and (computer or tool.name not in COMPUTER_NAMES)
-        and (tasks or tool.name not in TASK_NAMES)
-        and (manage or tool.name not in MANAGE_NAMES)
-        and (bridge or tool.name not in BRIDGE_NAMES)
+        for tool in available_tools(
+            is_superuser=is_superuser, computer=computer, tasks=tasks, manage=manage
+        )
     ]
 
 
@@ -713,6 +718,12 @@ class PrivateToolContext:
     # 本轮 group_manage 调用次数；以及“已经在等他回话，别再调工具了”的信号（主回合据此直接收尾）
     manage_calls: int = 0
     stop_tools: bool = False
+    # 这一轮这位用户能用的工具名（渐进式披露：use_tool 只能调这些）；None 不限（测试、子智能体）
+    available: frozenset[str] | None = None
+    # 本轮已经用 open_tools 展开过的工具族/工具（重复展开直接给短答，省上下文）
+    opened: set[str] = field(default_factory=set)
+    # 本轮已成功执行过的只读调用（工具名+参数）：一模一样的再来一次就不重复执行、不重复塞结果
+    seen_calls: set[str] = field(default_factory=set)
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -767,6 +778,36 @@ async def _overview(ctx: PrivateToolContext) -> dict[str, Any]:
         if user is not None and user.first_interaction_at
         else None,
     }
+
+
+async def _status(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """my_status：原来六个只读查询（概况/签到/签到榜/关系/好感明细/共同的群）合成一个。"""
+
+    from . import private_services as services
+
+    view = str(args.get("view") or "overview")
+    if view == "overview":
+        return await _overview(ctx)
+    if view == "checkin":
+        return await _checkin_status(ctx, args.get("group"))
+    if view == "board":
+        if not str(args.get("group") or "").strip():
+            if len(ctx.groups) == 1:
+                return await services.checkin_board(ctx, {"group": str(ctx.groups[0].group_id)})
+            raise ToolError(
+                "board 要写 group（哪个群）",
+                code=ERROR_INVALID_ARGS,
+                hint="问他是哪个群，或先用 view=groups 看看",
+            )
+        return await services.checkin_board(ctx, {"group": str(args["group"])})
+    if view == "relationship":
+        return await _relationship(ctx)
+    if view == "groups":
+        return _list_groups(ctx)
+    sub = view.removeprefix("affinity_")
+    return await services.affinity_detail(
+        ctx, {"view": sub, **({"limit": args["limit"]} if args.get("limit") else {})}
+    )
 
 
 async def _checkin(ctx: PrivateToolContext, group: str | None) -> dict[str, Any]:
@@ -1446,9 +1487,32 @@ async def execute_private_tool(  # noqa: PLR0915
 ) -> dict[str, Any]:
     """执行一个私聊工具，返回给模型的 payload（``ok`` + ``result`` 或错误）。"""
 
+    from . import private_tool_catalog as catalog
+
+    if name == catalog.OPEN_TOOL:
+        return catalog.open_tools(raw_args, ctx)
+    if name == catalog.USE_TOOL:
+        inner, inner_args, problem = catalog.unwrap_use(raw_args, ctx)
+        if problem is not None:
+            return problem
+        payload = await execute_private_tool(inner, inner_args, ctx)
+        return catalog.annotate_failure(inner, payload, ctx)
+    name, raw_args = resolve_alias(name, raw_args)
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
-        return {"ok": False, "error": f"没有工具 {name}", "error_code": "invalid_args"}
+        return {
+            "ok": False,
+            "error": f"没有工具 {name}",
+            "error_code": "invalid_args",
+            "hint": "工具名看 open_tools 里的目录",
+        }
+    if ctx.available is not None and name not in ctx.available:
+        return {
+            "ok": False,
+            "error": f"{name} 现在用不了",
+            "error_code": "not_allowed",
+            "hint": "这项能力对他没开或暂时不可用，照实说，别编结果",
+        }
     if ctx.allowed_tools is not None and name not in ctx.allowed_tools:
         allowed = "、".join(sorted(ctx.allowed_tools)) or "不调用任何工具"
         return {
@@ -1465,26 +1529,22 @@ async def execute_private_tool(  # noqa: PLR0915
         args = validate_tool_arguments(
             name, tool.properties, tool.required, raw_args or {}
         )
-        if name == "my_overview":
-            result = await _overview(ctx)
+        if name == "my_status":
+            result = await _status(ctx, args)
         elif name == "checkin":
             result = await _checkin(ctx, args.get("group"))
-        elif name == "checkin_status":
-            result = await _checkin_status(ctx, args.get("group"))
-        elif name == "list_my_groups":
-            result = _list_groups(ctx)
-        elif name == "what_you_remember":
-            result = await _remembered(ctx)
         elif name == "remember_about_me":
             result = await _remember(ctx, args)
         elif name == "forget_about_me":
             result = await _forget(ctx, args)
-        elif name == "our_relationship":
-            result = await _relationship(ctx)
         elif name == "group_recent":
             result = await _group_recent(ctx, str(args["group"]))
         elif name == "recall":
-            result = await _recall(ctx, args)
+            result = (
+                await _recall(ctx, args)
+                if str(args.get("query") or "").strip()
+                else await _remembered(ctx)
+            )
         elif name == "memory_link":
             result = await _memory_link_tool(ctx, args)
         elif name == "list_commands":
@@ -1503,8 +1563,6 @@ async def execute_private_tool(  # noqa: PLR0915
             result = _persona_tool(args, ctx)
         elif name == "webui_account":
             result = await _webui_account_tool(args, ctx)
-        elif name == "webui_onboarding":
-            result = await _webui_onboarding_tool(args, ctx)
         elif name in MANAGE_NAMES:
             result = await _group_manage_tool(args, ctx)
         elif name in BRIDGE_NAMES:
@@ -1522,6 +1580,9 @@ async def execute_private_tool(  # noqa: PLR0915
     except Exception as exc:  # noqa: BLE001
         return tool_error_payload(exc)
     ctx.succeeded.add(name)
+    if name == "my_status":
+        # 声明核验：查过签到/签到榜才能说“你今天签了/排第几”
+        ctx.succeeded.add(f"my_status.{args.get('view')}")
     if name in (MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES | OFFER_NAMES) and isinstance(result, dict) and result.get("done"):
         # 声明核验：只有真正执行了（不是“待确认”）才算办成
         ctx.succeeded.add(f"{name}.done")
@@ -1680,8 +1741,7 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "my_data": frozenset({"wipe"}),
     "tasks": frozenset({"cancel", "answer", "message"}),
     "my_persona": frozenset({"set", "preset", "template", "reset", "undo"}),
-    "webui_account": frozenset({"setup_code", "logout_all"}),
-    "webui_onboarding": frozenset({"ask_password", "cancel"}),
+    "webui_account": frozenset({"setup_code", "logout_all", "ask_password", "cancel"}),
     "computer_files": frozenset({"delete"}),
 }
 
@@ -1698,6 +1758,9 @@ async def _webui_account_tool(
     if blocked:
         raise ToolError(blocked, code=ERROR_PERMISSION, hint="照实告诉他现在用不了")
     action = str(args.get("action") or "view")
+    if action in {"guide", "ask_password", "cancel"}:
+        # 新人引导三件事（原 webui_onboarding 工具）合进来：一个账号一件工具。
+        return await _webui_onboarding_tool(args, ctx)
     if action == "view":
         account = webui_accounts.get_account(ctx.user_id)
         groups = await wac.managed_group_names(ctx.user_id)
@@ -1708,7 +1771,7 @@ async def _webui_account_tool(
             "last_login_at": account.last_login_at if account else None,
             "how_to_login": f"{wac.login_hint()}，用他的 QQ 号和密码",
             "managed_groups": groups[:10],
-            "how_to_set_password": "用 setup_code 给他发设置码，或让他自己发 /网页密码 新密码",
+            "how_to_set_password": "用 ask_password 让他直接把想要的密码发过来，或 setup_code 给他发设置码",
         }
     if action == "setup_code":
         if ctx.bot is None:
@@ -1727,7 +1790,7 @@ async def _webui_account_tool(
     if action == "logout_all":
         done = webui_accounts.revoke_sessions(ctx.user_id)
         return {"done": done, "note": "所有设备已退出" if done else "他还没有网页账号"}
-    raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS, hint="action 用 view/setup_code/logout_all")
+    raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS, hint="action 用 guide/view/ask_password/cancel/setup_code/logout_all")
 
 
 async def _webui_onboarding_tool(
@@ -2045,9 +2108,6 @@ async def _execute_extra(
     if name == "bot_status" and not ctx.is_superuser:
         raise ToolError("只有超级管理员能用", code=ERROR_PERMISSION)
     handlers = {
-        "affinity_detail": services.affinity_detail,
-        "checkin_board": services.checkin_board,
-        "chat_history": services.chat_history,
         "my_data": services.my_data,
         "feedback": services.feedback,
         "web_search": services.web_search,

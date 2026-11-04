@@ -84,8 +84,8 @@ from .private_prompt import (
 from .private_tools import (
     WRITE_TOOLS,
     PrivateToolContext,
+    available_tools,
     execute_private_tool,
-    tool_schemas,
 )
 from .prompt_sections import (
     ContentBuilder,
@@ -121,8 +121,8 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "delegate_task": ("delegate_task",),
     "delegate_project": ("delegate_task",),
     "checkin": ("checkin_for_me",),
-    "checkin_status": ("get_my_checkin",),
-    "checkin_board": ("get_my_checkin",),
+    "my_status.checkin": ("get_my_checkin",),
+    "my_status.board": ("get_my_checkin",),
     "reminders.add": ("schedule_task",),
     "reminders.snooze": ("update_scheduled_task",),
     "reminders.cancel": ("cancel_scheduled_task",),
@@ -370,6 +370,43 @@ def build_messages(
     return messages
 
 
+def with_call_hint(
+    rows: list[dict[str, Any]], tool: str, yes: str, no: str
+) -> list[dict[str, Any]]:
+    """等他确认的事附上一句怎么调（渐进式披露下这些工具的说明不在工具表里，
+    不附的话模型得先展开一次才知道 confirm 怎么写，多绕一轮）。只进本轮资料。"""
+
+    from .private_tool_catalog import direct_names, disclosure_mode
+
+    if not rows or disclosure_mode() == "full" or tool in direct_names():
+        return rows
+    hint = (
+        f"他同意：use_tool(tool={tool}, args={{action:{yes}, confirm_id}})；"
+        f"不同意：action:{no}"
+    )
+    return [{**row, "how": hint} if isinstance(row, dict) else row for row in rows]
+
+
+def tool_table(
+    *,
+    is_superuser: bool,
+    computer: bool,
+    tasks: bool,
+    manage: bool,
+) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """这一轮发给模型的工具表（默认渐进式：族目录 + 直达工具）和他能用的全部工具名。
+
+    同一位用户只随可用性（电脑/后台任务/群管/超管）变化，逐字稳定，满足前缀缓存规则。
+    """
+
+    from .private_tool_catalog import request_tools
+
+    tools = available_tools(
+        is_superuser=is_superuser, computer=computer, tasks=tasks, manage=manage
+    )
+    return request_tools(tools), frozenset(tool.name for tool in tools)
+
+
 def _stable_tools() -> bool:
     return bool(getattr(private_agent_config, "private_agent_stable_tools", True))
 
@@ -394,11 +431,13 @@ def _round_tools(
     if final:
         return {"tools": []}
     if allowed is not None:
+        from .private_tool_catalog import META_TOOLS
+
         return {
             "tools": [
                 tool
                 for tool in tools
-                if str((tool.get("function") or {}).get("name")) in allowed
+                if str((tool.get("function") or {}).get("name")) in allowed | META_TOOLS
             ]
         }
     return {"tools": tools}
@@ -424,6 +463,7 @@ def _trace_prompt(
             output={
                 "pipeline": pipeline,
                 "tool_count": len(tools),
+                "tool_chars": len(json.dumps(tools, ensure_ascii=False)),
                 "history": meta.get("history"),
                 "chars": meta.get("chars"),
                 "prefix_changed": diff.get("changed"),
@@ -539,17 +579,43 @@ def repeats_last_reply(text: str, history: list[dict[str, str]]) -> bool:
     return SequenceMatcher(None, current, before).ratio() >= REPEAT_SIMILARITY
 
 
-def _tool_content(payload: dict[str, Any]) -> str:
-    """工具结果转 JSON；太长时截掉尾部并标明，模型知道结果不完整。"""
+def compact_payload(value: Any) -> Any:
+    """工具结果瘦身：去掉值为 None/空串/空列表/空对象的键（False 和 0 保留，它们有意义）。"""
 
-    content = json.dumps(payload, ensure_ascii=False, default=str)
-    if len(content) <= TOOL_RESULT_CHAR_LIMIT:
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, raw in value.items():
+            item = compact_payload(raw)
+            if item is None or item in ("", [], {}):
+                continue
+            cleaned[key] = item
+        return cleaned
+    if isinstance(value, list | tuple):
+        return [compact_payload(item) for item in value]
+    return value
+
+
+def tool_content(payload: dict[str, Any], limit: int | None = None) -> str:
+    """工具结果转紧凑 JSON（无多余空格、去掉空字段）；太长时截掉尾部并标明，模型知道结果不完整。"""
+
+    if limit is None:
+        limit = int(
+            getattr(private_agent_config, "private_agent_tool_result_chars", TOOL_RESULT_CHAR_LIMIT)
+        )
+    content = json.dumps(
+        compact_payload(payload), ensure_ascii=False, separators=(",", ":"), default=str
+    )
+    if len(content) <= limit:
         return content
-    omitted = len(content) - TOOL_RESULT_CHAR_LIMIT
+    omitted = len(content) - limit
     return (
-        content[:TOOL_RESULT_CHAR_LIMIT]
+        content[:limit]
         + f"…（结果太长，后面 {omitted} 字省略；需要细节就缩小范围再查，或放到后台做）"
     )
+
+
+# 兼容旧引用。
+_tool_content = tool_content
 
 
 def _assistant_with_calls(message: Any) -> dict[str, Any]:
@@ -587,13 +653,37 @@ def _parse_args(raw: str) -> Any:
     return value if isinstance(value, dict) else {"__invalid__": True}
 
 
+def _call_key(name: str, args: dict[str, Any]) -> str | None:
+    """只读调用的去重键；写操作、跑代码、展开目录不去重（每次都可能不同或必须执行）。"""
+
+    from .private_tool_catalog import OPEN_TOOL, USE_TOOL
+    from .private_tools import WRITE_TOOLS as _WRITES
+    from .private_tools import resolve_alias
+
+    if name == OPEN_TOOL:
+        return None
+    if name == USE_TOOL:
+        name = str(args.get("tool") or "")
+        inner = args.get("args")
+        args = inner if isinstance(inner, dict) else {}
+    name, args = resolve_alias(name, args)
+    if not name or name in _WRITES or name == "toolbox":
+        # 小工具箱里有掷骰子、抛硬币、随机选：每次都该是新结果，不去重。
+        return None
+    # 联网也去重：同一轮搜同一个词/打开同一页，第二次不再扣他的次数、不再塞一遍结果。
+    return name + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+
+
 async def _run_tools(
     message: Any, messages: list[dict[str, Any]], ctx: PrivateToolContext
 ) -> None:
+    from .private_tool_catalog import inner_name, record_call
+
     messages.append(_assistant_with_calls(message))
     for call in messages[-1]["tool_calls"]:
         name = call["function"]["name"]
         args = _parse_args(call["function"]["arguments"])
+        key = None if args.get("__invalid__") else _call_key(name, args)
         if args.get("__invalid__"):
             payload: dict[str, Any] = {
                 "ok": False,
@@ -601,14 +691,28 @@ async def _run_tools(
                 "error_code": "invalid_args",
                 "hint": "按 schema 重新给出参数",
             }
+        elif key is not None and key in ctx.seen_calls:
+            # 同一轮里一模一样的只读查询：不再执行、不再把整段结果塞一遍上下文。
+            payload = {
+                "ok": True,
+                "result": "和这一轮前面同样的调用一样，结果见上文",
+                "same_as_before": True,
+            }
         else:
             payload = await execute_private_tool(name, args, ctx)
-        dbg(f"私聊用户 {ctx.user_id} 工具 {name} ok={payload.get('ok')}")
+            if key is not None and payload.get("ok"):
+                ctx.seen_calls.add(key)
+            elif key is None:
+                # 写操作之后再查，结果可能变了：之前的只读结果作废，照常执行。
+                ctx.seen_calls.clear()
+        record_call(name, args)
+        shown = inner_name(name, args)
+        dbg(f"私聊用户 {ctx.user_id} 工具 {shown} ok={payload.get('ok')}")
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": call["id"],
-                "content": _tool_content(payload),
+                "content": tool_content(payload),
             }
         )
     if ctx.mutated:
@@ -866,17 +970,24 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
 
     # 群聊 ↔ 私聊协作：从群里转来的事、还在收回复的提问、等他确认的转告（本轮层）。
     try:
-        context.payload.update(private_view(user_id, now))
+        bridge_view = private_view(user_id, now)
+        if bridge_view.get("group_relay_waiting"):
+            bridge_view["group_relay_waiting"] = with_call_hint(
+                bridge_view["group_relay_waiting"], "group_bridge", "confirm", "cancel"
+            )
+        context.payload.update(bridge_view)
     except Exception:  # noqa: BLE001
         dbg_exc(f"私聊用户 {user_id} 读群聊协作状态失败(忽略)")
-    manage_waiting = pending_view(user_id)
+    manage_waiting = with_call_hint(pending_view(user_id), "group_manage", "confirm", "cancel")
     if manage_waiting:
         # 之前问过他、还在等确认的群管操作：工具结果不进历史，不放这里模型就不知道 confirm_id，
         # 只能重新发起，又得再问一遍（“要发吗？”“发”……循环）。本轮层，不碰前缀。
         context.payload["group_manage_waiting"] = manage_waiting
     from .schedule_hub import pending_view as schedule_pending_view
 
-    schedule_waiting = schedule_pending_view(user_id)
+    schedule_waiting = with_call_hint(
+        schedule_pending_view(user_id), "schedules", "confirm", "drop"
+    )
     if schedule_waiting:
         # 等他确认的“给群设定时任务”：同样只进本轮层，免得重新发起又问一遍。
         context.payload["group_schedule_waiting"] = schedule_waiting
@@ -942,7 +1053,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     from .group_manage import refresh_manager_hint
 
     manage = await refresh_manager_hint(session, user_id)
-    tools = tool_schemas(
+    tools, available = tool_table(
         is_superuser=is_superuser, computer=computer, tasks=tasks, manage=manage
     )
     changed = _trace_prompt(user_id, "turn", meta, tools)
@@ -967,6 +1078,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         call_them=str((context.payload.get("user") or {}).get("call_them") or ""),
         computer=bool(computer),
         attachment_refs=[str(row["ref"]) for row in attachments if row.get("ref")],
+        available=available,
     )
     if scheduled is not None:
         # 定时代办的一轮：不许再设提醒/定时任务（防自我繁殖），不许无人值守地去群里说话或管群。
@@ -1516,12 +1628,12 @@ def _report_tools(user_id: int, computer: bool) -> list[dict[str, Any]]:  # noqa
     from .group_manage import manager_hint
     from .private_tasks import tasks_enabled
 
-    return tool_schemas(
+    return tool_table(
         is_superuser=_is_superuser(user_id),
         computer=computer,
         tasks=tasks_enabled(),
         manage=manager_hint(user_id),
-    )
+    )[0]
 
 
 def _already_told(user_id: int, task: dict[str, Any]) -> dict[str, Any] | None:

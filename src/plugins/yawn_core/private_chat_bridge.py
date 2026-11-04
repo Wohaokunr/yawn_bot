@@ -113,6 +113,14 @@ class PrivateAgentConfig(BaseModel):
     # 最后一轮/汇报轮/协调轮仍发送同一份工具表、用 tool_choice 限制，而不是换工具表
     # （换工具表会让整段前缀缓存失效）；端点不支持 tool_choice 时关掉
     private_agent_stable_tools: bool = True
+    # 工具渐进式披露：progressive 每轮只发工具族目录 + 少数直达工具，
+    # 其余用 open_tools 展开、use_tool 调用（省掉每轮近三万字的工具 schema）；
+    # full 退回每轮发全部工具的完整 schema
+    private_agent_tool_disclosure: Literal["progressive", "full"] = "progressive"
+    # 单个工具结果进上下文的字符上限（超出截尾并注明）；长网页、长列表别整段塞进上下文
+    private_agent_tool_result_chars: int = Field(default=8000, ge=2000, le=40000)
+    # 渐进式披露时仍直接放在工具表里的工具（逗号分隔；留空就全部走目录）
+    private_agent_direct_tools: str = "delegate_task,tasks,run_code,web_search,recall"
     # 把群里的记忆带进私聊：共同认识的人、各群最近发生的事、他最近在群里说的话
     private_agent_group_memory: bool = True
     # 他最近在群里说的话最多带几句、看多久以内（小时）

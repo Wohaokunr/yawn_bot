@@ -1381,6 +1381,14 @@ def _private_tool_definitions() -> dict[str, tuple[str, str]]:
     except Exception:  # noqa: BLE001
         pass
     try:
+        # 渐进式披露的目录：open_tools / use_tool 的说明和每个工具族“什么时候用”。
+        from .private_tool_catalog import catalog_sections
+
+        for name, item in catalog_sections().items():
+            found.setdefault(name, item)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from .private_worker import CONTROL_SPECS, WORKBENCH_SPECS
 
         for spec in (*WORKBENCH_SPECS, *CONTROL_SPECS):

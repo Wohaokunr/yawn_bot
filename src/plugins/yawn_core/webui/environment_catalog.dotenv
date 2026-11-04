@@ -295,6 +295,12 @@ PRIVATE_AGENT_HISTORY_DROP_RATIO=0.4
 PRIVATE_AGENT_HISTORY_MESSAGE_CHARS=1500
 # 最后一轮/汇报/协调仍发同一份工具表并用 tool_choice 限制，保住前缀缓存；端点不支持 tool_choice 时关掉
 PRIVATE_AGENT_STABLE_TOOLS=true
+# 私聊工具渐进式披露：progressive 每轮只发工具族目录和少数直达工具，按需展开；full 每轮发全部工具的完整说明
+PRIVATE_AGENT_TOOL_DISCLOSURE=progressive
+# 单个工具结果进上下文最多多少字（2000 到 40000），超出截尾并注明
+PRIVATE_AGENT_TOOL_RESULT_CHARS=8000
+# 渐进式披露时直接放在工具表里的工具（逗号分隔，留空就全部走目录）
+PRIVATE_AGENT_DIRECT_TOOLS=delegate_task,tasks,run_code,web_search,recall
 # 把群里的记忆带进私聊（共同认识的人、各群最近的事、他最近在群里说的话）
 PRIVATE_AGENT_GROUP_MEMORY=true
 # 他最近在群里说的话最多带几句（0 到 20）

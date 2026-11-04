@@ -235,6 +235,9 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 | `PRIVATE_AGENT_HISTORY_DROP_RATIO` | `0.4` | 历史窗口要挪时一次至少挪掉预算的多少（0.2–0.8），越大缓存越稳、可见历史越短 |
 | `PRIVATE_AGENT_HISTORY_MESSAGE_CHARS` | `1500` | 早先的单条历史超过这么多字时只留头尾（最后一条永远完整） |
 | `PRIVATE_AGENT_STABLE_TOOLS` | `true` | 最后一轮/汇报/协调仍发同一份工具表，用 `tool_choice` 限制，保住前缀缓存；端点不支持 `tool_choice` 时会自动退回旧做法，也可以直接关掉 |
+| `PRIVATE_AGENT_TOOL_DISCLOSURE` | `progressive` | 私聊工具怎么给模型：`progressive` 每轮只发工具族目录（`open_tools`）+ 少数直达工具 + `use_tool`，用到哪族再展开（工具表从约 2.9 万字降到约 5 千字，仍逐字稳定、不影响前缀缓存）；`full` 每轮发全部工具的完整说明 |
+| `PRIVATE_AGENT_DIRECT_TOOLS` | `delegate_task,tasks,run_code,web_search,recall` | 渐进式披露时仍直接放在工具表里的工具（逗号分隔；留空就全部走目录，最省但多一步） |
+| `PRIVATE_AGENT_TOOL_RESULT_CHARS` | `8000` | 单个工具结果进上下文最多多少字（2000–40000），超出截尾并注明；结果本身也会去掉空字段、用紧凑 JSON |
 | `PRIVATE_AGENT_GROUP_MEMORY` | `true` | 把群里的记忆带进私聊：共同认识的人、各群最近的事、他最近在群里说的话 |
 | `PRIVATE_AGENT_GROUP_LINES` | `4` | 他最近在群里说的话最多带几句（0–20，0 不带） |
 | `PRIVATE_AGENT_GROUP_LINES_HOURS` | `24` | 只看多少小时以内的群发言（1–168） |
