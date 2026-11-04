@@ -70,6 +70,30 @@ const MyPersonaPage = lazy(() =>
 const MyAccountPage = lazy(() =>
   import("./me/MyAccountPage").then(({ MyAccountPage: Page }) => ({ default: Page })),
 );
+const MyAssistantPage = lazy(() =>
+  import("./me/MyAssistantPage").then(({ MyAssistantPage: Page }) => ({ default: Page })),
+);
+const MyChatSettingsPage = lazy(() =>
+  import("./me/MyChatSettingsPage").then(({ MyChatSettingsPage: Page }) => ({ default: Page })),
+);
+const MyMemoryPage = lazy(() =>
+  import("./me/MyMemoryPage").then(({ MyMemoryPage: Page }) => ({ default: Page })),
+);
+const MyChatsPage = lazy(() =>
+  import("./me/MyChatsPage").then(({ MyChatsPage: Page }) => ({ default: Page })),
+);
+const MyAffinityPage = lazy(() =>
+  import("./me/MyAffinityPage").then(({ MyAffinityPage: Page }) => ({ default: Page })),
+);
+const MyTasksPage = lazy(() =>
+  import("./me/MyTasksPage").then(({ MyTasksPage: Page }) => ({ default: Page })),
+);
+const MyGroupsPage = lazy(() =>
+  import("./me/MyGroupsPage").then(({ MyGroupsPage: Page }) => ({ default: Page })),
+);
+const MyGamesPage = lazy(() =>
+  import("./me/MyGamesPage").then(({ MyGamesPage: Page }) => ({ default: Page })),
+);
 const GuestGroupPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupPage: Page }) => ({ default: Page })),
 );
@@ -115,7 +139,15 @@ function App(): React.JSX.Element {
           <Route element={<Shell session={session} onLogout={logout} />}>
             <Route index element={<Navigate to="/me" replace />} />
             <Route path="me" element={<MeHomePage />} />
+            <Route path="me/groups" element={<MyGroupsPage />} />
             <Route path="me/groups/:groupId" element={<MyGroupPage />} />
+            <Route path="me/assistant" element={<MyAssistantPage />} />
+            <Route path="me/tasks" element={<MyTasksPage />} />
+            <Route path="me/chat" element={<MyChatSettingsPage />} />
+            <Route path="me/memory" element={<MyMemoryPage />} />
+            <Route path="me/chats" element={<MyChatsPage />} />
+            <Route path="me/affinity" element={<MyAffinityPage />} />
+            <Route path="me/games" element={<MyGamesPage />} />
             <Route path="me/persona" element={<MyPersonaPage />} />
             <Route path="me/schedules" element={<MySchedulesPage />} />
             <Route path="me/account" element={<MyAccountPage onLoggedOut={logout} />} />

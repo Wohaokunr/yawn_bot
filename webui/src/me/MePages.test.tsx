@@ -58,6 +58,19 @@ const FEATURES = [
   { key: "group_agent", name: "群聊 Agent", override: null, effective: true, source: "default" },
 ];
 
+const DASHBOARD = {
+  now: "2026-11-04 09:00",
+  todos: { pending: 1, overdue: 0, dueToday: 1, top: [{ id: 1, content: "交作业", priority: "high", priorityLabel: "重要", done: false, due: "2026-11-04", dueInDays: 0, overdue: false, createdAt: null, doneAt: null }] },
+  reminders: [{ ref: "p2", content: "喝水", due: "2026-11-04 10:00" }],
+  countdowns: [],
+  mood: { last: null, week: { days: 7, count: 0, average: null, averageLabel: null, trend: null }, loggedToday: false },
+  affinity: { available: true, level: "熟人", nextLevel: "朋友", progress: 0.4, today: 2 },
+  checkin: { groups: 2, checkedToday: 1, bestStreak: 5, pendingGroups: [{ groupId: "900002", groupName: "摸鱼群", streakDays: 0 }] },
+  chat: { enabled: true, loaded: true, paused: false, turnsToday: 3, dailyTurns: 200 },
+  tasks: { running: 0, waitingYou: 0, total: 0 },
+  counts: { notes: 0, todos: 1, reminders: 1, countdowns: 0, moods: 0 },
+};
+
 function renderAt(path: string): void {
   render(
     <AntApp>
@@ -78,6 +91,7 @@ describe("我的空间", () => {
     state.api.mockReset();
     state.api.mockImplementation((path: string, init?: RequestInit) => {
       if (path === "/me") return Promise.resolve({ data: { userId: "10001", nickname: "小明", account: { userId: "10001", hasPassword: true, disabled: false, createdAt: "2026-11-01T10:00:00", passwordChangedAt: "2026-11-01T10:00:00", lastLoginAt: null, setupPending: false, passwordSource: "private_command" }, managedGroupCount: 1, groupCount: 3, persona: { sourceLabel: "默认", summary: "温和", name: "Yawn", locked: false }, sessionExpiresAt: 0 }, meta: {} });
+      if (path === "/me/dashboard") return Promise.resolve({ data: DASHBOARD, meta: {} });
       if (path === "/me/groups") return Promise.resolve({ data: [{ groupId: "900001", groupName: "猫猫群", role: "admin", memberCount: 3, lastActiveAt: null, enabledFeatures: 8, featureCount: 8, agentEnabled: true }], meta: {} });
       if (path === "/me/groups/900001") return Promise.resolve({ data: { groupId: "900001", groupName: "猫猫群", memberCount: 3, lastActiveAt: null, role: "owner", verified: true, features: FEATURES, featureHints: {} }, meta: {} });
       if (path === "/me/groups/900002") return Promise.reject(new Error("你不是这个群的群主或管理员"));
@@ -95,7 +109,10 @@ describe("我的空间", () => {
 
   it("lists only the groups the user manages", async () => {
     renderAt("/me");
-    expect(await screen.findByText("你好，小明")).toBeInTheDocument();
+    expect(await screen.findByText("早上好，小明")).toBeInTheDocument();
+    expect(await screen.findByText("交作业")).toBeInTheDocument();
+    expect(screen.getByText("今天到期")).toBeInTheDocument();
+    expect(screen.getByText(/还没签：摸鱼群/)).toBeInTheDocument();
     expect(await screen.findByText("猫猫群")).toBeInTheDocument();
     expect(screen.getByText("管理员")).toBeInTheDocument();
     expect(screen.getByText("猫猫群").closest("a")).toHaveAttribute("href", "/me/groups/900001");

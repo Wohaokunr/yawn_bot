@@ -74,11 +74,10 @@ const BREADCRUMB_LABELS: Record<string, string> = {
   me: "我的空间",
 };
 
-const USER_BREADCRUMB_LABELS: Record<string, string> = {
-  groups: "我管理的群",
-  persona: "私聊人设",
-  account: "账号安全",
-};
+// 面包屑跟侧栏同一份名字（USER_NAV），不用再维护第二份
+const USER_BREADCRUMB_LABELS: Record<string, string> = Object.fromEntries(
+  USER_NAV.filter((entry) => entry.key !== "/me").map((entry) => [entry.key.split("/")[2], entry.label]),
+);
 
 function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { title: React.ReactNode }[] {
   const segments = pathname.split("/").filter(Boolean);
@@ -88,7 +87,7 @@ function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { tit
     const items: { title: React.ReactNode }[] = [{ title: <Link to={rootPath}>{rootTitle}</Link> }];
     const sub = segments[1];
     if (sub && USER_BREADCRUMB_LABELS[sub]) {
-      items.push({ title: USER_BREADCRUMB_LABELS[sub] });
+      items.push({ title: segments[2] ? <Link to={`/me/${sub}`}>{USER_BREADCRUMB_LABELS[sub]}</Link> : USER_BREADCRUMB_LABELS[sub] });
       if (sub === "groups" && segments[2]) items.push({ title: `群 ${segments[2]}` });
     }
     return items;

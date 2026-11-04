@@ -1,6 +1,13 @@
 import {
   AuditOutlined,
   BookOutlined,
+  BulbOutlined,
+  CommentOutlined,
+  ControlOutlined,
+  HeartOutlined,
+  ProfileOutlined,
+  RobotOutlined,
+  TrophyOutlined,
   CodeOutlined,
   CrownOutlined,
   DashboardOutlined,
@@ -51,12 +58,20 @@ export const GUEST_NAV: NavEntry[] = [
   { key: "/guest", label: "可查看群聊", icon: <EyeOutlined />, group: "访客视图", description: "被授权查看的群聊" },
 ];
 
-// QQ 个人账号（群管理员 / 普通用户）只看自己的东西：管理的群、私聊人设、账号安全。
+// QQ 个人账号（群管理员 / 普通用户）只看自己的东西，按“今天 / 助理 / 我和 Bot / 群与成长 / 账号”分组。
 export const USER_NAV: NavEntry[] = [
-  { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "我的空间", description: "我管理的群与账号概况", keywords: "home 主页 群 管理" },
-  { key: "/me/schedules", label: "我的定时任务", icon: <FieldTimeOutlined />, group: "我的空间", description: "私聊提醒和我在群里设的定时任务", keywords: "schedule 定时 提醒 闹钟 cron 群任务" },
-  { key: "/me/persona", label: "私聊人设", icon: <SmileOutlined />, group: "我的空间", description: "调整 Bot 和我私聊时的人设", keywords: "persona 人设 私聊 自称 称呼 性格" },
-  { key: "/me/account", label: "账号安全", icon: <LockOutlined />, group: "我的空间", description: "改密码、退出所有设备", keywords: "password 密码 安全 退出 设备" },
+  { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "今天", description: "今日概览：待办、提醒、心情、签到与快捷入口", keywords: "home 主页 今天 概览 dashboard" },
+  { key: "/me/assistant", label: "小本本", icon: <ProfileOutlined />, group: "私人助理", description: "待办、笔记、倒数日、心情，和私聊里让 Bot 记的是同一份", keywords: "todo 待办 笔记 note 倒数日 countdown 心情 mood 日记" },
+  { key: "/me/schedules", label: "我的定时任务", icon: <FieldTimeOutlined />, group: "私人助理", description: "私聊提醒和我在群里设的定时任务", keywords: "schedule 定时 提醒 闹钟 cron 群任务" },
+  { key: "/me/tasks", label: "后台小助手", icon: <RobotOutlined />, group: "私人助理", description: "让 Bot 在后台帮我做的事：进度、结果、取消，以及我的虚拟电脑", keywords: "task 任务 小助手 后台 项目 电脑 sandbox" },
+  { key: "/me/chat", label: "私聊设置", icon: <ControlOutlined />, group: "我和 Bot", description: "称呼、回复长短、免打扰、早安与签到提醒、主动提议", keywords: "chat 私聊 设置 偏好 免打扰 称呼 早安 生日 主动 提议 暂停" },
+  { key: "/me/persona", label: "私聊人设", icon: <SmileOutlined />, group: "我和 Bot", description: "调整 Bot 和我私聊时的人设", keywords: "persona 人设 私聊 自称 称呼 性格" },
+  { key: "/me/memory", label: "Bot 记得我", icon: <BulbOutlined />, group: "我和 Bot", description: "Bot 记住了我哪些事、群里怎么看我、让它忘掉、群聊私聊怎么互通", keywords: "memory 记忆 忘掉 隐私 共享 画像 回顾" },
+  { key: "/me/chats", label: "聊天记录", icon: <CommentOutlined />, group: "我和 Bot", description: "和 Bot 的对话：翻看、搜索、改名、导出、删除", keywords: "chat history 聊天 记录 对话 搜索 导出 删除" },
+  { key: "/me/groups", label: "我在的群", icon: <TeamOutlined />, group: "群与成长", description: "我在的所有群：身份、签到、本群功能；管理的群可以进去管", keywords: "group 群 管理 签到 功能" },
+  { key: "/me/affinity", label: "好感与签到", icon: <HeartOutlined />, group: "群与成长", description: "和 Bot 的好感等级、来源、流水与各群连签", keywords: "affinity 好感 等级 签到 连签 积分 流水" },
+  { key: "/me/games", label: "狼人杀战绩", icon: <TrophyOutlined />, group: "群与成长", description: "我的胜率、常玩角色、阵营表现与最近对局", keywords: "werewolf 狼人杀 战绩 胜率 角色 对局 game" },
+  { key: "/me/account", label: "账号与数据", icon: <LockOutlined />, group: "账号", description: "改密码、退出所有设备、导出我的数据", keywords: "password 密码 安全 退出 设备 导出 数据 export 隐私" },
 ];
 
 export function navForRole(role: SessionRole): NavEntry[] {
@@ -78,9 +93,9 @@ const NAV_ALIASES: Record<string, string> = { "/agent": "/groups" };
 export function selectedNavKey(pathname: string, role: boolean | SessionRole): string {
   const resolved: SessionRole = role === true ? "guest" : role === false ? "admin" : role;
   if (resolved === "user") {
-    // /me/groups/… 属于“我的主页”；/me/persona、/me/account、/me/schedules 各自高亮
+    // /me/groups/<群号> 属于“我在的群”；其余二级页各自高亮，未知路径回到主页
     const second = pathname.split("/")[2] ?? "";
-    return second === "persona" || second === "account" || second === "schedules" ? `/me/${second}` : "/me";
+    return USER_NAV.some((entry) => entry.key === `/me/${second}`) ? `/me/${second}` : "/me";
   }
   const root = `/${pathname.split("/")[1] || homePathForRole(resolved).slice(1)}`;
   return NAV_ALIASES[root] ?? root;

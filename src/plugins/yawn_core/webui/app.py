@@ -41,7 +41,9 @@ from .group_manage_routes import router as group_manage_router
 from .groups import router as groups_router
 from .guest_access_routes import router as guest_access_router
 from .hub import hub
+from .me_insight_routes import router as me_insight_router
 from .me_schedule_routes import router as me_schedule_router
+from .me_space_routes import router as me_space_router
 from .overview_routes import router as overview_router
 from .private_agent_routes import router as private_agent_router
 from .private_offer_routes import router as private_offer_router
@@ -147,6 +149,8 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(stickers_router)
     app.include_router(schedules_router)
     app.include_router(self_service_router)
+    app.include_router(me_space_router)
+    app.include_router(me_insight_router)
     app.include_router(group_manage_router)
     app.include_router(me_schedule_router)
 

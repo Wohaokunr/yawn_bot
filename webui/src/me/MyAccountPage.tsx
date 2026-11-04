@@ -1,9 +1,11 @@
-import { KeyOutlined, LogoutOutlined, MessageOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
+import { BulbOutlined, CommentOutlined, DatabaseOutlined, DownloadOutlined, KeyOutlined, LogoutOutlined, MessageOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import { Alert, App as AntApp, Button, Card, Descriptions, Form, Input, Popconfirm, Progress, Typography } from "antd";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { setCsrfToken } from "../api";
 import { PageHeader, QueryErrorAlert, useApiQuery } from "../shared";
 import { meApi } from "./me-api";
+import { EXPORT_URL, spaceApi } from "./me-space-api";
 import { formatQqTime, passwordProblem, passwordStrength } from "./me-meta";
 import "./me.css";
 
@@ -24,6 +26,8 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
   const next = Form.useWatch("next", form) ?? "";
   const strength = passwordStrength(next);
   const me = query.data;
+  const dash = useApiQuery({ queryKey: ["me", "dashboard"], fetcher: () => spaceApi.dashboard() });
+  const counts = dash.data?.counts ?? {};
 
   const submit = async (values: { current: string; next: string }): Promise<void> => {
     setSaving(true);
@@ -51,7 +55,7 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
   };
 
   return <div className="me-page">
-    <PageHeader title="账号安全" subtitle="你的网页个人账号：QQ 号 + 你自己设的密码" onRefresh={query.reload} refreshing={query.refreshing} />
+    <PageHeader title="账号与数据" subtitle="你的网页个人账号（QQ 号 + 你自己设的密码），以及你在 Bot 这里留下的数据" onRefresh={query.reload} refreshing={query.refreshing} />
     {query.error && !me && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
     <div className="me-account-grid">
       <Card size="small" title={<span><SafetyCertificateOutlined /> 账号信息</span>}>
@@ -108,6 +112,23 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={saving} block>修改密码</Button>
         </Form>
+      </Card>
+
+      <Card size="small" title={<span><DatabaseOutlined /> 我的数据</span>}>
+        <Descriptions column={2} size="small">
+          <Descriptions.Item label="待办">{counts.todos ?? "—"}</Descriptions.Item>
+          <Descriptions.Item label="笔记">{counts.notes ?? "—"}</Descriptions.Item>
+          <Descriptions.Item label="私聊提醒">{counts.reminders ?? "—"}</Descriptions.Item>
+          <Descriptions.Item label="倒数日">{counts.countdowns ?? "—"}</Descriptions.Item>
+          <Descriptions.Item label="心情记录">{counts.moods ?? "—"}</Descriptions.Item>
+          <Descriptions.Item label="后台任务">{dash.data?.tasks.total ?? "—"}</Descriptions.Item>
+        </Descriptions>
+        <Paragraph type="secondary" className="me-hint">导出一份 JSON：小本本、提醒、私聊偏好、Bot 记得你的事、好感流水、各群签到、对话目录。不含密码。</Paragraph>
+        <Button type="primary" icon={<DownloadOutlined />} href={EXPORT_URL} block>导出我的数据</Button>
+        <div className="me-link-row">
+          <Link to="/me/memory"><BulbOutlined /> 管理 Bot 的记忆</Link>
+          <Link to="/me/chats"><CommentOutlined /> 管理聊天记录</Link>
+        </div>
       </Card>
 
       <Card size="small" title={<span><MessageOutlined /> 忘记密码 / 在私聊里管理</span>}>
