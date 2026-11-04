@@ -541,24 +541,27 @@ async def test_purge_drops_shares_but_keeps_tombstones(maker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_webui_overview_detail_and_admin_tightening(maker) -> None:
+async def test_webui_overview_detail_and_admin_tightening(maker, monkeypatch) -> None:
+    # 路由拿到的是 WebUI 登录会话（没有 execute），数据库会话必须由路由自己开。
+    monkeypatch.setattr(routes, "get_session", maker)
+    auth = SimpleNamespace(role="admin", user_id=None)
     async with maker() as session:
         ctx = await _tool_ctx(session)
         await _run(ctx, "remember_about_me", key="hobby", content="打羽毛球")
         await _run(ctx, "memory_link", action="share", keys=["hobby"])
         await _run(ctx, "forget_about_me", keyword="香菜")
         await session.commit()
-        overview = await routes.get_memory_link(session, limit=50)
-        detail = await routes.get_memory_link_user(USER, session)
-        group_view = {g["name"]: g for g in detail["data"]["groups"]}
-        assert group_view["开着的群"]["group_sees_shared"] == [{"label": "爱好", "content": "打羽毛球"}]
-        assert group_view["没开的群"]["group_sees_shared"] == []
-        unshared = await routes.post_memory_link_unshare(USER, session)
-        assert unshared["data"]["settings"]["share_keys"] == []
-        dropped = await routes.delete_memory_link_tombstone(USER, 0, session)
-        assert dropped["data"]["tombstones"] == []
-        with pytest.raises(Exception):  # noqa: B017
-            await routes.delete_memory_link_tombstone(USER, 5, session)
+    overview = await routes.get_memory_link(auth, limit=50)
+    detail = await routes.get_memory_link_user(USER, auth)
+    group_view = {g["name"]: g for g in detail["data"]["groups"]}
+    assert group_view["开着的群"]["group_sees_shared"] == [{"label": "爱好", "content": "打羽毛球"}]
+    assert group_view["没开的群"]["group_sees_shared"] == []
+    unshared = await routes.post_memory_link_unshare(USER, auth)
+    assert unshared["data"]["settings"]["share_keys"] == []
+    dropped = await routes.delete_memory_link_tombstone(USER, 0, auth)
+    assert dropped["data"]["tombstones"] == []
+    with pytest.raises(Exception):  # noqa: B017
+        await routes.delete_memory_link_tombstone(USER, 5, auth)
     data = overview["data"]
     assert data["totals"] == {"sharing": 1, "muting": 0, "forgetting": 1}
     assert data["users"][0]["user_id"] == str(USER)
