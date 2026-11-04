@@ -225,3 +225,76 @@
 .pa-bridge-list > li { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
 .pa-bridge-main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
 .pa-bridge-replies { margin: 4px 0 0; padding-left: 16px; }
+
+/* 主动提议 */
+.pa-offers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pa-offer-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pa-offer-switches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px 16px;
+}
+.pa-offer-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+.pa-offer-numbers {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px 16px;
+}
+.pa-offer-number {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px 8px;
+}
+.pa-offer-number .dbg-small {
+  grid-column: 1 / -1;
+}
+.pa-offer-kinds {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 6px 16px;
+}
+.pa-offer-own {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.pa-offer-text {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pa-offer-json {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pa-offer-cooling {
+  margin: 0;
+  padding-left: 18px;
+}
+.pa-offers .pst-section-head {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.pa-offers .pst-section-head > .ant-typography:first-child {
+  white-space: nowrap;
+}

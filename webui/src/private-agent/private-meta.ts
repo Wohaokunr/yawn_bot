@@ -3,8 +3,8 @@ import { composeText } from "../agent-prompts/prompt-meta";
 import type { PromptOverride } from "../agent-prompts/prompt-meta";
 import type { PersonaMode, PrivatePromptIssue, PrivateScope, PrivateSectionRow, PrivateSnapshot } from "./private-api";
 
-export type PrivateTab = "prompts" | "persona" | "captures" | "bridge" | "memory";
-export const PRIVATE_TABS: PrivateTab[] = ["prompts", "persona", "captures", "bridge", "memory"];
+export type PrivateTab = "prompts" | "persona" | "captures" | "bridge" | "memory" | "offers";
+export const PRIVATE_TABS: PrivateTab[] = ["prompts", "persona", "captures", "bridge", "memory", "offers"];
 
 /** 可共享到群里的私聊事实类别（与后端 memory_link.SHAREABLE_KEYS / PRIVATE_MEMORY_LABELS 一致）。 */
 export const MEMORY_LINK_KEY_LABELS: Record<string, string> = {
@@ -248,4 +248,50 @@ export const BRIDGE_REASON_LABELS: Record<string, string> = {
 
 export function bridgeStatusLabel(status: string | null | undefined): string {
   return BRIDGE_STATUS_LABELS[String(status ?? "")] ?? String(status ?? "—");
+}
+
+// ── 主动提议 ──
+
+/** 门槛原因的颜色：能问绿色、他的意愿/时段橙色、全站关掉灰色、出错红色。 */
+export function offerReasonColor(reason: string | null | undefined): string {
+  if (!reason) return "default";
+  if (reason === "ok") return "green";
+  if (reason === "backoff") return "red";
+  if (["env_off", "agent_off", "policy_off", "not_listed", "blocked"].includes(reason)) return "default";
+  if (["user_off", "paused", "snoozed", "unanswered", "not_friend"].includes(reason)) return "orange";
+  return "blue";
+}
+
+export function offerStatusColor(status: string | null | undefined, outcome?: string | null): string {
+  if (outcome === "accepted") return "green";
+  if (outcome === "declined") return "orange";
+  if (status === "failed") return "red";
+  if (status === "sent") return "blue";
+  return "default";
+}
+
+/** 他回应过的提议里答应了的比例（没回的不算进分母会虚高，所以分母是全部问过的）。 */
+export function offerAcceptRate(stats: { sent: number; accepted: number }): string {
+  if (!stats.sent) return "—";
+  return `${Math.round((stats.accepted / stats.sent) * 100)}%`;
+}
+
+export function formatHours(hours: number): string {
+  if (!Number.isFinite(hours) || hours <= 0) return "—";
+  if (hours < 1) return `${Math.round(hours * 60)} 分钟`;
+  return Number.isInteger(hours) ? `${hours} 小时` : `${hours.toFixed(1)} 小时`;
+}
+
+export const OFFER_DROP_LABELS: Record<string, string> = {
+  kind_off: "这一类在策略里关着",
+  muted: "他说过这类不用问",
+  cooldown: "最近问过，冷却中",
+  low_score: "分数不够",
+  duplicate: "重复",
+};
+
+/** 白名单/屏蔽名单输入：逗号、空格、换行分隔的 QQ 号。 */
+export function parseUserIds(text: string): number[] {
+  const ids = text.split(/[\s,，、]+/).map((part) => part.trim()).filter((part) => /^\d{5,12}$/.test(part)).map(Number);
+  return [...new Set(ids)];
 }

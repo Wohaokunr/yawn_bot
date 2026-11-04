@@ -212,6 +212,8 @@ Agent 发给模型的每一段文字都在 `yawn_agent/prompt_sections.py` 里�
 | `PRIVATE_AGENT_STATE_PATH` | 空 | 成员暂停自动回复的状态文件，留空为 `data/private_agent/state.json` |
 | `PRIVATE_AGENT_WEB_DAILY` | `10` | 私聊里每人每天联网搜索/读网页次数（0 关闭）；仍受「网页搜索」总开关、屏蔽域名和全站预算约束 |
 | `PRIVATE_AGENT_PROACTIVE` | `true` | 允许私聊主动发消息（用户设的提醒、早安、签到提醒、生日、倒数日）；关掉后全部不发 |
+| `PRIVATE_AGENT_OFFERS` | `true` | 主动提议总闸：每隔几小时（默认 3 小时）替他找找我能帮他做的事，私聊问他要不要去做。间隔、夜间不打扰时段、没回就停、每天上限、哪些事能拿来问都在 WebUI「私聊 Agent → 主动提议」里改；`PRIVATE_AGENT_PROACTIVE=false` 时同样不发 |
+| `PRIVATE_AGENT_OFFER_DIR` | 空 | 主动提议策略与当日用量目录，留空为 `data/private_agent/offers` |
 | `PRIVATE_AGENT_MERGE_WINDOW_MS` | `1500` | 连发合并：几秒内连发的几条私聊合成一轮回复（0 关闭） |
 | `PRIVATE_AGENT_DATA_DIR` | 空 | 个人数据目录（每人一个 JSON），留空为 `data/private_agent/users` |
 | `PRIVATE_AGENT_PERSONA_POLICY_PATH` | 空 | 私聊人设策略文件，留空为个人数据目录旁边的 `persona_policy.json`（WebUI「私聊 Agent → 人设」里改，不用手写） |

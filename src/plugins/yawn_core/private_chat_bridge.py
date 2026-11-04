@@ -62,6 +62,8 @@ class PrivateAgentConfig(BaseModel):
     private_agent_web_daily: int = Field(default=10, ge=0, le=200)
     # 允许私聊 Agent 主动发消息（用户设的提醒、早安、签到提醒、生日、倒数日当天）
     private_agent_proactive: bool = True
+    # 主动提议：每隔几小时找找能帮他做的事并私聊问他（细节在 WebUI 改）
+    private_agent_offers: bool = True
     # 连发合并：对话队列里攒着的连续几条消息（等这么多毫秒）合成一轮回复；0 关闭
     private_agent_merge_window_ms: int = Field(default=1500, ge=0, le=10000)
     # 发言判断：Agent 可以选择这轮不说话（他话没说完 / 不需要回），想回复时

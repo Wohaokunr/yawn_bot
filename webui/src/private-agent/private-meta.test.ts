@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { PrivateSectionRow } from "./private-api";
 import {
   cleanUserId,
+  formatHours,
+  offerAcceptRate,
+  offerReasonColor,
+  offerStatusColor,
+  parseUserIds,
   formatHitRate,
   filterPrivateSections,
   groupCounts,
@@ -117,5 +122,24 @@ describe("formatHitRate", () => {
     expect(formatHitRate(0)).toBe("0%");
     expect(formatHitRate(null)).toBe("—");
     expect(formatHitRate(undefined)).toBe("—");
+  });
+
+  it("labels offer gates, outcomes and inputs", () => {
+    expect(offerReasonColor("ok")).toBe("green");
+    expect(offerReasonColor("unanswered")).toBe("orange");
+    expect(offerReasonColor("policy_off")).toBe("default");
+    expect(offerReasonColor("quiet")).toBe("blue");
+    expect(offerReasonColor("backoff")).toBe("red");
+    expect(offerStatusColor("sent", "accepted")).toBe("green");
+    expect(offerStatusColor("sent", "declined")).toBe("orange");
+    expect(offerStatusColor("failed")).toBe("red");
+    expect(offerStatusColor("skipped")).toBe("default");
+    expect(offerAcceptRate({ sent: 0, accepted: 0 })).toBe("—");
+    expect(offerAcceptRate({ sent: 3, accepted: 1 })).toBe("33%");
+    expect(formatHours(0.5)).toBe("30 分钟");
+    expect(formatHours(3)).toBe("3 小时");
+    expect(formatHours(2.5)).toBe("2.5 小时");
+    expect(parseUserIds("12345, 12345 678 9876543，abc\n55555")).toEqual([12345, 9876543, 55555]);
+    expect(parsePrivateTab("offers")).toBe("offers");
   });
 });

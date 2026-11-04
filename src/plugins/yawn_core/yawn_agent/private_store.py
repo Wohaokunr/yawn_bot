@@ -68,6 +68,8 @@ def empty_record() -> dict[str, Any]:
         "bridge": {},
         # 群聊记忆 ↔ 私聊记忆打通（memory_link）：本人定的流动规则、让我忘掉的事、跨边流动记录
         "memory_link": {},
+        # 主动提议（private_offers）：他自己的开关/间隔/静音的种类、最近问过什么、问过的事的冷却
+        "offers": {},
     }
 
 

@@ -98,6 +98,9 @@ _GROUP_OF: dict[str, str] = {
     "private.handoff_notice": "team",
     "private.scheduled_turn": "team",
     "private.scheduled_notice": "team",
+    "private.offer_turn": "team",
+    "private.offer_notice": "team",
+    "private.offer_waiting": "team",
     "private.report_notice": "team",
     "private.coordinate_turn": "team",
     "private.coordinate_notice": "team",
@@ -159,6 +162,7 @@ _TAIL_STEPS = (
     _S("private.just_finished", "system#3", "有刚做完、还没汇报的结果"),
     _S("private.reply_cut", "system#3", "上一条分条发到一半被他打断"),
     _S("private.rhythm_mix", "system#3", "最近几次回复条数套了模板"),
+    _S("private.offer_waiting", "system#3", "上次主动提议他还没表态"),
     _S("private.turn_style", "system#3"),
 )
 _CORE_STEPS = (*_HEAD_STEPS, *_TAIL_STEPS)
@@ -221,6 +225,18 @@ PIPELINES: tuple[Pipeline, ...] = (
             *_CORE_STEPS,
             _S("private.scheduled_turn", "system#3", "接在本轮资料后面"),
             _S("private.scheduled_notice", "user"),
+        ),
+        tools="main",
+    ),
+    Pipeline(
+        "offer",
+        "主动提议",
+        "每隔几小时、过了打扰控制（夜间/免打扰/刚聊过/没回就停/每日上限）且找到值得问的事时，主智能体主动私聊、问他要不要帮他做某件事的一轮（只放行只读工具，可以选择这次不问）。",
+        "主动提议到时间",
+        (
+            *_CORE_STEPS,
+            _S("private.offer_turn", "system#3", "接在本轮资料后面"),
+            _S("private.offer_notice", "user"),
         ),
         tools="main",
     ),

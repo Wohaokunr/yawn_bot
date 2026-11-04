@@ -63,6 +63,8 @@ from .private_prompt import (
     PRIVATE_HANDOFF_TURN,
     PRIVATE_JUST_FINISHED,
     PRIVATE_MEDIA,
+    PRIVATE_OFFER_TURN,
+    PRIVATE_OFFER_WAITING,
     PRIVATE_PERSONA_SCOPE,
     PRIVATE_REPEAT_GUARD,
     PRIVATE_REPLY_CUT,
@@ -309,6 +311,12 @@ def build_messages(
         turn.add(
             "private.rhythm_mix",
             apply_section("private.rhythm_mix", "\n" + PRIVATE_RHYTHM_MIX),
+        )
+    if payload.get("offer_waiting"):
+        # 上次主动问他要不要帮忙、还没表态：说明怎么接（本轮层，不碰前缀）。
+        turn.add(
+            "private.offer_waiting",
+            apply_section("private.offer_waiting", "\n" + PRIVATE_OFFER_WAITING),
         )
     if round_note:
         section_id, note = round_note
@@ -730,7 +738,12 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
     整轮绑定这位用户：私聊分段按“本人覆盖 → 全局”解析，真实请求按用户抓取。
     """
 
-    pipeline = "scheduled" if isinstance(request.extra.get("scheduled"), dict) else "turn"
+    if isinstance(request.extra.get("scheduled"), dict):
+        pipeline = "scheduled"
+    elif isinstance(request.extra.get("offer"), dict):
+        pipeline = "offer"
+    else:
+        pipeline = "turn"
     with use_private_user(request.user_id, pipeline=pipeline):
         return await _handle_private_turn(request)
 
@@ -746,9 +759,14 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     scheduled = request.extra.get("scheduled") if isinstance(request.extra.get("scheduled"), dict) else None
     if scheduled is not None and handoff is None:
         handoff = scheduled
+    # 主动提议（每隔几小时问他要不要帮忙）：也是我主动开口，但可以看完候选决定这次不问。
+    offer = request.extra.get("offer") if isinstance(request.extra.get("offer"), dict) else None
+    raw_out = request.extra.get("offer_out")
+    offer_out: dict[str, Any] = raw_out if isinstance(raw_out, dict) else {}
+    opening = handoff is not None or offer is not None
     # 发言判断说明照常放（和普通回合同一份开头，保住前缀缓存），只是这一轮不许选择不说话。
     silence_ok = turn_taking.enabled()
-    if not resumed and handoff is None:
+    if not resumed and not opening:
         # 他又说话了：之前“等他说完”的计时器作废，由这一轮接着聊。
         turn_taking.cancel_wait(user_id)
     arrivals_at_start = turn_taking.arrivals(user_id)
@@ -831,7 +849,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     from .private_voice import dialogue_excerpt, voice_card
 
     just_finished: list[dict[str, Any]] = []
-    if tasks:
+    if tasks and offer is None:
         # 刚做完、还没告诉他的结果：他正好在说话，就顺着这一轮一起说，不另起一条汇报。
         from .private_tasks import unreported_results
 
@@ -862,6 +880,18 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     if schedule_waiting:
         # 等他确认的“给群设定时任务”：同样只进本轮层，免得重新发起又问一遍。
         context.payload["group_schedule_waiting"] = schedule_waiting
+    if not opening:
+        # 上次主动问他要不要帮忙、还没表态：他这句可能就是在回应（本轮层，不碰前缀）。
+        from .private_offer_policy import load_settings as _offer_settings
+        from .private_offers import turn_view as _offer_view
+
+        try:
+            offer_settings = _offer_settings()
+            context.payload.update(
+                private_store.update(user_id, lambda rec: _offer_view(rec, now, offer_settings))
+            )
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"私聊用户 {user_id} 读主动提议状态失败(忽略)")
     cut = private_rhythm.cut_note(user_id)
     if cut:
         # 上一条分条被他打断了：只告诉模型发到第几条，没发出去的内容不给（也不在历史里）。
@@ -890,7 +920,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         round_note=(
             ("private.scheduled_turn", PRIVATE_SCHEDULED_TURN)
             if scheduled is not None
-            else ("private.handoff_turn", PRIVATE_HANDOFF_TURN) if handoff else None
+            else ("private.handoff_turn", PRIVATE_HANDOFF_TURN)
+            if handoff
+            else ("private.offer_turn", PRIVATE_OFFER_TURN)
+            if offer is not None
+            else None
         ),
         meta_out=meta,
     )
@@ -940,6 +974,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         from .private_tools import TOOLS_BY_NAME as _ALL_TOOL_NAMES
 
         ctx.allowed_tools = frozenset(_ALL_TOOL_NAMES) - WAKE_BLOCKED_TOOLS
+    elif offer is not None:
+        # 主动提议的一轮只问不做：只放行只读工具（查一查再问），真正动手等他答应了再说。
+        from .private_offer_turn import OFFER_ALLOWED_TOOLS
+
+        ctx.allowed_tools = OFFER_ALLOWED_TOOLS
     max_rounds = int(private_agent_config.private_agent_max_tool_rounds)
     handoff_after = int(private_agent_config.private_agent_handoff_after)
     nudged = False
@@ -1041,7 +1080,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
                 continue
         break
 
-    if not resumed and handoff is None:
+    if not resumed and not opening:
         await _annotate_turn_message(
             session,
             user_id,
@@ -1050,7 +1089,21 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     wrote = bool(ctx.succeeded & (_WRITE_RESULTS | WRITE_TOOLS))
     silence = turn_taking.parse_silence(text)
     text = silence.text
-    if silence.silent and silence_ok and handoff is None and not (ctx.succeeded & _WRITE_RESULTS):
+    if offer is not None:
+        from .private_offers import parse_pick
+
+        text, picks, skip = parse_pick(text, len(offer.get("things") or []))
+        offer_out["picks"] = picks
+        if (skip or silence.silent) and offer.get("may_skip", True):
+            dbg(f"私聊用户 {user_id} 主动提议：看完觉得这次不问")
+            _trace_silence(user_id, "offer_skip")
+            return ""
+        if turn_taking.newer_message_arrived(user_id, arrivals_at_start):
+            # 正要问他就先开口了：这条不发，让给他那一轮。
+            offer_out["user_spoke"] = True
+            _trace_silence(user_id, "offer_yield")
+            return ""
+    elif silence.silent and silence_ok and handoff is None and not (ctx.succeeded & _WRITE_RESULTS):
         if silence.kind == "wait" and not resumed:
             turn_taking.schedule_wait(
                 request.bot,
@@ -1099,7 +1152,9 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             mark_reported(user_id, [str(item["id"]) for item in just_finished], via="chat")
         except Exception:  # noqa: BLE001
             dbg_exc(f"私聊用户 {user_id} 标记已顺带告知的结果失败(忽略)")
-    await _after_turn(session, user_id, now)
+    if offer is None:
+        # 主动提议是我找他：不加好感、不算一次聊天去触发记忆整理。
+        await _after_turn(session, user_id, now)
     return "\n".join(delivered)
 
 
