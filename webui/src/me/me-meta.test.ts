@@ -46,7 +46,9 @@ describe("user navigation", () => {
   it("keeps QQ accounts inside 我的空间", () => {
     expect(navForRole("user")).toBe(USER_NAV);
     expect(homePathForRole("user")).toBe("/me");
-    expect(selectedNavKey("/me/groups/123", "user")).toBe("/me");
+    expect(selectedNavKey("/me/groups/123", "user")).toBe("/me/groups");
+    expect(selectedNavKey("/me/memory", "user")).toBe("/me/memory");
+    expect(selectedNavKey("/me/nope", "user")).toBe("/me");
     expect(selectedNavKey("/me/persona", "user")).toBe("/me/persona");
     expect(selectedNavKey("/me/account", "user")).toBe("/me/account");
     expect(selectedNavKey("/", "guest")).toBe("/guest");

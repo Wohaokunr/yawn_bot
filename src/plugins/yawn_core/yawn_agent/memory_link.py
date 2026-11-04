@@ -324,6 +324,20 @@ def set_share(
     return _update(user_id, apply)
 
 
+def set_share_groups(
+    user_id: int, groups: list[int], *, now: datetime, group_names: list[str] | None = None
+) -> list[int]:
+    """只改共享范围：空列表 = 所有能看到的群（共享类别不动）。个人网页用。"""
+
+    def apply(data: dict[str, Any]) -> list[int]:
+        prefs = data["prefs"]
+        prefs["share_groups"] = _ints(groups, MAX_MUTED)
+        _log(data, "share", now, keys=list(prefs["share_keys"]), groups=list(group_names or []))
+        return list(prefs["share_groups"])
+
+    return _update(user_id, apply)
+
+
 def set_muted(
     user_id: int, group_id: int, *, muted: bool, now: datetime, group_name: str = ""
 ) -> list[int]:
@@ -605,8 +619,10 @@ def restore_tombstones(user_id: int, tombstones: list[dict[str, Any]]) -> None:
         dbg_exc(f"恢复“忘掉”记录失败: 用户 {user_id}")
 
 
-def drop_tombstone(user_id: int, index: int, *, now: datetime) -> bool:
-    """WebUI：删掉第 index 条墓碑（按当前列表顺序）。"""
+def drop_tombstone(
+    user_id: int, index: int, *, now: datetime, by: str = "admin"
+) -> bool:
+    """WebUI：删掉第 index 条墓碑（按当前列表顺序）；``by`` 记谁删的（admin / self）。"""
 
     def apply(data: dict[str, Any]) -> bool:
         # 与 tombstone_view 同一口径：先去掉过期的，序号才对得上。
@@ -615,7 +631,7 @@ def drop_tombstone(user_id: int, index: int, *, now: datetime) -> bool:
         if not 0 <= index < len(items):
             return False
         items.pop(index)
-        _log(data, "tombstone_cleared", now, by="admin")
+        _log(data, "tombstone_cleared", now, by=by)
         return True
 
     return bool(_update(user_id, apply))
@@ -954,6 +970,7 @@ __all__ = [
     "set_groups_in_private",
     "set_muted",
     "set_share",
+    "set_share_groups",
     "settings_view",
     "share_enabled",
     "shared_facts_for_group",
