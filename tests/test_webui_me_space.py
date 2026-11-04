@@ -319,4 +319,3 @@ def test_affinity_today_is_per_source_with_total(me):
     assert data["todayTotal"] == 7
     assert _get(me, "/me/dashboard")["affinity"]["today"] == 7
     affinity_mod.reset_ledger_state()
-
