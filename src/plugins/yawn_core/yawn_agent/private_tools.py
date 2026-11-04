@@ -36,6 +36,8 @@ from .memory_hygiene import contains_pii, looks_like_instruction, scrub_pii
 from .memory_self import SELF_FACT_KEYS, forget_member_facts, remember_member_fact
 from .private_computer import COMPUTER_TOOL_SPECS
 from .private_context import SharedGroup, group_bonds, group_profile_facts
+from .private_offers import TOOL_DESCRIPTION as _OFFERS_DESCRIPTION
+from .private_offers import TOOL_PROPERTIES as _OFFERS_PROPERTIES
 from .private_schedule_tool import TOOL_DESCRIPTION as _SCHEDULES_DESCRIPTION
 from .private_schedule_tool import TOOL_PROPERTIES as _SCHEDULES_PROPERTIES
 from .prompt_sections import PRIVATE_TOOL_SECTION_PREFIX, apply_section
@@ -617,6 +619,11 @@ SCHEDULE_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool("schedules", _SCHEDULES_DESCRIPTION, _SCHEDULES_PROPERTIES, ("action",), writes=True),
 )
 SCHEDULE_NAMES = frozenset(tool.name for tool in SCHEDULE_TOOLS)
+# 主动提议（private_offers）：他自己开关、调间隔、静音某类事，记下他对上次提议的态度。
+OFFER_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool("offers", _OFFERS_DESCRIPTION, _OFFERS_PROPERTIES, ("action",), writes=True),
+)
+OFFER_NAMES = frozenset(tool.name for tool in OFFER_TOOLS)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
@@ -627,6 +634,7 @@ ALL_TOOLS: tuple[PrivateTool, ...] = (
     + MANAGE_TOOLS
     + BRIDGE_TOOLS
     + SCHEDULE_TOOLS
+    + OFFER_TOOLS
     + COMPUTER_TOOLS
     + TASK_TOOLS
 )
@@ -1507,12 +1515,14 @@ async def execute_private_tool(  # noqa: PLR0915
             from .private_schedule_tool import schedules_tool
 
             result = await schedules_tool(args, ctx)
+        elif name in OFFER_NAMES:
+            result = _offers_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
         return tool_error_payload(exc)
     ctx.succeeded.add(name)
-    if name in (MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES) and isinstance(result, dict) and result.get("done"):
+    if name in (MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES | OFFER_NAMES) and isinstance(result, dict) and result.get("done"):
         # 声明核验：只有真正执行了（不是“待确认”）才算办成
         ctx.succeeded.add(f"{name}.done")
         ctx.succeeded.add(f"{name}.{result.get('action')}")
@@ -1520,6 +1530,23 @@ async def execute_private_tool(  # noqa: PLR0915
         # 声明核验按“工具.动作”区分：查了待办不能说“已经帮你加上了”
         ctx.succeeded.add(f"{name}.{args['action']}")
     return {"ok": True, "result": result}
+
+
+def _offers_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
+    from . import private_store as store
+    from .private_offer_policy import load_settings, record_usage
+    from .private_offers import tool_call
+
+    settings = load_settings()
+    try:
+        result = store.update(ctx.user_id, lambda rec: tool_call(rec, args, ctx.now, settings))
+    except LookupError as exc:
+        raise ToolError(str(exc), code=ERROR_NOT_FOUND) from exc
+    except ValueError as exc:
+        raise ToolError(str(exc), code=ERROR_INVALID_ARGS) from exc
+    if result.get("action") == "resolve" and result.get("outcome"):
+        record_usage(str(result["outcome"]))
+    return result
 
 
 MAX_DELEGATIONS_PER_TURN = 3
@@ -2039,6 +2066,7 @@ __all__ = [
     "EXTRA_TOOLS",
     "MANAGE_NAMES",
     "MANAGE_TOOLS",
+    "OFFER_NAMES",
     "PERSONA_TOOLS",
     "PRIVATE_TOOLS",
     "SCHEDULE_NAMES",

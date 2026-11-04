@@ -5,6 +5,144 @@ import type { PersonaCard, PersonaPreset } from "../types";
 
 export type PrivateScope = "global" | "user";
 
+// ── 主动提议 ──
+
+export interface OfferSettings {
+  enabled: boolean;
+  default_on: boolean;
+  interval_hours: number;
+  user_min_interval_hours: number;
+  jitter_minutes: number;
+  max_unanswered: number;
+  backoff_factor: number;
+  max_backoff_hours: number;
+  daily_max: number;
+  quiet_hours_enabled: boolean;
+  quiet_start: string;
+  quiet_end: string;
+  active_within_days: number;
+  min_idle_minutes: number;
+  item_cooldown_hours: number;
+  decline_mute_days: number;
+  max_candidates: number;
+  max_items_per_offer: number;
+  min_score: number;
+  allow_model_skip: boolean;
+  only_friends: boolean;
+  per_tick: number;
+  answer_window_hours: number;
+  user_mode: "all" | "allowlist";
+  allowed_users: number[];
+  blocked_users: number[];
+  kinds: Record<string, boolean>;
+}
+
+export interface OfferKind {
+  kind: string;
+  label: string;
+  description: string;
+}
+
+export interface OfferPrefsView {
+  on: boolean;
+  own_choice: boolean;
+  every_hours: number;
+  paused_until?: string;
+  muted?: Array<{ kind: string; label: string; until: string }>;
+}
+
+export interface OfferStats {
+  sent: number;
+  skipped: number;
+  accepted: number;
+  declined: number;
+  later: number;
+  replied: number;
+  ignored: number;
+}
+
+export interface OfferGate {
+  reason: string;
+  label: string;
+  unanswered: number;
+  interval_hours: number;
+  today: number;
+  next_at?: string;
+  at?: string;
+}
+
+export interface OfferLogRow {
+  id: string;
+  at: string;
+  status: string;
+  status_label: string;
+  by: string;
+  items: Array<{ kind: string; key: string; what: string }>;
+  considered: string[];
+  text: string;
+  outcome: string | null;
+  outcome_label: string;
+  replied_at: string | null;
+}
+
+export interface OfferUserRow {
+  user_id: number;
+  prefs: OfferPrefsView;
+  last: OfferLogRow | null;
+  last_check: OfferGate | null;
+  stats: OfferStats;
+  today: number;
+  pending: boolean;
+}
+
+export interface OfferOverview {
+  env_on: boolean;
+  agent_on: boolean;
+  settings: OfferSettings;
+  kinds: OfferKind[];
+  reasons: Record<string, string>;
+  outcomes: Record<string, string>;
+  usage: { day: string; results: Record<string, number>; kinds: Record<string, number> };
+  users: OfferUserRow[];
+  total_users: number;
+}
+
+export interface OfferCandidate {
+  kind: string;
+  key: string;
+  what: string;
+  could_do: string;
+  score: number;
+  details: Record<string, unknown>;
+  dropped?: string;
+}
+
+export interface OfferUserDetail {
+  env_on: boolean;
+  agent_on: boolean;
+  user_id: number;
+  gate: OfferGate;
+  facts: { last_user_at: string | null; last_bot_at: string | null; friend: boolean | null; paused: boolean; busy: boolean };
+  candidates: OfferCandidate[];
+  dropped: OfferCandidate[];
+  payload: Record<string, unknown>;
+  prefs: OfferPrefsView;
+  own: { enabled: boolean | null; interval_hours: number | null; snooze_until: string | null; muted_kinds: Record<string, string> };
+  log: OfferLogRow[];
+  stats: OfferStats;
+  cooling: Array<{ key: string; at: string }>;
+}
+
+export interface OfferPrefsPatch {
+  enabled?: boolean | null;
+  follow_default?: boolean;
+  interval_hours?: number | null;
+  reset_interval?: boolean;
+  snooze_hours?: number | null;
+  mute?: string[];
+  unmute?: string[];
+}
+
 // ── 群聊记忆 ↔ 私聊记忆打通 ──
 
 export interface MemoryLinkEvent {
@@ -420,6 +558,15 @@ export const privateApi = {
   resetUser: (userId: string, expectedRevision: number) =>
     data<{ revision: number; changed: number }>(`${BASE}/prompts/users/${encodeURIComponent(userId)}?expectedRevision=${expectedRevision}`, json("DELETE")),
 
+  offers: (signal?: AbortSignal) => data<OfferOverview>(`${BASE}/offers`, { signal }),
+  saveOfferSettings: (settings: OfferSettings) => data<{ settings: OfferSettings }>(`${BASE}/offers/settings`, json("PUT", settings)),
+  offerUser: (userId: string, signal?: AbortSignal) => data<OfferUserDetail>(`${BASE}/offers/users/${encodeURIComponent(userId)}`, { signal }),
+  offerPrefs: (userId: string, patch: OfferPrefsPatch) =>
+    data<{ prefs: OfferPrefsView }>(`${BASE}/offers/users/${encodeURIComponent(userId)}/prefs`, json("PUT", patch)),
+  offerReset: (userId: string, clearPrefs: boolean) =>
+    data<{ reset: boolean }>(`${BASE}/offers/users/${encodeURIComponent(userId)}/reset`, json("POST", { clear_prefs: clearPrefs })),
+  offerRun: (userId: string) =>
+    data<{ status: string; reason?: string; label?: string; text?: string; picks?: number[] }>(`${BASE}/offers/users/${encodeURIComponent(userId)}/run`, json("POST")),
   cacheStats: (signal?: AbortSignal) => data<CacheStats>(`${BASE}/cache`, { signal }),
   bridge: (signal?: AbortSignal) => data<BridgeOverview>(`${BASE}/bridge`, { signal }),
   bridgeUser: (userId: string, signal?: AbortSignal) =>
