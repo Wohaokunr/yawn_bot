@@ -1101,6 +1101,37 @@ def test_client_ip_only_trusts_configured_proxies(monkeypatch):
     assert auth.client_ip(spoof) == "203.0.113.7"
 
 
+def test_client_ip_behind_cloudflare_and_caddy(monkeypatch):
+    class FakeRequest:
+        def __init__(self, host, headers) -> None:
+            self.client = type("C", (), {"host": host})()
+            self.headers = headers
+
+    # Cloudflare → Caddy（容器网段）→ Bot：Caddy 把 XFF 写成它看到的 Cloudflare 节点
+    monkeypatch.setattr(
+        auth.config, "webui_trusted_proxies", "172.18.0.0/16,cloudflare"
+    )
+    via_cf = FakeRequest(
+        "172.18.0.5",
+        {"x-forwarded-for": "162.158.1.20", "cf-connecting-ip": "198.51.100.4"},
+    )
+    assert auth.client_ip(via_cf) == "198.51.100.4"
+    # 绕过 Cloudflare 直连源站：上一跳不是 Cloudflare，伪造的 CF-Connecting-IP 不认
+    direct = FakeRequest(
+        "172.18.0.5",
+        {"x-forwarded-for": "203.0.113.66", "cf-connecting-ip": "1.1.1.1"},
+    )
+    assert auth.client_ip(direct) == "203.0.113.66"
+    # 头里不是合法 IP 时退回直连方
+    garbage = FakeRequest(
+        "172.18.0.5", {"x-forwarded-for": "162.158.1.20", "cf-connecting-ip": "evil"}
+    )
+    assert auth.client_ip(garbage) == "172.18.0.5"
+    # 只信 Caddy、不写 cloudflare：拿到的是 Cloudflare 节点
+    monkeypatch.setattr(auth.config, "webui_trusted_proxies", "172.18.0.0/16")
+    assert auth.client_ip(via_cf) == "162.158.1.20"
+
+
 @pytest.mark.asyncio
 async def test_login_alert_text_and_send(monkeypatch):
     accounts.set_password(OWNER, GOOD_PASSWORD, source="test")

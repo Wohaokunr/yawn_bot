@@ -45,7 +45,16 @@ WEBUI_COOKIE_SECURE=true
 
 WebUI 登录 Token、OneBot access token 与 AI API Key 必须彼此独立。
 
-WebUI 放在 Nginx/Caddy 等反向代理后面时，后端直接看到的来源 IP 是代理本身：登录限速会把所有人算成一个来源，设备列表和异地登录提醒也认不出地点。把代理的地址写进 `WEBUI_TRUSTED_PROXIES`（逗号分隔，支持网段，如 `127.0.0.1,172.18.0.0/16`），只有来自这些地址的请求才读取 `X-Forwarded-For` / `X-Real-IP`；留空则一律不信任转发头，防止伪造。
+WebUI 放在 Nginx/Caddy 等反向代理后面时，后端直接看到的来源 IP 是代理本身：登录限速会把所有人算成一个来源，设备列表和异地登录提醒也认不出地点。把代理的地址写进 `WEBUI_TRUSTED_PROXIES`（逗号分隔，支持网段，如 `127.0.0.1,172.18.0.0/16`），只有来自这些地址的请求才读取 `X-Forwarded-For` / `CF-Connecting-IP` / `X-Real-IP`；留空则一律不信任转发头，防止伪造。
+
+前面还有 Cloudflare（橙色云）时，再加一个 `cloudflare`（展开为 Cloudflare 公布的全部回源 IP 段）。例如生产 Compose 里 Caddy 和 Bot 同在 `yawnbot-internal` 网络：
+
+```dotenv
+# 网段用 docker network inspect yawnbot-internal -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 查
+WEBUI_TRUSTED_PROXIES=172.18.0.0/16,cloudflare
+```
+
+`caddy reverse-proxy` 默认不信任上游，会把 `X-Forwarded-For` 写成它看到的 Cloudflare 节点；Bot 发现这一跳在 Cloudflare 段里，才改读 Cloudflare 加的 `CF-Connecting-IP`。绕过 Cloudflare 直连源站的请求上一跳不在可信段里，伪造这个头无效。只写 Caddy 网段、不写 `cloudflare` 时，记下的会是 Cloudflare 节点 IP，节点一变就会误报“新地点”。
 
 ## 登录状态与自动登录
 
