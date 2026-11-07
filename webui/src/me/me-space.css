@@ -29,6 +29,16 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin: 0;
+  color: inherit;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+h3.me-today-head {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .me-section-extra {
@@ -142,8 +152,15 @@
 .me-link-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
-  margin-top: 10px;
+  gap: 8px 20px;
+  margin-top: 12px;
+}
+
+.me-link-row a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
 }
 
 /* 待办 */
@@ -157,17 +174,48 @@
 }
 
 .me-todo {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 12px;
   border: 1px solid var(--border-soft);
   border-radius: 10px;
   background: var(--surface);
 }
 
-.me-todo.is-overdue {
-  border-color: var(--danger-bg, #ffccc7);
+.me-todo.is-editing {
+  border-color: var(--border);
+}
+
+.me-todo-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 48px;
+  padding-inline: 2px 4px;
+}
+
+/* 勾选框本身 16px，外面这层 label 撑出 44px 的点击热区 */
+.me-todo-check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  cursor: pointer;
+}
+
+.me-todo-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  padding-block: 8px;
+}
+
+.me-todo-text {
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
 }
 
 .me-todo.is-done .me-todo-text {
@@ -175,19 +223,49 @@
   text-decoration: line-through;
 }
 
-.me-todo-text.ant-typography {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
 .me-todo-meta {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
   gap: 4px;
+}
+
+.me-todo-meta .ant-tag {
+  margin-inline-end: 0;
+}
+
+.me-todo-toggle.ant-btn {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  color: var(--ink-tertiary);
+}
+
+.me-todo-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px 46px;
+}
+
+.me-todo-editor-row,
+.me-todo-editor-date,
+.me-todo-editor-actions,
+.me-composer-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.me-todo-editor-date .ant-input {
+  width: 160px;
+}
+
+.me-composer-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .me-todo-date {
@@ -354,12 +432,16 @@
 }
 
 .me-mood-mini-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 40px;
+  min-height: 40px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   font-size: 20px;
   line-height: 1;
-  padding: 4px;
+  padding: 0;
   cursor: pointer;
 }
 
@@ -430,8 +512,8 @@
   min-width: 72px;
   padding: 2px 8px;
   border-radius: 6px;
-  background: var(--brand-50);
-  color: var(--brand);
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
   font-size: 12px;
   text-align: center;
 }
@@ -692,8 +774,8 @@
   width: 56px;
   height: 56px;
   border-radius: 16px;
-  background: var(--brand-50);
-  color: var(--brand);
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
   font-size: 26px;
 }
 
@@ -861,7 +943,7 @@ a.me-today-card:focus-visible {
 }
 
 .me-today-head .anticon {
-  color: var(--brand);
+  color: var(--ink-tertiary);
 }
 
 .me-today-head strong {
@@ -891,6 +973,12 @@ a.me-today-card:focus-visible {
   white-space: nowrap;
 }
 
+/* 右边的时间/到期标签不折行，挤的时候让左边的内容省略 */
+.me-today-list li > :not(.me-today-text) {
+  flex: none;
+  white-space: nowrap;
+}
+
 .me-bond {
   display: flex;
   flex-direction: column;
@@ -911,7 +999,6 @@ a.me-today-card:focus-visible {
 
 .me-bond-affinity {
   flex: 1 1 auto;
-  background: linear-gradient(180deg, var(--brand-50) 0%, var(--surface) 100%);
 }
 
 .me-bond-affinity:hover,
@@ -933,7 +1020,7 @@ a.me-today-card:focus-visible {
 }
 
 .me-bond-label .anticon {
-  color: var(--brand);
+  color: var(--ink-tertiary);
 }
 
 .me-bond-level {
@@ -1049,14 +1136,12 @@ p.me-safety-note .anticon {
     flex-wrap: wrap;
   }
 
-  .me-todo {
-    flex-wrap: wrap;
+  .me-todo-editor {
+    padding-inline-start: 12px;
   }
 
-  .me-todo-meta {
-    width: 100%;
-    justify-content: flex-start;
-    padding-inline-start: 26px;
+  .me-todo-editor-actions .ant-btn {
+    min-height: 40px;
   }
 
   .me-composer-date,

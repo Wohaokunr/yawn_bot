@@ -9,6 +9,43 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 字距只给输进去的码，占位提示保持和别的输入框一样 */
+.login-code-input input::placeholder {
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.login-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+h1.login-title.ant-typography {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.3;
+}
+
+.login-mode-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.login-operator-link {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.login-operator-link .ant-btn-link {
+  color: var(--ink-tertiary);
+}
+
 .login-user-switch {
   display: flex;
   justify-content: center;

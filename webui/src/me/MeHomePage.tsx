@@ -35,7 +35,7 @@ function TodayPanel({ data }: { data: Dashboard }): React.JSX.Element {
   const { todos, reminders, countdowns, checkin } = data;
   return <div className="me-today">
     <Link to="/me/assistant" className="me-today-card">
-      <span className="me-today-head"><CheckSquareOutlined /> 待办 <strong>{todos.pending}</strong>{todos.overdue > 0 && <Tag color="error" className="me-inline-tag">逾期 {todos.overdue}</Tag>}</span>
+      <h3 className="me-today-head"><CheckSquareOutlined /> 待办 <strong>{todos.pending}</strong>{todos.overdue > 0 && <Tag color="error" className="me-inline-tag">逾期 {todos.overdue}</Tag>}</h3>
       {todos.top.length === 0 ? <Text type="secondary" className="me-hint">没有要做的事</Text> : (
         <ul className="me-today-list">
           {todos.top.map((item) => <li key={item.id}><span className="me-today-text">{item.content}</span>{dueLabel(item.dueInDays) && <Text type={item.overdue ? "danger" : "secondary"} className="me-hint">{dueLabel(item.dueInDays)}</Text>}</li>)}
@@ -43,7 +43,7 @@ function TodayPanel({ data }: { data: Dashboard }): React.JSX.Element {
       )}
     </Link>
     <Link to="/me/schedules" className="me-today-card">
-      <span className="me-today-head"><BellOutlined /> 接下来的提醒</span>
+      <h3 className="me-today-head"><BellOutlined /> 接下来的提醒</h3>
       {reminders.length === 0 ? <Text type="secondary" className="me-hint">没有排着的提醒</Text> : (
         <ul className="me-today-list">
           {reminders.map((item) => <li key={item.ref}><span className="me-today-text">{item.content}</span><Text type="secondary" className="me-hint me-mono">{item.due.slice(5)}</Text></li>)}
@@ -51,7 +51,7 @@ function TodayPanel({ data }: { data: Dashboard }): React.JSX.Element {
       )}
     </Link>
     <Link to="/me/assistant?tab=countdowns" className="me-today-card">
-      <span className="me-today-head"><CalendarOutlined /> 倒数日</span>
+      <h3 className="me-today-head"><CalendarOutlined /> 倒数日</h3>
       {countdowns.length === 0 ? <Text type="secondary" className="me-hint">没有临近的日子</Text> : (
         <ul className="me-today-list">
           {countdowns.map((item) => <li key={item.id}><span className="me-today-text">{item.title}</span><Text type="secondary" className="me-hint">{countdownLabel(item.daysLeft)}</Text></li>)}
@@ -59,7 +59,7 @@ function TodayPanel({ data }: { data: Dashboard }): React.JSX.Element {
       )}
     </Link>
     <Link to="/me/affinity" className="me-today-card">
-      <span className="me-today-head"><FireOutlined /> 签到</span>
+      <h3 className="me-today-head"><FireOutlined /> 签到</h3>
       <span><strong>{checkin.checkedToday}/{checkin.groups}</strong> <Text type="secondary">个群今天签过</Text></span>
       {checkin.pendingGroups.length > 0 ? <Text type="secondary" className="me-hint">还没签：{checkin.pendingGroups.map((group) => group.groupName || group.groupId).join("、")}</Text> : checkin.groups > 0 ? <Text type="success" className="me-hint">全签完啦</Text> : null}
       {checkin.bestStreak > 0 && <Text type="secondary" className="me-hint">最长连签 {checkin.bestStreak} 天</Text>}
@@ -86,7 +86,7 @@ function BondPanel({ data, onMood }: { data: Dashboard; onMood: (score: number) 
       <div className="me-mood-mini" role="group" aria-label="记一下现在的心情">
         {MOOD_OPTIONS.map((option) => (
           <Tooltip key={option.score} title={option.label}>
-            <button type="button" className={`me-mood-mini-btn${mood.loggedToday && mood.last?.score === option.score ? " is-active" : ""}`} onClick={() => onMood(option.score)} aria-label={option.label}>{option.emoji}</button>
+            <button type="button" className={`me-mood-mini-btn${mood.loggedToday && mood.last?.score === option.score ? " is-active" : ""}`} onClick={() => onMood(option.score)} aria-label={option.label} aria-pressed={mood.loggedToday && mood.last?.score === option.score}>{option.emoji}</button>
           </Tooltip>
         ))}
       </div>
@@ -164,8 +164,8 @@ export function MeHomePage(): React.JSX.Element {
                     <Tag className={`me-role-tag is-${group.role}`}>{groupRoleLabel(group.role)}</Tag>
                     <span>{group.memberCount} 名成员</span>
                     <span>·</span>
-                    <span>{group.enabledFeatures}/{group.featureCount} 项功能开启</span>
-                    {!group.agentEnabled && <Tag className="me-inline-tag">Agent 已关</Tag>}
+                    <span>开着 {group.enabledFeatures} / {group.featureCount} 项群功能</span>
+                    {!group.agentEnabled && <Tag className="me-inline-tag">群里的 AI 聊天关着</Tag>}
                   </span>
                 </span>
                 <RightOutlined className="me-card-arrow" />

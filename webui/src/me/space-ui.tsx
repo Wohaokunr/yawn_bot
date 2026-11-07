@@ -57,7 +57,7 @@ export function MeSection({
 }): React.JSX.Element {
   return <section className={`me-section${className ? ` ${className}` : ""}`}>
     <div className="me-section-head">
-      <span className="me-section-title">{icon}<strong>{title}</strong></span>
+      <h3 className="me-section-title">{icon}<strong>{title}</strong></h3>
       {extra && <span className="me-section-extra">{extra}</span>}
       {hint && <Text type="secondary" className="me-hint me-section-hint">{hint}</Text>}
     </div>

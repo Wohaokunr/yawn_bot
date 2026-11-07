@@ -1,6 +1,6 @@
 import { BellOutlined, ControlOutlined, MessageOutlined, PauseCircleOutlined, PlayCircleOutlined, StopOutlined } from "@ant-design/icons";
 import { Alert, Button, Form, Input, InputNumber, Popconfirm, Segmented, Select, Skeleton, Switch, Tag, Typography } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { PageHeader, QueryErrorAlert } from "../shared";
 import { type ChatPrefs, type ChatSettings, type OfferState, spaceApi } from "./me-space-api";
@@ -15,31 +15,62 @@ function clockRule(label: string) {
   return { validator: async (_rule: unknown, value: string) => { if (value && !isClock(value)) throw new Error(`${label}写成 HH:MM，比如 07:30`); } };
 }
 
+type PrefKey = keyof ChatPrefs;
+/** 选项类（分段、开关）一改就存；文字类在离开输入框或回车时存。整页没有“保存”按钮。 */
+const CHOICE_KEYS: PrefKey[] = ["replyLength", "emoji", "proactive"];
+const QUIET_KEYS: PrefKey[] = ["quietStart", "quietEnd"];
+
 function PrefsForm({ data, onSaved }: { data: ChatSettings; onSaved: (next: ChatSettings) => void }): React.JSX.Element {
   const [form] = Form.useForm<ChatPrefs>();
-  const { busy, run } = useAction();
-  const [dirty, setDirty] = useState(false);
+  const { run } = useAction();
+  const saved = useRef(data.prefs);
+  // 服务端数据变了（刷新、别处改过）时，只同步用户没在改的字段，免得冲掉正在输入的内容
   useEffect(() => {
-    form.setFieldsValue(data.prefs);
-    setDirty(false);
+    const current = form.getFieldsValue(true) as Partial<ChatPrefs>;
+    const sync: Partial<ChatPrefs> = {};
+    for (const key of Object.keys(data.prefs) as PrefKey[]) {
+      if (current[key] === undefined || current[key] === saved.current[key]) (sync as Record<string, unknown>)[key] = data.prefs[key];
+    }
+    form.setFieldsValue(sync);
+    saved.current = data.prefs;
   }, [data, form]);
 
-  const save = async (values: ChatPrefs): Promise<void> => {
+  const saveFields = async (keys: PrefKey[]): Promise<void> => {
+    try {
+      await form.validateFields(keys);
+    } catch {
+      return; // 输入框下方已经写明哪里不对
+    }
     // 只交改过的字段；清空的输入框交 ""，后端当作“关掉”
     const changes: Partial<ChatPrefs> = {};
-    for (const [key, value] of Object.entries(values) as Array<[keyof ChatPrefs, ChatPrefs[keyof ChatPrefs]]>) {
+    for (const key of keys) {
+      const value = form.getFieldValue(key) as ChatPrefs[PrefKey] | undefined;
       const normalized = typeof value === "string" ? value.trim().replace("：", ":") : value;
-      if (normalized !== data.prefs[key]) (changes as Record<string, unknown>)[key] = normalized ?? "";
+      if (normalized !== saved.current[key]) (changes as Record<string, unknown>)[key] = normalized ?? "";
     }
     if (Object.keys(changes).length === 0) return;
-    const next = await run("save", () => spaceApi.patchChatPrefs(changes), "保存好了，下一句私聊就生效");
+    const next = await run(`save-${keys.join("-")}`, () => spaceApi.patchChatPrefs(changes), "已保存，下一句私聊就生效");
     if (next) onSaved(next);
   };
+  const textField = (key: PrefKey) => ({
+    onBlur: () => void saveFields(QUIET_KEYS.includes(key) ? QUIET_KEYS : [key]),
+    onPressEnter: () => void saveFields(QUIET_KEYS.includes(key) ? QUIET_KEYS : [key]),
+  });
 
-  return <Form form={form} layout="vertical" requiredMark={false} onFinish={(values) => void save(values)} onValuesChange={() => setDirty(true)} className="me-prefs-form">
+  return <Form
+    form={form}
+    layout="vertical"
+    requiredMark={false}
+    initialValues={data.prefs}
+    onValuesChange={(changed: Partial<ChatPrefs>) => {
+      const keys = (Object.keys(changed) as PrefKey[]).filter((key) => CHOICE_KEYS.includes(key));
+      if (keys.length) void saveFields(keys);
+    }}
+    className="me-prefs-form"
+  >
     <div className="me-form-grid">
       <Form.Item name="callMe" label="怎么称呼你" extra="留空就用你的群名片/昵称">
-        <Input maxLength={16} placeholder="比如：小猫、老板" allowClear />
+        <Input maxLength={16} placeholder="比如：小猫、老板" allowClear {...textField("callMe")} />
       </Form.Item>
       <Form.Item name="replyLength" label="回复长短">
         <Segmented options={REPLY_LENGTH_OPTIONS.map((item) => ({ value: item.value, label: item.label }))} />
@@ -48,7 +79,7 @@ function PrefsForm({ data, onSaved }: { data: ChatSettings; onSaved: (next: Chat
         <Segmented options={EMOJI_OPTIONS.map((item) => ({ value: item.value, label: item.label }))} />
       </Form.Item>
       <Form.Item name="birthday" label="生日（月-日）" extra="生日当天 Bot 会私聊祝你" rules={[{ validator: async (_rule, value: string) => { if (value && !isBirthday(value)) throw new Error("写成 MM-DD，比如 03-14"); } }]}>
-        <Input maxLength={5} placeholder="MM-DD" allowClear />
+        <Input maxLength={5} placeholder="MM-DD" allowClear {...textField("birthday")} />
       </Form.Item>
     </div>
     <div className="me-subhead"><BellOutlined /> 主动消息</div>
@@ -57,28 +88,23 @@ function PrefsForm({ data, onSaved }: { data: ChatSettings; onSaved: (next: Chat
         <Switch disabled={!data.agent.proactiveAllowed} />
       </Form.Item>
       <Form.Item name="morningGreeting" label="早安问候时间" extra="留空不发" rules={[clockRule("早安时间")]}>
-        <Input maxLength={5} placeholder="07:30" allowClear />
+        <Input maxLength={5} placeholder="07:30" allowClear {...textField("morningGreeting")} />
       </Form.Item>
       <Form.Item name="checkinNudge" label="提醒我签到" extra="到点还没签到就私聊提醒，留空不提醒" rules={[clockRule("签到提醒")]}>
-        <Input maxLength={5} placeholder="21:00" allowClear />
+        <Input maxLength={5} placeholder="21:00" allowClear {...textField("checkinNudge")} />
       </Form.Item>
     </div>
     <div className="me-subhead"><StopOutlined /> 免打扰</div>
     <div className="me-form-grid">
       <Form.Item name="quietStart" label="从" rules={[clockRule("开始时间"), ({ getFieldValue }) => ({ validator: async (_rule, value: string) => { if (Boolean(value) !== Boolean(getFieldValue("quietEnd"))) throw new Error("开始和结束要一起填，或一起清空"); } })]} dependencies={["quietEnd"]}>
-        <Input maxLength={5} placeholder="23:00" allowClear />
+        <Input maxLength={5} placeholder="23:00" allowClear {...textField("quietStart")} />
       </Form.Item>
       <Form.Item name="quietEnd" label="到" rules={[clockRule("结束时间")]}>
-        <Input maxLength={5} placeholder="08:00" allowClear />
+        <Input maxLength={5} placeholder="08:00" allowClear {...textField("quietEnd")} />
       </Form.Item>
       <Form.Item label="现在">
         <Text type="secondary">{quietLabel(data.prefs.quietStart, data.prefs.quietEnd)}{data.inQuietHours && <Tag color="purple" className="me-inline-tag">正在免打扰</Tag>}</Text>
       </Form.Item>
-    </div>
-    <div className={`me-form-actions${dirty ? " is-dirty" : ""}`}>
-      {dirty && <Text type="warning" className="me-form-dirty">有改动还没保存</Text>}
-      <Button onClick={() => { form.setFieldsValue(data.prefs); setDirty(false); }} disabled={!dirty}>还原</Button>
-      <Button type="primary" htmlType="submit" loading={busy === "save"} disabled={!dirty}>保存</Button>
     </div>
   </Form>;
 }
@@ -94,6 +120,10 @@ function OffersCard(): React.JSX.Element {
   const patch = async (key: string, change: Parameters<typeof spaceApi.patchOffers>[0], success?: string): Promise<void> => {
     const next = await run(key, () => spaceApi.patchOffers(change), success);
     if (next) setData(next);
+  };
+  const commitHours = (): void => {
+    if (hours === null) { setHours(data.everyHours); return; }
+    if (hours !== data.everyHours) void patch("every", { everyHours: hours }, "已保存间隔");
   };
   const blocked = !data.siteEnabled ? "管理员关掉了主动提议" : !data.siteOpen ? "主动提议暂时没对你开放" : null;
   const accepted = data.stats.accepted ?? 0;
@@ -118,10 +148,20 @@ function OffersCard(): React.JSX.Element {
         />
         <span className="me-inline-switch">
           每隔
-          <InputNumber size="small" min={data.minEveryHours} max={48} step={0.5} value={hours} onChange={(value) => setHours(value)} aria-label="间隔小时" />
+          <InputNumber
+            size="small"
+            min={data.minEveryHours}
+            max={48}
+            step={0.5}
+            value={hours}
+            onChange={(value) => setHours(value)}
+            onBlur={commitHours}
+            onPressEnter={commitHours}
+            disabled={busy === "every"}
+            aria-label="间隔小时"
+          />
           小时问一次
-          <Button size="small" disabled={hours === null || hours === data.everyHours} loading={busy === "every"} onClick={() => hours !== null && void patch("every", { everyHours: hours }, "间隔改好了")}>应用</Button>
-          {hours !== data.defaultEveryHours && <Button size="small" type="link" onClick={() => void patch("every", { resetInterval: true })}>恢复默认 {data.defaultEveryHours} 小时</Button>}
+          {data.everyHours !== data.defaultEveryHours && <Button size="small" type="link" onClick={() => void patch("every", { resetInterval: true }, `已恢复默认 ${data.defaultEveryHours} 小时`)}>恢复默认 {data.defaultEveryHours} 小时</Button>}
         </span>
       </div>
       <div className="me-offer-row">
@@ -132,8 +172,16 @@ function OffersCard(): React.JSX.Element {
           </>
         ) : (
           <>
-            <Text type="secondary">先别问我：</Text>
-            {[3, 24, 72, 168].map((value) => <Button key={value} size="small" loading={busy === `snooze-${value}`} onClick={() => void patch(`snooze-${value}`, { snoozeHours: value }, "好的，这段时间不问你")}>{value < 24 ? `${value} 小时` : `${value / 24} 天`}</Button>)}
+            <Select<number>
+              size="small"
+              placeholder="先别问我…"
+              value={undefined}
+              loading={busy === "snooze"}
+              style={{ width: 140 }}
+              onChange={(value) => void patch("snooze", { snoozeHours: value }, "好的，这段时间不问你")}
+              options={[3, 24, 72, 168].map((value) => ({ value, label: value < 24 ? `${value} 小时内别问` : `${value / 24} 天内别问` }))}
+              aria-label="暂停主动提议"
+            />
           </>
         )}
       </div>
@@ -213,7 +261,7 @@ export function MyChatSettingsPage(): React.JSX.Element {
           </div>
         </div>
       </MeSection>
-      <MeSection icon={<MessageOutlined />} title="说话方式与打扰" hint={<>想改 Bot 的自称和性格，去 <Link to="/me/persona">私聊人设</Link>。</>}>
+      <MeSection icon={<MessageOutlined />} title="说话方式与打扰" hint={<>改完自动保存：选项点一下就生效，文字填好后点别处或回车。想改 Bot 的自称和性格，去 <Link to="/me/persona">私聊人设</Link>。</>}>
         <PrefsForm data={data} onSaved={setData} />
       </MeSection>
       <OffersCard />

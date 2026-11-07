@@ -26,26 +26,32 @@ interface LoginValues {
   confirm?: string;
 }
 
-const MODE_COPY: Record<LoginMode, { kicker: string; intro: string; note: string; submit: string }> = {
+const MODE_COPY: Record<LoginMode, { title: string; intro: string; note: string; submit: string }> = {
   user: {
-    kicker: "MY SPACE",
-    intro: "用 QQ 号和你在私聊里设的密码登录：管理你当群主/管理员的群，调整 Bot 和你私聊时的人设。",
-    note: "还没有密码？私聊 Bot 发 /网页密码 拿一次性设置码，或直接发 /网页密码 新密码。",
+    title: "我的空间",
+    intro: "用 QQ 号和你在私聊里设的密码登录：小本本、私聊设置、Bot 记得你的事，还有你管理的群。",
+    note: "还没有密码？在 QQ 里私聊 Bot 发 /网页密码，拿一次性设置码；或者直接发「/网页密码 新密码」。",
     submit: "登录我的空间",
   },
   admin: {
-    kicker: "CONTROL ROOM",
+    title: "YawnBot 管理台",
     intro: "使用部署时配置的运维 Token 进入完整管理台。",
     note: "运维登录保持原有权限与行为不变。",
     submit: "进入管理台",
   },
   guest: {
-    kicker: "GUEST PASS",
+    title: "访客视图",
     intro: "使用管理员签发的访客访问码，只查看被授权群聊的记忆、成员画像与关系边。",
     note: "访客会话没有写权限，管理员关闭访客访问或轮换凭据后会立即失效。",
     submit: "进入访客视图",
   },
 };
+
+/** 私聊里发的链接带 ?login=qq / ?login=guest：普通用户只看到 QQ 账号和访客，运维入口收成页脚的文字链接。 */
+export function operatorOptionHidden(search = window.location.search): boolean {
+  const wanted = new URLSearchParams(search).get("login");
+  return wanted === "qq" || wanted === "user" || wanted === "guest";
+}
 
 const MODE_KEY = "yawnbot.login.mode";
 const REMEMBER_KEY = "yawnbot.login.remember";
@@ -104,6 +110,8 @@ export function Login({ onSuccess, notice }: { onSuccess: (session: AuthSessionD
   const [remember, setRemember] = useState<boolean>(() => initialRemember());
   const [showNotice, setShowNotice] = useState(Boolean(notice));
   const [form] = Form.useForm<LoginValues>();
+  const [hideOperator] = useState(() => operatorOptionHidden());
+  const showOperatorOption = !hideOperator || mode === "admin";
   const isGuest = mode === "guest";
   const isUser = mode === "user";
   const isSetup = isUser && step === "setup";
@@ -162,24 +170,24 @@ export function Login({ onSuccess, notice }: { onSuccess: (session: AuthSessionD
       </div>
       <Card className="login-card" variant="borderless">
         <div className="brand-mark">{isGuest ? <TeamOutlined /> : isUser ? <UserOutlined /> : <RobotOutlined />}</div>
-        <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 18 }}>
-          <span className="login-kicker">✦ {copy.kicker}</span>
+        <div className="login-head">
           <Space align="center" wrap>
-            <Title level={2} style={{ margin: 0 }}>YawnBot WebUI</Title>
+            <Title level={1} className="login-title">{copy.title}</Title>
             {isGuest && <Tag color="blue" icon={<SafetyCertificateOutlined />}>只读</Tag>}
           </Space>
           <Paragraph type="secondary" style={{ margin: 0 }}>{copy.intro}</Paragraph>
-        </Space>
+        </div>
 
         <Segmented
           block
           className="login-mode-switch"
           value={mode}
           onChange={switchMode}
+          aria-label="登录方式"
           options={[
-            { value: "admin", label: <Space size={6}><KeyOutlined />运维登录</Space> },
-            { value: "user", label: <Space size={6}><UserOutlined />QQ 账号</Space> },
-            { value: "guest", label: <Space size={6}><TeamOutlined />访客登录</Space> },
+            { value: "user", label: <span className="login-mode-label"><UserOutlined aria-hidden="true" />QQ 账号</span> },
+            { value: "guest", label: <span className="login-mode-label"><TeamOutlined aria-hidden="true" />访客</span> },
+            ...(showOperatorOption ? [{ value: "admin", label: <span className="login-mode-label"><KeyOutlined aria-hidden="true" />运维</span> }] : []),
           ]}
         />
 
@@ -303,6 +311,11 @@ export function Login({ onSuccess, notice }: { onSuccess: (session: AuthSessionD
         <div className="login-mode-note">
           <Text type="secondary">{isSetup ? "设置码只能用一次；设好密码后，之前登录的设备会全部退出。" : copy.note}</Text>
         </div>
+        {!showOperatorOption && (
+          <div className="login-operator-link">
+            <Button type="link" size="small" onClick={() => switchMode("admin")}>部署这个 Bot 的运维？用 Token 登录</Button>
+          </div>
+        )}
       </Card>
     </div>
   );

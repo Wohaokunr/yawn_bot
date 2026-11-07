@@ -26,9 +26,10 @@
   --font-display: "ZCOOL KuaiLe", "PingFang SC", "Microsoft YaHei", sans-serif;
   /* 动效节奏令牌:统一全站缓动手感 */
   --ease-soft: cubic-bezier(0.22, 0.9, 0.32, 1);   /* 顺滑出场 */
-  --ease-spring: cubic-bezier(0.34, 1.3, 0.5, 1);  /* 轻微回弹(微交互) */
+  /* 下面两个沿用旧名字，但已不再过冲回弹：管理工具里的回弹显得轻浮，统一成指数缓出 */
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);   /* 微交互：快起慢收 */
   --ease-glide: cubic-bezier(0.4, 0, 0.2, 1);      /* 状态过渡(昼夜/主题) */
-  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1); /* Q弹回弹(按压释放过冲) */
+  --ease-bounce: cubic-bezier(0.16, 1, 0.3, 1);    /* 按压释放、出场：指数缓出 */
   --dur-fast: 0.18s;
   --dur-med: 0.32s;
   --dur-slow: 0.9s;
@@ -205,12 +206,6 @@ h1, h2, h3, h4, h5,
   font-size: 20px;
   background: linear-gradient(135deg, var(--sakura-400), var(--lavender-500));
   box-shadow: 0 6px 16px rgba(242, 96, 141, 0.35);
-}
-.brand span {
-  background: linear-gradient(120deg, var(--sakura-600), var(--lavender-500));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 
 .app-header {
@@ -2456,4 +2451,12 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
   .agent-debug-run-row { align-items: stretch; flex-direction: column; }
   .agent-debug-run-row .ant-btn { width: 100%; }
   .agent-debug-inspector-grid { grid-template-columns: 1fr; }
+}
+
+/* 手机上确认气泡的按钮默认只有 24px 高，拇指点不准；放大到 36px */
+@media (max-width: 767px) {
+  .ant-popconfirm .ant-popconfirm-buttons .ant-btn {
+    min-height: 36px;
+    padding-inline: 14px;
+  }
 }

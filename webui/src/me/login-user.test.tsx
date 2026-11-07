@@ -66,6 +66,20 @@ describe("QQ 账号登录", () => {
     expect(window.localStorage.getItem("yawnbot.login.qq")).toBeNull();
   });
 
+  it("hides the operator option behind a link when opened from the private-chat link", () => {
+    window.history.replaceState(null, "", "/webui/?login=qq");
+    try {
+      render(<Login onSuccess={vi.fn()} />);
+      const group = screen.getByRole("radiogroup", { name: "登录方式" });
+      expect(group).toHaveTextContent("QQ 账号");
+      expect(group).not.toHaveTextContent("运维");
+      fireEvent.click(screen.getByRole("button", { name: /用 Token 登录/ }));
+      expect(screen.getByPlaceholderText("输入运维 Token")).toBeInTheDocument();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
   it("sends remember for operator login and shows the expired notice", async () => {
     const onSuccess = vi.fn();
     render(<Login onSuccess={onSuccess} notice="登录已失效，请重新登录。" />);

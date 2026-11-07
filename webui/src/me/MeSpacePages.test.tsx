@@ -118,6 +118,19 @@ describe("我的空间 2.0", () => {
     await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/todos/7", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ done: true }) })));
   });
 
+  it("edits a todo in one save, sending only the changed fields", async () => {
+    renderAt("/me/assistant");
+    expect(await screen.findByText("交作业")).toBeInTheDocument();
+    expect(screen.queryByLabelText("截止日期")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "编辑：交作业" }));
+    const editor = screen.getByRole("group", { name: "编辑：交作业" });
+    const save = within(editor).getByRole("button", { name: /保\s?存/ });
+    expect(save).toBeDisabled();
+    fireEvent.click(within(editor).getByText("不急"));
+    fireEvent.click(save);
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/todos/7", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ priority: "low" }) })));
+  });
+
   it("opens notes and mood tabs from the URL and logs a mood", async () => {
     renderAt("/me/assistant?tab=notes");
     expect(await screen.findByText("wifi 在冰箱上")).toBeInTheDocument();
@@ -132,7 +145,8 @@ describe("我的空间 2.0", () => {
     renderAt("/me/chat");
     const input = await screen.findByPlaceholderText("比如：小猫、老板");
     fireEvent.change(input, { target: { value: "小猫" } });
-    fireEvent.click(screen.getByRole("button", { name: /保\s?存/ }));
+    expect(screen.queryByRole("button", { name: /保\s?存/ })).not.toBeInTheDocument();
+    fireEvent.blur(input);
     await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/chat/prefs", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ callMe: "小猫" }) })));
     expect((await screen.findAllByText("你答应了")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /暂停自动回复/ }));

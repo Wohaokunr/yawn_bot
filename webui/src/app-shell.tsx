@@ -9,7 +9,7 @@ import {
   SearchOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Breadcrumb, Button, Drawer, Layout, Menu, Spin, Tag, Tooltip } from "antd";
+import { Breadcrumb, Button, Drawer, Layout, Menu, Popconfirm, Spin, Tag, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -124,6 +124,13 @@ export function Shell({
   const location = useLocation();
   const isGuest = session.role === "guest";
   const isUser = session.role === "user";
+
+  // 标签页标题跟着角色走：普通用户看到的是“我的空间”，不是“管理台”
+  useEffect(() => {
+    const previous = document.title;
+    document.title = isUser ? "我的空间 · YawnBot" : isGuest ? "访客视图 · YawnBot" : previous;
+    return () => { document.title = previous; };
+  }, [isUser, isGuest]);
   // 访客和个人账号都没有管理员实时流、群组搜索与“未保存”跟踪
   const limited = isGuest || isUser;
   const canUseAdminStream = !limited && session.capabilities.realtimeAdminStream;
@@ -322,16 +329,25 @@ export function Shell({
             )}
             {!limited && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
             <ThemeToggle />
-            <Tooltip title={isGuest ? "退出访客" : "退出登录"}>
-              <Button
-                className="logout-button"
-                icon={<LogoutOutlined />}
-                aria-label={isGuest ? "退出访客" : "退出"}
-                onClick={() => void logout()}
-              >
-                <span className="logout-text">{isGuest ? "退出访客" : "退出"}</span>
-              </Button>
-            </Tooltip>
+            {isUser ? (
+              // 手机上这是挨着主题切换的纯图标按钮，误触代价是重新输密码，所以先确认一下
+              <Popconfirm title="退出登录？" description="这台设备要重新输入密码才能进来。" okText="退出" onConfirm={() => void logout()} placement="bottomRight">
+                <Button className="logout-button" icon={<LogoutOutlined />} aria-label="退出登录">
+                  <span className="logout-text">退出</span>
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Tooltip title={isGuest ? "退出访客" : "退出登录"}>
+                <Button
+                  className="logout-button"
+                  icon={<LogoutOutlined />}
+                  aria-label={isGuest ? "退出访客" : "退出"}
+                  onClick={() => void logout()}
+                >
+                  <span className="logout-text">{isGuest ? "退出访客" : "退出"}</span>
+                </Button>
+              </Tooltip>
+            )}
           </div>
         </Header>
         <Content className="app-content-shell">
