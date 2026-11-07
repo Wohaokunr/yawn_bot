@@ -7,6 +7,7 @@ import { PageHeader, QueryErrorAlert, useApiQuery } from "../shared";
 import { meApi } from "./me-api";
 import { EXPORT_URL, spaceApi } from "./me-space-api";
 import { formatQqTime, passwordProblem, passwordStrength } from "./me-meta";
+import { MyDevicesCards } from "./MyDevicesCards";
 import "./me.css";
 
 const { Text, Paragraph } = Typography;
@@ -16,6 +17,11 @@ const SOURCE_LABEL: Record<string, string> = {
   setup_code: "网页 · 设置码",
   webui: "网页 · 修改密码",
 };
+
+/** 秒级时间戳 → 北京时间 “YYYY-MM-DD HH:mm”（和后端其他时间同口径） */
+export function formatBeijing(epochSeconds: number): string {
+  return formatQqTime(new Date((epochSeconds + 8 * 3600) * 1000).toISOString());
+}
 
 export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): React.JSX.Element {
   const { message } = AntApp.useApp();
@@ -68,7 +74,11 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
             {me?.account?.passwordSource && <Text type="secondary"> · {SOURCE_LABEL[me.account.passwordSource] ?? me.account.passwordSource}</Text>}
           </Descriptions.Item>
           <Descriptions.Item label="上次登录">{formatQqTime(me?.account?.lastLoginAt)}</Descriptions.Item>
-          <Descriptions.Item label="本次登录到期">{me ? formatQqTime(new Date(me.sessionExpiresAt * 1000).toISOString()) : "—"}</Descriptions.Item>
+          <Descriptions.Item label="本次登录到期">
+            {me ? formatBeijing(me.sessionExpiresAt) : "—"}
+            {me?.sessionRemember && <Text type="secondary"> · 自动登录（使用中会顺延）</Text>}
+          </Descriptions.Item>
+          <Descriptions.Item label="在线设备">{me?.activeDeviceCount ?? "—"}</Descriptions.Item>
         </Descriptions>
         <Popconfirm
           title="退出所有设备？"
@@ -80,6 +90,8 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
           <Button danger icon={<LogoutOutlined />} block>退出所有设备</Button>
         </Popconfirm>
       </Card>
+
+      <MyDevicesCards onLoggedOut={onLoggedOut} />
 
       <Card size="small" title={<span><KeyOutlined /> 修改密码</span>}>
         {error && <Alert type="error" showIcon message={error} closable onClose={() => setError("")} className="me-banner" />}
@@ -136,6 +148,7 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
           <ul>
             <li>私聊 Bot 发 <Text code>/网页密码</Text>：拿一次性设置码，在登录页“用设置码设密码”。</li>
             <li>私聊 Bot 发 <Text code>/网页登录</Text>：看账号状态和你能管理的群。</li>
+            <li><Text code>/网页登录 设备</Text> 看在线设备和最近登录；<Text code>/网页登录 提醒 新地点</Text>（或 每次 / 关闭）设置登录提醒。</li>
             <li><Text code>/网页登录 下线</Text> 退出所有设备；<Text code>/网页登录 注销</Text> 删除账号。</li>
             <li>也可以直接跟 Bot 说“帮我弄个网页登录的设置码”。</li>
           </ul>

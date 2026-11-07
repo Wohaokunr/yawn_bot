@@ -3,6 +3,9 @@
 import { api } from "../api";
 import type { FeatureState, PersonaCard, PersonaPreset } from "../types";
 import type { PersonaHistoryItem, PersonaMode } from "../private-agent/private-api";
+import type { LoginRecord } from "../auth-session";
+
+export type { LoginRecord };
 
 export interface MyAccount {
   userId: string;
@@ -26,6 +29,35 @@ export interface MyProfile {
   persona: { sourceLabel: string; summary: string; name: string | null; locked: boolean } | null;
   groupManage?: GroupManageFlags;
   sessionExpiresAt: number;
+  /** 当前这台登录时勾了“自动登录” */
+  sessionRemember?: boolean;
+  activeDeviceCount?: number;
+}
+
+export type LoginAlertMode = "new_location" | "always" | "off";
+
+export interface MyDevice {
+  id: string;
+  device: string;
+  location: string;
+  lastLocation: string;
+  createdAt: string | null;
+  lastSeenAt: string | null;
+  expiresAt: string | null;
+  remember: boolean;
+  method: string;
+  current: boolean;
+}
+
+export interface MySecurity {
+  devices: MyDevice[];
+  activeCount: number;
+  logins: LoginRecord[];
+  alertMode: LoginAlertMode;
+  alertModes: { value: LoginAlertMode; label: string }[];
+  alertAvailable: boolean;
+  rememberDays: number;
+  sessionRemember: boolean;
 }
 
 export interface MyGroupRow {
@@ -227,4 +259,9 @@ export const meApi = {
   managePolicy: (groupId: string, changes: Partial<ManagePolicy>) =>
     api<ManagePolicy>(`/me/groups/${encodeURIComponent(groupId)}/manage/policy`, json("PUT", changes)).then((r) => r.data),
   logoutAll: () => api<{ authenticated: false }>("/me/logout-all", json("POST")).then((r) => r.data),
+  security: () => api<MySecurity>("/me/devices").then((r) => r.data),
+  logoutDevice: (id: string) =>
+    api<Partial<MySecurity> & { current: boolean; authenticated?: false }>(`/me/devices/${encodeURIComponent(id)}`, json("DELETE")).then((r) => r.data),
+  logoutOthers: () => api<MySecurity & { loggedOut: number }>("/me/devices/logout-others", json("POST")).then((r) => r.data),
+  setLoginAlert: (mode: LoginAlertMode) => api<MySecurity>("/me/security/login-alert", json("PUT", { mode })).then((r) => r.data),
 };

@@ -7,17 +7,21 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
+from nonebot import logger
 
-from .. import webui_accounts
+from .. import webui_accounts, webui_devices
 from .auth import (
     Session,
     check_admin_token,
     clear_login_failures,
+    client_ip,
     client_key,
     create_session,
     login_allowed,
     login_retry_after,
     record_login_failure,
+    renew,
+    set_session_cookie,
 )
 from .config import API_PATH, BASE_PATH, COOKIE_NAME, config
 from .deps import AuthenticatedSession, AuthenticatedWriteSession, ok
@@ -28,16 +32,8 @@ from .user_account_models import UserLoginBody, UserSetupBody
 router = APIRouter(prefix=API_PATH)
 
 
-def _set_session_cookie(response: Response, cookie: str) -> None:
-    response.set_cookie(
-        COOKIE_NAME,
-        cookie,
-        max_age=config.webui_session_ttl_hours * 3600,
-        httponly=True,
-        secure=config.webui_cookie_secure,
-        samesite="strict",
-        path=BASE_PATH,
-    )
+def _set_session_cookie(response: Response, cookie: str, session: Session) -> None:
+    set_session_cookie(response, cookie, session)
 
 
 def _session_payload(session: Session) -> dict[str, Any]:
@@ -47,6 +43,8 @@ def _session_payload(session: Session) -> dict[str, Any]:
         "role": session.role,
         "csrfToken": session.csrf_token,
         "expiresAt": session.expires_at,
+        "remember": session.remember,
+        "rememberDays": config.webui_remember_days,
         "capabilities": {
             "adminConsole": is_admin,
             "adminWrite": is_admin,
@@ -95,16 +93,67 @@ def _require_user_login_enabled() -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "个人账号登录当前未开启")
 
 
-def _start_user_session(response: Response, user_id: int) -> dict[str, Any]:
+# 登录提醒是后台任务：留个强引用，免得还没发完就被回收。
+_ALERT_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _schedule_login_alert(user_id: int, event: dict[str, Any]) -> None:
+    if not config.webui_login_alert or not webui_devices.should_alert(event):
+        return
+
+    async def _send() -> None:
+        try:
+            from ..webui_account_commands import send_login_alert
+
+            await send_login_alert(user_id, event)
+        except Exception:  # noqa: BLE001
+            logger.opt(exception=True).warning("网页账号：登录提醒发送失败(忽略)")
+
+    try:
+        task = asyncio.get_running_loop().create_task(_send())
+    except RuntimeError:
+        return
+    _ALERT_TASKS.add(task)
+    task.add_done_callback(_ALERT_TASKS.discard)
+
+
+def _start_user_session(
+    request: Request,
+    response: Response,
+    user_id: int,
+    *,
+    remember: bool,
+    method: str,
+) -> dict[str, Any]:
     version = webui_accounts.session_version(user_id)
     if version is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "QQ 号或密码不正确")
     webui_accounts.record_login(user_id)
     cookie, session = create_session(
-        role="user", credential_version=version, user_id=user_id
+        role="user", credential_version=version, user_id=user_id, remember=remember
     )
-    _set_session_cookie(response, cookie)
-    return ok(_session_payload(session))
+    event = webui_devices.register_session(
+        user_id,
+        session.session_id,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        remember=remember,
+        expires_at=session.expires_at,
+        method=method,
+    )
+    _schedule_login_alert(user_id, event)
+    _set_session_cookie(response, cookie, session)
+    payload = _session_payload(session)
+    # 给刚登录的页面看一眼“上次登录”和“这次是不是新地点”
+    payload["login"] = {
+        "newLocation": event["newLocation"],
+        "location": event["location"],
+        "device": event["device"],
+        "activeCount": event["activeCount"],
+        "previous": event["previous"],
+    }
+    return ok(payload)
+
 
 @router.post("/auth/login")
 async def login(
@@ -117,8 +166,8 @@ async def login(
         )
     if not check_admin_token(key, body.token):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token 不正确")
-    cookie, session = create_session(role="admin")
-    _set_session_cookie(response, cookie)
+    cookie, session = create_session(role="admin", remember=body.remember)
+    _set_session_cookie(response, cookie, session)
     return ok(_session_payload(session))
 
 
@@ -140,9 +189,11 @@ async def guest_login(
         )
     clear_login_failures(key)
     cookie, session = create_session(
-        role="guest", credential_version=policy.credential_version
+        role="guest",
+        credential_version=policy.credential_version,
+        remember=body.remember,
     )
-    _set_session_cookie(response, cookie)
+    _set_session_cookie(response, cookie, session)
     return ok(_session_payload(session))
 
 
@@ -168,7 +219,9 @@ async def user_login(
         _record_user_failure(ip_key, account_key)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "QQ 号或密码不正确")
     clear_login_failures(account_key)
-    return _start_user_session(response, user_id)
+    return _start_user_session(
+        request, response, user_id, remember=body.remember, method="password"
+    )
 
 
 @router.post("/auth/user/setup")
@@ -189,21 +242,41 @@ async def user_setup(
         if exc.code == "bad_code":
             _record_user_failure(ip_key, account_key)
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)
-        ) from exc
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     clear_login_failures(account_key)
-    return _start_user_session(response, user_id)
+    return _start_user_session(
+        request, response, user_id, remember=body.remember, method="setup_code"
+    )
 
 
 @router.post("/auth/logout")
 async def logout(
-    response: Response, _session: AuthenticatedWriteSession
+    response: Response, session: AuthenticatedWriteSession
 ) -> dict[str, Any]:
+    if session.role == "user" and session.user_id is not None:
+        webui_devices.forget_session(session.user_id, session.session_id)
     response.delete_cookie(COOKIE_NAME, path=BASE_PATH)
     return ok({"authenticated": False})
 
 
 @router.get("/auth/session")
-async def get_auth_session(session: AuthenticatedSession) -> dict[str, Any]:
+async def get_auth_session(
+    session: AuthenticatedSession, response: Response
+) -> dict[str, Any]:
+    """读会话；剩余有效期不到一半时顺手续签（同一个设备、同一个 CSRF）。
+
+    前端打开页面和定时保活都会调这里，所以“自动登录”只要隔段时间用一次就一直有效。
+    """
+
+    renewed = renew(session)
+    if renewed is not None:
+        cookie, session = renewed
+        _set_session_cookie(response, cookie, session)
+        if session.role == "user" and session.user_id is not None:
+            webui_devices.check_session(
+                session.user_id,
+                session.session_id,
+                expires_at=session.expires_at,
+                remember=session.remember,
+            )
     return ok(_session_payload(session))

@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import webui_devices
+
 _BEIJING = timezone(timedelta(hours=8))
 
 ACCOUNTS_PATH = Path(
@@ -348,6 +350,7 @@ def set_password(user_id: int, password: str, *, source: str) -> AccountView:
         raw["credential_version"] = int(raw.get("credential_version") or 0) + 1
         raw.pop("setup", None)
         _write_all(data)
+        webui_devices.drop_sessions(user_id)
         return _view(user_id, raw)
 
 
@@ -438,6 +441,7 @@ def revoke_sessions(user_id: int) -> bool:
             return False
         raw["credential_version"] = int(raw.get("credential_version") or 0) + 1
         _write_all(data)
+        webui_devices.drop_sessions(user_id)
         return True
 
 
@@ -452,6 +456,7 @@ def set_disabled(user_id: int, disabled: bool) -> AccountView | None:  # noqa: F
             raw["credential_version"] = int(raw.get("credential_version") or 0) + 1
             raw.pop("setup", None)
             _write_all(data)
+            webui_devices.drop_sessions(user_id)
         return _view(user_id, raw)
 
 
@@ -464,6 +469,7 @@ def delete_account(user_id: int) -> bool:
             return False
         del data["accounts"][str(int(user_id))]
         _write_all(data)
+        webui_devices.delete_user(user_id)
         return True
 
 
@@ -472,6 +478,7 @@ def reset_for_tests() -> None:
     with _LOCK:
         _cache = None
         _DUMMY_HASH = None
+    webui_devices.reset_for_tests()
 
 
 __all__ = [

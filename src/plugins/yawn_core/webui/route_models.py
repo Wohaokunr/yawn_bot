@@ -19,6 +19,8 @@ from ..yawn_agent.persona import PersonaCard  # noqa: TC001
 
 class LoginBody(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
+    # 勾选“自动登录”：长效 Cookie，下次打开免登录
+    remember: bool = False
 
 
 class GuestAccessPatch(BaseModel):

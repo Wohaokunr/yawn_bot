@@ -22,3 +22,17 @@
 .login-user-switch .ant-btn-link:hover {
   color: var(--brand-hover);
 }
+
+/* 自动登录勾选行：勾选框在左，说明在右 */
+.login-remember {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -6px 0 14px;
+}
+
+.login-remember-hint {
+  font-size: 12px;
+  cursor: help;
+}

@@ -486,13 +486,14 @@ ACCOUNT_TOOLS: tuple[PrivateTool, ...] = (
         "webui_account",
         "他的网页（WebUI）个人账号，登录后能管自己当群主/管理员的群、调你们私聊的人设。"
         "guide 新人引导：进行到哪一步、登录网址（login_url 原样发，别自己编）、下一步做什么；view 开没开通、能管哪些群；"
+        "sessions 看登录状态：在线几台设备（设备、IP 段、最近活跃、是否自动登录）、最近几次登录（有没有新地点）、登录提醒设置；"
         "ask_password 帮他设自己想要的密码：系统直接私聊提示他把密码发过来，下一条由系统收走加密保存，你看不到（只需简短说照提示发）；"
         "cancel 他不想设了时关掉收密码的窗口；setup_code 把一次性设置码直接私发给他，去登录页用设置码设密码；logout_all 所有设备退出。"
         "绝不让他把密码发在普通聊天里；他已经发了就提醒他撤回并换一个",
         {
             "action": {
                 "type": "string",
-                "enum": ["guide", "view", "ask_password", "cancel", "setup_code", "logout_all"],
+                "enum": ["guide", "view", "sessions", "ask_password", "cancel", "setup_code", "logout_all"],
             }
         },
         ("action",),
@@ -1787,6 +1788,8 @@ async def _webui_account_tool(
             "managed_groups": groups[:10],
             "how_to_set_password": "用 ask_password 让他直接把想要的密码发过来，或 setup_code 给他发设置码",
         }
+    if action == "sessions":
+        return _webui_sessions_view(ctx.user_id)
     if action == "setup_code":
         if ctx.bot is None:
             raise ToolError("现在发不了私聊消息", code=ERROR_PERMISSION, hint="让他自己发 /网页密码")
@@ -1804,7 +1807,52 @@ async def _webui_account_tool(
     if action == "logout_all":
         done = webui_accounts.revoke_sessions(ctx.user_id)
         return {"done": done, "note": "所有设备已退出" if done else "他还没有网页账号"}
-    raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS, hint="action 用 guide/view/ask_password/cancel/setup_code/logout_all")
+    raise ToolError("没有这个动作", code=ERROR_INVALID_ARGS, hint="action 用 guide/view/sessions/ask_password/cancel/setup_code/logout_all")
+
+
+def _webui_sessions_view(user_id: int) -> dict[str, Any]:
+    """登录状态（只读）：在线设备与最近登录。只给设备描述和 IP 段，不给完整 IP 和会话标识。"""
+
+    from .. import webui_accounts, webui_devices
+
+    account = webui_accounts.get_account(user_id)
+    if account is None or not account.has_password:
+        return {
+            "opened": False,
+            "note": "他还没有网页账号，想用的话可以 ask_password 帮他设密码",
+        }
+    summary = webui_devices.status_summary(user_id, recent=5)
+    devices = [
+        {
+            "device": item["device"],
+            "where": item["lastLocation"],
+            "logged_in_at": item["createdAt"],
+            "last_active": item["lastSeenAt"],
+            "auto_login": item["remember"],
+        }
+        for item in summary["devices"][:8]
+    ]
+    logins = [
+        {
+            "at": item["at"],
+            "device": item["device"],
+            "where": item["location"],
+            "new_location": item["newLocation"],
+        }
+        for item in summary["recentLogins"]
+    ]
+    return {
+        "opened": not account.disabled,
+        "disabled": account.disabled,
+        "online_devices": summary["activeCount"],
+        "devices": devices,
+        "recent_logins": logins,
+        "new_location_logins": summary["newLocationLogins"],
+        "login_alert": summary["alertModeLabel"],
+        "where_is": "IP 段，不是精确位置；别说成城市",
+        "if_suspicious": "有不认识的设备/新地点：建议他 logout_all 让所有设备退出，再重新设密码；"
+        "只下线某一台在网页「账号与数据」里点；改提醒发 /网页登录 提醒 新地点|每次|关闭",
+    }
 
 
 async def _webui_onboarding_tool(

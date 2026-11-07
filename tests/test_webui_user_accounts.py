@@ -34,6 +34,7 @@ if nonebot.get_plugin("yawn_core") is None:
 
 _PKG = "src.plugins.yawn_core"
 accounts = importlib.import_module(f"{_PKG}.webui_accounts")
+devices = importlib.import_module(f"{_PKG}.webui_devices")
 commands = importlib.import_module(f"{_PKG}.webui_account_commands")
 auth = importlib.import_module(f"{_PKG}.webui.auth")
 auth_routes = importlib.import_module(f"{_PKG}.webui.auth_routes")
@@ -66,6 +67,7 @@ API = "/webui/api/v1"
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_PATH", tmp_path / "webui" / "accounts.json")
+    monkeypatch.setattr(devices, "DEVICES_PATH", tmp_path / "webui" / "devices.json")
     # 测试里把 scrypt 调轻，算法与格式不变
     monkeypatch.setattr(accounts, "_SCRYPT_N", 2**10)
     accounts.reset_for_tests()
@@ -709,22 +711,16 @@ async def test_onboarding_guide_gives_login_url_and_next_step(_onboarding):
     tool = ptools.TOOLS_BY_NAME["webui_account"]
     assert set(tool.properties) == {"action"}
     assert "webui_onboarding" not in ptools.TOOLS_BY_NAME
-    guide = await ptools.execute_private_tool(
-        "webui_account", {"action": "guide"}, ctx
-    )
+    guide = await ptools.execute_private_tool("webui_account", {"action": "guide"}, ctx)
     assert guide["ok"] is True
     assert guide["result"]["step"] == "no_password"
     assert guide["result"]["login_url"] == "https://bot.example.com/?login=qq"
     assert str(OWNER) in guide["result"]["username"]
     accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
-    guide = await ptools.execute_private_tool(
-        "webui_account", {"action": "guide"}, ctx
-    )
+    guide = await ptools.execute_private_tool("webui_account", {"action": "guide"}, ctx)
     assert guide["result"]["step"] == "never_logged_in"
     accounts.record_login(OWNER)
-    guide = await ptools.execute_private_tool(
-        "webui_account", {"action": "guide"}, ctx
-    )
+    guide = await ptools.execute_private_tool("webui_account", {"action": "guide"}, ctx)
     assert guide["result"]["step"] == "ready"
     # 历史里模型可能还喊旧名 webui_onboarding，走别名照样能用
     legacy = await ptools.execute_private_tool(
@@ -746,9 +742,7 @@ async def test_onboarding_ask_password_captures_next_message_out_of_band(_onboar
     assert "webui_account.ask_password" in ctx.succeeded
     assert len(sent) == 1 and "直接把你想用的密码发给我" in str(sent[0]["message"])
     assert commands.capture_pending(OWNER)
-    guide = await ptools.execute_private_tool(
-        "webui_account", {"action": "guide"}, ctx
-    )
+    guide = await ptools.execute_private_tool("webui_account", {"action": "guide"}, ctx)
     assert guide["result"]["step"] == "waiting_password"
 
     weak = await commands.consume_capture_message(OWNER, "12345678")
@@ -778,9 +772,7 @@ async def test_onboarding_ask_password_captures_next_message_out_of_band(_onboar
 async def test_onboarding_capture_cancel_media_failures_and_expiry(_onboarding):
     sent: list[dict[str, Any]] = []
     ctx = _onboarding_ctx(sent)
-    await ptools.execute_private_tool(
-        "webui_account", {"action": "ask_password"}, ctx
-    )
+    await ptools.execute_private_tool("webui_account", {"action": "ask_password"}, ctx)
     out = await commands.consume_capture_message(OWNER, "取消")
     assert out.done and not out.success and not commands.capture_pending(OWNER)
 
@@ -848,3 +840,339 @@ async def test_onboarding_respects_feature_switch(_onboarding, monkeypatch):
         "webui_account", {"action": "ask_password"}, ctx
     )
     assert out["ok"] is False and sent == [] and not commands.capture_pending(OWNER)
+
+
+# ── 自动登录、登录设备、异地登录提醒 ────────────────────────────────────
+
+UA_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+UA_IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1 MicroMessenger/8.0"
+
+
+def _cookie_header(response) -> str:
+    return response.headers.get("set-cookie", "")
+
+
+def test_device_helpers_describe_and_group_locations():
+    assert devices.describe_device(UA_WIN) == "Windows · Chrome"
+    assert devices.describe_device(UA_IPHONE) == "iPhone · 微信"
+    assert devices.describe_device("") == "未知设备"
+    assert devices.location_key("203.0.113.77") == "203.0.113.*"
+    assert devices.location_key("203.0.113.5") == devices.location_key("203.0.113.9")
+    assert devices.location_key("192.168.1.2") == "内网"
+    assert devices.location_key("::1") == "内网"
+    assert devices.location_key("2001:db8:abcd:12::1") == "2001:db8:abcd::/48"
+
+
+def test_register_flags_new_location_and_alert_modes():
+    first = devices.register_session(
+        OWNER,
+        "sid-a",
+        ip="203.0.113.7",
+        user_agent=UA_WIN,
+        remember=True,
+        expires_at=10_000,
+        now=1_000,
+    )
+    assert first["firstLogin"] is True and first["newLocation"] is False
+    assert devices.should_alert(first) is False  # 第一次登录不提醒
+    same = devices.register_session(
+        OWNER,
+        "sid-b",
+        ip="203.0.113.99",
+        user_agent=UA_IPHONE,
+        remember=False,
+        expires_at=10_000,
+        now=1_100,
+    )
+    assert same["newLocation"] is False and devices.should_alert(same) is False
+    assert same["previous"]["device"] == "Windows · Chrome"
+    far = devices.register_session(
+        OWNER,
+        "sid-c",
+        ip="198.51.100.4",
+        user_agent=UA_WIN,
+        remember=False,
+        expires_at=10_000,
+        now=1_200,
+    )
+    assert far["newLocation"] is True and devices.should_alert(far) is True
+    assert far["activeCount"] == 3
+    devices.set_alert_mode(OWNER, "off")
+    assert devices.should_alert({**far, "alertMode": "off"}) is False
+    assert devices.should_alert({**same, "alertMode": "always"}) is True
+    history = devices.login_history(OWNER)
+    assert [item["newLocation"] for item in history] == [True, False, False]
+    raw = devices.DEVICES_PATH.read_text(encoding="utf-8")
+    assert "sid-a" not in raw  # 只存哈希
+    assert oct(devices.DEVICES_PATH.stat().st_mode & 0o777) == "0o600"
+    # 过期的设备不再算在线
+    assert devices.list_devices(OWNER, now=20_000) == []
+
+
+def test_remember_me_sets_persistent_cookie_and_session_cookie_otherwise(env):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    plain = client.post(
+        f"{API}/auth/user", json={"qq": str(OWNER), "password": GOOD_PASSWORD}
+    )
+    assert plain.status_code == 200
+    assert "max-age" not in _cookie_header(plain).lower()
+    assert plain.json()["data"]["remember"] is False
+    kept = TestClient(client.app).post(
+        f"{API}/auth/user",
+        json={"qq": str(OWNER), "password": GOOD_PASSWORD, "remember": True},
+    )
+    data = kept.json()["data"]
+    assert data["remember"] is True
+    assert f"max-age={30 * 86400}" in _cookie_header(kept).lower()
+    assert data["expiresAt"] - int(__import__("time").time()) > 29 * 86400
+    # 运维登录同样支持
+    admin = TestClient(client.app).post(
+        f"{API}/auth/login", json={"token": "x" * 40, "remember": True}
+    )
+    assert admin.status_code == 200 and admin.json()["data"]["remember"] is True
+
+
+def test_auth_session_renews_with_same_sid_and_csrf(env):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    version = accounts.session_version(OWNER)
+    import time as _time
+
+    old_now = int(_time.time()) - 29 * 86400
+    cookie, session = auth.create_session(
+        role="user",
+        credential_version=version,
+        user_id=OWNER,
+        remember=True,
+        now=old_now,
+    )
+    client.cookies.set(auth_routes.COOKIE_NAME, cookie, path="/webui")
+    response = client.get(f"{API}/auth/session")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["csrfToken"] == session.csrf_token
+    assert data["expiresAt"] > session.expires_at
+    set_cookie = response.headers["set-cookie"]
+    renewed = auth.verify_session(set_cookie.split(";", 1)[0].split("=", 1)[1])
+    assert renewed is not None and renewed.session_id == session.session_id
+    assert renewed.remember is True
+    # 新签的会话有效期还长，不再续
+    again = client.get(f"{API}/auth/session")
+    assert "set-cookie" not in again.headers
+
+
+def test_devices_list_revoke_one_and_logout_others(env):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    client.headers["User-Agent"] = UA_WIN
+    _login(client)
+    phone = TestClient(client.app, headers={"User-Agent": UA_IPHONE})
+    _login(phone)
+    third = TestClient(client.app)
+    _login(third)
+    listing = client.get(f"{API}/me/devices").json()["data"]
+    assert listing["activeCount"] == 3
+    assert listing["devices"][0]["current"] is True
+    assert listing["devices"][0]["device"] == "Windows · Chrome"
+    assert sum(1 for item in listing["devices"] if item["current"]) == 1
+    assert len(listing["logins"]) == 3
+    assert client.get(f"{API}/me").json()["data"]["activeDeviceCount"] == 3
+    phone_id = next(
+        i["id"] for i in listing["devices"] if i["device"] == "iPhone · 微信"
+    )
+    assert client.delete(f"{API}/me/devices/{phone_id}").status_code == 200
+    assert phone.get(f"{API}/me").status_code == 401
+    assert client.delete(f"{API}/me/devices/{phone_id}").status_code == 404
+    out = client.post(f"{API}/me/devices/logout-others").json()["data"]
+    assert out["loggedOut"] == 1 and out["activeCount"] == 1
+    assert third.get(f"{API}/me").status_code == 401
+    assert client.get(f"{API}/me").status_code == 200
+    # 下线当前这台：Cookie 一起清掉
+    current_id = out["devices"][0]["id"]
+    gone = client.delete(f"{API}/me/devices/{current_id}")
+    assert gone.json()["data"]["current"] is True
+    assert client.get(f"{API}/me").status_code == 401
+
+
+def test_logout_revokes_device_even_if_cookie_was_copied(env):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    _login(client)
+    copied = client.cookies.get(auth_routes.COOKIE_NAME)
+    assert client.post(f"{API}/auth/logout").status_code == 200
+    thief = TestClient(client.app)
+    thief.cookies.set(auth_routes.COOKIE_NAME, copied, path="/webui")
+    assert thief.get(f"{API}/me").status_code == 401
+
+
+def test_sessions_from_before_upgrade_are_adopted_not_kicked(env):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    cookie, _session = auth.create_session(
+        role="user", credential_version=accounts.session_version(OWNER), user_id=OWNER
+    )
+    client.cookies.set(auth_routes.COOKIE_NAME, cookie, path="/webui")
+    assert client.get(f"{API}/me").status_code == 200
+    items = devices.list_devices(OWNER)
+    assert len(items) == 1 and items[0]["method"] == "adopted"
+    assert devices.login_history(OWNER) == []  # 补登记不算一次登录
+
+
+def test_password_change_keeps_current_device_only(env):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    client.post(
+        f"{API}/auth/user",
+        json={"qq": str(OWNER), "password": GOOD_PASSWORD, "remember": True},
+    )
+    client.headers["X-CSRF-Token"] = client.get(f"{API}/auth/session").json()["data"][
+        "csrfToken"
+    ]
+    other = TestClient(client.app)
+    _login(other)
+    changed = client.post(
+        f"{API}/me/password",
+        json={"currentPassword": GOOD_PASSWORD, "newPassword": "Fresh-pass-22"},
+    )
+    client.headers["X-CSRF-Token"] = changed.json()["data"]["csrfToken"]
+    listing = client.get(f"{API}/me/devices").json()["data"]
+    assert listing["activeCount"] == 1 and listing["devices"][0]["current"] is True
+    assert listing["sessionRemember"] is True  # 沿用原来的“自动登录”
+    assert len(listing["logins"]) == 2  # 续登不记作一次新登录
+
+
+def test_login_alert_fires_for_new_location_only(env, monkeypatch):
+    client = env["client"]
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    sent: list[dict[str, Any]] = []
+
+    async def fake_alert(user_id, event):
+        sent.append({"user_id": user_id, **event})
+        return True
+
+    monkeypatch.setattr(commands, "send_login_alert", fake_alert)
+    where = {"ip": "203.0.113.7"}
+    monkeypatch.setattr(auth_routes, "client_ip", lambda _request: where["ip"])
+    _login(client)  # 第一次：不提醒
+    _login(TestClient(client.app))  # 同一网段：不提醒
+    where["ip"] = "198.51.100.4"
+    response = _login(TestClient(client.app))
+    assert response.json()["data"]["login"]["newLocation"] is True
+    assert response.json()["data"]["login"]["previous"]["location"] == "203.0.113.*"
+    assert [item["location"] for item in sent] == ["198.51.100.*"]
+    # 本人关掉提醒后不再发
+    assert (
+        client.put(f"{API}/me/security/login-alert", json={"mode": "off"}).status_code
+        == 200
+    )
+    where["ip"] = "192.0.2.8"
+    _login(TestClient(client.app))
+    assert len(sent) == 1
+    # 管理员全站关闭
+    devices.set_alert_mode(OWNER, "always")
+    monkeypatch.setattr(auth.config, "webui_login_alert", False)
+    _login(TestClient(client.app))
+    assert len(sent) == 1
+    assert (
+        client.put(f"{API}/me/security/login-alert", json={"mode": "loud"}).status_code
+        == 422
+    )
+
+
+def test_client_ip_only_trusts_configured_proxies(monkeypatch):
+    class FakeRequest:
+        def __init__(self, host, headers) -> None:
+            self.client = type("C", (), {"host": host})()
+            self.headers = headers
+
+    spoof = FakeRequest("203.0.113.7", {"x-forwarded-for": "1.1.1.1"})
+    monkeypatch.setattr(auth.config, "webui_trusted_proxies", "")
+    assert auth.client_ip(spoof) == "203.0.113.7"
+    monkeypatch.setattr(
+        auth.config, "webui_trusted_proxies", "127.0.0.1, 172.18.0.0/16"
+    )
+    proxied = FakeRequest(
+        "172.18.0.3", {"x-forwarded-for": "9.9.9.9, 198.51.100.4, 127.0.0.1"}
+    )
+    assert auth.client_ip(proxied) == "198.51.100.4"
+    real_ip = FakeRequest("127.0.0.1", {"x-real-ip": "198.51.100.5"})
+    assert auth.client_ip(real_ip) == "198.51.100.5"
+    assert auth.client_ip(spoof) == "203.0.113.7"
+
+
+@pytest.mark.asyncio
+async def test_login_alert_text_and_send(monkeypatch):
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    event = devices.register_session(
+        OWNER,
+        "sid-x",
+        ip="198.51.100.4",
+        user_agent=UA_WIN,
+        remember=False,
+        expires_at=9_999_999_999,
+    )
+    text = commands.login_alert_text({**event, "newLocation": True})
+    assert "新的地点" in text and "198.51.100.*" in text and "198.51.100.4" not in text
+    sent: list[dict[str, Any]] = []
+    recorded: list[str] = []
+
+    class FakeBot:
+        async def send_private_msg(self, **kwargs):
+            sent.append(kwargs)
+
+    async def fake_record(_user_id, value):
+        recorded.append(value)
+
+    monkeypatch.setattr(nonebot, "get_bots", lambda: {"1": FakeBot()})
+    monkeypatch.setattr(commands, "_record_capture_result", fake_record)
+    assert await commands.send_login_alert(OWNER, event) is True
+    assert sent[0]["user_id"] == OWNER and recorded == [sent[0]["message"]]
+
+
+@pytest.mark.asyncio
+async def test_private_status_command_text_and_agent_sessions_view(monkeypatch):
+    assert "还没有网页账号" in commands.devices_status_text(OWNER)
+    accounts.set_password(OWNER, GOOD_PASSWORD, source="test")
+    devices.register_session(
+        OWNER,
+        "sid-1",
+        ip="203.0.113.7",
+        user_agent=UA_WIN,
+        remember=True,
+        expires_at=9_999_999_999,
+    )
+    devices.register_session(
+        OWNER,
+        "sid-2",
+        ip="198.51.100.4",
+        user_agent=UA_IPHONE,
+        remember=False,
+        expires_at=9_999_999_999,
+    )
+    text = commands.devices_status_text(OWNER)
+    assert "在线设备 2 台" in text and "⚠新地点" in text
+    assert "203.0.113.7" not in text and "sid-1" not in text
+    status = commands.account_status_text(OWNER, [])
+    assert "当前在线设备：2 台" in status
+
+    ctx = ptools.PrivateToolContext(
+        session=None, user_id=OWNER, bot_id=None, groups=[], now=NOW, bot=None
+    )
+    result = await ptools.execute_private_tool(
+        "webui_account", {"action": "sessions"}, ctx
+    )
+    assert result["ok"] is True
+    view = result["result"]
+    assert view["online_devices"] == 2 and view["new_location_logins"] == 1
+    assert {item["device"] for item in view["devices"]} == {
+        "Windows · Chrome",
+        "iPhone · 微信",
+    }
+    dumped = json.dumps(view, ensure_ascii=False)
+    assert "203.0.113.7" not in dumped and "sid-" not in dumped
+    # 只读：不算写操作
+    assert "sessions" not in ptools._ORGANIZER_ACTIONS["webui_account"]
+    # 注销账号连设备记录一起删
+    accounts.delete_account(OWNER)
+    assert devices.list_devices(OWNER) == [] and devices.login_history(OWNER) == []

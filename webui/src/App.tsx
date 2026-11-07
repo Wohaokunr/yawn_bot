@@ -1,9 +1,9 @@
 import { App as AntApp, Spin } from "antd";
-import { lazy, useEffect, useState } from "react";
+import { lazy, useEffect, useRef, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./app-shell";
 import { api, setCsrfToken } from "./api";
-import type { AuthSessionData } from "./auth-session";
+import type { AuthSessionData, LoginInfo } from "./auth-session";
 import { Login } from "./login";
 import { OverviewPage } from "./overview";
 
@@ -98,8 +98,51 @@ const GuestGroupPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupPage: Page }) => ({ default: Page })),
 );
 
+/** 已登录时每隔多久读一次会话：后端在剩余有效期不到一半时顺延，打开着的页面不会突然掉线。 */
+export const KEEPALIVE_MS = 10 * 60 * 1000;
+
+function keepSessionAlive(): void {
+  api<AuthSessionData>("/auth/session")
+    .then(({ data }) => setCsrfToken(data.csrfToken, data.role))
+    // 401 已由 api() 广播 yawnbot-auth-lost；网络抖动等下一次再试
+    .catch(() => undefined);
+}
+
+/** QQ 账号刚登录时提示一次“上次登录 / 这次是新地点”。 */
+export function loginNoticeText(info: LoginInfo): { title: string; description: string; warn: boolean } | null {
+  const previous = info.previous;
+  if (info.newLocation) {
+    return {
+      title: "这次是在新的地点登录",
+      description: `${info.device} · ${info.location}。Bot 会私聊提醒你；当前在线 ${info.activeCount} 台设备，可在「账号与数据」里查看和下线。`,
+      warn: true,
+    };
+  }
+  if (!previous) return null;
+  const when = previous.at ? previous.at.slice(0, 16).replace("T", " ") : "未知时间";
+  return {
+    title: "欢迎回来",
+    description: `上次登录：${when} · ${previous.device} · ${previous.location}。当前在线 ${info.activeCount} 台设备。`,
+    warn: false,
+  };
+}
+
+function LoginNotice({ info }: { info?: LoginInfo }): null {
+  const { notification } = AntApp.useApp();
+  const shown = useRef(false);
+  useEffect(() => {
+    if (!info || shown.current) return;
+    shown.current = true;
+    const text = loginNoticeText(info);
+    if (!text) return;
+    (text.warn ? notification.warning : notification.info)({ message: text.title, description: text.description, placement: "topRight", duration: 8 });
+  }, [info, notification]);
+  return null;
+}
+
 function App(): React.JSX.Element {
   const [session, setSession] = useState<AuthSessionData | null | undefined>(undefined);
+  const [notice, setNotice] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     api<AuthSessionData>("/auth/session")
@@ -111,11 +154,29 @@ function App(): React.JSX.Element {
 
     const lost = () => {
       setCsrfToken("", null);
-      setSession(null);
+      setSession((previous) => {
+        // 用着用着掉线（被下线 / 过期 / 改了密码）才提示；首次打开没登录不提示
+        if (previous) setNotice("登录已失效：可能已过期、在别的设备上被下线或改了密码，请重新登录。");
+        return null;
+      });
     };
     window.addEventListener("yawnbot-auth-lost", lost);
     return () => window.removeEventListener("yawnbot-auth-lost", lost);
   }, []);
+
+  const loggedIn = Boolean(session);
+  useEffect(() => {
+    if (!loggedIn) return undefined;
+    const timer = window.setInterval(keepSessionAlive, KEEPALIVE_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") keepSessionAlive();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [loggedIn]);
 
   if (session === undefined) {
     return <div className="center-screen"><Spin size="large" /></div>;
@@ -123,8 +184,10 @@ function App(): React.JSX.Element {
   if (session === null) {
     return (
       <Login
+        notice={notice}
         onSuccess={(nextSession) => {
           setCsrfToken(nextSession.csrfToken, nextSession.role);
+          setNotice(undefined);
           setSession(nextSession);
         }}
       />
@@ -135,6 +198,7 @@ function App(): React.JSX.Element {
     const logout = () => setSession(null);
     return (
       <AntApp>
+        <LoginNotice info={session.login} />
         <Routes>
           <Route element={<Shell session={session} onLogout={logout} />}>
             <Route index element={<Navigate to="/me" replace />} />
