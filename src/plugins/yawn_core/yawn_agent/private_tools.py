@@ -1373,6 +1373,7 @@ async def _recall_chat(ctx: PrivateToolContext, query: str) -> list[dict[str, An
         .where(
             ChatSession.user_id == ctx.user_id,
             ChatSession.group_id.is_(None),
+            ChatSession.is_deleted.is_(False),
             ChatMessage.is_deleted.is_(False),
         )
         .order_by(ChatMessage.id.desc())
@@ -1386,6 +1387,7 @@ async def _recall_chat(ctx: PrivateToolContext, query: str) -> list[dict[str, An
             .where(
                 ChatSession.user_id == ctx.user_id,
                 ChatSession.group_id.is_(None),
+                ChatSession.is_deleted.is_(False),
                 ChatMessage.is_deleted.is_(False),
                 or_(*(ChatMessage.content.contains(term, autoescape=True) for term in terms[:6])),
             )
@@ -1732,6 +1734,7 @@ def _hand_context(ctx: PrivateToolContext) -> dict[str, Any]:
 
 # 会改个人数据的动作（其余动作只读）。
 _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
+    "memory_link": frozenset({"share", "unshare", "mute_group", "unmute_group", "group_talk"}),
     "notes": frozenset({"add", "delete", "pin", "unpin"}),
     "todos": frozenset({"add", "done", "undo", "delete", "clear_done"}),
     "reminders": frozenset({"add", "cancel", "snooze", "pause", "resume", "edit"}),
@@ -1744,6 +1747,17 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "webui_account": frozenset({"setup_code", "logout_all", "ask_password", "cancel"}),
     "computer_files": frozenset({"delete"}),
 }
+
+
+def has_write_result(succeeded: set[str]) -> bool:
+    """本轮成功的修改动作；混合工具的 list/view 不算修改。"""
+    confirmed = MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES | OFFER_NAMES
+    direct = WRITE_TOOLS - _ORGANIZER_ACTIONS.keys() - confirmed
+    return bool(succeeded & direct) or any(
+        f"{name}.{action}" in succeeded
+        for name, actions in _ORGANIZER_ACTIONS.items()
+        for action in actions
+    ) or any(f"{name}.done" in succeeded for name in confirmed)
 
 
 async def _webui_account_tool(

@@ -199,6 +199,13 @@ beforeEach(() => {
 });
 
 describe("AgentDebugger 2.0", () => {
+  it("switches back to Trace analysis with a message replay in the URL", async () => {
+    renderDebugger("/agent/1?tab=debug&debug.messageId=501");
+    await screen.findByText("生成调试快照");
+    fireEvent.click(screen.getByText("Trace 分析"));
+    expect(await screen.findByRole("listbox", { name: "Trace" })).toBeTruthy();
+  });
+
   it("展示缓冲统计、带预览的 Trace 列表、KPI 与自动诊断", async () => {
     renderDebugger();
 

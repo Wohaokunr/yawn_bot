@@ -27,13 +27,13 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ApiError } from "../api";
 import { CopyButton } from "../agent-debug/debug-utils";
 import { downloadJson, estimateTokens } from "../agent-debug/trace-analysis";
 import { composeText, MODE_META, modeLabel, type PromptHistoryEntry, type PromptMode } from "../agent-prompts/prompt-meta";
 import { PromptSnapshotView } from "../agent-prompts/PromptSnapshotView";
-import { AdminEmpty, formatTime, QueryErrorAlert, useApiQuery } from "../shared";
+import { AdminEmpty, DraftDiffModal, formatTime, QueryErrorAlert, ServerDraftUpdateAlert, useApiQuery, useDraftSafeServerData, useUnsavedChanges } from "../shared";
 import { privateApi, type PrivatePipeline, type PrivatePromptCatalog, type PrivateScope, type PrivateSectionRow, type PrivateSnapshot } from "./private-api";
 import {
   baseOf,
@@ -194,9 +194,26 @@ function SectionEditor({
   const { message } = AntApp.useApp();
   const own = ownOverride(row, scope);
   const inherited = inheritedOf(row, scope);
-  const [state, setState] = useState<EditorState>(() => own
+  const initial = useMemo<EditorState>(() => own
     ? { mode: own.mode, text: own.text || (own.mode === "replace" ? row.effectiveText ?? "" : ""), note: own.note, confirmSafety: false }
-    : { mode: "inherit", text: "", note: "", confirmSafety: false });
+    : { mode: "inherit", text: "", note: "", confirmSafety: false }, [own, row.effectiveText]);
+  const [state, setState] = useState<EditorState>(initial);
+  const baseline = useRef(initial);
+  const baseRevision = useRef(revision);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const dirty = JSON.stringify(state) !== JSON.stringify(baseline.current);
+  useUnsavedChanges(dirty);
+  const server = useMemo(() => ({ ...initial, version: String(revision) }), [initial, revision]);
+  const drafts = useDraftSafeServerData(server, dirty, (value) => {
+    const { version, ...next } = value;
+    baseline.current = next;
+    baseRevision.current = Number(version);
+    setState(next);
+  }, (value) => {
+    const { version, ...next } = value;
+    baseline.current = next;
+    baseRevision.current = Number(version);
+  });
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState<PromptHistoryEntry[] | null>(null);
   const [previewUser, setPreviewUser] = useState(userId);
@@ -216,10 +233,10 @@ function SectionEditor({
     setSaving(true);
     try {
       if (state.mode === "inherit") {
-        await privateApi.clearOverride(row.id, scope, userId, revision);
+        await privateApi.clearOverride(row.id, scope, userId, baseRevision.current);
         message.success(scope === "user" ? "已恢复继承全局" : "已恢复默认");
       } else {
-        await privateApi.saveOverride(row.id, { scope, userId, mode: state.mode, text: state.text, note: state.note, confirmSafety: state.confirmSafety, expectedRevision: revision });
+        await privateApi.saveOverride(row.id, { scope, userId, mode: state.mode, text: state.text, note: state.note, confirmSafety: state.confirmSafety, expectedRevision: baseRevision.current });
         message.success(`已保存：${row.title} → ${modeLabel(state.mode)}，${scope === "user" ? "这位用户" : "所有私聊"}下一轮立即生效`);
       }
       onSaved();
@@ -254,9 +271,11 @@ function SectionEditor({
     width="min(760px, 100vw)"
     onClose={onClose}
     title={<span className="pst-drawer-title">{row.safety && <SafetyCertificateOutlined className="pst-safety-icon" />}{row.title}<Text type="secondary" code>{row.id}</Text></span>}
-    extra={<Button type="primary" loading={saving} disabled={Boolean(error)} onClick={() => void save()}>保存</Button>}
+    extra={<Button type="primary" loading={saving} disabled={Boolean(error) || Boolean(drafts.remoteUpdate)} onClick={() => void save()}>保存</Button>}
   >
     <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+      {drafts.remoteUpdate && <ServerDraftUpdateAlert onKeep={drafts.keepDraft} onCompare={() => setDiffOpen(true)} onReload={drafts.reloadRemote} />}
+      <DraftDiffModal open={diffOpen} draft={state} server={drafts.remoteUpdate} onClose={() => setDiffOpen(false)} />
       <div className="pst-editor-meta">
         <Text type="secondary">{row.layerLabel} · {row.when}</Text>
         {row.description && <Text type="secondary">{row.description}</Text>}
@@ -366,14 +385,16 @@ export function PromptsTab({ params }: { params: PromptsParams }): React.JSX.Ele
   const editing = rows.find((row) => row.id === sectionId) ?? null;
   const revision = catalog.data?.revision ?? 0;
 
-  const runBulk = async (changes: Array<{ sectionId: string; mode: string; text?: string; note?: string }>, done: string, confirmSafety = false, replaceScope = false): Promise<void> => {
+  const runBulk = async (changes: Array<{ sectionId: string; mode: string; text?: string; note?: string }>, done: string, confirmSafety = false, replaceScope = false): Promise<boolean> => {
     setBusy(true);
     try {
       const result = await privateApi.bulk({ scope, userId, changes, confirmSafety, expectedRevision: revision, replaceScope });
       message.success(`${done}（${result.changed} 处）`);
       catalog.reload();
+      return true;
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 409) { message.warning("别处刚改过提示词，已刷新，请重试"); catalog.reload(); } else message.error(errorText(reason));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -400,7 +421,7 @@ export function PromptsTab({ params }: { params: PromptsParams }): React.JSX.Ele
     const parsed = parsePrivateImport(importText);
     if (parsed.error) { message.error(parsed.error); return; }
     const touchesSafety = parsed.changes.some((item) => rows.find((row) => row.id === item.sectionId)?.safety && (item.mode === "disable" || item.mode === "replace"));
-    await runBulk(parsed.changes, "导入完成", touchesSafety);
+    if (!await runBulk(parsed.changes, "导入完成", touchesSafety)) return;
     setImportOpen(false);
     setImportText("");
   };
@@ -436,7 +457,7 @@ export function PromptsTab({ params }: { params: PromptsParams }): React.JSX.Ele
           <Text type="secondary" className="pa-block">私聊 Agent 发给模型的每一段：主回合、汇报、协调、后台小助手和记忆整理。可以对所有私聊改，也可以只给某一位用户改。</Text>
         </div>
         <Space wrap>
-          <Segmented value={scope} onChange={(value) => (value === "global" ? pickUser("") : setUserInput(userInput || ""))} options={[{ value: "global", label: "全局（所有私聊）" }, { value: "user", label: "某位用户", disabled: !userId && !userInput }]} />
+          <Segmented value={scope} onChange={(value) => (value === "global" ? pickUser("") : pickUser(userInput))} options={[{ value: "global", label: "全局（所有私聊）" }, { value: "user", label: "某位用户", disabled: !userId && !userInput }]} />
           <Input.Search value={userInput} onChange={(event) => setUserInput(event.target.value)} onSearch={pickUser} placeholder="用户 QQ" enterButton="切换" allowClear aria-label="按用户查看" className="pa-user-search" />
           <Tooltip title="刷新"><Button icon={<ReloadOutlined />} aria-label="刷新私聊提示词" onClick={catalog.reload} loading={catalog.refreshing} /></Tooltip>
         </Space>
@@ -499,7 +520,7 @@ export function PromptsTab({ params }: { params: PromptsParams }): React.JSX.Ele
     <OverrideUsers revision={revision} onPick={pickUser} onChanged={catalog.reload} />
 
     {editing && <SectionEditor
-      key={`${editing.id}-${scope}-${userId}-${revision}`}
+      key={`${editing.id}-${scope}-${userId}`}
       row={editing}
       scope={scope}
       userId={userId}

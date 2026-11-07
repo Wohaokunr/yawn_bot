@@ -82,10 +82,10 @@ from .private_prompt import (
     PRIVATE_TURN_TAKING,
 )
 from .private_tools import (
-    WRITE_TOOLS,
     PrivateToolContext,
     available_tools,
     execute_private_tool,
+    has_write_result,
 )
 from .prompt_sections import (
     ContentBuilder,
@@ -152,29 +152,6 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "group_bridge.post": ("relay_to_group",),
     "group_bridge.ask": ("relay_to_group",),
 }
-# 模型这轮做了写操作却没说话时，用兜底句子告知结果。
-_WRITE_RESULTS = frozenset(
-    {
-        "checkin",
-        "remember_about_me",
-        "forget_about_me",
-        "notes.add",
-        "todos.add",
-        "todos.done",
-        "reminders.add",
-        "reminders.cancel",
-        "schedules.add",
-        "schedules.cancel",
-        "countdowns.add",
-        "mood.log",
-        "chat_prefs.set",
-        "delegate_task",
-        "delegate_project",
-        "tasks.cancel",
-        "tasks.answer",
-        "tasks.message",
-    }
-)
 # 私聊里用户找 Bot 聊一轮给的好感；每日上限见 affinity.SOURCE_RULES。
 PRIVATE_CHAT_AFFINITY = 1
 
@@ -1198,7 +1175,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             user_id,
             [*private_vision.history_notes(vision), *attachment_notes(attachments)],
         )
-    wrote = bool(ctx.succeeded & (_WRITE_RESULTS | WRITE_TOOLS))
+    wrote = has_write_result(ctx.succeeded)
     silence = turn_taking.parse_silence(text)
     text = silence.text
     if offer is not None:
@@ -1215,7 +1192,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             offer_out["user_spoke"] = True
             _trace_silence(user_id, "offer_yield")
             return ""
-    elif silence.silent and silence_ok and handoff is None and not (ctx.succeeded & _WRITE_RESULTS):
+    elif silence.silent and silence_ok and handoff is None and not wrote:
         if silence.kind == "wait" and not resumed:
             turn_taking.schedule_wait(
                 request.bot,
@@ -1229,7 +1206,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         _trace_silence(user_id, silence.kind)
         return ""
     if not text.strip():
-        if ctx.succeeded & _WRITE_RESULTS:
+        if wrote:
             text = "好啦，已经帮你处理好了~"
         else:
             return None
@@ -1526,7 +1503,7 @@ async def _recent_history(session: Any, user_id: int) -> list[dict[str, str]]:
     rows = (
         await session.execute(
             select(ChatMessage.role, ChatMessage.content)
-            .where(ChatMessage.session_id == session_id)
+            .where(ChatMessage.session_id == session_id, ChatMessage.is_deleted.is_(False))
             .order_by(ChatMessage.id.desc())
             .limit(
                 int(

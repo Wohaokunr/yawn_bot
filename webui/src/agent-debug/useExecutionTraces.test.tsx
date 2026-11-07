@@ -62,6 +62,19 @@ describe("useExecutionTraces selection stability", () => {
     vi.restoreAllMocks();
   });
 
+  it("refreshes the selected detail when its summary completes", async () => {
+    let current = "running";
+    apiMock.mockImplementation(async (path: string) => {
+      const item = { ...summary("live", current), eventCount: 0 };
+      return path.includes("/execution-traces/") ? { data: { ...item, events: [] } } as never : { data: [item] } as never;
+    });
+    const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
+    await waitFor(() => expect(result.current.selectedTrace?.status).toBe("running"));
+    current = "completed";
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.selectedTrace?.status).toBe("completed"));
+  });
+
   it("旧 Trace 被 12 条缓冲淘汰后保持用户选择和已加载详情", async () => {
     const { result } = renderHook(() => useExecutionTraces("1"), { wrapper });
     await waitFor(() => expect(result.current.selectedTraceId).toBe("new"));

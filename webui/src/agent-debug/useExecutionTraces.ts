@@ -212,6 +212,15 @@ export function useExecutionTraces(groupId: string): ExecutionTracesState {
       : Promise.resolve(null),
   });
 
+  const selectedSummary = summaries.find((item) => item.traceId === selectedTraceId);
+  useEffect(() => {
+    const detail = detailQuery.data;
+    if (detail && selectedSummary && detail.traceId === selectedTraceId
+      && ((detail.status === "running" && selectedSummary.status !== "running") || detail.events.length < selectedSummary.eventCount)) {
+      detailQuery.reload();
+    }
+  }, [selectedTraceId, selectedSummary?.status, selectedSummary?.eventCount, detailQuery.data?.status, detailQuery.data?.events.length, detailQuery.reload]);
+
   const reload = useCallback(() => {
     listQuery.reload();
     statsQuery.reload();

@@ -823,3 +823,13 @@ async def test_wake_turn_runs_through_real_dialogue_pipeline(monkeypatch: pytest
     assert len(sent) == 1
     # 没有触发消息可引用：不带 reply 段。
     assert "reply" not in [item["type"] for item in sent[0].segment_records]
+
+
+def test_cancelled_task_only_restarts_with_explicit_schedule() -> None:
+    task = _fake_task(status="cancelled", revision=1, next_run_at=None, cancelled_at=NOW, cancelled_by=ALICE)
+    validated = store.validate_draft(store.TaskDraft(instruction="new reminder", schedule={"kind": "once", "delay_minutes": 60}), settings=Settings(), now=NOW)
+    store.apply_draft(task, validated, now=NOW)
+    assert task.status == "cancelled" and task.next_run_at is None
+    store.apply_draft(task, validated, now=NOW, restart=True)
+    assert task.status == "active" and task.next_run_at == NOW + timedelta(minutes=60)
+    assert task.cancelled_at is None and task.cancelled_by is None

@@ -182,10 +182,7 @@ async def run_tick(
             dbg_exc(f"私聊调度读写用户 {user_id} 的提醒失败")
             firings = []
         for firing in firings:
-            done, delivered = await _run_firing(user_id, firing, now, send, record, wake, proactive_ok)
-            sent += delivered
-            if not done:
-                break
+            sent += await _run_firing(user_id, firing, now, send, record, wake, proactive_ok)
 
         def plan(rec: dict[str, Any], uid: int = user_id, ok: bool = proactive_ok) -> tuple[list[str], list[str]]:
             rec["user_id"] = uid
@@ -228,8 +225,8 @@ async def _run_firing(
     record: Callable[[int, str, datetime], Awaitable[None]],
     wake: Waker | None,
     proactive_ok: bool,
-) -> tuple[bool, int]:
-    """执行一条到点的私聊提醒并写回结果；返回（能否继续发下一条, 送达条数）。
+) -> int:
+    """执行一条到点的私聊提醒并写回结果；返回送达条数。
 
     agent 模式交给私聊回合去办；他用 /退出 暂停了或回合没办成时退回发提醒原文，
     保证他至少收到。发不出去时按退避重试，不再像以前那样直接丢掉。
@@ -268,7 +265,7 @@ async def _run_firing(
         dbg_exc(f"私聊提醒结果写回失败 用户 {user_id}")
         final = result
     record_private_usage(final)
-    return result != "failed", delivered
+    return delivered
 
 
 async def _send_private(user_id: int, text: str) -> bool:

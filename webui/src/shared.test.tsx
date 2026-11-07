@@ -110,10 +110,11 @@ describe("useApiQuery", () => {
 describe("useDraftSafeServerData", () => {
   it("keeps a dirty draft intact when a newer server version arrives", async () => {
     const hydrate = vi.fn();
+    const rebase = vi.fn();
     const v1 = { version: "v1", value: "old" };
     const v2 = { version: "v2", value: "remote" };
     const { result, rerender } = renderHook(
-      ({ data, dirty }) => useDraftSafeServerData(data, dirty, hydrate),
+      ({ data, dirty }) => useDraftSafeServerData(data, dirty, hydrate, rebase),
       { initialProps: { data: v1, dirty: false } },
     );
 
@@ -126,7 +127,12 @@ describe("useDraftSafeServerData", () => {
 
     act(() => result.current.keepDraft());
     expect(result.current.remoteUpdate).toBeNull();
+    expect(rebase).toHaveBeenLastCalledWith(v2);
     expect(hydrate).toHaveBeenCalledTimes(1);
+    rerender({ data: { ...v2 }, dirty: true });
+    expect(result.current.remoteUpdate).toBeNull();
+    rerender({ data: { version: "v3", value: "newer" }, dirty: true });
+    await waitFor(() => expect(result.current.remoteUpdate?.version).toBe("v3"));
   });
 
   it("only overwrites the form after the user explicitly reloads the remote version", async () => {

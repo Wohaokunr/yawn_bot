@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App as AntApp } from "antd";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ vi.mock("../api", () => ({
   },
 }));
 
+import { ApiError } from "../api";
 import { PrivateAgentPage } from "./PrivateAgentPage";
 
 const card = {
@@ -121,6 +122,50 @@ describe("PrivateAgentPage", () => {
     })));
     state.api.mockReset();
     state.api.mockImplementation((path: string, init?: RequestInit) => Promise.resolve(respond(path, init)));
+  });
+
+  it("preserves a policy draft while refreshing the persona list", async () => {
+    renderAt("/private-agent?pa.tab=persona");
+    const input = await screen.findByRole("spinbutton", { name: "每天最多改几次" });
+    fireEvent.change(input, { target: { value: "77" } });
+    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole("button", { name: "刷新人设列表" }));
+    await waitFor(() => expect(state.api.mock.calls.filter(([path]) => String(path).startsWith("/private-agent/persona/users")).length).toBeGreaterThan(1));
+    expect(input).toHaveValue("77");
+    expect(screen.getByRole("button", { name: "保存策略" })).not.toBeDisabled();
+  });
+
+  it("retains prompt text and exposes conflict resolution after a 409", async () => {
+    let revision = 3;
+    state.api.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith("/private-agent/prompts/catalog")) return { data: { ...catalog("12345"), revision } };
+      if (init?.method === "PUT") { revision = 4; throw new ApiError(409, "conflict"); }
+      return respond(path, init);
+    });
+    renderAt("/private-agent?pa.user=12345&pa.section=private.rules");
+    const input = await screen.findByRole("textbox", { name: "分段文字" });
+    fireEvent.change(input, { target: { value: "本地尚未保存的详细草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    expect(await screen.findByText("服务器配置已更新")).toBeTruthy();
+    expect(input).toHaveValue("本地尚未保存的详细草稿");
+    expect(screen.getByRole("button", { name: /保\s*存/ })).toBeDisabled();
+  });
+
+  it("keeps the import dialog and JSON when the request fails", async () => {
+    state.api.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/bulk")) throw new Error("模拟导入失败");
+      return respond(path, init);
+    });
+    renderAt("/private-agent");
+    await screen.findByText("私聊提示词注册表");
+    fireEvent.click(screen.getByRole("button", { name: /导入/ }));
+    const input = await screen.findByRole("textbox", { name: "导入 JSON" });
+    const json = JSON.stringify({ overrides: { "private.rules": { mode: "append", text: "保留输入" } } });
+    fireEvent.change(input, { target: { value: json } });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^导\s*入$/ }));
+    await screen.findByText("模拟导入失败");
+    expect(input).toHaveValue(json);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("shows the private prompt registry with pipelines and health issues", async () => {

@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Flex, Modal, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Empty, Flex, Modal, Popconfirm, Space, Table, Tag, Typography } from "antd";
 import type { TablePaginationConfig } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -210,13 +210,15 @@ export function useDraftSafeServerData<T extends VersionedServerData>(
   data: T | null,
   dirty: boolean,
   hydrate: (value: T) => void,
+  rebase?: (value: T) => void,
 ): DraftSafeServerState<T> {
   const [remoteUpdate, setRemoteUpdate] = useState<T | null>(null);
   const hasApplied = useRef(false);
   const appliedVersion = useRef<string | null>(null);
-  const ignoredVersion = useRef<string | null>(null);
   const dirtyRef = useRef(dirty);
   const hydrateRef = useRef(hydrate);
+  const rebaseRef = useRef(rebase);
+  rebaseRef.current = rebase;
   dirtyRef.current = dirty;
   hydrateRef.current = hydrate;
 
@@ -224,7 +226,6 @@ export function useDraftSafeServerData<T extends VersionedServerData>(
     hydrateRef.current(value);
     hasApplied.current = true;
     appliedVersion.current = value.version ?? null;
-    ignoredVersion.current = null;
     setRemoteUpdate(null);
   }, []);
 
@@ -233,14 +234,16 @@ export function useDraftSafeServerData<T extends VersionedServerData>(
     const version = data.version ?? null;
     if (hasApplied.current && version === appliedVersion.current) return;
     if (dirtyRef.current) {
-      if (version !== ignoredVersion.current) setRemoteUpdate(data);
+      setRemoteUpdate(data);
       return;
     }
     acceptServerData(data);
   }, [acceptServerData, data]);
 
   const keepDraft = useCallback(() => {
-    ignoredVersion.current = remoteUpdate?.version ?? null;
+    if (!remoteUpdate || !rebaseRef.current) return;
+    rebaseRef.current(remoteUpdate);
+    appliedVersion.current = remoteUpdate.version ?? null;
     setRemoteUpdate(null);
   }, [remoteUpdate]);
 
@@ -266,9 +269,11 @@ export function ServerDraftUpdateAlert({
       showIcon
       className="section-alert"
       message="服务器配置已更新"
-      description="检测到当前群的服务端版本发生变化。你的未保存草稿已保留，系统没有自动覆盖表单。"
+      description="检测到服务端版本发生变化。你的未保存草稿已保留，系统没有自动覆盖表单。"
       action={<Space wrap>
-        <Button size="small" onClick={onKeep}>保留我的草稿</Button>
+        <Popconfirm title="保留草稿并使用服务器新版本作为基线？" description="请先查看差异。之后保存会用当前草稿覆盖对应配置，仍会检查后续版本冲突。" onConfirm={onKeep}>
+          <Button size="small">保留我的草稿</Button>
+        </Popconfirm>
         <Button size="small" onClick={onCompare}>查看差异</Button>
         <Button size="small" danger onClick={onReload}>重新载入</Button>
       </Space>}

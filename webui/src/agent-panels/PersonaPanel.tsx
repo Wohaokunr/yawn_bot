@@ -75,7 +75,7 @@ export function PersonaPanel({ groupId, manager = false }: { groupId: string; ma
     setDirty(false);
     setTrialResult(null);
     setTrialError(null);
-  });
+  }, (value) => { baseVersion.current = value.version ?? undefined; });
 
   const data = query.data;
   if (!data) return query.error ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : <Spin />;

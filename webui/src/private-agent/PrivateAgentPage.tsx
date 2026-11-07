@@ -1,6 +1,7 @@
 import { BulbOutlined, FileSearchOutlined, FileTextOutlined, LinkOutlined, SmileOutlined, SwapOutlined } from "@ant-design/icons";
 import { Tabs } from "antd";
 import { useSearchParams } from "react-router-dom";
+import { confirmDiscardChanges } from "../shared";
 import { updateSearchParams } from "../sandbox/sandbox-meta";
 import { BridgeTab } from "./BridgeTab";
 import { CapturesTab } from "./CapturesTab";
@@ -18,7 +19,9 @@ export function PrivateAgentPage(): React.JSX.Element {
   const update = (patch: Record<string, string | null>): void => {
     setSearchParams(updateSearchParams(searchParams, patch), { replace: true });
   };
-  const setTab = (next: PrivateTab): void => update({ "pa.tab": next === "prompts" ? null : next, "pa.section": null });
+  const setTab = (next: PrivateTab): void => {
+    if (confirmDiscardChanges()) update({ "pa.tab": next === "prompts" ? null : next, "pa.section": null });
+  };
   const pickUser = (next: string | null): void => update({ "pa.user": next });
   const openSection = (sectionId: string): void => update({ "pa.tab": null, "pa.section": sectionId });
 

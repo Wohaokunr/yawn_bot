@@ -256,7 +256,7 @@ def test_ask_flow_confirm_send_capture_and_deliver(_env):
     assert consumed is True and again is False
     assert bot.private and "小红：我可以！" in bot.private[-1][1] and "猫猫群" in bot.private[-1][1]
     # 已转过的不再转
-    assert bridge.take_undelivered(USER) == []
+    assert bridge.pending_replies(USER) == []
     view = bridge.private_view(USER)
     assert view["asks_in_groups"][0]["replies"][0]["who"] == "小红"
 
@@ -388,3 +388,30 @@ def test_overview_lists_records_without_replies_text():
     assert "秘密回复" not in json.dumps(data, ensure_ascii=False)
     detail = bridge.user_detail(USER)
     assert detail["relays"][0]["replies"][0]["text"] == "秘密回复"
+
+
+@pytest.mark.asyncio
+async def test_reply_delivery_retries_and_confirms_only_sent_snapshot(monkeypatch):
+    relay = bridge.record_relay(USER, group_id=GID, group_name="test", kind="ask", text="q", message_id=1)
+    bridge.add_reply(USER, relay["id"], from_id=REPLIER, from_name="one", text="first", message_id=2)
+    attempts = []
+    sent = []
+
+    class FlakyBot(FakeBot):
+        async def send_private_msg(self, *, user_id, message):
+            assert user_id == USER
+            attempts.append(str(message))
+            if len(attempts) == 1:
+                raise RuntimeError("test")
+            if len(attempts) == 2:
+                assert bridge.pending_replies(USER)
+                bridge.add_reply(USER, relay["id"], from_id=REPLIER, from_name="two", text="new-arrival", message_id=3)
+            sent.append(str(message))
+
+    monkeypatch.setattr(bridge, "REPLY_RETRY_SECONDS", (0.0,))
+    bridge.schedule_reply_delivery(FlakyBot(), USER)
+    await bridge._delivery_tasks[USER]
+    assert len(attempts) == 3
+    assert "first" in sent[0] and "new-arrival" not in sent[0]
+    assert "new-arrival" in sent[1] and "first" not in sent[1]
+    assert bridge.pending_replies(USER) == []
