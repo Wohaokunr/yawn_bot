@@ -69,6 +69,22 @@ export const PRIORITY_META: Record<TodoItem["priority"], { label: string; color:
 
 export type TodoFilter = "open" | "today" | "overdue" | "done" | "all";
 
+export interface TodoDraftEdit { content: string; priority: TodoItem["priority"]; due: string }
+
+/** 只有填完整的日期（或清空）才算有效；输到一半的日期框是空串以外的残缺值或被浏览器报为空。 */
+export const isCompleteDate = (value: string): boolean => value === "" || /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+/** 编辑框的草稿与原条目对比，只返回改动的字段；内容为空或日期不完整时返回 null（不能保存）。 */
+export function todoChanges(item: TodoItem, draft: TodoDraftEdit): { content?: string; priority?: TodoItem["priority"]; due?: string } | null {
+  const content = draft.content.trim();
+  if (!content || !isCompleteDate(draft.due)) return null;
+  const changes: { content?: string; priority?: TodoItem["priority"]; due?: string } = {};
+  if (content !== item.content) changes.content = content;
+  if (draft.priority !== item.priority) changes.priority = draft.priority;
+  if (draft.due !== (item.due ?? "")) changes.due = draft.due;
+  return changes;
+}
+
 export function filterTodos(items: TodoItem[], filter: TodoFilter, keyword = ""): TodoItem[] {
   const needle = keyword.trim().toLowerCase();
   return items.filter((item) => {

@@ -22,7 +22,7 @@ function DeviceRow({ item, onLogout, busy }: { item: MyDevice; onLogout: (item: 
       <div className="me-device-main">
         <Space size={6} wrap>
           <Text strong>{item.device}</Text>
-          {item.current && <Tag color="green">这台设备</Tag>}
+          {item.current && <Tag>这台设备</Tag>}
           {item.remember && <Tag>自动登录</Tag>}
         </Space>
         <Text type="secondary" className="me-device-meta">
@@ -36,13 +36,17 @@ function DeviceRow({ item, onLogout, busy }: { item: MyDevice; onLogout: (item: 
         okButtonProps={{ danger: true }}
         onConfirm={() => onLogout(item)}
       >
-        <Button size="small" danger={!item.current} loading={busy}>{item.current ? "退出" : "下线"}</Button>
+        <Button danger={!item.current} loading={busy} className="me-device-action">{item.current ? "退出" : "下线"}</Button>
       </Popconfirm>
     </div>
   );
 }
 
-export function MyDevicesCards({ onLoggedOut }: { onLoggedOut: () => void }): React.JSX.Element {
+/**
+ * 用词：「下线」= 让别的设备退出；「退出」= 这一台，或连同这一台的所有设备。
+ * onLogoutAll 给了就在设备卡片底部放「退出所有设备」，账号页只在这一处放这个按钮。
+ */
+export function MyDevicesCards({ onLoggedOut, onLogoutAll }: { onLoggedOut: () => void; onLogoutAll?: () => Promise<void> }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const query = useApiQuery({ queryKey: ["me", "devices"], fetcher: () => meApi.security() });
   const [override, setOverride] = useState<MySecurity | null>(null);
@@ -107,6 +111,19 @@ export function MyDevicesCards({ onLoggedOut }: { onLoggedOut: () => void }): Re
             : "这台设备没开自动登录：关掉浏览器后要重新登录。"}
           位置只显示 IP 段，不是精确地址。
         </Text>
+      )}
+      {onLogoutAll && (
+        <div className="me-device-footer">
+          <Popconfirm
+            title="退出所有设备？"
+            description="包括这一台，所有登录都要重新输入密码。"
+            okText="全部退出"
+            okButtonProps={{ danger: true }}
+            onConfirm={onLogoutAll}
+          >
+            <Button danger type="text" icon={<LogoutOutlined />}>退出所有设备（包括这台）</Button>
+          </Popconfirm>
+        </div>
       )}
     </Card>
 

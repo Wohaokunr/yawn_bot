@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessageRow, NoteItem, TodoItem } from "./me-space-api";
-import { countdownLabel, dueLabel, filterNotes, filterTodos, formatBytes, greeting, groupByDay, isBirthday, isClock, moodByDay, pickTab, quietLabel, trendLabel } from "./me-space-meta";
+import { countdownLabel, dueLabel, filterNotes, filterTodos, formatBytes, greeting, groupByDay, isBirthday, isClock, moodByDay, pickTab, quietLabel, todoChanges, trendLabel } from "./me-space-meta";
 
 const todo = (patch: Partial<TodoItem>): TodoItem => ({ id: 1, content: "x", priority: "normal", priorityLabel: "普通", done: false, due: null, dueInDays: null, overdue: false, createdAt: null, doneAt: null, ...patch });
 
@@ -22,6 +22,14 @@ describe("我的空间纯逻辑", () => {
     expect(countdownLabel(0)).toBe("就是今天");
     expect(countdownLabel(3)).toBe("还有 3 天");
     expect(countdownLabel(-4)).toBe("已过去 4 天");
+  });
+
+  it("diffs a todo edit and refuses blank content or a half-typed date", () => {
+    const item = todo({ content: "交作业", priority: "high", due: "2026-11-07" });
+    expect(todoChanges(item, { content: " 交作业 ", priority: "high", due: "2026-11-07" })).toEqual({});
+    expect(todoChanges(item, { content: "交作业", priority: "low", due: "" })).toEqual({ priority: "low", due: "" });
+    expect(todoChanges(item, { content: "  ", priority: "high", due: "2026-11-07" })).toBeNull();
+    expect(todoChanges(item, { content: "交作业", priority: "high", due: "2026-11" })).toBeNull();
   });
 
   it("filters todos", () => {

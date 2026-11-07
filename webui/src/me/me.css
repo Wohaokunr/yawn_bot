@@ -60,8 +60,8 @@
   width: 40px;
   height: 40px;
   border-radius: 10px;
-  background: var(--brand-50);
-  color: var(--brand);
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
   font-size: 18px;
 }
 
@@ -144,8 +144,8 @@
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: var(--brand-100);
-  color: var(--brand-active);
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
   font-weight: 700;
 }
 
@@ -303,7 +303,30 @@
 }
 
 .me-account-grid .ant-descriptions {
-  margin-bottom: 12px;
+  margin-bottom: 0;
+}
+
+h3.me-account-heading {
+  margin: 28px 0 10px;
+  color: var(--ink-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+h3.me-account-heading:first-of-type {
+  margin-top: 4px;
+}
+
+.me-account-help {
+  background: var(--surface);
+}
+
+.me-device-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
 }
 
 .me-strength {
@@ -322,9 +345,9 @@
 
 .me-header-tag {
   margin: 0;
-  color: var(--brand-active);
-  background: var(--brand-50);
-  border-color: var(--brand-100);
+  color: var(--ink-secondary);
+  background: var(--surface-muted);
+  border-color: var(--border);
 }
 
 @media (max-width: 900px) {
@@ -682,7 +705,11 @@
 }
 
 .me-device-row.is-current {
-  border-color: var(--brand);
+  background: var(--surface-muted);
+}
+
+.me-device-action.ant-btn {
+  flex: none;
 }
 
 .me-device-icon {

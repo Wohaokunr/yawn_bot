@@ -8,13 +8,15 @@ import {
   PlusOutlined,
   PushpinFilled,
   PushpinOutlined,
+  SearchOutlined,
   SmileOutlined,
+  UpOutlined,
 } from "@ant-design/icons";
-import { AutoComplete, Button, Checkbox, Empty, Input, Popconfirm, Segmented, Select, Skeleton, Switch, Tag, Tooltip, Typography } from "antd";
+import { AutoComplete, Button, Checkbox, Empty, Input, Popconfirm, Segmented, Skeleton, Switch, Tag, Tooltip, Typography } from "antd";
 import { useMemo, useState } from "react";
 import { PageHeader, QueryErrorAlert } from "../shared";
 import { type CountdownList, type MoodList, type NoteList, spaceApi, type TodoItem, type TodoList } from "./me-space-api";
-import { countdownLabel, dueLabel, filterNotes, filterTodos, MOOD_OPTIONS, moodByDay, moodEmoji, PRIORITY_META, type TodoFilter, trendLabel } from "./me-space-meta";
+import { countdownLabel, dueLabel, filterNotes, filterTodos, MOOD_OPTIONS, moodByDay, moodEmoji, PRIORITY_META, type TodoDraftEdit, todoChanges, type TodoFilter, trendLabel } from "./me-space-meta";
 import { MeSection, StatTile, UrlTabs, useAction, useResource } from "./space-ui";
 import "./me.css";
 import "./me-space.css";
@@ -29,6 +31,61 @@ const todayIso = (): string => {
 
 // ── 待办 ───────────────────────────────────────────────────────────────
 
+const PRIORITY_OPTIONS = (["high", "normal", "low"] as const).map((value) => ({ value, label: PRIORITY_META[value].label }));
+
+/** 一条待办的编辑区：草稿只在点「保存」时一次性提交，日期没填完整不让存。 */
+function TodoEditor({ item, busy, onSave, onDelete, onClose }: {
+  item: TodoItem;
+  busy: string | null;
+  onSave: (changes: NonNullable<ReturnType<typeof todoChanges>>) => Promise<void>;
+  onDelete: () => Promise<void>;
+  onClose: () => void;
+}): React.JSX.Element {
+  const [draft, setDraft] = useState<TodoDraftEdit>({ content: item.content, priority: item.priority, due: item.due ?? "" });
+  const [dateIncomplete, setDateIncomplete] = useState(false);
+  const changes = dateIncomplete ? null : todoChanges(item, draft);
+  const dirty = changes !== null && Object.keys(changes).length > 0;
+  const save = (): void => { if (changes && dirty) void onSave(changes); };
+
+  return <div className="me-todo-editor" role="group" aria-label={`编辑：${item.content}`}>
+    <Input
+      autoFocus
+      maxLength={120}
+      value={draft.content}
+      onChange={(event) => setDraft({ ...draft, content: event.target.value })}
+      onPressEnter={save}
+      onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}
+      aria-label="待办内容"
+      status={draft.content.trim() ? undefined : "error"}
+    />
+    <div className="me-todo-editor-row">
+      <Segmented<TodoItem["priority"]> value={draft.priority} onChange={(priority) => setDraft({ ...draft, priority })} options={PRIORITY_OPTIONS} aria-label="优先级" />
+      <span className="me-todo-editor-date">
+        <Input
+          type="date"
+          value={draft.due}
+          onChange={(event) => {
+            setDateIncomplete(event.target.validity.badInput);
+            setDraft({ ...draft, due: event.target.value });
+          }}
+          aria-label="截止日期"
+          status={dateIncomplete ? "error" : undefined}
+        />
+        {draft.due && <Button type="link" size="small" onClick={() => { setDateIncomplete(false); setDraft({ ...draft, due: "" }); }}>去掉截止</Button>}
+      </span>
+    </div>
+    {dateIncomplete && <Text type="danger" className="me-hint">日期还没填完整</Text>}
+    <div className="me-todo-editor-actions">
+      <Popconfirm title="删掉这条待办？" okText="删掉" okButtonProps={{ danger: true }} onConfirm={onDelete}>
+        <Button danger type="text" icon={<DeleteOutlined />} loading={busy === `del-${item.id}`}>删除</Button>
+      </Popconfirm>
+      <span className="me-toolbar-spacer" />
+      <Button onClick={onClose}>取消</Button>
+      <Button type="primary" loading={busy === `todo-${item.id}`} disabled={!dirty} onClick={save}>保存</Button>
+    </div>
+  </div>;
+}
+
 function TodosTab(): React.JSX.Element {
   const { query, data, setData } = useResource<TodoList>(["me", "todos"], () => spaceApi.todos());
   const { busy, run } = useAction();
@@ -37,6 +94,7 @@ function TodosTab(): React.JSX.Element {
   const [due, setDue] = useState("");
   const [filter, setFilter] = useState<TodoFilter>("open");
   const [keyword, setKeyword] = useState("");
+  const [editing, setEditing] = useState<number | null>(null);
   const rows = useMemo(() => filterTodos(data?.items ?? [], filter, keyword), [data, filter, keyword]);
 
   const add = async (): Promise<void> => {
@@ -49,43 +107,48 @@ function TodosTab(): React.JSX.Element {
       setPriority("normal");
     }
   };
-  const patch = async (item: TodoItem, change: Parameters<typeof spaceApi.editTodo>[1], success?: string): Promise<void> => {
+  const patch = async (item: TodoItem, change: Parameters<typeof spaceApi.editTodo>[1], success?: string): Promise<boolean> => {
     const next = await run(`todo-${item.id}`, () => spaceApi.editTodo(item.id, change), success);
     if (next) setData(next);
+    return Boolean(next);
   };
 
   if (query.error && !data) return <QueryErrorAlert error={query.error} onRetry={query.reload} />;
   if (!data) return <Skeleton active paragraph={{ rows: 4 }} />;
   const overdue = data.items.filter((item) => item.overdue).length;
+  const filters: { value: TodoFilter; label: string }[] = [
+    { value: "open", label: `未完成 ${data.pending}` },
+    { value: "today", label: "今天" },
+    ...(overdue > 0 || filter === "overdue" ? [{ value: "overdue" as const, label: `逾期 ${overdue}` }] : []),
+    { value: "done", label: `已完成 ${data.done}` },
+    { value: "all", label: "全部" },
+  ];
 
   return <div className="me-stack">
-    <div className="me-composer" role="group" aria-label="新待办">
-      <Input
-        className="me-composer-main"
-        placeholder="要做什么？回车记下"
-        maxLength={120}
-        value={content}
-        onChange={(event) => setContent(event.target.value)}
-        onPressEnter={() => void add()}
-      />
-      <Select<TodoItem["priority"]> value={priority} onChange={setPriority} options={(["high", "normal", "low"] as const).map((value) => ({ value, label: PRIORITY_META[value].label }))} aria-label="优先级" className="me-composer-select" />
-      <Input type="date" value={due} min={todayIso()} onChange={(event) => setDue(event.target.value)} aria-label="截止日期" className="me-composer-date" />
-      <Button type="primary" icon={<PlusOutlined />} loading={busy === "add"} disabled={!content.trim()} onClick={() => void add()}>添加</Button>
+    <div className="me-composer-block" role="group" aria-label="新待办">
+      <div className="me-composer">
+        <Input
+          className="me-composer-main"
+          placeholder="要做什么？回车记下"
+          maxLength={120}
+          value={content}
+          onChange={(event) => setContent(event.target.value)}
+          onPressEnter={() => void add()}
+          aria-label="新待办内容"
+        />
+        <Button type="primary" icon={<PlusOutlined />} loading={busy === "add"} disabled={!content.trim()} onClick={() => void add()}>添加</Button>
+      </div>
+      {content.trim() && (
+        <div className="me-composer-extra">
+          <Segmented<TodoItem["priority"]> size="small" value={priority} onChange={setPriority} options={PRIORITY_OPTIONS} aria-label="优先级" />
+          <Input type="date" size="small" value={due} min={todayIso()} onChange={(event) => setDue(event.target.validity.badInput ? "" : event.target.value)} aria-label="截止日期（可选）" className="me-composer-date" />
+        </div>
+      )}
     </div>
 
     <div className="me-toolbar">
-      <Segmented<TodoFilter>
-        value={filter}
-        onChange={setFilter}
-        options={[
-          { value: "open", label: `未完成 ${data.pending}` },
-          { value: "today", label: "今天要做" },
-          { value: "overdue", label: `逾期 ${overdue}` },
-          { value: "done", label: `已完成 ${data.done}` },
-          { value: "all", label: "全部" },
-        ]}
-      />
-      <Input.Search allowClear placeholder="搜索待办" value={keyword} onChange={(event) => setKeyword(event.target.value)} className="me-toolbar-search" />
+      <Segmented<TodoFilter> value={filter} onChange={setFilter} options={filters} aria-label="筛选待办" />
+      <Input allowClear prefix={<SearchOutlined aria-hidden="true" />} placeholder="搜索待办" value={keyword} onChange={(event) => setKeyword(event.target.value)} className="me-toolbar-search" aria-label="搜索待办" />
       <span className="me-toolbar-spacer" />
       <Text type="secondary" className="me-hint">{data.items.length}/{data.limit} 条</Text>
       {data.done > 0 && (
@@ -101,33 +164,40 @@ function TodosTab(): React.JSX.Element {
       <ul className="me-todo-list">
         {rows.map((item) => {
           const label = dueLabel(item.dueInDays);
-          return <li key={item.id} className={`me-todo${item.done ? " is-done" : ""}${item.overdue ? " is-overdue" : ""}`}>
-            <Checkbox checked={item.done} disabled={busy === `todo-${item.id}`} onChange={(event) => void patch(item, { done: event.target.checked }, event.target.checked ? "完成一件！" : undefined)} aria-label={`完成：${item.content}`} />
-            <Paragraph
-              className="me-todo-text"
-              editable={{ tooltip: "改内容", maxLength: 120, onChange: (value) => { if (value.trim() && value !== item.content) void patch(item, { content: value.trim() }, "改好了"); } }}
-            >
-              {item.content}
-            </Paragraph>
-            <span className="me-todo-meta">
-              <Select<TodoItem["priority"]>
-                size="small"
-                variant="borderless"
-                value={item.priority}
-                onChange={(value) => void patch(item, { priority: value })}
-                options={(["high", "normal", "low"] as const).map((value) => ({ value, label: <Tag color={PRIORITY_META[value].color}>{PRIORITY_META[value].label}</Tag> }))}
-                aria-label="优先级"
-                popupMatchSelectWidth={false}
+          const open = editing === item.id;
+          return <li key={item.id} className={`me-todo${item.done ? " is-done" : ""}${item.overdue ? " is-overdue" : ""}${open ? " is-editing" : ""}`}>
+            <div className="me-todo-row">
+              <label className="me-todo-check">
+                <Checkbox checked={item.done} disabled={busy === `todo-${item.id}`} onChange={(event) => void patch(item, { done: event.target.checked }, event.target.checked ? "完成一件！" : undefined)} aria-label={`完成：${item.content}`} />
+              </label>
+              <div className="me-todo-body">
+                <span className="me-todo-text">{item.content}</span>
+                {(item.priority !== "normal" || label || (item.done && item.doneAt)) && (
+                  <span className="me-todo-meta">
+                    {item.priority !== "normal" && <Tag color={PRIORITY_META[item.priority].color}>{PRIORITY_META[item.priority].label}</Tag>}
+                    {label && !item.done && <Tag color={item.overdue ? "error" : item.dueInDays === 0 ? "warning" : "default"}>{label}</Tag>}
+                    {item.done && item.doneAt && <Text type="secondary" className="me-hint">完成于 {item.doneAt.slice(5)}</Text>}
+                  </span>
+                )}
+              </div>
+              <Button
+                type="text"
+                className="me-todo-toggle"
+                icon={open ? <UpOutlined /> : <EditOutlined />}
+                aria-label={open ? `收起：${item.content}` : `编辑：${item.content}`}
+                aria-expanded={open}
+                onClick={() => setEditing(open ? null : item.id)}
               />
-              {label && <Tag color={item.overdue ? "error" : item.dueInDays === 0 ? "warning" : "default"}>{label}</Tag>}
-              {item.done && item.doneAt && <Text type="secondary" className="me-hint">完成于 {item.doneAt.slice(5)}</Text>}
-              <Tooltip title={item.due ? `截止 ${item.due}（清空即去掉）` : "设截止日期"}>
-                <Input type="date" size="small" className="me-todo-date" value={item.due ?? ""} onChange={(event) => void patch(item, { due: event.target.value || "" })} aria-label="截止日期" />
-              </Tooltip>
-              <Popconfirm title="删掉这条待办？" okText="删掉" okButtonProps={{ danger: true }} onConfirm={async () => { const next = await run(`del-${item.id}`, () => spaceApi.deleteTodo(item.id)); if (next) setData(next); }}>
-                <Button type="text" size="small" icon={<DeleteOutlined />} aria-label="删除" loading={busy === `del-${item.id}`} />
-              </Popconfirm>
-            </span>
+            </div>
+            {open && (
+              <TodoEditor
+                item={item}
+                busy={busy}
+                onClose={() => setEditing(null)}
+                onSave={async (changes) => { if (await patch(item, changes, "改好了")) setEditing(null); }}
+                onDelete={async () => { const next = await run(`del-${item.id}`, () => spaceApi.deleteTodo(item.id), "删掉了"); if (next) { setData(next); setEditing(null); } }}
+              />
+            )}
           </li>;
         })}
       </ul>

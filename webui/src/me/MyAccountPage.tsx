@@ -1,5 +1,5 @@
-import { BulbOutlined, CommentOutlined, DatabaseOutlined, DownloadOutlined, KeyOutlined, LogoutOutlined, MessageOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
-import { Alert, App as AntApp, Button, Card, Descriptions, Form, Input, Popconfirm, Progress, Typography } from "antd";
+import { BulbOutlined, CommentOutlined, DatabaseOutlined, DownloadOutlined, KeyOutlined, MessageOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
+import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Form, Input, Progress, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { setCsrfToken } from "../api";
@@ -18,8 +18,9 @@ const SOURCE_LABEL: Record<string, string> = {
   webui: "网页 · 修改密码",
 };
 
-/** 秒级时间戳 → 北京时间 “YYYY-MM-DD HH:mm”（和后端其他时间同口径） */
-export function formatBeijing(epochSeconds: number): string {
+/** 秒级时间戳 → 北京时间 “YYYY-MM-DD HH:mm”（和后端其他时间同口径）；缺值或 0 显示 “—”，不显示 1970 年 */
+export function formatBeijing(epochSeconds: number | null | undefined): string {
+  if (!epochSeconds || !Number.isFinite(epochSeconds) || epochSeconds <= 0) return "—";
   return formatQqTime(new Date((epochSeconds + 8 * 3600) * 1000).toISOString());
 }
 
@@ -63,6 +64,7 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
   return <div className="me-page">
     <PageHeader title="账号与数据" subtitle="你的网页个人账号（QQ 号 + 你自己设的密码），以及你在 Bot 这里留下的数据" onRefresh={query.reload} refreshing={query.refreshing} />
     {query.error && !me && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
+    <h3 className="me-account-heading">安全</h3>
     <div className="me-account-grid">
       <Card size="small" title={<span><SafetyCertificateOutlined /> 账号信息</span>}>
         <Descriptions column={1} size="small">
@@ -74,24 +76,16 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
             {me?.account?.passwordSource && <Text type="secondary"> · {SOURCE_LABEL[me.account.passwordSource] ?? me.account.passwordSource}</Text>}
           </Descriptions.Item>
           <Descriptions.Item label="上次登录">{formatQqTime(me?.account?.lastLoginAt)}</Descriptions.Item>
-          <Descriptions.Item label="本次登录到期">
-            {me ? formatBeijing(me.sessionExpiresAt) : "—"}
-            {me?.sessionRemember && <Text type="secondary"> · 自动登录（使用中会顺延）</Text>}
-          </Descriptions.Item>
-          <Descriptions.Item label="在线设备">{me?.activeDeviceCount ?? "—"}</Descriptions.Item>
+          {me?.sessionExpiresAt ? (
+            <Descriptions.Item label="本次登录到期">
+              {formatBeijing(me.sessionExpiresAt)}
+              {me.sessionRemember && <Text type="secondary"> · 自动登录（使用中会顺延）</Text>}
+            </Descriptions.Item>
+          ) : null}
         </Descriptions>
-        <Popconfirm
-          title="退出所有设备？"
-          description="包括这一台，所有登录都要重新输入密码。"
-          okText="全部退出"
-          okButtonProps={{ danger: true }}
-          onConfirm={logoutAll}
-        >
-          <Button danger icon={<LogoutOutlined />} block>退出所有设备</Button>
-        </Popconfirm>
       </Card>
 
-      <MyDevicesCards onLoggedOut={onLoggedOut} />
+      <MyDevicesCards onLoggedOut={onLoggedOut} onLogoutAll={logoutAll} />
 
       <Card size="small" title={<span><KeyOutlined /> 修改密码</span>}>
         {error && <Alert type="error" showIcon message={error} closable onClose={() => setError("")} className="me-banner" />}
@@ -125,7 +119,10 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
           <Button type="primary" htmlType="submit" loading={saving} block>修改密码</Button>
         </Form>
       </Card>
+    </div>
 
+    <h3 className="me-account-heading">数据</h3>
+    <div className="me-account-grid">
       <Card size="small" title={<span><DatabaseOutlined /> 我的数据</span>}>
         <Descriptions column={2} size="small">
           <Descriptions.Item label="待办">{counts.todos ?? "—"}</Descriptions.Item>
@@ -143,18 +140,24 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
         </div>
       </Card>
 
-      <Card size="small" title={<span><MessageOutlined /> 忘记密码 / 在私聊里管理</span>}>
-        <Paragraph className="me-tip-list">
+    </div>
+
+    <h3 className="me-account-heading">帮助</h3>
+    <Collapse
+      className="me-account-help"
+      items={[{
+        key: "help",
+        label: <span><MessageOutlined /> 忘记密码、删除账号：在私聊里也能管</span>,
+        children: <div className="me-tip-list">
           <ul>
-            <li>私聊 Bot 发 <Text code>/网页密码</Text>：拿一次性设置码，在登录页“用设置码设密码”。</li>
-            <li>私聊 Bot 发 <Text code>/网页登录</Text>：看账号状态和你能管理的群。</li>
-            <li><Text code>/网页登录 设备</Text> 看在线设备和最近登录；<Text code>/网页登录 提醒 新地点</Text>（或 每次 / 关闭）设置登录提醒。</li>
-            <li><Text code>/网页登录 下线</Text> 退出所有设备；<Text code>/网页登录 注销</Text> 删除账号。</li>
-            <li>也可以直接跟 Bot 说“帮我弄个网页登录的设置码”。</li>
+            <li>忘记密码：私聊 Bot 发 <Text code>/网页密码</Text> 拿一次性设置码，再到登录页点“用设置码设密码”。</li>
+            <li>看账号状态和你能管理的群：发 <Text code>/网页登录</Text>。</li>
+            <li>删除网页账号：发 <Text code>/网页登录 注销</Text>。只删网页账号的密码和登录设备，之后想用再发 /网页密码 重新设置。</li>
+            <li>记不住指令也没关系，直接跟 Bot 说“帮我弄个网页登录的设置码”。</li>
           </ul>
           <Text type="secondary">密码和设置码都不要发给任何人，Bot 和管理员不会找你要。</Text>
-        </Paragraph>
-      </Card>
-    </div>
+        </div>,
+      }]}
+    />
   </div>;
 }
