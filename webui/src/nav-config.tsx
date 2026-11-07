@@ -32,6 +32,7 @@ export interface NavEntry {
   key: string;
   label: string;
   icon: ReactNode;
+  /** 侧栏分组标题；空字符串表示不分组、直接列在最上面（如“我的主页”） */
   group: string;
   description: string;
   keywords?: string;
@@ -58,9 +59,9 @@ export const GUEST_NAV: NavEntry[] = [
   { key: "/guest", label: "可查看群聊", icon: <EyeOutlined />, group: "访客视图", description: "被授权查看的群聊" },
 ];
 
-// QQ 个人账号（群管理员 / 普通用户）只看自己的东西，按“今天 / 助理 / 我和 Bot / 群与成长 / 账号”分组。
+// QQ 个人账号（群管理员 / 普通用户）只看自己的东西：主页不分组，其余按“助理 / 我和 Bot / 群与成长 / 账号”分组。
 export const USER_NAV: NavEntry[] = [
-  { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "今天", description: "今日概览：待办、提醒、心情、签到与快捷入口", keywords: "home 主页 今天 概览 dashboard" },
+  { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "", description: "今日概览：待办、提醒、心情、签到与快捷入口", keywords: "home 主页 今天 概览 dashboard" },
   { key: "/me/assistant", label: "小本本", icon: <ProfileOutlined />, group: "私人助理", description: "待办、笔记、倒数日、心情，和私聊里让 Bot 记的是同一份", keywords: "todo 待办 笔记 note 倒数日 countdown 心情 mood 日记" },
   { key: "/me/schedules", label: "我的定时任务", icon: <FieldTimeOutlined />, group: "私人助理", description: "私聊提醒和我在群里设的定时任务", keywords: "schedule 定时 提醒 闹钟 cron 群任务" },
   { key: "/me/tasks", label: "后台小助手", icon: <RobotOutlined />, group: "私人助理", description: "让 Bot 在后台帮我做的事：进度、结果、取消，以及我的虚拟电脑", keywords: "task 任务 小助手 后台 项目 电脑 sandbox" },
@@ -100,3 +101,6 @@ export function selectedNavKey(pathname: string, role: boolean | SessionRole): s
   const root = `/${pathname.split("/")[1] || homePathForRole(resolved).slice(1)}`;
   return NAV_ALIASES[root] ?? root;
 }
+
+/** 手机上的底部标签栏（只给 QQ 个人账号）：最常用的四项 + “更多”打开完整侧栏。 */
+export const USER_TABBAR_KEYS = ["/me", "/me/assistant", "/me/chats", "/me/groups"] as const;

@@ -1,8 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
-import "@fontsource/zcool-kuaile/400.css";
-import "@fontsource-variable/nunito/wght.css";
 import App from "./App";
 import { installGlassGlow } from "./glass";
 import { ThemeProvider } from "./theme";

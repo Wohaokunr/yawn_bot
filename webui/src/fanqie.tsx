@@ -195,22 +195,17 @@ export function FanqiePage(): React.JSX.Element {
   }
   const active = status.active;
   return <>
-    <div className="fq-hero">
-      <div className="fq-hero-main">
-        <span className="fq-hero-mark">🍅</span>
-        <div className="fq-hero-text">
-          <h2>番茄小说</h2>
-          <p>公开小说搜索与 TXT 任务管理</p>
-        </div>
-      </div>
-      <div className="fq-hero-stats">
-        <span className="fq-chip fq-chip-sky">排队 {active?.queued ?? 0}</span>
-        <span className="fq-chip fq-chip-tomato">下载中 {active?.running ?? 0}</span>
-        <span className="fq-chip fq-chip-mint">单次上限 {status.limits?.maxChapters ?? "?"} 章</span>
-      </div>
-      <span className="fq-hero-deco fq-hero-deco-book">📖</span>
-      <span className="fq-hero-deco fq-hero-deco-spark">✨</span>
-    </div>
+    <PageHeader
+      title="番茄小说"
+      subtitle="公开小说搜索与 TXT 任务管理"
+      status={(
+        <span className="fq-hero-stats">
+          <span className="fq-chip fq-chip-sky">排队 {active?.queued ?? 0}</span>
+          <span className="fq-chip fq-chip-tomato">下载中 {active?.running ?? 0}</span>
+          <span className="fq-chip fq-chip-mint">单次上限 {status.limits?.maxChapters ?? "?"} 章</span>
+        </span>
+      )}
+    />
     <Tabs
       activeKey={tab}
       onChange={(key) => setSearchParams(key === "discover" ? {} : { tab: key }, { replace: true })}

@@ -1,4 +1,5 @@
 import {
+  AppstoreOutlined,
   BellOutlined,
   BulbOutlined,
   CalendarOutlined,
@@ -30,8 +31,8 @@ import "./me-space.css";
 
 const { Text } = Typography;
 
-function TodayPanel({ data, onMood }: { data: Dashboard; onMood: (score: number) => void }): React.JSX.Element {
-  const { todos, reminders, countdowns, mood, checkin } = data;
+function TodayPanel({ data }: { data: Dashboard }): React.JSX.Element {
+  const { todos, reminders, countdowns, checkin } = data;
   return <div className="me-today">
     <Link to="/me/assistant" className="me-today-card">
       <span className="me-today-head"><CheckSquareOutlined /> 待办 <strong>{todos.pending}</strong>{todos.overdue > 0 && <Tag color="error" className="me-inline-tag">逾期 {todos.overdue}</Tag>}</span>
@@ -57,8 +58,31 @@ function TodayPanel({ data, onMood }: { data: Dashboard; onMood: (score: number)
         </ul>
       )}
     </Link>
-    <div className="me-today-card">
-      <span className="me-today-head"><SmileOutlined /> 今天心情{mood.loggedToday && mood.last && <span className="me-inline-tag">{moodEmoji(mood.last.score)}</span>}</span>
+    <Link to="/me/affinity" className="me-today-card">
+      <span className="me-today-head"><FireOutlined /> 签到</span>
+      <span><strong>{checkin.checkedToday}/{checkin.groups}</strong> <Text type="secondary">个群今天签过</Text></span>
+      {checkin.pendingGroups.length > 0 ? <Text type="secondary" className="me-hint">还没签：{checkin.pendingGroups.map((group) => group.groupName || group.groupId).join("、")}</Text> : checkin.groups > 0 ? <Text type="success" className="me-hint">全签完啦</Text> : null}
+      {checkin.bestStreak > 0 && <Text type="secondary" className="me-hint">最长连签 {checkin.bestStreak} 天</Text>}
+    </Link>
+  </div>;
+}
+
+/** 右侧“我和 Bot”卡：好感等级 + 今天心情，一眼看完不用再滚。 */
+function BondPanel({ data, onMood }: { data: Dashboard; onMood: (score: number) => void }): React.JSX.Element {
+  const { mood, affinity } = data;
+  const percent = Math.round(affinity.progress * 100);
+  return <div className="me-bond">
+    <Link to="/me/affinity" className="me-bond-affinity">
+      <span className="me-bond-label"><HeartOutlined /> 和 Bot 的关系</span>
+      <span className="me-bond-level">
+        <strong>{affinity.level}</strong>
+        {affinity.today > 0 && <Text type="success" className="me-hint">今天 +{affinity.today}</Text>}
+      </span>
+      <Progress className="me-affinity-progress" percent={percent} size="small" showInfo={false} strokeColor="var(--brand)" />
+      <Text type="secondary" className="me-hint">{affinity.nextLevel ? `下一级「${affinity.nextLevel}」· 进度 ${percent}%` : "已经是最高级"}</Text>
+    </Link>
+    <div className="me-bond-mood">
+      <span className="me-bond-label"><SmileOutlined /> 今天心情{mood.loggedToday && mood.last && <span className="me-inline-tag">{moodEmoji(mood.last.score)}</span>}</span>
       <div className="me-mood-mini" role="group" aria-label="记一下现在的心情">
         {MOOD_OPTIONS.map((option) => (
           <Tooltip key={option.score} title={option.label}>
@@ -68,14 +92,11 @@ function TodayPanel({ data, onMood }: { data: Dashboard; onMood: (score: number)
       </div>
       <Text type="secondary" className="me-hint">{mood.week.count ? `这周 ${mood.week.averageLabel} · ${trendLabel(mood.week.trend)}` : "点一下就记下"}</Text>
     </div>
-    <Link to="/me/affinity" className="me-today-card">
-      <span className="me-today-head"><FireOutlined /> 签到</span>
-      <span><strong>{checkin.checkedToday}/{checkin.groups}</strong> <Text type="secondary">个群今天签过</Text></span>
-      {checkin.pendingGroups.length > 0 ? <Text type="secondary" className="me-hint">还没签：{checkin.pendingGroups.map((group) => group.groupName || group.groupId).join("、")}</Text> : checkin.groups > 0 ? <Text type="success" className="me-hint">全签完啦</Text> : null}
-      {checkin.bestStreak > 0 && <Text type="secondary" className="me-hint">最长连签 {checkin.bestStreak} 天</Text>}
-    </Link>
   </div>;
 }
+
+// 首页“更多”：今天面板和“我管理的群”里已经露出的入口不再重复一遍。
+const HOME_HIDDEN_ENTRIES = new Set(["/me/assistant", "/me/schedules", "/me/affinity", "/me/groups"]);
 
 const ENTRIES: Array<{ to: string; icon: React.ReactNode; title: string; sub: (data: Dashboard | null) => string }> = [
   { to: "/me/assistant", icon: <ProfileOutlined />, title: "小本本", sub: (d) => (d ? `${d.counts.todos ?? 0} 条待办 · ${d.counts.notes ?? 0} 条笔记 · ${d.counts.countdowns ?? 0} 个倒数日` : "待办、笔记、倒数日、心情") },
@@ -123,29 +144,12 @@ export function MeHomePage(): React.JSX.Element {
     {data?.chat.paused && <Alert type="warning" showIcon message="你暂停了 Bot 的私聊自动回复" action={<Link to="/me/chat">去恢复</Link>} />}
     {data && data.tasks.waitingYou > 0 && <Alert type="info" showIcon message={`有 ${data.tasks.waitingYou} 个后台任务在等你回答`} description="在私聊里直接回复 Bot 就行。" action={<Link to="/me/tasks">看看</Link>} />}
 
-    {!data ? <Skeleton active paragraph={{ rows: 4 }} /> : <TodayPanel data={data} onMood={(score) => void logMood(score)} />}
-
-    {data && (
-      <div className="me-affinity-strip">
-        <HeartOutlined className="me-affinity-icon" />
-        <span>和 Bot 的关系：<strong>{data.affinity.level}</strong></span>
-        <Progress className="me-affinity-progress" percent={Math.round(data.affinity.progress * 100)} size="small" showInfo={false} strokeColor="var(--brand)" />
-        <Text type="secondary" className="me-hint">{data.affinity.nextLevel ? `下一级「${data.affinity.nextLevel}」` : "最高级"}</Text>
+    {!data ? <Skeleton active paragraph={{ rows: 4 }} /> : (
+      <div className="me-home-top">
+        <TodayPanel data={data} />
+        <BondPanel data={data} onMood={(score) => void logMood(score)} />
       </div>
     )}
-
-    <div className="me-cards me-entry-grid">
-      {ENTRIES.map((entry) => (
-        <Link key={entry.to} to={entry.to} className="me-card me-card-link">
-          <span className="me-card-icon">{entry.icon}</span>
-          <span className="me-card-body">
-            <strong>{entry.title}</strong>
-            <Text type="secondary" className="me-card-sub" ellipsis>{entry.to === "/me/persona" && me?.persona ? `${me.persona.name || "默认人设"} · ${me.persona.sourceLabel}` : entry.to === "/me/account" && me?.account ? `上次登录 ${formatQqTime(me.account.lastLoginAt)}` : entry.sub(data)}</Text>
-          </span>
-          <RightOutlined className="me-card-arrow" />
-        </Link>
-      ))}
-    </div>
 
     {(groups.data?.length ?? 0) > 0 && (
       <MeSection icon={<TeamOutlined />} title="我管理的群" extra={<Link to="/me/groups">全部群 <RightOutlined /></Link>} hint={me?.isSuperuser ? "你是超级管理员：Bot 在的群都列在这里（Bot 自己是管理员的群才能做禁言等操作）" : "打开时会再向 QQ 确认一次身份"}>
@@ -175,13 +179,23 @@ export function MeHomePage(): React.JSX.Element {
       <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span>你目前不是任何 Bot 所在群的群主或管理员，<Link to="/me/groups">看看我在的群</Link>。</span>} />
     )}
 
-    <Alert
-      className="me-safety-note"
-      type="info"
-      showIcon
-      icon={<SafetyCertificateOutlined />}
-      message="这里只有你自己的东西"
-      description="小本本、记忆、聊天记录只有你和 Bot 看得到；群功能开关和群里的 /面板 是同一份设置；忘记密码就私聊 Bot 发 /网页密码。"
-    />
+    <MeSection icon={<AppstoreOutlined />} title="更多" className="me-more-section">
+      <div className="me-more-grid">
+        {ENTRIES.filter((entry) => !HOME_HIDDEN_ENTRIES.has(entry.to)).map((entry) => (
+          <Link key={entry.to} to={entry.to} className="me-more-link">
+            <span className="me-card-icon">{entry.icon}</span>
+            <span className="me-card-body">
+              <strong>{entry.title}</strong>
+              <Text type="secondary" className="me-card-sub" ellipsis>{entry.to === "/me/persona" && me?.persona ? `${me.persona.name || "默认人设"} · ${me.persona.sourceLabel}` : entry.to === "/me/account" && me?.account ? `上次登录 ${formatQqTime(me.account.lastLoginAt)}` : entry.sub(data)}</Text>
+            </span>
+            <RightOutlined className="me-card-arrow" />
+          </Link>
+        ))}
+      </div>
+    </MeSection>
+
+    <p className="me-safety-note">
+      <SafetyCertificateOutlined /> 这里只有你自己的东西：小本本、记忆、聊天记录只有你和 Bot 看得到；群功能开关和群里的 /面板 是同一份设置；忘记密码就私聊 Bot 发 /网页密码。
+    </p>
   </div>;
 }
