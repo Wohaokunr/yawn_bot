@@ -1868,25 +1868,7 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 320p
 .fq-chip-gold   { color: #c08a1a; }
 .fq-chip-sakura { color: var(--sakura-700); }
 
-/* 模式切换:番茄渐变胶囊(选中态同时覆盖 thumb 与 item,兼容各版本结构) */
-.fq-modes.ant-segmented {
-  border-radius: 999px;
-  padding: 3px;
-  background: rgba(255, 255, 255, 0.85);
-  border: 1px solid var(--line);
-}
-.fq-modes .ant-segmented-item { border-radius: 999px; }
-.fq-modes .ant-segmented-item-selected,
-.fq-modes .ant-segmented-item-selected:hover {
-  background: linear-gradient(135deg, var(--tomato-400), var(--sakura-500));
-  box-shadow: 0 4px 12px rgba(244, 105, 77, 0.32);
-  color: #fff;
-}
-.fq-modes .ant-segmented-thumb {
-  border-radius: 999px;
-  background: linear-gradient(135deg, var(--tomato-400), var(--sakura-500));
-  box-shadow: 0 4px 12px rgba(244, 105, 77, 0.32);
-}
+/* 模式切换:用全站统一的 Segmented 外观(轨道 + 白色选中块),不再单独做渐变胶囊 */
 
 /* 书封卡片网格 */
 .fq-book-grid {

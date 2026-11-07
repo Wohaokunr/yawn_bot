@@ -1,5 +1,8 @@
 import {
   ApiOutlined,
+  CloseCircleFilled,
+  ExclamationCircleFilled,
+  InfoCircleFilled,
   CrownOutlined,
   MessageOutlined,
   RobotOutlined,
@@ -237,27 +240,31 @@ export function OverviewPage(): React.JSX.Element {
     />
     {issues.length === 0
       ? <Alert className="ops-ok-banner" type="success" showIcon message="一切正常，当前没有需要处理的问题" />
-      : <Card title={`需要处理的问题 · ${issues.length}`} className="ops-issues-card">
-        <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+      : <Card title={`需要处理的问题 · ${issues.length}`} className="ops-issues-card" size="small">
+        <ul className="ops-issue-list">
           {issues.map((issue) => (
-            <Alert
-              key={issue.key}
-              type={issue.severity}
-              showIcon
-              message={issue.title}
-              description={issue.description}
-              action={issue.to.startsWith("#") ? <a href={issue.to}>查看</a> : <Link to={issue.to}>去处理</Link>}
-            />
+            <li key={issue.key} className={`ops-issue is-${issue.severity}`}>
+              <span className="ops-issue-icon" aria-hidden="true">
+                {issue.severity === "error" ? <CloseCircleFilled /> : issue.severity === "warning" ? <ExclamationCircleFilled /> : <InfoCircleFilled />}
+              </span>
+              <span className="ops-issue-text">
+                <strong>{issue.title}</strong>
+                <span>{issue.description}</span>
+              </span>
+              <span className="ops-issue-action">
+                {issue.to.startsWith("#") ? <a href={issue.to}>查看</a> : <Link to={issue.to}>去处理</Link>}
+              </span>
+            </li>
           ))}
-        </Space>
+        </ul>
       </Card>}
-    <Row gutter={[16, 16]} className="section-row equal-height-row">
-      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sakura" icon={<RobotOutlined />} title="在线 Bot" value={data.bots.length} suffix="个" /></Col>
-      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="mint" icon={<MessageOutlined />} title="24 小时消息量" value={stats.activity.messages24h} suffix="条" to="/groups" /></Col>
-      <Col xs={24} sm={12} lg={8} xl={4}><StatCard tone="sky" icon={<TeamOutlined />} title="24 小时活跃群" value={stats.activity.activeGroups24h} suffix="个" to="/groups" /></Col>
-      <Col xs={24} sm={12} xl={4}><StatCard tone="lavender" icon={<ApiOutlined />} title="AI 成功率" value={formatRate(stats.ai.successRate)} suffix={stats.ai.requestsTotal > 0 ? `均 ${formatLatency(stats.ai.avgDurationMs)}` : undefined} to="/environment" /></Col>
-      <Col xs={24} sm={12} xl={4}><StatCard tone="sky" icon={<CrownOutlined />} title="进行中对局" value={liveGames} suffix={liveAvailable ? "局" : undefined} to="/games" /></Col>
-      <Col xs={24} sm={12} xl={4}><StatCard tone={stats.memory.failingGroups > 0 || stats.memory.rebuildRequired > 0 ? "tomato" : "mint"} icon={<WarningOutlined />} title="记忆异常群" value={stats.memory.failingGroups + stats.memory.rebuildRequired} suffix="个" to="/groups" /></Col>
+    <Row gutter={[16, 16]} className="section-row equal-height-row ops-stat-row">
+      <Col xs={12} sm={12} lg={8} xl={4}><StatCard tone="sakura" icon={<RobotOutlined />} title="在线 Bot" value={data.bots.length} suffix="个" /></Col>
+      <Col xs={12} sm={12} lg={8} xl={4}><StatCard tone="mint" icon={<MessageOutlined />} title="24 小时消息量" value={stats.activity.messages24h} suffix="条" to="/groups" /></Col>
+      <Col xs={12} sm={12} lg={8} xl={4}><StatCard tone="sky" icon={<TeamOutlined />} title="24 小时活跃群" value={stats.activity.activeGroups24h} suffix="个" to="/groups" /></Col>
+      <Col xs={12} sm={12} lg={8} xl={4}><StatCard tone="lavender" icon={<ApiOutlined />} title="AI 成功率" value={formatRate(stats.ai.successRate)} suffix={stats.ai.requestsTotal > 0 ? `均 ${formatLatency(stats.ai.avgDurationMs)}` : undefined} to="/environment" /></Col>
+      <Col xs={12} sm={12} lg={8} xl={4}><StatCard tone="sky" icon={<CrownOutlined />} title="进行中对局" value={liveGames} suffix={liveAvailable ? "局" : undefined} to="/games" /></Col>
+      <Col xs={12} sm={12} lg={8} xl={4}><StatCard tone={stats.memory.failingGroups > 0 || stats.memory.rebuildRequired > 0 ? "tomato" : "mint"} icon={<WarningOutlined />} title="记忆异常群" value={stats.memory.failingGroups + stats.memory.rebuildRequired} suffix="个" to="/groups" /></Col>
     </Row>
     <Row gutter={[16, 16]} className="section-row">
       <Col xs={24} lg={12}>

@@ -75,7 +75,8 @@ function PrefsForm({ data, onSaved }: { data: ChatSettings; onSaved: (next: Chat
         <Text type="secondary">{quietLabel(data.prefs.quietStart, data.prefs.quietEnd)}{data.inQuietHours && <Tag color="purple" className="me-inline-tag">正在免打扰</Tag>}</Text>
       </Form.Item>
     </div>
-    <div className="me-form-actions">
+    <div className={`me-form-actions${dirty ? " is-dirty" : ""}`}>
+      {dirty && <Text type="warning" className="me-form-dirty">有改动还没保存</Text>}
       <Button onClick={() => { form.setFieldsValue(data.prefs); setDirty(false); }} disabled={!dirty}>还原</Button>
       <Button type="primary" htmlType="submit" loading={busy === "save"} disabled={!dirty}>保存</Button>
     </div>

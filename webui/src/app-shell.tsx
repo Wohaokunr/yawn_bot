@@ -1,4 +1,5 @@
 import {
+  AppstoreOutlined,
   EyeOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
@@ -16,7 +17,7 @@ import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
 import { CommandPalette } from "./command-palette";
 import { ScrollRegion } from "./layout";
-import { ADMIN_NAV, GUEST_NAV, homePathForRole, type NavEntry, navForRole, selectedNavKey, USER_NAV } from "./nav-config";
+import { ADMIN_NAV, GUEST_NAV, homePathForRole, type NavEntry, navForRole, selectedNavKey, USER_NAV, USER_TABBAR_KEYS } from "./nav-config";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 import { ThemeToggle } from "./theme";
 
@@ -28,11 +29,13 @@ const SIDER_COLLAPSED_KEY = "yawnbot.sider.collapsed";
 function menuItems(entries: NavEntry[]): MenuItem[] {
   const groups = new Map<string, NavEntry[]>();
   for (const entry of entries) groups.set(entry.group, [...(groups.get(entry.group) ?? []), entry]);
-  return [...groups.entries()].map(([label, children]) => ({
-    type: "group" as const,
-    label,
-    children: children.map((entry) => ({ key: entry.key, icon: entry.icon, label: entry.label })),
-  }));
+  const toItem = (entry: NavEntry) => ({ key: entry.key, icon: entry.icon, label: entry.label });
+  return [...groups.entries()].flatMap(([label, children]): MenuItem[] => (
+    // 空分组名：不加分组标题，免得出现只有一项的“今天”这类分组
+    label
+      ? [{ type: "group" as const, label, children: children.map(toItem) }]
+      : children.map(toItem)
+  ));
 }
 
 const ADMIN_NAV_ITEMS = menuItems(ADMIN_NAV);
@@ -68,6 +71,7 @@ const BREADCRUMB_LABELS: Record<string, string> = {
   modules: "模组库",
   fanqie: "番茄小说",
   agent: "群组",
+  "private-agent": "私聊 Agent",
   "guest-access": "访客访问",
   environment: "环境配置",
   guest: "可查看群聊",
@@ -100,9 +104,11 @@ function breadcrumbItems(pathname: string, role: AuthSessionData["role"]): { tit
   if (root !== "overview" || role === "guest") {
     items.push({ title: segments.length > 1 ? <Link to={rootPathForCrumb}>{rootLabel}</Link> : rootLabel });
   }
-  if (segments.length > 1) items.push({ title: `群 ${segments[1]}` });
-  if (segments.length > 1 && (root === "agent" || root === "groups")) {
-    items.push({ title: root === "agent" ? "Agent 工作台" : "成员与权限" });
+  if (segments.length > 1) {
+    // Agent 工作台的“群 xxx”可以点回群详情；群详情页本身就是最后一级
+    const groupCrumb = `群 ${segments[1]}`;
+    items.push({ title: root === "agent" ? <Link to={`/groups/${segments[1]}`}>{groupCrumb}</Link> : groupCrumb });
+    if (root === "agent") items.push({ title: "Agent 工作台" });
   }
   return items;
 }
@@ -232,18 +238,21 @@ export function Shell({
     />
   );
 
-  const mascot = (
-    <div className="sider-mascot" aria-hidden="true">
-      <span className="sider-mascot-face">=ω=</span>
-      <span className="sider-mascot-text">
-        <strong>{isGuest ? "只读巡视中" : isUser ? "欢迎回来" : "今日也在值班"}</strong>
-        <span>{isGuest ? "访客视图" : isUser ? `QQ ${session.userId ?? ""}` : stream === "open" ? "实时连接已就绪" : "等待实时连接"}</span>
+  const roleLabel = isGuest ? "访客视图（只读）" : isUser ? `QQ ${session.userId ?? ""}` : "管理员";
+  const siderFooter = (
+    <div className="sider-footer" aria-hidden="true">
+      <span className={`sider-footer-dot${limited ? "" : stream === "open" ? " is-open" : " is-connecting"}`} />
+      <span className="sider-footer-text">
+        {limited ? roleLabel : `${roleLabel} · ${stream === "open" ? "实时已连接" : "等待实时连接"}`}
       </span>
     </div>
   );
+  const brand = (
+    <div className="brand"><RobotOutlined /><span>YawnBot</span>{!isUser && <small>{isGuest ? "访客" : "管理台"}</small>}</div>
+  );
 
   return (
-    <Layout className="app-layout">
+    <Layout className={`app-layout${isUser ? " has-mobile-tabbar" : ""}`}>
       <Sider
         width={236}
         collapsedWidth={72}
@@ -251,9 +260,9 @@ export function Shell({
         trigger={null}
         className={`app-sider desktop-sider${collapsed ? " is-collapsed" : ""}`}
       >
-        <div className="brand"><RobotOutlined /><span>YawnBot</span></div>
-        {menu}
-        {!collapsed && mascot}
+        {brand}
+        <div className="sider-menu-scroll">{menu}</div>
+        {!collapsed && siderFooter}
       </Sider>
       <Drawer
         placement="left"
@@ -264,6 +273,7 @@ export function Shell({
         title={<div className="brand drawer-brand"><RobotOutlined /><span>YawnBot</span></div>}
       >
         {menu}
+        {siderFooter}
       </Drawer>
       <Layout className="app-main-layout">
         <Header className="app-header">
@@ -275,6 +285,7 @@ export function Shell({
               aria-label="打开导航"
               onClick={() => setMobileOpen(true)}
             />
+            <span className="mobile-brand" aria-hidden="true"><RobotOutlined />YawnBot</span>
             <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"}>
               <Button
                 className="sider-toggle"
@@ -302,10 +313,12 @@ export function Shell({
             ) : isUser ? (
               <Tag className="me-header-tag" icon={<UserOutlined />}>QQ {session.userId}</Tag>
             ) : (
-              <Tag className="status-tag" color={stream === "open" ? "green" : "orange"}>
-                <span className="live-dot" />
-                {stream === "open" ? "实时连接" : "正在重连"}
-              </Tag>
+              <Tooltip title={stream === "open" ? "管理台实时推送已连接" : "实时推送断开，正在自动重连；页面数据仍可手动刷新"}>
+                <span className={`status-pill${stream === "open" ? " is-open" : ""}`} role="status">
+                  <span className="live-dot" />
+                  {stream === "open" ? "实时连接" : "正在重连"}
+                </span>
+              </Tooltip>
             )}
             {!limited && dirtyCount > 0 && <Tag color="gold">{dirtyCount} 处未保存</Tag>}
             <ThemeToggle />
@@ -331,6 +344,34 @@ export function Shell({
           </ScrollRegion>
         </Content>
       </Layout>
+      {isUser && (
+        <nav className="mobile-tabbar" aria-label="常用页面">
+          {USER_TABBAR_KEYS.map((key) => {
+            const entry = USER_NAV.find((item) => item.key === key);
+            if (!entry) return null;
+            return (
+              <button
+                key={key}
+                type="button"
+                className={`mobile-tabbar-item${selected === key ? " is-active" : ""}`}
+                aria-current={selected === key ? "page" : undefined}
+                onClick={() => go(key)}
+              >
+                {entry.icon}
+                <span>{entry.label === "我的主页" ? "主页" : entry.label === "我在的群" ? "群" : entry.label}</span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className={`mobile-tabbar-item${(USER_TABBAR_KEYS as readonly string[]).includes(selected) ? "" : " is-active"}`}
+            onClick={() => setMobileOpen(true)}
+          >
+            <AppstoreOutlined />
+            <span>更多</span>
+          </button>
+        </nav>
+      )}
       <CommandPalette
         open={paletteOpen}
         entries={navEntries}

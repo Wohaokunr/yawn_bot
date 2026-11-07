@@ -1,3 +1,4 @@
+import { ReloadOutlined } from "@ant-design/icons";
 import { Alert, Button, Empty, Flex, Modal, Popconfirm, Space, Table, Tag, Typography } from "antd";
 import type { TablePaginationConfig } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -341,20 +342,35 @@ export function PageHeader({
   refreshing?: boolean;
   status?: React.ReactNode;
 }): React.JSX.Element {
+  // 只有刷新按钮时窄屏也和标题同一行（图标按钮），不再单独占一整行；
+  // 有额外控件（搜索框等）时窄屏换行铺满。
+  const actions = onRefresh || extra;
   return (
-    <Flex justify="space-between" align="center" gap={16} wrap className="page-heading">
-      <div>
+    <div className={`page-heading${extra ? " has-extra" : ""}`}>
+      <div className="page-heading-main">
         <Flex align="center" gap={10} wrap>
           <Title level={2}>{title}</Title>
           {status}
         </Flex>
-        <Text type="secondary">{subtitle}</Text>
+        {subtitle && <Text type="secondary">{subtitle}</Text>}
       </div>
-      <Space wrap>
-        {onRefresh && <Button onClick={onRefresh} loading={refreshing}>刷新</Button>}
-        {extra}
-      </Space>
-    </Flex>
+      {actions && (
+        <Space wrap className="page-heading-actions">
+          {onRefresh && (
+            <Button
+              onClick={onRefresh}
+              loading={refreshing}
+              icon={<ReloadOutlined />}
+              aria-label="刷新"
+              className="page-heading-refresh"
+            >
+              <span className="page-heading-refresh-text">刷新</span>
+            </Button>
+          )}
+          {extra}
+        </Space>
+      )}
+    </div>
   );
 }
 

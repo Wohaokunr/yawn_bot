@@ -17,20 +17,26 @@ export type ResolvedTheme = "light" | "dark";
 export const THEME_STORAGE_KEY = "yawnbot.theme";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
+// 中英文都用系统 UI 字体：PingFang / HarmonyOS / 微软雅黑与 SF / Segoe 字重和字宽一致，
+// 不再混一套圆体拉丁字体，数字和表格更整齐。
 const FONT_FAMILY =
-  '"Nunito Variable", -apple-system, "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif';
+  '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif';
 
 /** 两套主题共用的 token（形状、字体、按钮手感）。 */
 const SHARED_TOKEN = {
   borderRadius: 8,
+  borderRadiusLG: 12,
   fontFamily: FONT_FAMILY,
+  fontSize: 14,
+  controlHeight: 34,
 };
 
 const SHARED_COMPONENTS = {
-  Card: { borderRadius: 14, borderRadiusLG: 14 },
-  Button: { borderRadius: 8, borderRadiusLG: 10, controlHeight: 34, controlHeightLG: 42, fontWeight: 600, primaryShadow: "none", defaultShadow: "none" },
-  Menu: { itemBg: "transparent", itemBorderRadius: 8, activeBarBorderWidth: 0, itemMarginInline: 10 },
-  Table: { headerSplitColor: "transparent" },
+  Card: { borderRadius: 12, borderRadiusLG: 12, headerFontSize: 15, headerHeight: 52, bodyPadding: 20 },
+  Button: { borderRadius: 8, borderRadiusLG: 10, controlHeight: 34, controlHeightLG: 40, fontWeight: 500, primaryShadow: "none", defaultShadow: "none", dangerShadow: "none" },
+  Menu: { itemBg: "transparent", itemBorderRadius: 8, activeBarBorderWidth: 0, itemMarginInline: 10, itemHeight: 38, groupTitleFontSize: 12 },
+  Table: { headerSplitColor: "transparent", cellPaddingBlock: 12 },
+  Tabs: { horizontalItemGutter: 24, titleFontSize: 14 },
 };
 
 /** 颜色与 theme-anime.css :root 保持一致。 */
@@ -38,31 +44,35 @@ export const LIGHT_THEME: ThemeConfig = {
   algorithm: theme.defaultAlgorithm,
   token: {
     ...SHARED_TOKEN,
-    colorPrimary: "#e4558a",
+    colorPrimary: "#e14d84",
     colorInfo: "#3b82f6",
     colorSuccess: "#16a34a",
     colorWarning: "#d97706",
     colorError: "#dc2626",
-    colorTextBase: "#1f1d24",
-    colorLink: "#d2427a",
-    colorLinkHover: "#e4558a",
+    colorTextBase: "#1b1d23",
+    colorLink: "#c93d72",
+    colorLinkHover: "#e14d84",
     colorBgLayout: "transparent",
-    colorBorder: "#e7e6ec",
-    colorBorderSecondary: "#f0eff3",
+    colorTextSecondary: "#5d6270",
+    colorTextTertiary: "#8d93a0",
+    colorBorder: "#e3e5ea",
+    colorBorderSecondary: "#eef0f3",
   },
   components: {
     Layout: { siderBg: "#ffffff", headerBg: "rgba(255, 255, 255, 0.88)", bodyBg: "transparent" },
     Menu: {
       ...SHARED_COMPONENTS.Menu,
-      itemColor: "#6c6977",
-      itemHoverBg: "#f4f3f7",
-      itemHoverColor: "#1f1d24",
-      itemSelectedBg: "#fdf2f6",
-      itemSelectedColor: "#bb3469",
+      itemColor: "#5d6270",
+      itemHoverBg: "#f2f3f6",
+      itemHoverColor: "#1b1d23",
+      itemSelectedBg: "#fdf1f5",
+      itemSelectedColor: "#b8336a",
     },
-    Card: { ...SHARED_COMPONENTS.Card, colorBorderSecondary: "#f0eff3", boxShadowTertiary: "0 1px 2px rgba(24, 20, 34, 0.04)" },
-    Table: { ...SHARED_COMPONENTS.Table, headerBg: "#fafafb", headerColor: "#6c6977", rowHoverBg: "#fafafb", borderColor: "#f0eff3" },
-    Tabs: { inkBarColor: "#e4558a", itemSelectedColor: "#bb3469", itemHoverColor: "#e4558a" },
+    Card: { ...SHARED_COMPONENTS.Card, colorBorderSecondary: "#eef0f3", boxShadowTertiary: "0 1px 2px rgba(24, 20, 34, 0.04)" },
+    Table: { ...SHARED_COMPONENTS.Table, headerBg: "#f8f9fb", headerColor: "#5d6270", rowHoverBg: "#f8f9fb", borderColor: "#eef0f3" },
+    Tabs: { inkBarColor: "#e14d84", itemSelectedColor: "#b8336a", itemHoverColor: "#e14d84" },
+    // colorBgLayout 设成了透明（页面底色由 CSS 给），Segmented 的轨道默认取它，会变成“看不见的分段”，这里显式给底色
+    Segmented: { trackBg: "#eef0f3", itemSelectedBg: "#ffffff", itemColor: "#5d6270", itemHoverColor: "#1b1d23", itemHoverBg: "rgba(0, 0, 0, 0.04)" },
     Button: SHARED_COMPONENTS.Button,
   },
 };
@@ -101,6 +111,7 @@ export const DARK_THEME: ThemeConfig = {
     Card: { ...SHARED_COMPONENTS.Card, colorBorderSecondary: "#2a2930", boxShadowTertiary: "0 1px 2px rgba(0, 0, 0, 0.3)" },
     Table: { ...SHARED_COMPONENTS.Table, headerBg: "#222128", headerColor: "#a9a6b4", rowHoverBg: "#232229", borderColor: "#2a2930" },
     Tabs: { inkBarColor: "#ec6a9a", itemSelectedColor: "#f6a9c6", itemHoverColor: "#f08cb1" },
+    Segmented: { trackBg: "#25242b", itemSelectedBg: "#3a3842", itemColor: "#a9a6b4", itemHoverColor: "#ecebf1", itemHoverBg: "rgba(255, 255, 255, 0.06)" },
     Button: SHARED_COMPONENTS.Button,
   },
 };
@@ -138,7 +149,7 @@ export function applyThemeToDocument(resolved: ResolvedTheme): void {
   root.dataset.theme = resolved;
   root.style.colorScheme = resolved;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", resolved === "dark" ? "#141318" : "#f6f6f8");
+  if (meta) meta.setAttribute("content", resolved === "dark" ? "#141318" : "#f5f6f8");
 }
 
 interface ThemeContextValue {
@@ -188,7 +199,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   return (
     <ThemeContext.Provider value={value}>
-      <ConfigProvider locale={zhCN} theme={resolved === "dark" ? DARK_THEME : LIGHT_THEME}>
+      {/* button.autoInsertSpace=false：antd 默认会把两个汉字的按钮写成“刷 新”“保 存” */}
+      <ConfigProvider locale={zhCN} theme={resolved === "dark" ? DARK_THEME : LIGHT_THEME} button={{ autoInsertSpace: false }}>
         {children}
       </ConfigProvider>
     </ThemeContext.Provider>

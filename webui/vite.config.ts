@@ -11,7 +11,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/webui/api": "http://127.0.0.1:8080",
+      // ws: true 让 /webui/api/v1/stream 的 WebSocket 也走代理，开发时顶栏的“实时连接”才会亮
+      "/webui/api": { target: "http://127.0.0.1:8080", ws: true },
     },
   },
   test: {
