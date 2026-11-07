@@ -1,7 +1,10 @@
 """私聊里开通 / 管理 WebUI 个人账号。
 
-- ``/网页登录``：看账号状态、能管理哪些群、登录地址；``/网页登录 下线`` 退出所有设备，
-  ``/网页登录 注销`` 删掉账号。
+- ``/网页登录``：看账号状态、能管理哪些群、登录地址；``/网页登录 设备`` 看在线设备和
+  最近登录记录，``/网页登录 提醒 新地点/每次/关闭`` 设登录提醒，``/网页登录 下线`` 退出
+  所有设备，``/网页登录 注销`` 删掉账号。
+- 登录提醒：网页上用 QQ 账号登录成功后，按本人的偏好（默认只在新地点）由 Bot 私聊
+  提醒一句（时间、设备、IP 段），并记进私聊历史，Agent 下一轮能接着聊。
 - ``/网页密码``（不带参数）：发一次性设置码，去登录页“用设置码设密码”，密码不经过聊天。
 - ``/网页密码 新密码``：直接在私聊里设密码。
 
@@ -40,7 +43,7 @@ from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata, on_command, on_message
 from nonebot.rule import Rule
 
-from . import webui_accounts
+from . import webui_accounts, webui_devices
 from .command_catalog import CommandSpec, PluginCommandGroup, register_command_group
 
 LOGIN_COMMAND = "网页登录"
@@ -58,7 +61,7 @@ COMMAND_GROUP = register_command_group(
             CommandSpec(
                 name=LOGIN_COMMAND,
                 aliases=LOGIN_ALIASES,
-                description="查看网页账号、能管理的群和登录地址（含下线、注销）",
+                description="查看网页账号、登录设备、能管理的群和登录地址（含设备、提醒、下线、注销）",
                 scope="private",
                 display_level="advanced",
             ),
@@ -215,6 +218,12 @@ def account_status_text(user_id: int, groups: list[str]) -> str:
         lines.append(f"已开通，密码设置于 {account.password_changed_at or '未知'}。")
         if account.last_login_at:
             lines.append(f"上次登录：{account.last_login_at}")
+        active = len(webui_devices.list_devices(user_id))
+        lines.append(
+            f"当前在线设备：{active} 台（发 /网页登录 设备 查看）"
+            if active
+            else "当前没有设备登录着。"
+        )
         lines.append(f"登录：{login_hint()}，用 QQ 号 {user_id} + 密码。")
     if groups:
         shown = "、".join(groups[:_GROUPS_SHOWN]) + (
@@ -233,8 +242,114 @@ def account_status_text(user_id: int, groups: list[str]) -> str:
             )
     else:
         lines.append("网页上可以调整我和你私聊时的人设；当了群管理员还能管理群。")
-    lines.append("其他：/网页登录 下线（退出所有设备）、/网页登录 注销（删除账号）")
+    lines.append(
+        "其他：/网页登录 设备（在线设备与登录记录）、/网页登录 提醒 新地点/每次/关闭、"
+        "/网页登录 下线（退出所有设备）、/网页登录 注销（删除账号）"
+    )
     return "\n".join(lines)
+
+
+_DEVICES_SHOWN = 8
+_LOGINS_SHOWN = 5
+
+
+def _short_time(value: str | None) -> str:
+    # 2026-11-07T12:34:56 → 11-07 12:34
+    if not value:
+        return "未知"
+    return value[5:16].replace("T", " ")
+
+
+def devices_status_text(user_id: int) -> str:
+    """在线设备 + 最近几次登录；只给 IP 段，不给完整 IP 和设备编号以外的标识。"""
+
+    account = webui_accounts.get_account(user_id)
+    if account is None or not account.has_password:
+        return "你还没有网页账号。发 /网页密码 开通。"
+    summary = webui_devices.status_summary(user_id, recent=_LOGINS_SHOWN)
+    lines = ["【网页登录状态】"]
+    devices = summary["devices"]
+    if devices:
+        lines.append(f"在线设备 {len(devices)} 台：")
+        for item in devices[:_DEVICES_SHOWN]:
+            tags = "（自动登录）" if item["remember"] else ""
+            lines.append(
+                f"· {item['device']} · {item['lastLocation']}{tags}，"
+                f"最近活跃 {_short_time(item['lastSeenAt'])}"
+            )
+        if len(devices) > _DEVICES_SHOWN:
+            lines.append(f"……还有 {len(devices) - _DEVICES_SHOWN} 台")
+    else:
+        lines.append("现在没有设备登录着。")
+    logins = summary["recentLogins"]
+    if logins:
+        lines.append("最近登录：")
+        for item in logins:
+            flag = " ⚠新地点" if item["newLocation"] else ""
+            when = _short_time(item["at"])
+            lines.append(f"· {when} {item['device']} · {item['location']}{flag}")
+    lines.append(f"登录提醒：{summary['alertModeLabel']}")
+    lines.append(
+        "不认识的设备？发 /网页登录 下线 让所有设备退出，再发 /网页密码 改密码；"
+        "只下线某一台可以在网页「账号与数据」里点。"
+    )
+    return "\n".join(lines)
+
+
+_ALERT_WORDS = {
+    "新地点": "new_location",
+    "异地": "new_location",
+    "默认": "new_location",
+    "每次": "always",
+    "总是": "always",
+    "开": "always",
+    "开启": "always",
+    "关": "off",
+    "关闭": "off",
+    "不提醒": "off",
+}
+
+
+def login_alert_text(event: dict[str, Any]) -> str:
+    """登录提醒文案：只给时间、设备描述和 IP 段。"""
+
+    title = "【网页登录提醒】你的网页账号" + (
+        "在新的地点登录了" if event.get("newLocation") else "刚刚登录了"
+    )
+    return "\n".join(
+        [
+            title,
+            f"时间：{_short_time(event.get('at'))}",
+            f"设备：{event.get('device') or '未知设备'}",
+            f"位置：{event.get('location') or '未知'}（IP 段）",
+            f"现在在线 {event.get('activeCount', 1)} 台设备。",
+            "是你本人就不用管。不是你？马上发 /网页登录 下线 让所有设备退出，"
+            "再发 /网页密码 换个密码。",
+            "不想收这类提醒：/网页登录 提醒 关闭"
+            "（只在新地点提醒：/网页登录 提醒 新地点）",
+        ]
+    )
+
+
+async def send_login_alert(user_id: int, event: dict[str, Any]) -> bool:
+    """私聊提醒本人有新登录；Bot 不在线或发不出去就算了（网页登录记录里照样能看到）。"""
+
+    if not getattr(_webui_config(), "webui_login_alert", True):
+        return False
+    text = login_alert_text(event)
+    from nonebot import get_bots
+
+    for bot in list(get_bots().values()):
+        try:
+            await bot.send_private_msg(user_id=int(user_id), message=text)
+        except Exception:  # noqa: BLE001
+            logger.opt(exception=True).debug("网页账号：登录提醒这个 Bot 发不出去")
+            continue
+        logger.info(f"网页账号：已提醒用户 {user_id} 有新登录")
+        # 记进私聊历史，Agent 下一轮知道刚才提醒过什么（不含完整 IP）
+        await _record_capture_result(user_id, text)
+        return True
+    return False
 
 
 def setup_code_text(code: str) -> str:
@@ -259,6 +374,23 @@ async def _handle_login(event: MessageEvent, args: Message = CommandArg()) -> No
         await login_cmd.finish(blocked)
     user_id = int(event.user_id)
     action = args.extract_plain_text().strip()
+    if action in {"设备", "登录状态", "状态", "devices", "在线"}:
+        await login_cmd.finish(devices_status_text(user_id))
+    if action.startswith("提醒"):
+        word = action.removeprefix("提醒").strip()
+        mode = _ALERT_WORDS.get(word)
+        if mode is None:
+            current = webui_devices.ALERT_MODE_LABELS[webui_devices.alert_mode(user_id)]
+            await login_cmd.finish(
+                f"登录提醒现在是：{current}。\n"
+                "改法：/网页登录 提醒 新地点 | 每次 | 关闭"
+            )
+        if webui_accounts.get_account(user_id) is None:
+            await login_cmd.finish("你还没有网页账号。发 /网页密码 开通。")
+        webui_devices.set_alert_mode(user_id, mode)
+        await login_cmd.finish(
+            f"好，网页登录提醒改成：{webui_devices.ALERT_MODE_LABELS[mode]}。"
+        )
     if action in {"下线", "退出", "退出所有设备", "logout"}:
         done = webui_accounts.revoke_sessions(user_id)
         await login_cmd.finish(
@@ -535,7 +667,10 @@ __all__ = [
     "capture_pending",
     "capture_prompt_text",
     "consume_capture_message",
+    "devices_status_text",
     "is_password_command_text",
+    "login_alert_text",
     "login_url",
+    "send_login_alert",
     "setup_code_text",
 ]

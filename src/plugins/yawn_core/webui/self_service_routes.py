@@ -17,11 +17,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from nonebot_plugin_orm import get_session
 from sqlalchemy import func, select
 
-from .. import webui_accounts
+from .. import webui_accounts, webui_devices
 from ..data_models.bot_group import BotGroup
 from ..data_models.bot_user import BotUser
 from ..data_models.user_group import UserGroup
@@ -31,7 +31,14 @@ from ..yawn_agent import private_persona
 from ..yawn_agent.config_store import get_or_create_config
 from ..yawn_agent.conversation import close_group_conversations
 from ..yawn_agent.persona import PersonaCard, persona_preset_payloads
-from .auth import Session, create_session, login_allowed, record_login_failure
+from .auth import (
+    Session,
+    client_ip,
+    create_session,
+    login_allowed,
+    record_login_failure,
+    set_session_cookie,
+)
 from .config import API_PATH, BASE_PATH, COOKIE_NAME, config
 from .deps import UserReadSession, UserWriteSession, ok
 from .hub import hub
@@ -39,6 +46,7 @@ from .service import group_feature_rows, iso, set_group_feature
 from .user_account_models import (
     ChangePasswordBody,
     GroupFeatureBody,
+    LoginAlertBody,
     PersonaFieldsBody,
     PersonaPickBody,
 )
@@ -88,6 +96,8 @@ async def get_me(session: UserReadSession) -> dict[str, Any]:
             "persona": persona,
             "groupManage": _group_manage_flags(),
             "sessionExpiresAt": session.expires_at,
+            "sessionRemember": session.remember,
+            "activeDeviceCount": len(webui_devices.list_devices(user_id)),
         }
     )
 
@@ -113,7 +123,10 @@ def _persona_brief(user_id: int) -> dict[str, Any] | None:
 
 @router.post("/password")
 async def change_password(
-    body: ChangePasswordBody, response: Response, session: UserWriteSession
+    body: ChangePasswordBody,
+    request: Request,
+    response: Response,
+    session: UserWriteSession,
 ) -> dict[str, Any]:
     """改密码：要先输对旧密码；改完别的设备全部下线，当前页面换新会话继续用。"""
 
@@ -138,7 +151,9 @@ async def change_password(
         )
     except webui_accounts.AccountError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    new_session = _reissue_cookie(response, user_id, account.credential_version)
+    new_session = _reissue_cookie(
+        request, response, session, account.credential_version
+    )
     return ok(
         {
             "account": account.as_dict(),
@@ -159,20 +174,92 @@ async def logout_everywhere(
     return ok({"authenticated": False})
 
 
-def _reissue_cookie(response: Response, user_id: int, version: int) -> Session:
+def _reissue_cookie(
+    request: Request, response: Response, old: Session, version: int
+) -> Session:
+    """改完密码后当前这台换新会话继续用（沿用原来的“自动登录”选择），并重新登记设备。"""
+
+    user_id = _uid(old)
     cookie, new_session = create_session(
-        role="user", credential_version=version, user_id=user_id
+        role="user",
+        credential_version=version,
+        user_id=user_id,
+        remember=old.remember,
     )
-    response.set_cookie(
-        COOKIE_NAME,
-        cookie,
-        max_age=config.webui_session_ttl_hours * 3600,
-        httponly=True,
-        secure=config.webui_cookie_secure,
-        samesite="strict",
-        path=BASE_PATH,
+    webui_devices.register_session(
+        user_id,
+        new_session.session_id,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        remember=new_session.remember,
+        expires_at=new_session.expires_at,
+        method="password_change",
+        record_login=False,
     )
+    set_session_cookie(response, cookie, new_session)
     return new_session
+
+
+# ── 登录设备与登录记录 ──────────────────────────────────────────────────
+
+
+def _security_payload(session: Session) -> dict[str, Any]:
+    user_id = _uid(session)
+    devices = webui_devices.list_devices(user_id, current_session_id=session.session_id)
+    mode = webui_devices.alert_mode(user_id)
+    return {
+        "devices": devices,
+        "activeCount": len(devices),
+        "logins": webui_devices.login_history(user_id),
+        "alertMode": mode,
+        "alertModes": [
+            {"value": key, "label": label}
+            for key, label in webui_devices.ALERT_MODE_LABELS.items()
+        ],
+        # 管理员在 .env 里关掉了登录提醒时，偏好照存，但暂时不发
+        "alertAvailable": config.webui_login_alert,
+        "rememberDays": config.webui_remember_days,
+        "sessionRemember": session.remember,
+    }
+
+
+@router.get("/devices")
+async def my_devices(session: UserReadSession) -> dict[str, Any]:
+    """在线设备（当前这台排最前）、最近登录记录、登录提醒偏好。"""
+
+    return ok(_security_payload(session))
+
+
+@router.delete("/devices/{device_id}")
+async def logout_device(
+    device_id: str, response: Response, session: UserWriteSession
+) -> dict[str, Any]:
+    """让某一台设备下线；下线的是当前这台就顺便清掉 Cookie。"""
+
+    user_id = _uid(session)
+    current_id = webui_devices.public_id(webui_devices.session_key(session.session_id))
+    if not webui_devices.revoke_device(user_id, device_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "这台设备已经不在线了")
+    if device_id == current_id:
+        response.delete_cookie(COOKIE_NAME, path=BASE_PATH)
+        return ok({"authenticated": False, "current": True})
+    return ok({**_security_payload(session), "current": False})
+
+
+@router.post("/devices/logout-others")
+async def logout_other_devices(session: UserWriteSession) -> dict[str, Any]:
+    """除了这一台，其余设备全部下线（不改密码）。"""
+
+    count = webui_devices.revoke_others(_uid(session), session.session_id)
+    return ok({**_security_payload(session), "loggedOut": count})
+
+
+@router.put("/security/login-alert")
+async def set_login_alert(
+    body: LoginAlertBody, session: UserWriteSession
+) -> dict[str, Any]:
+    webui_devices.set_alert_mode(_uid(session), body.mode)
+    return ok(_security_payload(session))
 
 
 # ── 管理的群 ────────────────────────────────────────────────────────────

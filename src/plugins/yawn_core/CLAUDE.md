@@ -50,6 +50,7 @@ WebUI 后端。全局规则（迁移、权限注入写法、Ruff 约定）见 [�
 | `affinity.py` | 全局好感唯一写入口：`grant`（来源日上限、`AffinityEvent` 流水、表未迁移时降级）、等级 `level_for`/`level_words`（给模型只给词语） |
 | `private_chat_bridge.py` | 私聊 Agent 桥：`PrivateAgentConfig`（`PRIVATE_AGENT_*`）、处理函数注册（由 `yawn_agent` 在加载时注册，核心不导入子插件）、成员“暂停自动回复”状态（JSON，非数据库）。`ai_chat.py` 先交给它，返回 None 或异常就退回流式纯对话 |
 | `friend_approve.py` | 好友申请审批 |
+| `webui_accounts.py` / `webui_devices.py` / `webui_account_commands.py` | WebUI 个人账号：密码与设置码（JSON）/ 登录设备、登录记录、登录提醒偏好（JSON，只存 sid 哈希）/ 私聊命令 `/网页登录 [设备|提醒 …|下线|注销]`、`/网页密码` 与登录提醒发送。不依赖 FastAPI，WebUI 与私聊 Agent 共用 |
 | `reminder.py` | 群聊定时提醒（单文件较大，含解析、调度与持久化） |
 
 **AI**

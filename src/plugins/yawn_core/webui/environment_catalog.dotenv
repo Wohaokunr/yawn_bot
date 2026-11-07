@@ -109,6 +109,12 @@ WEBUI_COOKIE_SECURE=false
 WEBUI_USER_LOGIN_ENABLED=true
 # WebUI 对外访问地址（如 https://bot.example.com/webui），私聊里发登录链接用；留空只提示“打开 WebUI”
 WEBUI_PUBLIC_URL=
+# 登录页勾选“自动登录”时会话保持的天数（1-365）；期间每次使用都会顺延，不勾选则关掉浏览器即退出
+WEBUI_REMEMBER_DAYS=30
+# QQ 个人账号在新地点登录时由 Bot 私聊提醒本人（本人可改为每次或关闭）；关闭后全站不发登录提醒
+WEBUI_LOGIN_ALERT=true
+# 反向代理的 IP 或网段（逗号分隔，写 cloudflare 代表 Cloudflare 全部回源段）；只有来自这些地址的请求才读取 X-Forwarded-For / CF-Connecting-IP，用于限速、设备列表和异地登录判断
+WEBUI_TRUSTED_PROXIES=
 
 # ── 子插件 LLM 任务路由 ─────────────────────────────────────────────────────────
 

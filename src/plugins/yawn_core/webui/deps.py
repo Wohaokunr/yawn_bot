@@ -12,8 +12,8 @@ from typing import Annotated, Any
 from fastapi import Depends, HTTPException, Request, status
 from nonebot_plugin_orm import get_session
 
-from .. import webui_accounts
-from .auth import Session, require_csrf, require_session
+from .. import webui_accounts, webui_devices
+from .auth import Session, client_ip, require_csrf, require_session
 from .config import config
 from .guest_access import guest_group_is_allowed, guest_session_is_current
 from .user_scope import ensure_group_manager
@@ -23,15 +23,25 @@ def ok(data: Any, meta: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"data": data, "meta": meta or {}}
 
 
-def user_session_is_current(session: Session) -> bool:
-    """个人账号会话：功能开着、账号还在且没停用、密码没改过（版本号对得上）。"""
+def user_session_is_current(session: Session, request: Request | None = None) -> bool:
+    """个人账号会话：功能开着、账号还在且没停用、密码没改过（版本号对得上），
+    而且这台设备没有被单独下线。"""
 
     if session.role != "user" or session.user_id is None:
         return False
     if not config.webui_user_login_enabled:
         return False
     current = webui_accounts.session_version(session.user_id)
-    return current is not None and current == session.credential_version
+    if current is None or current != session.credential_version:
+        return False
+    return webui_devices.check_session(
+        session.user_id,
+        session.session_id,
+        expires_at=session.expires_at,
+        remember=session.remember,
+        ip=client_ip(request) if request is not None else None,
+        user_agent=request.headers.get("user-agent") if request is not None else None,
+    )
 
 
 async def authenticated_session(request: Request) -> Session:
@@ -42,7 +52,7 @@ async def authenticated_session(request: Request) -> Session:
         session.credential_version
     ):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "访客会话已失效")
-    if session.role == "user" and not user_session_is_current(session):
+    if session.role == "user" and not user_session_is_current(session, request):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录已失效，请重新登录")
     return session
 

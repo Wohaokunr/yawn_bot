@@ -5,7 +5,7 @@ const state = vi.hoisted(() => ({ api: vi.fn() }));
 
 vi.mock("../api", () => ({ api: state.api }));
 
-import { initialLoginMode, Login } from "../login";
+import { initialLoginMode, initialRemember, Login } from "../login";
 
 describe("QQ 账号登录", () => {
   beforeEach(() => {
@@ -30,7 +30,9 @@ describe("QQ 账号登录", () => {
     fireEvent.change(screen.getByPlaceholderText("私聊里设的密码"), { target: { value: "Mao-mao-2026" } });
     fireEvent.click(screen.getByRole("button", { name: /登录我的空间/ }));
     await waitFor(() => expect(onSuccess).toHaveBeenCalled());
-    expect(state.api).toHaveBeenCalledWith("/auth/user", expect.objectContaining({ method: "POST", body: JSON.stringify({ qq: "10001", password: "Mao-mao-2026" }) }));
+    expect(state.api).toHaveBeenCalledWith("/auth/user", expect.objectContaining({ method: "POST", body: JSON.stringify({ qq: "10001", password: "Mao-mao-2026", remember: true }) }));
+    // 勾着自动登录：记住 QQ 号，下次直接填好
+    expect(window.localStorage.getItem("yawnbot.login.qq")).toBe("10001");
   });
 
   it("sets a password with a one-time setup code", async () => {
@@ -44,6 +46,33 @@ describe("QQ 账号登录", () => {
     fireEvent.change(screen.getByPlaceholderText("确认新密码"), { target: { value: "Mao-mao-2026" } });
     fireEvent.click(screen.getByRole("button", { name: /设置密码并登录/ }));
     await waitFor(() => expect(onSuccess).toHaveBeenCalled());
-    expect(state.api).toHaveBeenCalledWith("/auth/user/setup", expect.objectContaining({ body: JSON.stringify({ qq: "10001", code: "ABCD2345", password: "Mao-mao-2026" }) }));
+    expect(state.api).toHaveBeenCalledWith("/auth/user/setup", expect.objectContaining({ body: JSON.stringify({ qq: "10001", code: "ABCD2345", password: "Mao-mao-2026", remember: true }) }));
+  });
+
+  it("remembers turning auto-login off and stops remembering the QQ number", async () => {
+    const onSuccess = vi.fn();
+    window.localStorage.setItem("yawnbot.login.mode", "user");
+    window.localStorage.setItem("yawnbot.login.qq", "10001");
+    render(<Login onSuccess={onSuccess} />);
+    // 上次的 QQ 号已经填好
+    expect(screen.getByPlaceholderText("你的 QQ 号")).toHaveValue("10001");
+    fireEvent.click(screen.getByRole("checkbox", { name: /自动登录/ }));
+    expect(initialRemember()).toBe(false);
+    expect(window.localStorage.getItem("yawnbot.login.qq")).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("私聊里设的密码"), { target: { value: "Mao-mao-2026" } });
+    fireEvent.click(screen.getByRole("button", { name: /登录我的空间/ }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(state.api).toHaveBeenCalledWith("/auth/user", expect.objectContaining({ body: JSON.stringify({ qq: "10001", password: "Mao-mao-2026" }) }));
+    expect(window.localStorage.getItem("yawnbot.login.qq")).toBeNull();
+  });
+
+  it("sends remember for operator login and shows the expired notice", async () => {
+    const onSuccess = vi.fn();
+    render(<Login onSuccess={onSuccess} notice="登录已失效，请重新登录。" />);
+    expect(screen.getByText("登录已失效，请重新登录。")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("输入运维 Token"), { target: { value: "t".repeat(20) } });
+    fireEvent.click(screen.getByRole("button", { name: /进入管理台/ }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(state.api).toHaveBeenCalledWith("/auth/login", expect.objectContaining({ body: JSON.stringify({ token: "t".repeat(20), remember: true }) }));
   });
 });

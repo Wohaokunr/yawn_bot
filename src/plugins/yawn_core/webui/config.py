@@ -10,6 +10,9 @@ from .environment_schema import admin_token_warnings
 SESSION_TTL_DEFAULT_HOURS = 12
 SESSION_TTL_MIN_HOURS = 1
 SESSION_TTL_MAX_HOURS = 168
+REMEMBER_DEFAULT_DAYS = 30
+REMEMBER_MIN_DAYS = 1
+REMEMBER_MAX_DAYS = 365
 
 
 class WebUIConfig(BaseModel):
@@ -21,6 +24,13 @@ class WebUIConfig(BaseModel):
     webui_user_login_enabled: bool = True
     # 对外访问地址（如 https://bot.example.com/webui），私聊里发登录链接用
     webui_public_url: str = ""
+    # 登录页勾选“自动登录”时，会话保持多少天（期间每次打开都会顺延）
+    webui_remember_days: int = REMEMBER_DEFAULT_DAYS
+    # QQ 个人账号在新地点登录时私聊提醒本人（本人还可以在网页/私聊里改成每次或关闭）
+    webui_login_alert: bool = True
+    # 反向代理地址（逗号分隔的 IP 或网段）；只有来自这些地址的请求才读取
+    # X-Forwarded-For / X-Real-IP，用于登录限速、设备列表和异地登录判断
+    webui_trusted_proxies: str = ""
 
     @field_validator("webui_session_ttl_hours", mode="before")
     @classmethod
@@ -40,6 +50,24 @@ class WebUIConfig(BaseModel):
             logger.warning(
                 f"WEBUI_SESSION_TTL_HOURS={hours} 超出 "
                 f"{SESSION_TTL_MIN_HOURS}-{SESSION_TTL_MAX_HOURS}，已按 {clamped} 处理"
+            )
+        return clamped
+
+    @field_validator("webui_remember_days", mode="before")
+    @classmethod
+    def _clamp_remember_days(cls, value: object) -> int:
+        try:
+            days = int(str(value).strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                f"WEBUI_REMEMBER_DAYS 不是整数，已使用默认 {REMEMBER_DEFAULT_DAYS} 天"
+            )
+            return REMEMBER_DEFAULT_DAYS
+        clamped = max(REMEMBER_MIN_DAYS, min(REMEMBER_MAX_DAYS, days))
+        if clamped != days:
+            logger.warning(
+                f"WEBUI_REMEMBER_DAYS={days} 超出 "
+                f"{REMEMBER_MIN_DAYS}-{REMEMBER_MAX_DAYS}，已按 {clamped} 处理"
             )
         return clamped
 

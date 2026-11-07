@@ -17,4 +17,28 @@ export interface AuthSessionData {
   capabilities: SessionCapabilities;
   /** 个人账号会话的 QQ 号 */
   userId?: string;
+  /** 登录时勾了“自动登录”（长效 Cookie） */
+  remember?: boolean;
+  /** 自动登录保持的天数（WEBUI_REMEMBER_DAYS） */
+  rememberDays?: number;
+  /** 刚登录时才有：这次是否新地点、上一次登录（只有 QQ 个人账号） */
+  login?: LoginInfo;
+}
+
+export interface LoginRecord {
+  at: string | null;
+  device: string;
+  location: string;
+  method: string;
+  methodLabel: string;
+  newLocation: boolean;
+  remember: boolean;
+}
+
+export interface LoginInfo {
+  newLocation: boolean;
+  location: string;
+  device: string;
+  activeCount: number;
+  previous: LoginRecord | null;
 }

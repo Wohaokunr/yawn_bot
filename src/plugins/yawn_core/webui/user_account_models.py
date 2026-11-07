@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 _QQ_PATTERN = r"^[1-9][0-9]{4,11}$"
@@ -17,12 +19,18 @@ class _Body(BaseModel):
 class UserLoginBody(_Body):
     qq: str = Field(pattern=_QQ_PATTERN)
     password: str = Field(min_length=1, max_length=128)
+    remember: bool = False
 
 
 class UserSetupBody(_Body):
     qq: str = Field(pattern=_QQ_PATTERN)
     code: str = Field(min_length=4, max_length=16)
     password: str = Field(min_length=1, max_length=128)
+    remember: bool = False
+
+
+class LoginAlertBody(_Body):
+    mode: Literal["new_location", "always", "off"]
 
 
 class ChangePasswordBody(_Body):
@@ -52,6 +60,7 @@ __all__ = [
     "AccountDisableBody",
     "ChangePasswordBody",
     "GroupFeatureBody",
+    "LoginAlertBody",
     "PersonaFieldsBody",
     "PersonaPickBody",
     "UserLoginBody",

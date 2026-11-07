@@ -663,3 +663,92 @@
     justify-content: flex-end;
   }
 }
+
+/* 登录设备与登录记录 */
+.me-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.me-device-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  border-radius: 10px;
+}
+
+.me-device-row.is-current {
+  border-color: var(--brand);
+}
+
+.me-device-icon {
+  font-size: 18px;
+  color: var(--ink-secondary);
+}
+
+.me-device-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.me-device-meta {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.me-alert-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.me-login-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.me-login-list li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 4px 10px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line, rgba(0, 0, 0, 0.08));
+}
+
+.me-login-list li:last-child {
+  border-bottom: none;
+}
+
+.me-login-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.me-login-what {
+  overflow-wrap: anywhere;
+}
+
+.me-login-flag {
+  margin-inline-start: 6px;
+}
+
+.me-login-method {
+  font-size: 12px;
+}
+
+@media (max-width: 520px) {
+  .me-login-list li {
+    grid-template-columns: 1fr;
+  }
+}

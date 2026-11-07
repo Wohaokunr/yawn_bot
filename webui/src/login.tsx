@@ -7,7 +7,7 @@ import {
   TeamOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Card, Form, Input, Segmented, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Form, Input, Segmented, Space, Tag, Tooltip, Typography } from "antd";
 import { useState } from "react";
 import { api } from "./api";
 import type { AuthSessionData } from "./auth-session";
@@ -48,6 +48,35 @@ const MODE_COPY: Record<LoginMode, { kicker: string; intro: string; note: string
 };
 
 const MODE_KEY = "yawnbot.login.mode";
+const REMEMBER_KEY = "yawnbot.login.remember";
+const QQ_KEY = "yawnbot.login.qq";
+
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string | null): void {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    // 隐私模式下写不进去，忽略
+  }
+}
+
+/** “自动登录”默认勾选；用户取消过就记住取消。 */
+export function initialRemember(): boolean {
+  return readStorage(REMEMBER_KEY) !== "0";
+}
+
+/** 勾了自动登录时记住上次登录的 QQ 号，下次直接填好。 */
+export function rememberedQq(): string {
+  return readStorage(QQ_KEY) ?? "";
+}
 
 /** 默认仍是运维登录；私聊里发的链接带 ?login=qq，或上次用过 QQ 账号，就直接打开 QQ 账号。 */
 export function initialLoginMode(search = window.location.search): LoginMode {
@@ -64,18 +93,16 @@ export function initialLoginMode(search = window.location.search): LoginMode {
 }
 
 function rememberMode(mode: LoginMode): void {
-  try {
-    window.localStorage.setItem(MODE_KEY, mode);
-  } catch {
-    // 忽略
-  }
+  writeStorage(MODE_KEY, mode);
 }
 
-export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => void }): React.JSX.Element {
+export function Login({ onSuccess, notice }: { onSuccess: (session: AuthSessionData) => void; notice?: string }): React.JSX.Element {
   const [mode, setMode] = useState<LoginMode>(() => initialLoginMode());
   const [step, setStep] = useState<UserStep>("login");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [remember, setRemember] = useState<boolean>(() => initialRemember());
+  const [showNotice, setShowNotice] = useState(Boolean(notice));
   const [form] = Form.useForm<LoginValues>();
   const isGuest = mode === "guest";
   const isUser = mode === "user";
@@ -97,21 +124,29 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
     if (qq) form.setFieldValue("qq", qq);
   };
 
+  const changeRemember = (checked: boolean) => {
+    setRemember(checked);
+    writeStorage(REMEMBER_KEY, checked ? "1" : "0");
+    if (!checked) writeStorage(QQ_KEY, null);
+  };
+
   const submit = async (values: LoginValues) => {
     setLoading(true);
     setError("");
     try {
       let path = isGuest ? "/auth/guest" : "/auth/login";
-      let body: Record<string, string> = { token: values.credential ?? "" };
+      let body: Record<string, string | boolean> = { token: values.credential ?? "" };
+      const qq = (values.qq ?? "").trim();
       if (isUser) {
-        const qq = (values.qq ?? "").trim();
         path = isSetup ? "/auth/user/setup" : "/auth/user";
         body = isSetup
           ? { qq, code: normalizeSetupCode(values.code ?? ""), password: values.password ?? "" }
           : { qq, password: values.password ?? "" };
       }
+      if (remember) body.remember = true;
       const { data } = await api<AuthSessionData>(path, { method: "POST", body: JSON.stringify(body) });
       rememberMode(mode);
+      if (isUser) writeStorage(QQ_KEY, remember ? qq : null);
       onSuccess(data);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : isGuest ? "访客登录失败" : "登录失败");
@@ -148,6 +183,17 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
           ]}
         />
 
+        {showNotice && notice && !error && (
+          <Alert
+            type="warning"
+            message={notice}
+            showIcon
+            closable
+            onClose={() => setShowNotice(false)}
+            className="login-setup-hint"
+          />
+        )}
+
         {error && (
           <Alert
             type="error"
@@ -158,7 +204,14 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
           />
         )}
 
-        <Form form={form} layout="vertical" onFinish={submit} requiredMark={false} key={`${mode}-${step}`}>
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={submit}
+          requiredMark={false}
+          key={`${mode}-${step}`}
+          initialValues={isUser ? { qq: rememberedQq() || undefined } : undefined}
+        >
           {isUser ? (
             <>
               {isSetup && (
@@ -177,7 +230,7 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
                   { validator: async (_rule, value: string) => { if (value && !isQqNumber(value)) throw new Error("QQ 号格式不对"); } },
                 ]}
               >
-                <Input autoFocus inputMode="numeric" autoComplete="username" size="large" prefix={<UserOutlined />} placeholder="你的 QQ 号" maxLength={12} />
+                <Input autoFocus={!rememberedQq()} inputMode="numeric" autoComplete="username" size="large" prefix={<UserOutlined />} placeholder="你的 QQ 号" maxLength={12} />
               </Form.Item>
               {isSetup && (
                 <Form.Item name="code" label="设置码" rules={[{ required: true, message: "请输入私聊里收到的设置码" }]}>
@@ -195,7 +248,7 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
                     : []),
                 ]}
               >
-                <Input.Password autoComplete={isSetup ? "new-password" : "current-password"} size="large" prefix={<LockOutlined />} placeholder={isSetup ? "设置一个新密码" : "私聊里设的密码"} />
+                <Input.Password autoFocus={!isSetup && Boolean(rememberedQq())} autoComplete={isSetup ? "new-password" : "current-password"} size="large" prefix={<LockOutlined />} placeholder={isSetup ? "设置一个新密码" : "私聊里设的密码"} />
               </Form.Item>
               {isSetup && (
                 <Form.Item
@@ -226,6 +279,14 @@ export function Login({ onSuccess }: { onSuccess: (session: AuthSessionData) => 
               />
             </Form.Item>
           )}
+          <div className="login-remember">
+            <Checkbox checked={remember} onChange={(event) => changeRemember(event.target.checked)}>
+              自动登录
+            </Checkbox>
+            <Tooltip title="勾选后这台设备一段时间内打开就直接进入，期间每次使用都会顺延；不勾选则关掉浏览器就要重新登录。公共电脑上请不要勾选。">
+              <Text type="secondary" className="login-remember-hint">{remember ? "下次打开免登录" : "关闭浏览器即退出"}</Text>
+            </Tooltip>
+          </div>
           <Button type="primary" htmlType="submit" size="large" block loading={loading}>
             {isSetup ? "设置密码并登录" : copy.submit}
           </Button>
