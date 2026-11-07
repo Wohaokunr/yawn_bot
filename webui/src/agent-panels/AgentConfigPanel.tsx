@@ -65,7 +65,7 @@ export function AgentConfigPanel({
     form.setFieldsValue(value);
     baseVersion.current = value.version ?? undefined;
     setDirty(false);
-  });
+  }, (value) => { baseVersion.current = value.version ?? undefined; });
 
   const save = async (values: Record<string, unknown>) => {
     setSaving(true);

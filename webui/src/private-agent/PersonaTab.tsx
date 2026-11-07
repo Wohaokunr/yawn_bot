@@ -21,12 +21,12 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../api";
 import { downloadJson } from "../agent-debug/trace-analysis";
 import { cleanPersonaCard, PERSONA_LIMITS, PERSONA_TRAIT_META, PERSONA_VOICE_TRAITS, PERSONA_SOCIAL_TRAITS } from "../agent-meta";
 import type { PersonaTraitKey } from "../agent-meta";
-import { formatTime, QueryErrorAlert, useApiQuery } from "../shared";
+import { DraftDiffModal, formatTime, QueryErrorAlert, ServerDraftUpdateAlert, useApiQuery, useDraftSafeServerData, useUnsavedChanges } from "../shared";
 import type { PersonaCard } from "../types";
 import { privateApi, type PersonaOptions, type PersonaPolicy, type PersonaPreviewResult, type PersonaUserRow, type PersonaUserState } from "./private-api";
 import { PERSONA_MODE_META, personaActionLabel, personaByLabel, tokenBar } from "./private-meta";
@@ -73,12 +73,26 @@ function PolicyCard({ policy, options, onSaved }: { policy: PersonaPolicy; optio
   const { message } = AntApp.useApp();
   const [draft, setDraft] = useState(policy);
   const [saving, setSaving] = useState(false);
-  useEffect(() => setDraft(policy), [policy]);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(policy);
+  const baseline = useRef(policy);
+  const baseRevision = useRef(policy.revision);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.current);
+  useUnsavedChanges(dirty);
+  const server = useMemo(() => ({ ...policy, version: String(policy.revision) }), [policy]);
+  const drafts = useDraftSafeServerData(server, dirty, (value) => {
+    const { version, ...next } = value;
+    baseline.current = next;
+    baseRevision.current = Number(version);
+    setDraft(next);
+  }, (value) => {
+    const { version, ...next } = value;
+    baseline.current = next;
+    baseRevision.current = Number(version);
+  });
   const save = async (): Promise<void> => {
     setSaving(true);
     try {
-      await privateApi.savePolicy({
+      const saved = await privateApi.savePolicy({
         enabled: draft.enabled,
         selfEdit: draft.selfEdit,
         selfEditDaily: draft.selfEditDaily,
@@ -86,8 +100,9 @@ function PolicyCard({ policy, options, onSaved }: { policy: PersonaPolicy; optio
         allowPresets: draft.allowPresets,
         allowLibrary: draft.allowLibrary,
         defaultTemplateId: draft.defaultTemplateId ?? "",
-        expectedRevision: policy.revision,
+        expectedRevision: baseRevision.current,
       });
+      drafts.acceptServerData({ ...saved.policy, version: String(saved.policy.revision) });
       message.success("人设策略已保存，下一轮私聊生效");
       onSaved();
     } catch (reason) {
@@ -98,8 +113,10 @@ function PolicyCard({ policy, options, onSaved }: { policy: PersonaPolicy; optio
   };
   return <Card size="small" title="私聊人设策略" extra={<Space>
     {policy.updatedAt && <Text type="secondary" className="dbg-small">第 {policy.revision} 版 · {formatTime(policy.updatedAt)}</Text>}
-    <Button type="primary" size="small" disabled={!dirty} loading={saving} onClick={() => void save()}>保存策略</Button>
+    <Button type="primary" size="small" disabled={!dirty || Boolean(drafts.remoteUpdate)} loading={saving} onClick={() => void save()}>保存策略</Button>
   </Space>}>
+    {drafts.remoteUpdate && <ServerDraftUpdateAlert onKeep={drafts.keepDraft} onCompare={() => setDiffOpen(true)} onReload={drafts.reloadRemote} />}
+    <DraftDiffModal open={diffOpen} draft={draft} server={drafts.remoteUpdate} onClose={() => setDiffOpen(false)} />
     <div className="pa-policy">
       <label className="pa-switch"><Switch checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} aria-label="启用每用户人设" /><span><strong>启用每用户人设</strong><small>关掉后所有人暂时都用私聊默认，已有设置保留</small></span></label>
       <label className="pa-switch"><Switch checked={draft.selfEdit} onChange={(selfEdit) => setDraft({ ...draft, selfEdit })} aria-label="允许本人在私聊里改" /><span><strong>允许本人在私聊里改</strong><small>用户可以说“以后自称本喵”这类话，Agent 用 my_persona 工具改</small></span></label>
@@ -162,13 +179,26 @@ function UserDrawer({ userId, options, onClose, onChanged }: { userId: string; o
   const [groupId, setGroupId] = useState("");
   const [importText, setImportText] = useState("");
   const state = query.data;
-  useEffect(() => { if (state) setCard(state.card); }, [state]);
-  const dirty = Boolean(state && card && JSON.stringify(card) !== JSON.stringify(state.card));
+  const baseline = useRef<PersonaCard | null>(null);
+  const baseRevision = useRef(0);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const dirty = Boolean(card && JSON.stringify(card) !== JSON.stringify(baseline.current));
+  useUnsavedChanges(dirty);
+  const server = useMemo(() => state ? { ...state, version: String(state.revision) } : null, [state]);
+  const drafts = useDraftSafeServerData(server, dirty, (value) => {
+    baseline.current = value.card;
+    baseRevision.current = value.revision;
+    setCard(value.card);
+  }, (value) => {
+    baseline.current = value.card;
+    baseRevision.current = value.revision;
+  });
 
   const act = async (work: () => Promise<unknown>, done: string): Promise<void> => {
     setBusy(true);
     try {
-      await work();
+      const result = await work() as { state?: PersonaUserState };
+      if (result?.state) drafts.acceptServerData({ ...result.state, version: String(result.state.revision) });
       message.success(done);
       query.reload();
       onChanged();
@@ -181,10 +211,12 @@ function UserDrawer({ userId, options, onClose, onChanged }: { userId: string; o
   };
 
   return <Drawer open width="min(820px, 100vw)" onClose={onClose} title={<span>私聊人设 · {userId}</span>} extra={state && card && <Space wrap size={4}>
-    <Button size="small" disabled={!dirty} onClick={() => setCard(state.card)}>撤销编辑</Button>
-    <Button type="primary" size="small" loading={busy} disabled={!dirty && state.mode === "custom"} onClick={() => void act(() => privateApi.setCard(userId, cleanPersonaCard(card), state.revision), "已保存为他的专属人设，下一句开始生效")}>保存为专属人设</Button>
+    <Button size="small" disabled={!dirty} onClick={() => { if (server) drafts.acceptServerData(server); }}>撤销编辑</Button>
+    <Button type="primary" size="small" loading={busy} disabled={Boolean(drafts.remoteUpdate) || (!dirty && state.mode === "custom")} onClick={() => void act(() => privateApi.setCard(userId, cleanPersonaCard(card), baseRevision.current), "已保存为他的专属人设，下一句开始生效")}>保存为专属人设</Button>
   </Space>}>
     {query.error && !state ? <QueryErrorAlert error={query.error} onRetry={query.reload} /> : !state || !card ? <Skeleton active /> : <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+      {drafts.remoteUpdate && <ServerDraftUpdateAlert onKeep={drafts.keepDraft} onCompare={() => setDiffOpen(true)} onReload={drafts.reloadRemote} />}
+      <DraftDiffModal open={diffOpen} draft={card} server={drafts.remoteUpdate?.card} onClose={() => setDiffOpen(false)} />
       <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered>
         <Descriptions.Item label="现在用的"><Space wrap><Tag color={state.personal ? "magenta" : "default"}>{state.sourceLabel}</Tag><Tag color={PERSONA_MODE_META[state.mode].color}>{PERSONA_MODE_META[state.mode].label}</Tag></Space></Descriptions.Item>
         <Descriptions.Item label="摘要">{state.summary}</Descriptions.Item>

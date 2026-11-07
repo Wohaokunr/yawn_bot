@@ -252,6 +252,7 @@ async def user_message_count(session: Any, user_id: int) -> int:
             .where(
                 ChatSession.user_id == user_id,
                 ChatSession.group_id.is_(None),
+                ChatSession.is_deleted.is_(False),
                 ChatMessage.role == "user",
                 ChatMessage.is_deleted.is_(False),
             )
@@ -316,6 +317,7 @@ async def _recent_user_lines(session: Any, user_id: int) -> list[str]:
             .where(
                 ChatSession.user_id == user_id,
                 ChatSession.group_id.is_(None),
+                ChatSession.is_deleted.is_(False),
                 ChatMessage.is_deleted.is_(False),
             )
             .order_by(ChatMessage.id.desc())

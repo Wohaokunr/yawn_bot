@@ -598,7 +598,7 @@ async def schedule_update(task_id: int, body: TaskBody, _session: AdminWriteSess
             if rule_changed:
                 task.run_count = 0
                 task.created_at = now
-            apply_draft(task, validated, now=now)
+            apply_draft(task, validated, now=now, restart=rule_changed)
             await session.commit()
             await session.refresh(task)
             payload = task_payload(task, detail=True)

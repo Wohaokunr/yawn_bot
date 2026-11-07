@@ -872,3 +872,21 @@ def test_me_routes_private_create_preview_and_actions(monkeypatch) -> None:
     assert detail["ref"] == ref
     asyncio.run(routes.my_schedule_action(ref, "cancel", ME))
     assert store.load(USER)["reminders"] == []
+
+
+def test_batch_continues_after_first_reminder_fails() -> None:
+    _add({"content": "A", "in_minutes": 5})
+    _add({"content": "B", "in_minutes": 5})
+    attempts = []
+
+    async def send(_uid, text):
+        attempts.append(text)
+        return len(attempts) != 1
+
+    asyncio.run(sched.run_tick(NOW + timedelta(minutes=6), send, record=_noop))
+    assert len(attempts) == 2 and "B" in attempts[1]
+    remaining = store.load(USER)["reminders"]
+    assert len(remaining) == 1 and remaining[0]["content"] == "A"
+    assert remaining[0]["retry"]["attempt"] == 1
+    asyncio.run(sched.run_tick(NOW + timedelta(minutes=9), send, record=_noop))
+    assert store.load(USER)["reminders"] == []

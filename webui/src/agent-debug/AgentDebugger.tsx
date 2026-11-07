@@ -33,7 +33,7 @@ export function AgentDebugger({ groupId }: { groupId: string }): React.JSX.Eleme
 
   const setView = useCallback((next: DebugView, extra: Record<string, string> = {}) => {
     const params = new URLSearchParams(searchParams);
-    if (next === "trace") params.delete("debug.view"); else params.set("debug.view", next);
+    params.set("debug.view", next);
     for (const [key, value] of Object.entries(extra)) {
       if (value) params.set(key, value); else params.delete(key);
     }

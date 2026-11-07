@@ -127,6 +127,10 @@ async def test_agent_queue_drops_expired_items_after_slow_processing(
     monkeypatch.setattr(_collector, "PENDING_TRIGGER_TTL_SECONDS", 0.05)
     _collector.reset_for_tests()
     processed: list[str] = []
+    expired: list[str] = []
+
+    async def on_expired(_bot: object, _event: object, normalized: str) -> None:
+        expired.append(normalized)
     first_started = asyncio.Event()
     release_first = asyncio.Event()
 
@@ -148,13 +152,14 @@ async def test_agent_queue_drops_expired_items_after_slow_processing(
     second = (bot, types.SimpleNamespace(message_id=2), "expired")
     try:
         assert _collector.enqueue(1, first, 100)
-        _collector.ensure_worker(1, process, 100)
+        _collector.ensure_worker(1, process, 100, on_expired=on_expired)
         await asyncio.wait_for(first_started.wait(), timeout=1)
         assert _collector.enqueue(1, second, 100)
         await asyncio.sleep(0.08)
         release_first.set()
         await asyncio.sleep(0.08)
         assert processed == ["first"]
+        assert expired == ["expired"]
     finally:
         _collector.reset_for_tests()
         await asyncio.sleep(0)

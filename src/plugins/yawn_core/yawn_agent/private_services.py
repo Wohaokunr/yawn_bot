@@ -200,6 +200,7 @@ def _private_messages(user_id: int) -> Any:
         .where(
             ChatSession.user_id == user_id,
             ChatSession.group_id.is_(None),
+            ChatSession.is_deleted.is_(False),
             ChatMessage.is_deleted.is_(False),
         )
     )
@@ -250,6 +251,7 @@ async def chat_history(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[st
         .where(
             ChatSession.user_id == ctx.user_id,
             ChatSession.group_id.is_(None),
+            ChatSession.is_deleted.is_(False),
             ChatMessage.is_deleted.is_(False),
             ChatMessage.role == "user",
         )
@@ -562,7 +564,12 @@ async def bot_status(ctx: PrivateToolContext, _args: dict[str, Any]) -> dict[str
         select(func.count(func.distinct(ChatSession.user_id)))
         .select_from(ChatMessage)
         .join(ChatSession, ChatSession.id == ChatMessage.session_id)
-        .where(ChatSession.group_id.is_(None), ChatMessage.created_at >= start)
+        .where(
+            ChatSession.group_id.is_(None),
+            ChatSession.is_deleted.is_(False),
+            ChatMessage.is_deleted.is_(False),
+            ChatMessage.created_at >= start,
+        )
     )
     replies = await ctx.session.scalar(
         select(func.count())
@@ -570,6 +577,8 @@ async def bot_status(ctx: PrivateToolContext, _args: dict[str, Any]) -> dict[str
         .join(ChatSession, ChatSession.id == ChatMessage.session_id)
         .where(
             ChatSession.group_id.is_(None),
+            ChatSession.is_deleted.is_(False),
+            ChatMessage.is_deleted.is_(False),
             ChatMessage.role == "assistant",
             ChatMessage.created_at >= start,
         )

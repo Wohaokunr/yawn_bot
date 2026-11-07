@@ -443,7 +443,7 @@ def cancel_task(task: AgentScheduledTask, *, now: datetime, by_user_id: int | No
     _touch(task, now)
 
 
-def apply_draft(task: AgentScheduledTask, validated: ValidatedDraft, *, now: datetime) -> None:
+def apply_draft(task: AgentScheduledTask, validated: ValidatedDraft, *, now: datetime, restart: bool = False) -> None:
     """把修改后的规则/内容写回任务；运行次数保留，下一次从现在重新算。"""
 
     task.instruction = validated.instruction
@@ -454,9 +454,11 @@ def apply_draft(task: AgentScheduledTask, validated: ValidatedDraft, *, now: dat
     task.description = validated.description
     task.mention_creator = validated.mention_creator
     task.max_runs = validated.max_runs if validated.spec.recurring else int(task.run_count or 0) + 1
-    if task.status in {STATUS_COMPLETED, STATUS_FAILED}:
+    if task.status in {STATUS_COMPLETED, STATUS_FAILED} or (restart and task.status == STATUS_CANCELLED):
         task.status = STATUS_ACTIVE
         task.status_reason = ""
+        task.cancelled_at = None
+        task.cancelled_by = None
     if task.status == STATUS_ACTIVE:
         task.next_run_at = validated.first_run
     task.failure_count = 0

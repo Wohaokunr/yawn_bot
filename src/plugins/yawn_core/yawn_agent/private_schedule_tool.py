@@ -386,7 +386,7 @@ async def _apply_group_edit(task: Any, draft: TaskDraft, ctx: Any, *, rule_chang
     if rule_changed:
         task.run_count = 0
         task.created_at = ctx.now
-    apply_draft(task, validated, now=ctx.now)
+    apply_draft(task, validated, now=ctx.now, restart=rule_changed)
     await ctx.session.flush()
 
 

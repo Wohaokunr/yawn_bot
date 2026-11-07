@@ -177,6 +177,7 @@ def ensure_worker(
     bot_id: int | None = None,
     *,
     coalesce: Coalescer | None = None,
+    on_expired: Callable[[Any, Any, Any], Awaitable[None]] | None = None,
 ) -> asyncio.Task[None]:
     key = _key(group_id, bot_id)
     task = _workers.get(key)
@@ -198,6 +199,8 @@ def ensure_worker(
                             f"message_id={getattr(event, 'message_id', None)} "
                             f"等待 {pending_trigger_age(enqueued_at):.1f}s"
                         )
+                        if on_expired is not None:
+                            await on_expired(bot, event, normalized)
                         continue
                     # 保留短暂防抖，但不再丢弃防抖窗口内的有效消息；
                     # 这样队列按入队顺序处理，只有超过 TTL 的项目会被跳过。
@@ -208,6 +211,8 @@ def ensure_worker(
                             f"message_id={getattr(event, 'message_id', None)} "
                             f"等待 {pending_trigger_age(enqueued_at):.1f}s"
                         )
+                        if on_expired is not None:
+                            await on_expired(bot, event, normalized)
                         continue
                     if coalesce is not None:
                         try:

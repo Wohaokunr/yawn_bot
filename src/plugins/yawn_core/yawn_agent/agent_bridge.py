@@ -515,8 +515,8 @@ def add_reply(
     return reply
 
 
-def take_undelivered(user_id: int) -> list[dict[str, Any]]:
-    """取走还没转给他的回复（按提问分组），并标记已转。"""
+def pending_replies(user_id: int) -> list[dict[str, Any]]:
+    """读取待转发回复；只有发送成功才能确认送达。"""
 
     def apply(data: dict[str, Any]) -> list[dict[str, Any]]:
         out = []
@@ -524,8 +524,6 @@ def take_undelivered(user_id: int) -> list[dict[str, Any]]:
             fresh = [row for row in item.get("replies") or [] if not row.get("delivered")]
             if not fresh:
                 continue
-            for row in fresh:
-                row["delivered"] = True
             out.append(
                 {
                     "id": item.get("id"),
@@ -536,7 +534,22 @@ def take_undelivered(user_id: int) -> list[dict[str, Any]]:
             )
         return out
 
-    return _update(user_id, apply)
+    return apply(_load_bridge(user_id))
+
+
+def confirm_replies(user_id: int, batches: list[dict[str, Any]]) -> None:
+    """只确认刚刚成功发送的快照，发送期间新收到的回答留待下一批。"""
+
+    def apply(data: dict[str, Any]) -> None:
+        for batch in batches:
+            for item in data["relays"]:
+                if item.get("id") != batch["id"]:
+                    continue
+                for row in item.get("replies") or []:
+                    if row in batch["replies"]:
+                        row["delivered"] = True
+
+    _update(user_id, apply)
 
 
 def format_replies(batches: list[dict[str, Any]]) -> str:
@@ -553,6 +566,7 @@ def format_replies(batches: list[dict[str, Any]]) -> str:
 
 
 _delivery_tasks: dict[int, asyncio.Task[None]] = {}
+REPLY_RETRY_SECONDS = (30.0, 120.0, 300.0)
 
 
 def schedule_reply_delivery(bot: Any, user_id: int) -> None:
@@ -567,9 +581,20 @@ def schedule_reply_delivery(bot: Any, user_id: int) -> None:
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
-            await deliver_replies(bot, user_id)
-        except Exception:  # noqa: BLE001
-            dbg_exc(f"私聊用户 {user_id} 转群回复失败(忽略)")
+            failures = 0
+            while pending_replies(user_id):
+                if can_message_privately(user_id) or not await is_friend(bot, user_id):
+                    return
+                try:
+                    await deliver_replies(bot, user_id)
+                except Exception:  # noqa: BLE001
+                    dbg_exc(f"私聊用户 {user_id} 转群回复失败，保留待发送")
+                    if failures >= len(REPLY_RETRY_SECONDS):
+                        return
+                    await asyncio.sleep(REPLY_RETRY_SECONDS[failures])
+                    failures += 1
+                else:
+                    failures = 0
         finally:
             _delivery_tasks.pop(int(user_id), None)
 
@@ -577,11 +602,12 @@ def schedule_reply_delivery(bot: Any, user_id: int) -> None:
 
 
 async def deliver_replies(bot: Any, user_id: int) -> str:
-    batches = take_undelivered(user_id)
+    batches = pending_replies(user_id)
     if not batches:
         return ""
     text = format_replies(batches)
     await bot.send_private_msg(user_id=int(user_id), message=text)
+    confirm_replies(user_id, batches)
     try:
         from .private_scheduler import record_outgoing
 
@@ -971,6 +997,7 @@ __all__ = [
     "capture_group_reply",
     "check_relay_quota",
     "close_relay",
+    "confirm_replies",
     "create_handoff",
     "create_pending",
     "deliver_replies",
@@ -984,6 +1011,7 @@ __all__ = [
     "opted_out",
     "overview",
     "pending_for",
+    "pending_replies",
     "pending_view",
     "private_view",
     "record_relay",
@@ -995,7 +1023,6 @@ __all__ = [
     "reset_for_tests",
     "schedule_reply_delivery",
     "take_pending",
-    "take_undelivered",
     "update_handoff",
     "user_detail",
 ]

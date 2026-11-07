@@ -361,7 +361,7 @@ async def my_schedule_edit(ref: str, body: EditBody, session: UserWriteSession) 
             if rule_changed:
                 task.run_count = 0
                 task.created_at = now
-            apply_draft(task, validated, now=now)
+            apply_draft(task, validated, now=now, restart=rule_changed)
             await db.commit()
             await db.refresh(task)
             payload = task_payload(task, detail=True)

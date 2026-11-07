@@ -211,14 +211,18 @@ def plan_private_reply(text: str) -> tuple[RhythmPlan, list[OutItem]]:
             items.append(OutItem(kind, value, pause if items else 0.0))
             first = False
     if len(items) > MAX_MESSAGES:
-        # 太多条：多出来的文字并进最后一条文字，媒体保留前几个。
-        head = items[: MAX_MESSAGES - 1]
-        tail = [item for item in items[MAX_MESSAGES - 1 :] if item.kind == "text"]
-        if tail:
-            head.append(
-                OutItem("text", "\n".join(item.value for item in tail), tail[0].delay)
+        # 先收拢说明文字，为产物保留发送位置；不能把文件静默截掉。
+        texts = [item.value for item in items if item.kind == "text"]
+        media = [item for item in items if item.kind != "text"]
+        if len(media) + bool(texts) > MAX_MESSAGES:
+            kept = media[: MAX_MESSAGES - 1]
+            omitted = media[MAX_MESSAGES - 1 :]
+            texts.append(
+                f"（本次消息条数已到上限，还有 {len(omitted)} 个附件或表情未发送；"
+                "请让我分批发送剩余附件。）"
             )
-        items = head
+            media = kept
+        items = ([OutItem("text", "\n".join(texts))] if texts else []) + media
     return plan, items
 
 

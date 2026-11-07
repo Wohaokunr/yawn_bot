@@ -742,6 +742,7 @@ async def last_chat(session: Any, user_id: int, now: datetime) -> dict[str, Any]
             .where(
                 ChatSession.user_id == user_id,
                 ChatSession.group_id.is_(None),
+                ChatSession.is_deleted.is_(False),
                 ChatMessage.role == "assistant",
                 ChatMessage.is_deleted.is_(False),
             )

@@ -5,6 +5,8 @@
 get-or-create 在 config_store.py。
 """
 
+import asyncio
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -383,6 +385,39 @@ async def handle_group_agent_message(  # noqa: PLR0911
     _dispatch_turn(item)
 
 
+_QUEUE_NOTICE_COOLDOWN = 30.0
+_queue_notices: dict[tuple[int, int], float] = {}
+_queue_notice_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _notify_queue_drop(bot: Any, event: Any, normalized: Any) -> None:
+    """明确呼叫没能处理时给终态反馈，每群限频并遵守当前总开关。"""
+    from nonebot_plugin_orm import get_session
+
+    from .outbound import send_outbound_message
+
+    if getattr(normalized, "trigger_source", None) not in {"mention", "reply", "wake_word"}:
+        return
+    key = (int(bot.self_id), int(event.group_id))
+    now = time.monotonic()
+    if now - _queue_notices.get(key, -_QUEUE_NOTICE_COOLDOWN) < _QUEUE_NOTICE_COOLDOWN:
+        return
+    if len(_queue_notices) >= 512:
+        _queue_notices.pop(next(iter(_queue_notices)))
+    _queue_notices[key] = now
+    try:
+        async with get_session() as session:
+            if not await agent_runtime_enabled(session, key[1]):
+                return
+            await send_outbound_message(
+                bot, key[1],
+                [{"type": "text", "text": "刚才有请求因排队超时或队列已满而未处理。还需要帮忙的话，请稍后重新 @ 我。"}],
+                session=session, source="queue_rejected",
+            )
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {key[1]} 排队失败提示发送失败")
+
+
 def _dispatch_turn(item: tuple[Any, Any, Any]) -> None:
     bot, event, _normalized = item
     group_id = int(event.group_id)
@@ -390,9 +425,12 @@ def _dispatch_turn(item: tuple[Any, Any, Any]) -> None:
     if not enqueue(group_id, item, bot_id):
         logger.warning("群聊 Agent 队列已满: %s", group_id)
         dbg(f"群 {group_id} 队列已满,消息被丢弃")
+        task = asyncio.create_task(_notify_queue_drop(*item))
+        _queue_notice_tasks.add(task)
+        task.add_done_callback(_queue_notice_tasks.discard)
         return
     dbg(f"群 {group_id} 已入队,等待 worker 处理")
-    ensure_worker(group_id, process_group_message, bot_id, coalesce=coalesce_same_actor)
+    ensure_worker(group_id, process_group_message, bot_id, coalesce=coalesce_same_actor, on_expired=_notify_queue_drop)
 
 
 @member_notice.handle()

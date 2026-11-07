@@ -547,3 +547,13 @@ def test_private_data_wipe_cancels_tasks() -> None:
     store.update(USER, seed)
     assert ptasks.cancel_all(USER) == 1
     assert ptasks.get_task(USER, "t1")["status"] == "cancelled"
+
+
+def test_reply_cap_preserves_all_requested_artifacts() -> None:
+    _, items = delivery.plan_private_reply("第一张图[图片:sandbox:a.png]第二张图[图片:sandbox:b.png]第三张图[图片:sandbox:c.png][文件:sandbox:report.xlsx]")
+    assert len(items) <= delivery.MAX_MESSAGES
+    assert [item.value for item in items if item.kind == "image"] == ["sandbox:a.png", "sandbox:b.png", "sandbox:c.png"]
+    assert [item.value for item in items if item.kind == "file"] == ["sandbox:report.xlsx"]
+    _, capped = delivery.plan_private_reply("".join(f"[图片:sandbox:{n}.png]" for n in range(8)))
+    assert len(capped) == delivery.MAX_MESSAGES
+    assert "3 个附件或表情未发送" in capped[0].value

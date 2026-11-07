@@ -406,7 +406,7 @@ async def _update(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
             # 换了规则就重新计数：新规则的 max_runs 从现在起算。
             task.run_count = 0
             task.created_at = now
-        apply_draft(task, validated, now=now)
+        apply_draft(task, validated, now=now, restart=bool(args.get("kind")))
         await context.session.flush()
     except ScheduleRuleError as exc:
         raise _rule_error(exc) from exc

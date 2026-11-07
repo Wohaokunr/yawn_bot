@@ -107,9 +107,12 @@ async def get_privacy(
     _session: AdminReadSession,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    user_id: int | None = Query(default=None, alias="userId", ge=1),
 ) -> dict[str, Any]:
     page, page_size = page_params(page, page_size)
     clause = AgentPrivacy.group_id == group_id
+    if user_id is not None:
+        clause = clause & (AgentPrivacy.user_id == user_id)
     async with get_session() as db:
         await require_group(db, group_id)
         total = int(
