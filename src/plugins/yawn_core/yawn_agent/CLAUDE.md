@@ -24,7 +24,7 @@ QQ 群里的 LLM 群友：被 @/唤醒词触发的对话、主动插话、短会
 | 分组 | 文件 |
 |---|---|
 | 入口与配置 | `__init__.py`、`agent.py`、`config_store.py`、`command_definitions.py`、`commands.py`（群内配置/记忆命令）、`log.py` |
-| 入站与回合 | `message_parser.py`、`implicit_trigger.py`（叫名字/接着提需求）、`turn_intake.py`、`collector.py`、`turn_taking.py`、`turn_fallbacks.py`、`turn_budget.py`（超时/轮次/时限）、`progress_notice.py`（贴表情与进度提示）、`activity.py` |
+| 入站与回合 | `message_parser.py`、`implicit_trigger.py`（叫名字/接着提需求）、`turn_intake.py`、`collector.py`、`turn_taking.py`、`turn_fallbacks.py`、`turn_budget.py`（超时/轮次/时限）、`llm_retry.py`（模型没回应时要不要再试：按失败原因判断，群聊/私聊/小助手共用）、`turn_completion.py`（群聊请求模型的包装：抖动重试、轮次/时限用完时的收尾轮）、`progress_notice.py`（贴表情与进度提示）、`activity.py` |
 | 对话编排 | `dialogue.py`、`dialogue_support.py`、`dialogue_turn_support.py`、`dialogue_runtime_support.py` |
 | 上下文 | `context.py`、`context_loader.py`、`context_repository.py`、`context_history.py`、`context_budget.py`、`topic_state.py`、`emotion.py` |
 | 提示词与人设 | `prompt.py`、`prompt_sections.py`（全部提示词分段登记、WebUI 覆盖存储与解析、位置清单；作用域 global / 群号 / `user:<QQ>`，后者只收 `private.*` 与 `ptool.*`，私聊回合用 `use_private_user` 绑定当前用户与链路）、`persona.py`（PersonaCard、模板、解析/编译/行为推导）、`persona_library.py`（人设库与全局人设缓存）、`reactions.py` |

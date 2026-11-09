@@ -217,6 +217,7 @@ async def run_offer_turn(bot: Any, user_id: int, payload: dict[str, Any]) -> Off
 
     from nonebot_plugin_orm import get_session
 
+    from ..llm import background_priority
     from ..private_chat_bridge import PrivateTurnRequest, user_turn_lock
     from . import private_turn_taking as turn_taking
     from .private_agent import (  # pyright: ignore[reportPrivateUsage]
@@ -247,7 +248,9 @@ async def run_offer_turn(bot: Any, user_id: int, payload: dict[str, Any]) -> Off
                     session=session,
                     extra={"offer": payload, "offer_out": out},
                 )
-                text = await handle_private_turn(request)
+                # 是我主动找他，没人在等：模型调用走后台车道，不和实时聊天抢名额。
+                with background_priority():
+                    text = await handle_private_turn(request)
         except Exception:  # noqa: BLE001
             dbg_exc(f"私聊用户 {user_id} 主动提议回合出错")
             return OfferResult("failed")

@@ -43,6 +43,17 @@ prometheus_text = render_prometheus()
 `error`、`cancelled`，流式部分响应会使用 `*_partial`，并发额度耗尽使用
 `concurrency_timeout`。所有结果只记录状态和耗时，不记录提示词、模型响应或密钥。
 
+`yawnbot_ai_degradations_total{component="llm"}` 的 `reason` 是细分后的失败原因：
+`timeout`、`empty`、`rate_limited`（限流）、`server`（服务商 5xx）、`connection`、
+`auth`（密钥无效/无权限）、`quota`（余额或额度用完）、`bad_request`、
+`context_length`（上下文超长）、`not_configured`、`cancelled`、`unknown`。前六种会被
+Agent 原样重试一次，后面的重试没有意义，直接降级。
+
+非流式调用分两条并发车道：有人在等回复的实时回合，和后台调用（记忆整理、主动发言、
+私聊后台小助手、任务汇报、主动提议）。全局同时最多 6 个请求，其中后台最多占 4 个，
+剩下的始终留给实时回合。`llm.concurrency_snapshot()` 返回两条车道的调用数、排队次数、
+排队超时次数和平均/最长等待。
+
 ## 标签和故障边界
 
 - 指标标签只接受受限标识符和白名单字段。

@@ -633,7 +633,7 @@ async def _run_worker(
         if message is None:
             outcome = WorkerOutcome(
                 "failed",
-                error=f"模型没有回应（{result.outcome}）",
+                error=f"模型没有回应（{getattr(result, 'error_kind', '') or result.outcome}）",
                 rounds=round_index + 1,
             )
             break
@@ -833,29 +833,26 @@ async def _complete(
     *,
     tool_choice: Any = None,
 ) -> Any:
-    """请求模型；没拿到回复（超时、上游抖动）时等一下重试一次，长任务不因一次抖动整个失败。"""
+    """请求模型；没拿到回复且值得再试（超时、限流、上游抖动）时等一下重试一次。
 
-    import asyncio
+    长任务不因一次抖动整个失败；密钥错、请求非法这类再试也没用的直接返回。
+    小助手没人盯着等，走后台车道：再多小助手同时跑，也不会把实时聊天的模型名额占满。
+    """
+
+    from .llm_retry import complete_with_retry
 
     extra: dict[str, Any] = {"tool_choice": tool_choice} if tool_choice is not None else {}
-    result = await llm.complete_with_tools_result(
-        history,  # pyright: ignore[reportArgumentType]
-        tools,  # pyright: ignore[reportArgumentType]
-        task="agent_dialogue",
-        max_tokens=llm.NO_OUTPUT_LIMIT,
-        timeout=COMPLETION_TIMEOUT,
-        **extra,
-    )
-    if result.message is not None:
-        return result
-    await asyncio.sleep(_TRANSIENT_RETRY_SECONDS)
-    return await llm.complete_with_tools_result(
-        history,  # pyright: ignore[reportArgumentType]
-        tools,  # pyright: ignore[reportArgumentType]
-        task="agent_dialogue",
-        max_tokens=llm.NO_OUTPUT_LIMIT,
-        timeout=COMPLETION_TIMEOUT,
-        **extra,
+    return await complete_with_retry(
+        lambda: llm.complete_with_tools_result(
+            history,  # pyright: ignore[reportArgumentType]
+            tools,  # pyright: ignore[reportArgumentType]
+            task="agent_dialogue",
+            max_tokens=llm.NO_OUTPUT_LIMIT,
+            timeout=COMPLETION_TIMEOUT,
+            priority="background",
+            **extra,
+        ),
+        pause=_TRANSIENT_RETRY_SECONDS,
     )
 
 

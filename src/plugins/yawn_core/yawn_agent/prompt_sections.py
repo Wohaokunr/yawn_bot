@@ -426,6 +426,14 @@ SECTIONS: tuple[PromptSection, ...] = (
         when="有工具结果且只剩最后一轮时追加一条 system",
     ),
     PromptSection(
+        "tools.wrap_up",
+        "收尾轮提示",
+        "tools",
+        "round",
+        default_ref="turn_budget:WRAP_UP_NOTE",
+        when="工具轮次或回合时限用完、已有工具结果但还没最终回复时，追加一条 system 并禁止再调工具",
+    ),
+    PromptSection(
         "tools.media_followup",
         "工具图片说明",
         "tools",

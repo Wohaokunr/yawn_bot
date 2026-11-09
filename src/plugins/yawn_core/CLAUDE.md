@@ -62,7 +62,7 @@ WebUI 后端。全局规则（迁移、权限注入写法、Ruff 约定）见 [�
 
 | 模块 | 职责 |
 |---|---|
-| `llm.py` | 共享 OpenAI 兼容客户端：懒加载、模型路由、非流式 `complete()` / `complete_with_tools()`、全局并发上限。被 `ai_chat`、[yawn_agent](yawn_agent/CLAUDE.md)、[yawn_rpg](yawn_rpg/CLAUDE.md)、[yawn_werewolf](yawn_werewolf/CLAUDE.md) 共用 |
+| `llm.py` | 共享 OpenAI 兼容客户端：懒加载、模型路由、非流式 `complete()` / `complete_with_tools()`、全局并发上限与两条车道（实时 / 后台，`priority`、`background_priority()`，后台最多占 4/6）、失败原因细分（`error_kind`、`classify_llm_error`、`retryable`）。被 `ai_chat`、[yawn_agent](yawn_agent/CLAUDE.md)、[yawn_rpg](yawn_rpg/CLAUDE.md)、[yawn_werewolf](yawn_werewolf/CLAUDE.md) 共用 |
 | `ai_chat.py` | 私聊 `/对话` 模式（流式、按块空闲超时） |
 | `chat_state.py` | 对话模式的每用户队列与后台 worker（自建 DB session） |
 | `reply_chain.py` | QQ 嵌套引用链解析，供 `ai_chat` 构造上下文 |
