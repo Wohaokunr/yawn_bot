@@ -159,6 +159,11 @@ export function TaskDetailDrawer({
             <Descriptions.Item label="方式">{MODE_META[task.mode].label}</Descriptions.Item>
             <Descriptions.Item label="群">{task.groupName ? `${task.groupName}（${task.groupId}）` : task.groupId}</Descriptions.Item>
             <Descriptions.Item label="创建者">{task.creatorName ?? task.creatorUserId}{task.mentionCreator ? " · 到点 @" : ""}</Descriptions.Item>
+            {(task.mentionAll || (task.mentionUserIds?.length ?? 0) > 0) && (
+              <Descriptions.Item label="到点还 @">
+                {[task.mentionAll ? "全体成员" : null, ...(task.mentionUserIds ?? [])].filter(Boolean).join("、")}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="规则" span={2}>{task.description}</Descriptions.Item>
             <Descriptions.Item label="下次">{task.nextRunAt ? `${formatLocal(task.nextRunAt)}（${relativeTo(task.nextRunAt, now)}）` : "—"}</Descriptions.Item>
             <Descriptions.Item label="次数">
@@ -214,7 +219,17 @@ export function TaskDetailDrawer({
   );
 }
 
-export function TasksTab({ status, agentModeAllowed }: { status: ScheduleStatusData; agentModeAllowed: boolean }): React.JSX.Element {
+export function TasksTab({
+  status,
+  agentModeAllowed,
+  mentionAllWho,
+  maxMentionMembers,
+}: {
+  status: ScheduleStatusData;
+  agentModeAllowed: boolean;
+  mentionAllWho?: "off" | "admins" | "members";
+  maxMentionMembers?: number;
+}): React.JSX.Element {
   const { message, modal } = AntApp.useApp();
   const [searchParams, setSearchParams] = useSearchParams();
   const group = searchParams.get("schedules.group") ?? "";
@@ -421,6 +436,8 @@ export function TasksTab({ status, agentModeAllowed }: { status: ScheduleStatusD
         task={editor.task}
         defaultGroupId={group || undefined}
         agentModeAllowed={agentModeAllowed}
+        mentionAllWho={mentionAllWho}
+        maxMentionMembers={maxMentionMembers}
         onClose={() => setEditor({ open: false, task: null })}
         onSaved={(task) => {
           setEditor({ open: false, task: null });

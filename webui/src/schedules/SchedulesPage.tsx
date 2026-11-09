@@ -119,7 +119,12 @@ export function SchedulesPage(): React.JSX.Element {
           {
             key: "tasks",
             label: <span><UnorderedListOutlined /> 任务</span>,
-            children: <TasksTab status={status} agentModeAllowed={settingsQuery.data?.settings.allowAgentMode ?? true} />,
+            children: <TasksTab
+                status={status}
+                agentModeAllowed={settingsQuery.data?.settings.allowAgentMode ?? true}
+                mentionAllWho={settingsQuery.data?.settings.mentionAllWho}
+                maxMentionMembers={settingsQuery.data?.settings.maxMentionMembers}
+              />,
           },
           {
             key: "private",

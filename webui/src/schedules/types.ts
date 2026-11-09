@@ -49,6 +49,10 @@ export interface ScheduleTask {
   status: ScheduleStatus;
   statusReason: string | null;
   mentionCreator: boolean;
+  /** 到点 @全体成员 */
+  mentionAll?: boolean;
+  /** 到点还要 @ 的群成员 QQ 号 */
+  mentionUserIds?: string[];
   maxRuns: number | null;
   runCount: number;
   failureCount: number;
@@ -127,6 +131,8 @@ export interface ScheduleTaskInput {
   schedule: ScheduleRule;
   maxRuns: number | null;
   mentionCreator: boolean;
+  mentionAll?: boolean;
+  mentionUserIds?: string[];
   revision?: number;
 }
 
@@ -165,6 +171,10 @@ export interface ScheduleSettings {
   privateMaxActive: number;
   privateMinIntervalMinutes: number;
   privateRetryLimit: number;
+  /** 谁能设到点 @全体成员 */
+  mentionAllWho: "off" | "admins" | "members";
+  /** 一个任务最多 @ 几位成员 */
+  maxMentionMembers: number;
 }
 
 // ── 私聊提醒（每人的个人助理数据；后端 /schedules/private）────────────────

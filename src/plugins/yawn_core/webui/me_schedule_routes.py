@@ -36,9 +36,11 @@ from ..yawn_agent.schedule_store import (
     TaskDraft,
     apply_draft,
     cancel_task,
+    check_mention_members,
     pause_task,
     preview_runs,
     resume_task,
+    task_mentions,
     validate_draft,
 )
 from ..yawn_agent.tool_args import ToolError
@@ -204,6 +206,21 @@ class MyScheduleBody(BaseModel):
     schedule: dict[str, Any]
     max_runs: int | None = Field(default=None, ge=1, le=10000)
     mention_me: bool = True
+    # 群任务到点 @全体成员（要他是群主/管理员）/ @这些群成员（QQ 号字符串）。
+    mention_all: bool | None = None
+    mention_user_ids: list[str] | None = Field(default=None, max_length=50)
+
+
+def _mention_ids(raw: list[str] | None) -> list[int] | None:
+    if raw is None:
+        return None
+    result: list[int] = []
+    for item in raw:
+        text = str(item).strip()
+        if not text.isdigit() or int(text) <= 0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"要 @ 的成员必须是 QQ 号：{text}")
+        result.append(int(text))
+    return result
 
 
 class PreviewBody(BaseModel):
@@ -260,6 +277,7 @@ async def my_schedule_create(body: MyScheduleBody, session: UserWriteSession) ->
     try:
         async with get_session() as db:
             member = await db.get(UserGroup, (group_id, user_id))
+            await hub.check_mention_all(bot, user_id, group_id, wanted=body.mention_all)
             task, reused = await hub.create_group_task(
                 db,
                 bot=bot,
@@ -273,6 +291,8 @@ async def my_schedule_create(body: MyScheduleBody, session: UserWriteSession) ->
                     mode=body.mode,
                     max_runs=body.max_runs,
                     mention_creator=body.mention_me,
+                    mention_all=body.mention_all,
+                    mention_user_ids=_mention_ids(body.mention_user_ids),
                 ),
                 now=now,
                 source_kind="webui_user",
@@ -311,6 +331,8 @@ class EditBody(BaseModel):
     schedule: dict[str, Any] | None = None
     max_runs: int | None = Field(default=None, ge=1, le=10000)
     mention_me: bool | None = None
+    mention_all: bool | None = None
+    mention_user_ids: list[str] | None = Field(default=None, max_length=50)
     revision: int | None = None
 
 
@@ -344,6 +366,9 @@ async def my_schedule_edit(ref: str, body: EditBody, session: UserWriteSession) 
             if body.revision is not None and int(task.revision or 0) != body.revision:
                 raise HTTPException(status.HTTP_409_CONFLICT, "任务刚被调度器或别人改过，请刷新后再保存")
             rule_changed = body.schedule is not None and dict(task.schedule or {}) != body.schedule
+            had_all, old_members = task_mentions(task)
+            await hub.check_mention_all(_bot(), user_id, int(task.group_id), wanted=body.mention_all, had=had_all)
+            mentions_given = body.mention_all is not None or body.mention_user_ids is not None
             validated = validate_draft(
                 TaskDraft(
                     instruction=body.content or task.instruction,
@@ -352,12 +377,15 @@ async def my_schedule_edit(ref: str, body: EditBody, session: UserWriteSession) 
                     mode=body.mode or task.mode,
                     max_runs=body.max_runs if body.max_runs is not None else task.max_runs,
                     mention_creator=body.mention_me if body.mention_me is not None else bool(task.mention_creator),
+                    mention_all=(body.mention_all if body.mention_all is not None else had_all) if mentions_given else None,
+                    mention_user_ids=(_mention_ids(body.mention_user_ids) if body.mention_user_ids is not None else old_members) if mentions_given else None,
                 ),
                 settings=load_settings(),
                 now=now,
                 anchor=now if rule_changed else task.created_at,
                 run_count=0 if rule_changed else int(task.run_count or 0),
             )
+            await check_mention_members(db, int(task.group_id), validated.mention_targets)
             if rule_changed:
                 task.run_count = 0
                 task.created_at = now

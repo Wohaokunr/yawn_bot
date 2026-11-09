@@ -20,7 +20,7 @@ import {
   WEEKDAY_LABELS,
 } from "./schedule-meta";
 import type { RuleDraft } from "./schedule-meta";
-import type { ScheduleKind, ScheduleMode, SchedulePreview, ScheduleTaskDetail } from "./types";
+import type { ScheduleKind, ScheduleMode, SchedulePreview, ScheduleSettings, ScheduleTaskDetail } from "./types";
 
 const PREVIEW_DEBOUNCE_MS = 400;
 const GROUP_ID_RE = /^\d{4,12}$/;
@@ -32,8 +32,24 @@ interface FormState {
   instruction: string;
   mode: ScheduleMode;
   mentionCreator: boolean;
+  mentionAll: boolean;
+  /** 每行/逗号分隔的 QQ 号原文 */
+  mentionUsers: string;
   maxRuns: number | null;
   rule: RuleDraft;
+}
+
+/** “123, 456\n789” → 去重后的 QQ 号；不合法的单独返回给表单提示。 */
+export function parseMentionUsers(text: string): { ids: string[]; invalid: string[] } {
+  const ids: string[] = [];
+  const invalid: string[] = [];
+  for (const raw of text.split(/[\s,，、]+/)) {
+    const item = raw.trim().replace(/^@/, "");
+    if (!item) continue;
+    if (!/^\d{5,12}$/.test(item)) invalid.push(item);
+    else if (!ids.includes(item)) ids.push(item);
+  }
+  return { ids, invalid };
 }
 
 function initialForm(task: ScheduleTaskDetail | null, defaults: { groupId?: string }): FormState {
@@ -45,6 +61,8 @@ function initialForm(task: ScheduleTaskDetail | null, defaults: { groupId?: stri
       instruction: task.instruction,
       mode: task.mode,
       mentionCreator: task.mentionCreator,
+      mentionAll: Boolean(task.mentionAll),
+      mentionUsers: (task.mentionUserIds ?? []).join("\n"),
       maxRuns: task.maxRuns,
       rule: draftFromRule(task.schedule),
     };
@@ -56,6 +74,8 @@ function initialForm(task: ScheduleTaskDetail | null, defaults: { groupId?: stri
     instruction: "",
     mode: "notify",
     mentionCreator: true,
+    mentionAll: false,
+    mentionUsers: "",
     maxRuns: null,
     rule: emptyRuleDraft("daily"),
   };
@@ -295,6 +315,8 @@ export function TaskEditor({
   task,
   defaultGroupId,
   agentModeAllowed,
+  mentionAllWho = "admins",
+  maxMentionMembers = 20,
   onClose,
   onSaved,
 }: {
@@ -302,6 +324,8 @@ export function TaskEditor({
   task: ScheduleTaskDetail | null;
   defaultGroupId?: string;
   agentModeAllowed: boolean;
+  mentionAllWho?: ScheduleSettings["mentionAllWho"];
+  maxMentionMembers?: number;
   onClose: () => void;
   onSaved: (task: ScheduleTaskDetail) => void;
 }): React.JSX.Element {
@@ -355,6 +379,9 @@ export function TaskEditor({
   if (!editing && !/^\d{5,12}$/.test(form.creatorUserId)) errors.creatorUserId = "填该群一位成员的 QQ 号";
   if (!form.instruction.trim()) errors.instruction = "写清楚到点要做什么";
   if (form.mode === "agent" && !agentModeAllowed && !(editing && task.mode === "agent")) errors.mode = "策略里关闭了“唤醒 Agent”，只能用直接提醒";
+  const mentionParsed = parseMentionUsers(form.mentionUsers);
+  if (mentionParsed.invalid.length) errors.mentionUsers = `不是 QQ 号：${mentionParsed.invalid.slice(0, 3).join("、")}`;
+  else if (mentionParsed.ids.length > maxMentionMembers) errors.mentionUsers = `最多 @ ${maxMentionMembers} 位成员`;
   const blocked = Object.keys(errors).length > 0 || (preview !== null && !preview.valid);
 
   const save = async () => {
@@ -368,6 +395,8 @@ export function TaskEditor({
         schedule: rule,
         maxRuns: form.maxRuns,
         mentionCreator: form.mentionCreator,
+        mentionAll: form.mentionAll,
+        mentionUserIds: mentionParsed.ids,
       };
       const saved = editing
         ? await scheduleApi.update(task.id, { ...input, revision: task.revision })
@@ -453,6 +482,23 @@ export function TaskEditor({
               <span className="sbx-muted">关掉后只发到群里，不单独提醒人</span>
             </div>
           </div>
+          <div className="sbx-switch-row">
+            <Switch checked={form.mentionAll} disabled={mentionAllWho === "off" && !form.mentionAll} onChange={(value) => set("mentionAll", value)} aria-label="@全体成员" />
+            <div>
+              <strong>到点 @全体成员</strong>
+              <span className="sbx-muted">{mentionAllWho === "off" ? "策略里关闭了 @全体成员" : "需要 Bot 是群主/管理员；QQ 拒发时自动去掉 @全体，正文照发"}</span>
+            </div>
+          </div>
+          <Field label="到点还要 @ 的成员" hint={`QQ 号，空格、逗号或换行分隔；最多 ${maxMentionMembers} 位，必须是该群已知成员`} error={errors.mentionUsers}>
+            <Input.TextArea
+              value={form.mentionUsers}
+              autoSize={{ minRows: 1, maxRows: 4 }}
+              placeholder="例如 123456789, 987654321"
+              status={errors.mentionUsers ? "error" : undefined}
+              onChange={(event) => set("mentionUsers", event.target.value)}
+              aria-label="到点 @ 的成员"
+            />
+          </Field>
           <h4 className="sbx-subhead">什么时候执行</h4>
           <RuleEditor draft={form.rule} errors={ruleErrors} onChange={(next) => set("rule", next)} />
         </div>

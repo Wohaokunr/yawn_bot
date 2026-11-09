@@ -22,25 +22,32 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
 from nonebot import get_bots, get_driver, logger
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
+from .capabilities import get_segment_capabilities
 from .config_store import agent_runtime_enabled
 from .context import now_beijing
 from .dialogue_support import persist_bot_reply
 from .execution_trace import recent_execution_trace_summaries
 from .log import dbg, dbg_exc
 from .message_parser import NormalizedMessage, SegmentNode
-from .outbound import send_outbound_message
+from .outbound import (
+    PreparedOutboundMessage,
+    prepare_outbound_message,
+    send_outbound_message,
+    send_prepared_outbound,
+)
 from .schedule_policy import (
     ScheduleSettings,
     group_runs_today,
@@ -59,6 +66,7 @@ from .schedule_store import (
     pause_task,
     push_history,
     remaining_runs,
+    task_mentions,
 )
 from .schedule_wake import WAKE_TRIGGER_SOURCE, ScheduledWake, scheduled_wake
 
@@ -187,6 +195,8 @@ class _RunSnapshot:
     late_minutes: int
     once: bool
     source_kind: str = "agent"
+    mention_all: bool = False
+    mention_user_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -238,6 +248,78 @@ async def _member_info(bot: Any, group_id: int, user_id: int) -> dict[str, Any] 
     return info if isinstance(info, dict) else {}
 
 
+def _wake_mentions(snapshot: _RunSnapshot) -> list[int]:
+    people = [snapshot.creator_user_id] if snapshot.mention_creator else []
+    people.extend(item for item in snapshot.mention_user_ids if item not in people)
+    return people
+
+
+def mention_segments(snapshot: _RunSnapshot) -> list[dict[str, Any]]:
+    """到点要 @ 的成员段（不含 @全体成员，那个在 :func:`with_mention_all` 里单独加）。"""
+
+    return [{"type": "at", "user_id": user_id} for user_id in _wake_mentions(snapshot)]
+
+
+def with_mention_all(prepared: PreparedOutboundMessage) -> PreparedOutboundMessage:
+    """在已经校验过的消息前面加 @全体成员。
+
+    普通发言的出站校验禁止 @全体（防止模型滥用），这里只给定时任务在创建时已经
+    查过权限的那一条提醒用。QQ 拒发（Bot 不是管理员、当天 @全体 次数用完）时
+    发送状态机的结构降级会把它去掉，提醒正文照样发出去。
+    """
+
+    message = Message(MessageSegment.at("all")) + prepared.message
+    records = ({"type": "at", "data": {"qq": "all"}, "text": "@全体成员"}, *prepared.segment_records)
+    return replace(
+        prepared,
+        message=message,
+        segment_records=records,
+        normalized_text=f"@全体成员 {prepared.normalized_text}".strip(),
+    )
+
+
+async def _send_scheduled(bot: Any, snapshot: _RunSnapshot, segments: list[dict[str, Any]], *, mention_all: bool) -> Any:
+    async with get_session() as session:
+        if mention_all:
+            prepared = await prepare_outbound_message(
+                segments,
+                session=session,
+                group_id=snapshot.group_id,
+                actor_user_id=snapshot.creator_user_id,
+                allowed_segment_types=get_segment_capabilities(bot, snapshot.group_id).allowed,
+            )
+            result = await send_prepared_outbound(
+                bot,
+                snapshot.group_id,
+                with_mention_all(prepared),
+                session=session,
+                actor_user_id=snapshot.creator_user_id,
+                source="scheduled_task",
+            )
+        else:
+            result = await send_outbound_message(
+                bot,
+                snapshot.group_id,
+                segments,
+                session=session,
+                actor_user_id=snapshot.creator_user_id,
+                source="scheduled_task",
+            )
+        if result.sent:
+            config = await session.get(GroupAgentConfig, snapshot.group_id)
+            await persist_bot_reply(
+                session,
+                _bot_id(bot),
+                snapshot.group_id,
+                result.message_id,
+                result.normalized_text,
+                int(getattr(config, "raw_retention_days", 30) or 30),
+                segments=result.segments,
+            )
+        await session.commit()
+    return result
+
+
 def build_wake_turn(snapshot: _RunSnapshot, member: dict[str, Any]) -> tuple[Any, NormalizedMessage]:
     """合成“设任务的人把任务说明发给 Bot”的回合输入（不落库、没有 message_id）。"""
 
@@ -245,8 +327,8 @@ def build_wake_turn(snapshot: _RunSnapshot, member: dict[str, Any]) -> tuple[Any
     normalized = NormalizedMessage(
         plain_text=text,
         segments=[SegmentNode(type="text", data={"text": text}, text=text)],
-        # 需要提醒设任务的人时把他放进 mentions：本轮会开放 at 消息段。
-        mentions=[snapshot.creator_user_id] if snapshot.mention_creator else [],
+        # 需要提醒的人放进 mentions：本轮会开放 at 消息段（设任务的人 + 指定成员）。
+        mentions=_wake_mentions(snapshot),
     )
     normalized.trigger_source = WAKE_TRIGGER_SOURCE
     normalized.trigger_signals = {"scheduled_task": True}
@@ -318,6 +400,8 @@ async def _run_agent(bot: Any, snapshot: _RunSnapshot, member: dict[str, Any], s
         previous_output=clip(snapshot.previous_output, 160),
         mention_creator=snapshot.mention_creator,
         source_kind=snapshot.source_kind,
+        mention_user_ids=snapshot.mention_user_ids,
+        mention_all_announced=await _announce_mention_all(bot, snapshot, settings) if snapshot.mention_all else False,
     )
     started_at = now_beijing().replace(microsecond=0)
     bot_id = _bot_id(bot)
@@ -335,37 +419,32 @@ async def _run_agent(bot: Any, snapshot: _RunSnapshot, member: dict[str, Any], s
 
 async def _run_notify(bot: Any, snapshot: _RunSnapshot, settings: ScheduleSettings) -> RunOutcome:
     text = f"{settings.notify_prefix}{snapshot.instruction}".strip()
-    segments: list[dict[str, Any]] = []
-    if snapshot.mention_creator:
-        segments.append({"type": "at", "user_id": snapshot.creator_user_id})
+    segments = mention_segments(snapshot)
+    if segments or snapshot.mention_all:
         text = f" {text}"
     segments.append({"type": "text", "text": text})
-    async with get_session() as session:
-        result = await send_outbound_message(
-            bot,
-            snapshot.group_id,
-            segments,
-            session=session,
-            actor_user_id=snapshot.creator_user_id,
-            source="scheduled_task",
-        )
-        if result.sent:
-            config = await session.get(GroupAgentConfig, snapshot.group_id)
-            await persist_bot_reply(
-                session,
-                _bot_id(bot),
-                snapshot.group_id,
-                result.message_id,
-                result.normalized_text,
-                int(getattr(config, "raw_retention_days", 30) or 30),
-                segments=result.segments,
-            )
-        await session.commit()
+    result = await _send_scheduled(bot, snapshot, segments, mention_all=snapshot.mention_all)
     if result.sent:
         return RunOutcome(RESULT_SENT, preview=clip(result.normalized_text or text, 300))
     if result.may_have_delivered:
         return RunOutcome(RESULT_UNKNOWN, preview=clip(text, 300), error="QQ 没有返回发送回执")
     return RunOutcome(RESULT_FAILED, error=f"发送失败（{result.outcome}）")
+
+
+async def _announce_mention_all(bot: Any, snapshot: _RunSnapshot, settings: ScheduleSettings) -> bool:
+    """agent 模式要 @全体成员 时，先由我发一句带 @全体 的开场，再唤醒 Agent 干活。
+
+    模型自己的发言不允许 @全体（出站校验禁止），所以这一句由调度器代发；返回是否发出。
+    """
+
+    title = snapshot.title or clip(snapshot.instruction, 40)
+    text = f" {settings.notify_prefix}{title}".rstrip()
+    try:
+        result = await _send_scheduled(bot, snapshot, [{"type": "text", "text": text}], mention_all=True)
+    except Exception as exc:  # noqa: BLE001
+        dbg(f"群 {snapshot.group_id} 定时任务 {snapshot.task_id} @全体开场发送失败(继续执行): {str(exc)[:120]}")
+        return False
+    return bool(result.sent)
 
 
 async def _prepare(task_id: int, settings: ScheduleSettings, now: datetime) -> tuple[_RunSnapshot | None, list[Any]]:
@@ -432,6 +511,8 @@ async def _prepare(task_id: int, settings: ScheduleSettings, now: datetime) -> t
             instruction=str(task.instruction or ""),
             mode=str(task.mode or "agent"),
             mention_creator=bool(task.mention_creator),
+            mention_all=task_mentions(task)[0],
+            mention_user_ids=tuple(task_mentions(task)[1]),
             run_number=int(task.run_count or 0) + 1,
             max_runs=int(task.max_runs) if task.max_runs and task.schedule_kind != "once" else None,
             description=str(task.description or ""),
@@ -598,6 +679,8 @@ async def _prepare_forced(task_id: int, settings: ScheduleSettings, now: datetim
             instruction=str(task.instruction or ""),
             mode=str(task.mode or "agent"),
             mention_creator=bool(task.mention_creator),
+            mention_all=task_mentions(task)[0],
+            mention_user_ids=tuple(task_mentions(task)[1]),
             run_number=int(task.run_count or 0) + 1,
             max_runs=int(task.max_runs) if task.max_runs and task.schedule_kind != "once" else None,
             description=str(task.description or ""),

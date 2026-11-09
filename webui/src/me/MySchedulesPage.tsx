@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { PageHeader, QueryErrorAlert, useApiQuery } from "../shared";
 import { draftFromRule, emptyRuleDraft, formatLocal, privateSourceMeta, privateStatusMeta, ruleFromDraft, sourceLabel, STATUS_META, validateRuleDraft } from "../schedules/schedule-meta";
 import type { RuleDraft } from "../schedules/schedule-meta";
-import { RuleEditor } from "../schedules/TaskEditor";
+import { parseMentionUsers, RuleEditor } from "../schedules/TaskEditor";
 import type { ScheduleMode, ScheduleStatus } from "../schedules/types";
 import { isPrivateItem, myScheduleApi } from "./me-schedule-api";
 import type { MyScheduleAction, MyScheduleDetail, MyScheduleGroup, MyScheduleItem, MySchedulePreview, MySchedulesData } from "./me-schedule-api";
@@ -25,12 +25,14 @@ interface FormState {
   mode: ScheduleMode;
   maxRuns: number | null;
   mentionMe: boolean;
+  mentionAll: boolean;
+  mentionUsers: string;
   rule: RuleDraft;
   revision?: number;
 }
 
 function blankForm(): FormState {
-  return { ref: null, target: "private", groupId: "", content: "", title: "", mode: "notify", maxRuns: null, mentionMe: true, rule: emptyRuleDraft("daily") };
+  return { ref: null, target: "private", groupId: "", content: "", title: "", mode: "notify", maxRuns: null, mentionMe: true, mentionAll: false, mentionUsers: "", rule: emptyRuleDraft("daily") };
 }
 
 function itemText(item: MyScheduleItem): { content: string; rule: string } {
@@ -142,6 +144,7 @@ function ScheduleForm({ open, form, groups, data, onClose, onSaved }: {
         schedule: ruleFromDraft(state.rule),
         maxRuns: state.maxRuns,
         mentionMe: state.mentionMe,
+        ...(state.target === "group" ? { mentionAll: state.mentionAll, mentionUserIds: parseMentionUsers(state.mentionUsers).ids } : {}),
       };
       if (editing && state.ref) {
         await myScheduleApi.update(state.ref, { ...payload, revision: state.revision });
@@ -213,7 +216,27 @@ function ScheduleForm({ open, form, groups, data, onClose, onSaved }: {
               <div><strong>提醒时 @我</strong></div>
             </div>
           )}
+          {state.target === "group" && (
+            <div className="sbx-switch-row">
+              <Switch checked={state.mentionAll} onChange={(value) => set("mentionAll", value)} aria-label="提醒时 @全体成员" />
+              <div><strong>提醒时 @全体成员</strong><span className="sbx-muted">要你是这个群的群主/管理员</span></div>
+            </div>
+          )}
         </div>
+        {state.target === "group" && (
+          <label className="sbx-field">
+            <span className="sbx-field-label">提醒时还要 @ 谁（可选）</span>
+            <Input.TextArea
+              value={state.mentionUsers}
+              autoSize={{ minRows: 1, maxRows: 3 }}
+              placeholder="群成员 QQ 号，空格或逗号分隔"
+              status={parseMentionUsers(state.mentionUsers).invalid.length ? "error" : undefined}
+              onChange={(event) => set("mentionUsers", event.target.value)}
+              aria-label="提醒时还要 @ 的成员"
+            />
+            {parseMentionUsers(state.mentionUsers).invalid.length > 0 && <span className="sbx-field-error">不是 QQ 号：{parseMentionUsers(state.mentionUsers).invalid.slice(0, 3).join("、")}</span>}
+          </label>
+        )}
         <Space>
           <Button onClick={() => void runPreview()} disabled={Object.keys(ruleErrors).length > 0}>看看接下来几次</Button>
         </Space>
@@ -237,6 +260,8 @@ function formFromDetail(detail: MyScheduleDetail): FormState {
     mode: detail.mode,
     maxRuns: detail.maxRuns ?? null,
     mentionMe: "mentionCreator" in detail ? detail.mentionCreator : true,
+    mentionAll: "mentionAll" in detail ? Boolean(detail.mentionAll) : false,
+    mentionUsers: "mentionUserIds" in detail ? (detail.mentionUserIds ?? []).join("\n") : "",
     rule: draftFromRule(detail.schedule),
     revision: "revision" in detail ? detail.revision : undefined,
   };

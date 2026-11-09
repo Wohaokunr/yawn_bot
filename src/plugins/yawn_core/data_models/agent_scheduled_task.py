@@ -52,6 +52,10 @@ class AgentScheduledTask(Model):
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     status_reason: Mapped[str] = mapped_column(String(120), default="")
     mention_creator: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 到点还要 @ 谁："all"=@全体成员，数字=群成员 QQ 号。旧行为 NULL，按空列表读。
+    mention_targets: Mapped[Optional[list[Any]]] = mapped_column(
+        JSON, nullable=True, default=list
+    )
     max_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     # 连续失败次数；成功一次清零，达到策略上限自动暂停。
