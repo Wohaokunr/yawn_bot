@@ -35,6 +35,14 @@ FINAL_ROUND_NOTE = (
     "工具轮次只剩最后一轮：这一轮不要再调用查询或运行类工具，"
     "根据已有结果直接给出最终回复；没做成的事如实说明原因。"
 )
+# 轮次或时限用完、还没给出最终回复时的收尾轮：不许再调工具，把已经查到的说出来。
+WRAP_UP_NOTE = (
+    "工具轮次或时间已经用完，不能再调用任何工具。"
+    "根据上面已经拿到的工具结果，直接给出最终回复；"
+    "还没做完的部分如实说明做到哪一步、差什么，不要说成已经完成。"
+)
+# 收尾轮只是把已有结果说出来，不需要长时间推理。
+WRAP_UP_COMPLETION_TIMEOUT = 45.0
 TOOL_MEDIA_NOTE = "以下图片来自刚才的工具查询结果，请结合该工具结果继续回答。"
 TRUNCATED_ARGS_HINT = (
     "上一轮输出被服务商截断，工具参数没写完整。把代码写短一些"
@@ -142,6 +150,13 @@ def final_round_messages() -> list[dict[str, str]]:
     return [{"role": "system", "content": text}] if text else []
 
 
+def wrap_up_messages() -> list[dict[str, str]]:
+    """收尾轮前追加的 system 提示；WebUI 删掉这一段时不追加空消息。"""
+
+    text = section_text("tools.wrap_up", WRAP_UP_NOTE)
+    return [{"role": "system", "content": text}] if text else []
+
+
 def tool_media_note() -> str:
     """工具查询带回图片时，追加的 user 消息里那句说明（可在 WebUI 改写）。"""
 
@@ -170,6 +185,8 @@ __all__ = [
     "SANDBOX_TURN_SECONDS",
     "WEB_EXTENSION_SECONDS",
     "WEB_TURN_SECONDS",
+    "WRAP_UP_COMPLETION_TIMEOUT",
+    "WRAP_UP_NOTE",
     "argument_error_payload",
     "completion_timeout",
     "discovery_deadline",
@@ -180,4 +197,5 @@ __all__ = [
     "is_final_round",
     "tool_media_note",
     "turn_seconds",
+    "wrap_up_messages",
 ]

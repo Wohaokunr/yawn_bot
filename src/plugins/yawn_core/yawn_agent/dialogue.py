@@ -138,7 +138,7 @@ from .tools import (
     select_dialogue_message_segment_types,
 )
 from .tool_execution import ToolExecutionContext
-from . import turn_budget
+from . import turn_budget, turn_completion
 from .progress_notice import begin_progress, clean_preamble, current_progress
 from .sandbox_inbox import prepare_turn_inbox
 from .tool_preload import resolve_tool_plan, start_tool_plan
@@ -821,20 +821,11 @@ _REBUILT = object()
 
 
 async def _request_completion(turn: _DialogueTurn) -> Any:
-    """请求一次模型；多模态不兼容时改走视觉转述重建 Prompt 并返回 ``_REBUILT``。"""
+    """请求一次模型（抖动时重试一次）；多模态不兼容时改走视觉转述重建 Prompt 并返回 ``_REBUILT``。"""
 
     llm_started = time.monotonic()
     try:
-        return await complete_with_tools_result(  # pyright: ignore[reportArgumentType]
-            turn.messages,  # pyright: ignore[reportArgumentType]
-            turn.tools,  # pyright: ignore[reportArgumentType]
-            task="agent_dialogue",
-            max_tokens=NO_OUTPUT_LIMIT,
-            timeout=turn_budget.completion_timeout(turn.tools),
-            multimodal=bool(turn.media_blocks),
-            raise_on_unsupported=bool(turn.media_blocks)
-            and not turn.fallback_attempted,
-        )
+        return await turn_completion.request_completion(complete_with_tools_result, turn)
     except LLMMultimodalUnsupportedError:
         trace_event(
             "llm",
@@ -867,14 +858,22 @@ async def _request_completion(turn: _DialogueTurn) -> Any:
         return _REBUILT
 
 
+async def _wrap_up_turn(turn: _DialogueTurn, reason: str) -> None:
+    """轮次/时限用完还没最终回复：有工具结果就请模型收尾一次（不许调工具），否则发固定提示。"""
+
+    content = await turn_completion.wrap_up_reply(complete_with_tools_result, turn, reason)
+    if content:
+        await _finalize_turn_reply(turn, content)
+    else:
+        await turn.send_notice(_TURN_END_NOTICE, label="收尾")
+
+
 async def _run_turn(turn: _DialogueTurn) -> None:
     turn_started_at = time.monotonic()
     while turn.rounds < turn.round_limit:
         if time.monotonic() > turn.deadline:
-            dbg(
-                f"群 {turn.group_id} 工具循环超过 {_MAX_TURN_SECONDS}s 时限,发送收尾提示"
-            )
-            await turn.send_notice(_TURN_END_NOTICE, label="收尾")
+            dbg(f"群 {turn.group_id} 工具循环超过 {_MAX_TURN_SECONDS}s 时限,进入收尾")
+            await _wrap_up_turn(turn, "回合超时")
             return
         if turn.had_tool_results and turn_budget.is_final_round(
             turn.rounds, turn.round_limit
@@ -898,6 +897,7 @@ async def _run_turn(turn: _DialogueTurn) -> None:
                     "model": turn.model,
                     "response": "none",
                     "outcome": completion.outcome,
+                    "error_kind": turn_completion.error_kind(completion),
                     "usage": usage,
                 },
                 detail="LLM 返回空结果，进入确定性兜底回复",
@@ -948,9 +948,9 @@ async def _run_turn(turn: _DialogueTurn) -> None:
     # 走到这里说明所有轮次都被工具调用耗尽、始终没有最终回复。给用户一个交代，不能静默。
     dbg(
         f"群 {turn.group_id} {turn.round_limit} 轮全部被工具调用耗尽,无最终回复,"
-        f"发送收尾提示;整轮耗时 {time.monotonic() - turn_started_at:.1f}s"
+        f"进入收尾;整轮耗时 {time.monotonic() - turn_started_at:.1f}s"
     )
-    await turn.send_notice(_TURN_END_NOTICE, label="工具收尾")
+    await _wrap_up_turn(turn, "工具轮次用完")
 
 
 async def _finalize_turn_reply(turn: _DialogueTurn, content: str) -> None:

@@ -34,7 +34,7 @@ from ..private_chat_bridge import (
     private_agent_config,
     turns_today,
 )
-from . import private_rhythm
+from . import llm_retry, private_rhythm
 from . import private_turn_taking as turn_taking
 from .context import now_beijing
 from .log import dbg, dbg_exc
@@ -109,8 +109,6 @@ PART_PAUSE_SECONDS = 0.8
 HISTORY_CHAR_BUDGET = 6000
 COMPLETION_TIMEOUT = 60.0
 # 模型没给回复时（超时/空回复/上游报错）同一轮重试一次前等多久。
-RETRY_PAUSE_SECONDS = 1.0
-_RETRY_OUTCOMES = frozenset({"timeout", "empty", "error"})
 # 和上一条回复的相似度超过这个就算“复读”（只看 12 字以上的回复）。
 REPEAT_SIMILARITY = 0.88
 REPEAT_MIN_CHARS = 12
@@ -1142,12 +1140,13 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
                 timeout=COMPLETION_TIMEOUT,
             )
         _record_usage("turn", result, user_id, round_index, changed)
-        if result.message is None and not retried and result.outcome in _RETRY_OUTCOMES:
-            # 上游抖了一下（超时/空回复）：同样的请求再试一次（前缀相同，基本全命中缓存），
-            # 而不是直接退回没有人设的纯对话。
+        if not retried and llm_retry.should_retry(result):
+            # 上游抖了一下（超时/空回复/限流/服务端错误）：同样的请求再试一次（前缀相同，
+            # 基本全命中缓存），而不是直接退回没有人设的纯对话。密钥错、请求非法这类
+            # 再试也没用的不试。
             retried = True
-            dbg(f"私聊用户 {user_id} 模型无回复（{result.outcome}），重试一次")
-            await asyncio.sleep(RETRY_PAUSE_SECONDS)
+            dbg(f"私聊用户 {user_id} 模型无回复（{llm_retry.error_kind(result)}），重试一次")
+            await asyncio.sleep(llm_retry.retry_pause(result))
             result = await llm.complete_with_tools_result(
                 messages,  # pyright: ignore[reportArgumentType]
                 **_round_tools(tools, final=final),
@@ -1159,7 +1158,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             _record_usage("turn", result, user_id, round_index, None)
         message = result.message
         if message is None:
-            dbg(f"私聊用户 {user_id} 模型无回复（{result.outcome}）")
+            dbg(f"私聊用户 {user_id} 模型无回复（{llm_retry.error_kind(result)}）")
             break
         if getattr(message, "tool_calls", None) and not final:
             await _run_tools(message, messages, ctx)
@@ -1736,12 +1735,17 @@ async def _report_task(bot: Any, user_id: int, task: dict[str, Any]) -> bool:
                 changed = _trace_prompt(user_id, "report", meta, tools)
                 for round_index in range(REPORT_MAX_ROUNDS + 1):
                     final = round_index == REPORT_MAX_ROUNDS or not blocked
-                    result = await llm.complete_with_tools_result(
-                        messages,  # pyright: ignore[reportArgumentType]
-                        **_round_tools(tools, final=final, allowed=ctx.allowed_tools),
-                        task="agent_dialogue",
-                        max_tokens=llm.NO_OUTPUT_LIMIT,
-                        timeout=COMPLETION_TIMEOUT,
+                    round_kwargs = _round_tools(tools, final=final, allowed=ctx.allowed_tools)
+                    # 汇报没人在等：走后台车道；上游抖一下就再试一次，别让做完的结果落成模板。
+                    result = await llm_retry.complete_with_retry(
+                        lambda kwargs=round_kwargs: llm.complete_with_tools_result(
+                            messages,  # pyright: ignore[reportArgumentType]
+                            **kwargs,
+                            task="agent_dialogue",
+                            max_tokens=llm.NO_OUTPUT_LIMIT,
+                            timeout=COMPLETION_TIMEOUT,
+                            priority="background",
+                        )
                     )
                     _record_usage("report", result, user_id, round_index, changed)
                     message = result.message
@@ -1864,12 +1868,16 @@ async def _coordinate(bot: Any, user_id: int) -> None:
             text = ""
             for round_index in range(COORDINATE_MAX_ROUNDS + 1):
                 final = round_index == COORDINATE_MAX_ROUNDS
-                result = await llm.complete_with_tools_result(
-                    messages,  # pyright: ignore[reportArgumentType]
-                    **_round_tools(tools, final=final, allowed=ctx.allowed_tools),
-                    task="agent_dialogue",
-                    max_tokens=llm.NO_OUTPUT_LIMIT,
-                    timeout=COMPLETION_TIMEOUT,
+                round_kwargs = _round_tools(tools, final=final, allowed=ctx.allowed_tools)
+                result = await llm_retry.complete_with_retry(
+                    lambda kwargs=round_kwargs: llm.complete_with_tools_result(
+                        messages,  # pyright: ignore[reportArgumentType]
+                        **kwargs,
+                        task="agent_dialogue",
+                        max_tokens=llm.NO_OUTPUT_LIMIT,
+                        timeout=COMPLETION_TIMEOUT,
+                        priority="background",
+                    )
                 )
                 _record_usage("coordinate", result, user_id, round_index, changed)
                 message = result.message

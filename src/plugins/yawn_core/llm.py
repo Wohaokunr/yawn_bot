@@ -1,4 +1,4 @@
-# ruff: noqa: E501,PLR0913,TRY003
+# ruff: noqa: E501,PLR0913,PLR2004,TRY003
 """共享 LLM 客户端：OpenAI 兼容端点的配置、路由与非流式补全。
 
 ai_chat 的流式对话与各 AI 子插件共用同一客户端、三级模型档位与
@@ -13,15 +13,15 @@ import asyncio
 import hashlib
 import re
 import time
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 from nonebot import get_plugin_config, logger
-from openai import AsyncOpenAI, OpenAIError
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, OpenAIError
 from openai.types.chat import (
     ChatCompletionMessage,
     ChatCompletionMessageParam,
@@ -189,8 +189,14 @@ ai_config = get_plugin_config(AIChatConfig)
 _client_pool: dict[tuple[str, str, str], AsyncOpenAI] = {}
 
 
-def _record_ai_metric(operation: str, outcome: str, started: float) -> None:
-    """把 LLM 调用观测写入进程指标；指标故障不影响调用方。"""
+def _record_ai_metric(
+    operation: str, outcome: str, started: float, error_kind: str = ""
+) -> None:
+    """把 LLM 调用观测写入进程指标；指标故障不影响调用方。
+
+    请求结果仍按 outcome 记；降级原因用细分后的 ``error_kind``（限流/服务端/密钥…），
+    都是固定的几个词，不会撑大标签基数。
+    """
 
     try:
         from .metrics import record_ai_degradation, record_ai_request
@@ -201,7 +207,7 @@ def _record_ai_metric(operation: str, outcome: str, started: float) -> None:
             max(time.perf_counter() - started, 0.0),
         )
         if outcome != "success":
-            record_ai_degradation("llm", outcome)
+            record_ai_degradation("llm", error_kind or outcome)
     except Exception:  # noqa: BLE001
         logger.debug("AI 指标更新失败", exc_info=True)
 
@@ -460,24 +466,162 @@ async def test_llm_connection(
 
 # 非流式补全的并发上限：防止满桌 AI 的并发决策饿死 /对话 等交互调用
 _COMPLETION_CONCURRENCY = asyncio.Semaphore(6)
+# 后台调用（记忆整理、主动发言、私聊后台小助手）另有一道更窄的闸：它们最多同时占
+# ``BACKGROUND_SLOTS`` 个名额，剩下的永远留给有人在等回复的实时回合。
+# 没有这道闸时，几十个后台小助手会把 6 个名额排满，聊天请求在队列里就超时了。
+BACKGROUND_SLOTS = 4
+_BACKGROUND_CONCURRENCY = asyncio.Semaphore(BACKGROUND_SLOTS)
+LLMPriority = Literal["interactive", "background"]
+_BACKGROUND_TASKS: frozenset[str] = frozenset({"agent_memory", "agent_proactive"})
+# 本次调用的并发车道；调用方不显式传 ``priority`` 时按它来（再退到按 task 判断）。
+_PRIORITY: ContextVar[str] = ContextVar("yawn_llm_priority", default="")
+_LANE_STATS: dict[str, dict[str, float]] = {
+    lane: {"calls": 0, "queued": 0, "queue_timeouts": 0, "wait_ms_total": 0.0, "wait_ms_max": 0.0}
+    for lane in ("interactive", "background")
+}
+# 排队超过这么久才算“排过队”（协程切换本身也要几十微秒）。
+_QUEUED_THRESHOLD_MS = 5.0
+
+
+@contextmanager
+def background_priority() -> Iterator[None]:
+    """这段代码里发起的模型调用都走后台车道（整条后台任务包一层即可）。"""
+
+    token = _PRIORITY.set("background")
+    try:
+        yield
+    finally:
+        _PRIORITY.reset(token)
+
+
+def resolve_priority(task: str, priority: Optional[str] = None) -> str:
+    """显式参数 > 当前任务绑定的车道 > 按 task 的默认值。"""
+
+    chosen = priority or _PRIORITY.get()
+    if chosen in ("interactive", "background"):
+        return chosen
+    return "background" if task in _BACKGROUND_TASKS else "interactive"
+
+
+def concurrency_snapshot() -> dict[str, Any]:
+    """两条车道的排队统计（进程启动以来），供诊断页和测试读取。"""
+
+    lanes: dict[str, Any] = {}
+    for lane, stats in _LANE_STATS.items():
+        calls = int(stats["calls"])
+        lanes[lane] = {
+            "calls": calls,
+            "queued": int(stats["queued"]),
+            "queue_timeouts": int(stats["queue_timeouts"]),
+            "avg_wait_ms": round(stats["wait_ms_total"] / calls, 1) if calls else 0.0,
+            "max_wait_ms": round(stats["wait_ms_max"], 1),
+        }
+    return {"background_slots": BACKGROUND_SLOTS, "lanes": lanes}
+
+
+def _note_wait(lane: str, waited_ms: float, *, timed_out: bool = False) -> None:
+    stats = _LANE_STATS.get(lane)
+    if stats is None:
+        return
+    stats["calls"] += 1
+    stats["wait_ms_total"] += waited_ms
+    stats["wait_ms_max"] = max(stats["wait_ms_max"], waited_ms)
+    if waited_ms >= _QUEUED_THRESHOLD_MS:
+        stats["queued"] += 1
+    if timed_out:
+        stats["queue_timeouts"] += 1
 
 
 @asynccontextmanager
-async def _completion_slot(timeout: float) -> AsyncIterator[float]:
+async def _completion_slot(
+    timeout: float, *, priority: str = "interactive"
+) -> AsyncIterator[float]:
     """获取并发名额；排队时间计入调用方总超时，产出剩余可用于请求的秒数。
 
     排队超时抛出 ``asyncio.TimeoutError``，与请求超时走同一降级分支。
+    后台调用先过后台闸再拿全局名额；两把都在同一个期限内等。
     """
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    await asyncio.wait_for(_COMPLETION_CONCURRENCY.acquire(), timeout=timeout)
+    started = loop.time()
+    deadline = started + timeout
+    background = priority == "background"
+    held_background = False
+    held_global = False
     try:
+        try:
+            if background:
+                await asyncio.wait_for(_BACKGROUND_CONCURRENCY.acquire(), timeout=timeout)
+                held_background = True
+            await asyncio.wait_for(
+                _COMPLETION_CONCURRENCY.acquire(),
+                timeout=max(deadline - loop.time(), 0.0),
+            )
+            held_global = True
+        except asyncio.TimeoutError:
+            _note_wait(priority, (loop.time() - started) * 1000, timed_out=True)
+            raise
+        _note_wait(priority, (loop.time() - started) * 1000)
         remaining = deadline - loop.time()
         if remaining <= 0:
             raise asyncio.TimeoutError
         yield remaining
     finally:
-        _COMPLETION_CONCURRENCY.release()
+        if held_global:
+            _COMPLETION_CONCURRENCY.release()
+        if held_background:
+            _BACKGROUND_CONCURRENCY.release()
+
+
+# 失败原因细分（``LLMToolCompletionResult.error_kind`` / ``last_completion_error_kind``）。
+# ``outcome`` 仍是原来那几类（success/timeout/empty/error/…），老调用方不用改。
+RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset(
+    {"timeout", "empty", "rate_limited", "server", "connection", "unknown"}
+)
+_CONTEXT_LENGTH_MARKERS = (
+    "context length",
+    "context_length",
+    "maximum context",
+    "context window",
+    "too many tokens",
+    "reduce the length",
+    "string too long",
+)
+
+
+def classify_llm_error(exc: BaseException) -> str:  # noqa: C901, PLR0911
+    """把服务商异常归成一类：决定值不值得原样再试一次，也给诊断页一个说得清的原因。
+
+    只看异常类型、HTTP 状态码和服务商自己的报错文字，不碰用户消息。
+    """
+
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(exc, APITimeoutError):
+        return "timeout"
+    if isinstance(exc, APIConnectionError):
+        return "connection"
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    if status == 429:
+        # 余额/额度用完也常是 429，但等一下再试没有用。
+        if "insufficient" in text or "quota" in text or "balance" in text:
+            return "quota"
+        return "rate_limited"
+    if status in {401, 403}:
+        return "auth"
+    if status == 402:
+        return "quota"
+    if status in {400, 413, 422}:
+        if status == 413 or any(marker in text for marker in _CONTEXT_LENGTH_MARKERS):
+            return "context_length"
+        return "bad_request"
+    if status == 404:
+        return "bad_request"
+    if status in {408, 409}:
+        return "server"
+    if isinstance(status, int) and status >= 500:
+        return "server"
+    return "unknown"
 
 
 # 请求观察者：每次非流式补全结束后收到“实际发给服务商的请求 + 回复”。
@@ -514,6 +658,8 @@ def _observe(
     outcome: str,
     started: float,
     timeout: float,
+    error_kind: str = "",
+    priority: str = "",
 ) -> None:
     if not _REQUEST_OBSERVERS:
         return
@@ -531,6 +677,8 @@ def _observe(
             "timeout": timeout,
             "response": response,
             "outcome": outcome,
+            "error_kind": error_kind,
+            "priority": priority,
             "duration_ms": max(time.perf_counter() - started, 0.0) * 1000,
         }
     )
@@ -549,6 +697,25 @@ def last_completion_outcome() -> str:
     return _LAST_COMPLETION_OUTCOME.get()
 
 
+_LAST_COMPLETION_ERROR_KIND: ContextVar[str] = ContextVar(
+    "yawn_llm_last_completion_error_kind", default=""
+)
+
+
+def last_completion_error_kind() -> str:
+    """最近一次 ``complete()`` 没拿到回复的细分原因（见 ``classify_llm_error``）；成功时为空串。"""
+
+    return _LAST_COMPLETION_ERROR_KIND.get()
+
+
+def _error_kind_for(outcome: str, error_kind: str) -> str:
+    """没有异常可分类的失败（空回复、没配密钥、被取消）直接用 outcome 当原因。"""
+
+    if outcome == "success":
+        return ""
+    return error_kind or ("unknown" if outcome == "error" else outcome)
+
+
 async def complete(  # noqa: PLR0911, PLR0915
     messages: list[ChatCompletionMessageParam],
     *,
@@ -558,11 +725,18 @@ async def complete(  # noqa: PLR0911, PLR0915
     task: LLMTask = "core_chat",
     response_format: dict[str, Any] | None = None,
     multimodal: bool = False,
+    priority: Optional[LLMPriority] = None,
 ) -> Optional[str]:
-    """非流式补全：返回完整回复文本；失败/超时/空回复返回 None。"""
+    """非流式补全：返回完整回复文本；失败/超时/空回复返回 None。
+
+    ``priority`` 选并发车道：``background`` 的调用最多占 ``BACKGROUND_SLOTS`` 个名额；
+    不传时按 ``background_priority()`` 绑定或 task 的默认值。
+    """
     _ = multimodal  # reserved for role-specific provider capability handling
     started = time.perf_counter()
     outcome = "error"
+    error_kind = ""
+    lane = resolve_priority(task, priority)
     result: Optional[str] = None
     # 部分 OpenAI 兼容端点会把显式 null 的 temperature 拒成 400，
     # 仅在调用方显式给值时才加入请求参数
@@ -596,7 +770,7 @@ async def complete(  # noqa: PLR0911, PLR0915
             **extra,
         }
         try:
-            async with _completion_slot(timeout) as remaining:
+            async with _completion_slot(timeout, priority=lane) as remaining:
                 response = await asyncio.wait_for(
                     llm_client.chat.completions.create(**create_kwargs),
                     timeout=remaining,
@@ -610,10 +784,11 @@ async def complete(  # noqa: PLR0911, PLR0915
                 exc_info=True,
             )
             return None
-        except OpenAIError:
+        except OpenAIError as exc:
+            error_kind = classify_llm_error(exc)
             logger.warning(
                 f"LLM 非流式补全失败（task={task}, model={request.model}, "
-                f"timeout={timeout}s）",
+                f"timeout={timeout}s, 原因={error_kind}）",
                 exc_info=True,
             )
             return None
@@ -649,8 +824,9 @@ async def complete(  # noqa: PLR0911, PLR0915
         )
         return None
     finally:
-        _record_ai_metric(task, outcome, started)
+        _record_ai_metric(task, outcome, started, _error_kind_for(outcome, error_kind))
         _LAST_COMPLETION_OUTCOME.set(outcome)
+        _LAST_COMPLETION_ERROR_KIND.set(_error_kind_for(outcome, error_kind))
         _observe(
             kind="complete",
             task=task,
@@ -660,6 +836,8 @@ async def complete(  # noqa: PLR0911, PLR0915
             outcome=outcome,
             started=started,
             timeout=timeout,
+            error_kind=_error_kind_for(outcome, error_kind),
+            priority=lane,
         )
     return result
 
@@ -703,6 +881,15 @@ class LLMToolCompletionResult:
     cache_miss_tokens: int | None
     outcome: str
     duration_ms: float
+    # 没拿到回复时的细分原因：timeout / empty / rate_limited / server / connection /
+    # auth / quota / bad_request / context_length / not_configured / cancelled / unknown。
+    error_kind: str = ""
+
+    @property
+    def retryable(self) -> bool:
+        """原样再请求一次有没有意义：上游抖动值得，密钥错/请求非法/上下文超长不值得。"""
+
+        return self.message is None and self.error_kind in RETRYABLE_ERROR_KINDS
 
 
 def _tool_completion_result(
@@ -712,6 +899,7 @@ def _tool_completion_result(
     response: object = None,
     outcome: str,
     started: float,
+    error_kind: str = "",
 ) -> LLMToolCompletionResult:
     usage = _usage_value(response, "usage") if response is not None else None
     cached_tokens, cache_miss_tokens = _prompt_cache_usage(usage)
@@ -728,6 +916,7 @@ def _tool_completion_result(
         cache_miss_tokens=cache_miss_tokens,
         outcome=outcome,
         duration_ms=max(time.perf_counter() - started, 0.0) * 1000,
+        error_kind=_error_kind_for(outcome, error_kind),
     )
 
 
@@ -743,6 +932,7 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
     multimodal: bool = False,
     raise_on_unsupported: bool = False,
     tool_choice: str | dict[str, Any] | None = None,
+    priority: Optional[LLMPriority] = None,
 ) -> LLMToolCompletionResult:
     """带工具调用的非流式补全，并返回 WebUI 可展示的诊断元数据。
 
@@ -757,6 +947,8 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
     """
     started = time.perf_counter()
     outcome = "error"
+    error_kind = ""
+    lane = resolve_priority(task, priority)
     extra: dict[str, Any] = {}
     if temperature is not None:
         extra["temperature"] = temperature
@@ -796,7 +988,7 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
             **extra,
         }
         try:
-            async with _completion_slot(timeout) as remaining:
+            async with _completion_slot(timeout, priority=lane) as remaining:
                 response = await asyncio.wait_for(
                     llm_client.chat.completions.create(**create_kwargs),
                     timeout=remaining,
@@ -833,14 +1025,17 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     response_format=response_format,
                     multimodal=multimodal,
                     raise_on_unsupported=raise_on_unsupported,
+                    priority=priority,
                 )
+            else:
+                error_kind = classify_llm_error(exc)
             logger.warning(
                 f"LLM 工具补全失败（task={task}, model={request.model}, "
-                f"timeout={timeout}s）",
+                f"timeout={timeout}s, 原因={error_kind or outcome}）",
                 exc_info=True,
             )
             return _tool_completion_result(
-                message=None, outcome=outcome, started=started
+                message=None, outcome=outcome, started=started, error_kind=error_kind
             )
         if not response.choices:
             outcome = "empty"
@@ -891,7 +1086,7 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
         )
         return _tool_completion_result(message=None, outcome=outcome, started=started)
     finally:
-        _record_ai_metric(task, outcome, started)
+        _record_ai_metric(task, outcome, started, _error_kind_for(outcome, error_kind))
         _observe(
             kind="tools",
             task=task,
@@ -901,6 +1096,8 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
             outcome=outcome,
             started=started,
             timeout=timeout,
+            error_kind=_error_kind_for(outcome, error_kind),
+            priority=lane,
         )
     return _tool_completion_result(message=None, outcome=outcome, started=started)
 
@@ -916,6 +1113,7 @@ async def complete_with_tools(
     response_format: dict[str, Any] | None = None,
     multimodal: bool = False,
     raise_on_unsupported: bool = False,
+    priority: Optional[LLMPriority] = None,
 ) -> Optional[ChatCompletionMessage]:
     """兼容现有调用方，只返回完整 message（含 tool_calls）。"""
 
@@ -929,6 +1127,7 @@ async def complete_with_tools(
         response_format=response_format,
         multimodal=multimodal,
         raise_on_unsupported=raise_on_unsupported,
+        priority=priority,
     )
     return result.message
 
