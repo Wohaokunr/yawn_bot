@@ -70,9 +70,10 @@ from .tool_router import (
     select_dialogue_tool_names,
 )
 
-# 这些工具族只写调用者自己的东西（本群沙箱工作区），不需要 UserGroup 里已有
-# 这位成员：新入群、还没同步过成员表的人也能跑代码。真实 actor 仍然必需。
-_ACTOR_SCOPED_FAMILIES = frozenset({"sandbox"})
+# 这些工具族只写调用者自己的东西（本群沙箱工作区、调用者本人的签到），不需要
+# UserGroup 里已有这位成员：新入群、还没同步过成员表的人也能跑代码、签到
+# （签到服务自己会补齐 BotUser/UserGroup，和 /签到 命令一致）。真实 actor 仍然必需。
+_ACTOR_SCOPED_FAMILIES = frozenset({"sandbox", "checkin"})
 FAMILY_LOAD_LIMIT = 12
 # 同参数也可能有不同结果（随机数、读到更新后的文件），不做同回合去重。
 _NON_IDEMPOTENT_TOOLS = frozenset({"run_python", "run_shell"})

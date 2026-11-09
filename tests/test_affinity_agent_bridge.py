@@ -282,6 +282,35 @@ async def test_checkin_tool_signs_actor_and_reports_status(factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_checkin_tool_works_before_member_row_exists(factory) -> None:
+    """新成员还没有 UserGroup 行时也能签到（和 /签到 一样由签到服务补齐）。"""
+
+    caps = capabilities.BotGroupCapabilities(
+        role="member", can_manage=False, actions=frozenset({"send_group_msg"})
+    )
+    newcomer = 8
+    async with factory() as session:
+        result = await tools.execute_tool(
+            "checkin_for_me",
+            {},
+            bot=_Bot(),
+            group_id=GROUP,
+            actor_user_id=newcomer,
+            session=session,
+            capabilities=caps,
+        )
+        assert result["ok"] is True, result
+        assert result["result"]["status"] == "ok"
+        await session.commit()
+    async with factory() as session:
+        membership = await session.get(UserGroup, (GROUP, newcomer))
+        summary = await session.get(CheckinUser, (GROUP, newcomer))
+    assert membership is not None
+    assert summary is not None
+    assert summary.total_days == 1
+
+
+@pytest.mark.asyncio
 async def test_checkin_tool_respects_feature_switch(factory) -> None:
     caps = capabilities.BotGroupCapabilities(
         role="member", can_manage=False, actions=frozenset({"send_group_msg"})
