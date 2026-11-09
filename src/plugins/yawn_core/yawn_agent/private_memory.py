@@ -116,13 +116,26 @@ async def _row_for(session: Any, user_id: int, key: str) -> AgentMemory | None:
     )
 
 
-def _merge_list(old: str, new: str) -> str:
+# 爱好/喜好/讨厌/技能这类列表每类最多记几样；好感等级（memory_bonus）会再加几样。
+LIST_ITEMS = 8
+
+
+def list_keep(user_id: int | None) -> int:
+    try:
+        from ..affinity_perks import bonus_limit
+
+        return bonus_limit(LIST_ITEMS, user_id, "memory_bonus")
+    except Exception:  # noqa: BLE001
+        return LIST_ITEMS
+
+
+def _merge_list(old: str, new: str, keep: int = LIST_ITEMS) -> str:
     items = [part for part in old.split("、") if part.strip()]
     for raw in new.split("、"):
         part = raw.strip()
         if part and not any(is_near_duplicate(part, item) for item in items):
             items.append(part)
-    return "、".join(items[-8:])
+    return "、".join(items[-max(keep, 1):])
 
 
 async def remember(  # noqa: PLR0913
@@ -174,7 +187,7 @@ async def remember(  # noqa: PLR0913
         return {"created": False, "key": key, "content": str(row.content), "kept": True}
     old = str(row.content or "")
     merged = (
-        _merge_list(old, content)
+        _merge_list(old, content, list_keep(user_id))
         if key in LIST_KEYS and source == row.source_kind
         else content
     )

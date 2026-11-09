@@ -48,6 +48,11 @@ WebUI 后端。全局规则（迁移、权限注入写法、Ruff 约定）见 [�
 | `checkin.py` | 签到命令（群里签当前群、私聊一键签所有群、`/签到状态`），逻辑全在 `checkin_service.py` |
 | `checkin_service.py` | 签到唯一实现：`perform_checkin`（不提交、SAVEPOINT 防重、积分/群经验/好感/里程碑）、`checkin_overview`；命令、群 Agent 工具、私聊 Agent 共用 |
 | `affinity.py` | 全局好感唯一写入口：`grant`（来源日上限、`AffinityEvent` 流水、表未迁移时降级）、等级 `level_for`/`level_words`（给模型只给词语） |
+| `affinity_policy.py` | 好感玩法策略（pydantic，`data/affinity/policy.json`，`AFFINITY_DATA_DIR` 可改目录）：六级权益表 `LevelPerks`（额度加成、语气/分寸、送礼次数、商店折扣、解锁项 `UNLOCKS`、升级礼包）、礼物、商店道具、每日任务、衰减、久别问候；WebUI「好感度」整份读写 |
+| `affinity_store.py` | 每人一份好感玩法 JSON（`data/affinity/users/<QQ>.json`）：背包、称呼、当日任务、送礼/互动记录、升级历史、护盾/暴击卡、衰减与久别问候标记；不需要迁移 |
+| `affinity_perks.py` | 好感“有用”的那一层：进程内余额缓存 + `bonus_limit`（各额度检查点按等级加成，没缓存按陌生）、`has_unlock`、每日任务（进度在 `grant` 钩子里记，奖励只在入口 `settle_quests` 发）、升级礼包与“刚升级”一次性提示、`speaker_view`（给 Agent 的称呼/分寸/刚升级/今天的礼物，只有词语）、衰减 `run_decay`（每天 4:10，保级、护盾）、久别问候 `care_message`、互动回复 |
+| `affinity_economy.py` | 花签到积分：钱包（跨群合计，扣时先扣余额多的群）、送礼（今日心仪 ×N、礼物好感日上限）、商店/背包、道具（补签卡救 7 天内断的连签、护盾、暴击卡、任务刷新券）、签到积分加成 `checkin_bonus`；业务错误 `EconomyError(code)` |
+| `affinity_commands.py` | 命令 /好感 /好感权益 /好感榜 /送礼 /好感商店 /兑换 /背包 /使用道具 /好感任务 /叫我 /击掌（/摸头 /抱抱 /贴贴 /举高高），都受 `checkin` 功能开关；共用的 `set_nickname`、`do_interact`；衰减定时任务 |
 | `private_chat_bridge.py` | 私聊 Agent 桥：`PrivateAgentConfig`（`PRIVATE_AGENT_*`）、处理函数注册（由 `yawn_agent` 在加载时注册，核心不导入子插件）、成员“暂停自动回复”状态（JSON，非数据库）。`ai_chat.py` 先交给它，返回 None 或异常就退回流式纯对话 |
 | `friend_approve.py` | 好友申请审批 |
 | `webui_accounts.py` / `webui_devices.py` / `webui_account_commands.py` | WebUI 个人账号：密码与设置码（JSON）/ 登录设备、登录记录、登录提醒偏好（JSON，只存 sid 哈希）/ 私聊命令 `/网页登录 [设备|提醒 …|下线|注销]`、`/网页密码` 与登录提醒发送。不依赖 FastAPI，WebUI 与私聊 Agent 共用 |

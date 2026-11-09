@@ -58,8 +58,9 @@ async def _run(ctx, name, **args):
 def test_tool_table_is_complete_and_safe() -> None:
     names = [tool.name for tool in ptools.ALL_TOOLS]
     # 2026-11 精简：六个状态查询并成 my_status，what_you_remember/chat_history 并进 recall/my_data，
-    # webui_onboarding 并进 webui_account，toolbox 只在电脑用不了时出现 → 33 个
-    assert len(names) == len(set(names)) == 33
+    # webui_onboarding 并进 webui_account，toolbox 只在电脑用不了时出现 → 33 个；
+    # 2026-11 好感玩法加了 affinity → 34 个
+    assert len(names) == len(set(names)) == 34
     for old in ptools.LEGACY_ALIASES:
         assert old not in names and ptools.LEGACY_ALIASES[old][0] in names
     # 虚拟电脑 4 个（含能力包目录与执行）+ 小助手任务 3 个，只在可用时才出现在 schema 里
@@ -293,7 +294,8 @@ async def test_my_data_summary_quota_and_wipe(maker) -> None:
         summary = (await _run(ctx, "my_data", action="summary"))["result"]
         assert summary["stored"]["notes"] == 1 and summary["stored"]["private_memories"] == 1
         quota = (await _run(ctx, "my_data", action="quota"))["result"]
-        assert quota["turn_limit"] == 120
+        # 基础 120 轮；这位用户好感 70 是「熟人」，好感权益多给 25%
+        assert quota["turn_limit"] == 150
         refused = await _run(ctx, "my_data", action="wipe")
         assert refused["ok"] is False
         wiped = (await _run(ctx, "my_data", action="wipe", confirm=True))["result"]
@@ -354,6 +356,10 @@ async def test_web_search_respects_private_quota(maker, monkeypatch) -> None:
     monkeypatch.setattr(policy, "record_admin_call", lambda *_a: None)
     monkeypatch.setattr(policy, "usage_snapshot", lambda: {"totals": {}})
     monkeypatch.setattr(bridge.private_agent_config, "private_agent_web_daily", 1)
+    # 只测基础额度：关掉好感等级加成（加成另有 test_affinity_perks 覆盖）
+    perks = importlib.import_module(f"{_PKG}.affinity_perks")
+    apol = importlib.import_module(f"{_PKG}.affinity_policy")
+    monkeypatch.setattr(perks, "load_policy", lambda: apol.AffinityPolicy(enabled=False))
     async with maker() as session:
         ctx = await _tool_ctx(session)
         first = await _run(ctx, "web_search", query="今天新闻")

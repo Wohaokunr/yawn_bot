@@ -571,6 +571,29 @@ OFFER_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool("offers", _OFFERS_DESCRIPTION, _OFFERS_PROPERTIES, ("action",), writes=True),
 )
 OFFER_NAMES = frozenset(tool.name for tool in OFFER_TOOLS)
+# 好感玩法（affinity_perks / affinity_economy）：查权益/任务/背包，送礼、兑换、用道具、称呼、互动。
+AFFINITY_VIEWS = ("overview", "perks", "gifts", "shop", "bag", "quests")
+AFFINITY_WRITES = ("gift", "buy", "use", "nickname", "interact")
+AFFINITY_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "affinity",
+        "好感玩法（只作用于他本人，花的是他自己的签到积分；结果不报好感数值）。查：overview 概况（等级、这一级的权益和解锁、"
+        "下一级解锁什么、今日任务、背包、签到积分、今日心仪礼物）、perks 各级权益、gifts 礼物清单、shop 商店、bag 背包、quests 今日任务；"
+        "办：gift 送你礼物（item 礼物名、count）、buy 兑换道具、use 用道具（补签卡写 group 指定续哪个群）、"
+        "nickname 设专属称呼（nickname；写“清除”取消）、interact 互动（item 写 击掌/摸头/抱抱/贴贴/举高高）。"
+        "他问好感有什么用、想送你东西、要补签、让你换个称呼叫他时用；只在他明确要求时才办，失败照实说",
+        {
+            "action": {"type": "string", "enum": [*AFFINITY_VIEWS, *AFFINITY_WRITES]},
+            "item": {"type": "string", "minLength": 1, "maxLength": 20},
+            "count": {"type": "integer", "minimum": 1, "maximum": 10},
+            "nickname": {"type": "string", "minLength": 1, "maxLength": 12},
+            "group": _GROUP_SCHEMA,
+        },
+        ("action",),
+        writes=True,
+    ),
+)
+AFFINITY_NAMES = frozenset(tool.name for tool in AFFINITY_TOOLS)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
@@ -582,6 +605,7 @@ ALL_TOOLS: tuple[PrivateTool, ...] = (
     + BRIDGE_TOOLS
     + SCHEDULE_TOOLS
     + OFFER_TOOLS
+    + AFFINITY_TOOLS
     + COMPUTER_TOOLS
     + TASK_TOOLS
 )
@@ -1578,6 +1602,8 @@ async def execute_private_tool(  # noqa: PLR0915
             result = await schedules_tool(args, ctx)
         elif name in OFFER_NAMES:
             result = _offers_tool(args, ctx)
+        elif name in AFFINITY_NAMES:
+            result = await _affinity_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
@@ -1594,6 +1620,20 @@ async def execute_private_tool(  # noqa: PLR0915
         # 声明核验按“工具.动作”区分：查了待办不能说“已经帮你加上了”
         ctx.succeeded.add(f"{name}.{args['action']}")
     return {"ok": True, "result": result}
+
+
+async def _affinity_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
+    from .tool_handlers.affinity import action_payload, overview_payload
+
+    action = str(args.get("action") or "overview")
+    if action in AFFINITY_VIEWS:
+        return await overview_payload(ctx.session, ctx.user_id, action, now=ctx.now)
+    group_id = _single_group(ctx, str(args["group"])).group_id if args.get("group") else None
+    # SAVEPOINT：积分扣了但后面失败（比如背包并发被用掉）时只回滚这一段
+    async with ctx.session.begin_nested():
+        payload = await action_payload(ctx.session, ctx.user_id, args, group_id=group_id, name=ctx.call_them or ctx.nickname or "", now=ctx.now)
+    ctx.mutated = True
+    return payload
 
 
 def _offers_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
@@ -1747,6 +1787,7 @@ _ORGANIZER_ACTIONS: dict[str, frozenset[str]] = {
     "my_persona": frozenset({"set", "preset", "template", "reset", "undo"}),
     "webui_account": frozenset({"setup_code", "logout_all", "ask_password", "cancel"}),
     "computer_files": frozenset({"delete"}),
+    "affinity": frozenset(AFFINITY_WRITES),
 }
 
 

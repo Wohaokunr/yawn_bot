@@ -185,6 +185,8 @@ class Facts:
     friend: bool | None = None
     paused: bool = False
     busy: bool = False
+    # 好感等级还没解锁“主动提议”（affinity_policy 的 offers 解锁项）
+    affinity_locked: bool = False
 
     @property
     def last_chat_at(self) -> datetime | None:
@@ -288,6 +290,8 @@ def evaluate_gate(
         return stop("paused")
     if settings.only_friends and facts.friend is False:
         return stop("not_friend")
+    if facts.affinity_locked:
+        return stop("affinity_level")
     if facts.last_user_at is None:
         return stop("no_history")
     if now - facts.last_user_at > timedelta(days=int(settings.active_within_days)):

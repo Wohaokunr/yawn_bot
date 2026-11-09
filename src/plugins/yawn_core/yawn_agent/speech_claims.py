@@ -58,6 +58,14 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,8}}签(?:好|上|完)?(?:到)?了|签到(?:已经|已)?(?:成功|好了|完成)"),
         frozenset({"checkin_for_me", "get_my_checkin"}),
     ),
+    # 好感玩法：没真的兑换/补签就说“换好了/补签好了/续上了”，他会以为积分花了、连签保住了。
+    "affinity_item": (
+        re.compile(
+            rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:兑换|补签|续上|换到)(?:好|成功|了)"
+            r"|(?:兑换|补签)(?:已经|已)?(?:成功|好了|完成)|连签(?:已经|已)?(?:续上|补上|保住)了"
+        ),
+        frozenset({"affinity_action"}),
+    ),
     "kick": (
         re.compile(rf"{_COMPLETION}[^。！？!?\n]{{0,12}}(?:踢出|踢了|移出群)"),
         frozenset({"kick_member"}),

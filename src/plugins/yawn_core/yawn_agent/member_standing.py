@@ -28,8 +28,15 @@ from .schedule_wake import WAKE_TRIGGER_SOURCE
 MIN_STREAK_TO_MENTION = 3
 
 
-def standing_view(standing: Any, now: datetime) -> dict[str, Any]:
-    """把 ``MemberStanding`` 投影成发言人层字段；没有值得说的返回空 dict。"""
+def standing_view(
+    standing: Any, now: datetime, *, user_id: int | None = None
+) -> dict[str, Any]:
+    """把 ``MemberStanding`` 投影成发言人层字段；没有值得说的返回空 dict。
+
+    给了 ``user_id`` 时再并上好感玩法的字段（``affinity_perks.speaker_view``）：
+    专属称呼 ``call_them``、这一级能做到什么程度 ``what_you_can_do``、
+    刚升级 ``just_leveled_up``、今天送的礼物 ``gifts_today``。
+    """
 
     if standing is None:
         return {}
@@ -37,6 +44,13 @@ def standing_view(standing: Any, now: datetime) -> dict[str, Any]:
     points = int(getattr(standing, "affinity", 0) or 0)
     if level_for(points).index > 0:
         view["overall"] = level_words(points)
+    if user_id:
+        try:
+            from ..affinity_perks import speaker_view
+
+            view.update(speaker_view(int(user_id), points, now, channel="group"))
+        except Exception:  # noqa: BLE001
+            dbg_exc(f"成员 {user_id} 好感玩法字段读取失败(忽略)")
     streak = int(getattr(standing, "streak_days", 0) or 0)
     last = getattr(standing, "last_checkin_date", None)
     if isinstance(last, datetime):
@@ -62,7 +76,7 @@ def merge_speaker_standing(
 
     if speaker_id is None:
         return views
-    extra = standing_view(standing, now)
+    extra = standing_view(standing, now, user_id=speaker_id)
     if not extra:
         return views
     merged = [dict(item) for item in views]
@@ -125,6 +139,13 @@ async def reward_group_interaction(  # noqa: PLR0913
         return False
     if change.applied:
         dbg(f"群 {group_id} 成员 {actor} 群聊互动好感 +{change.applied}")
+    try:
+        # 每日任务“在群里找我聊”完成了就顺手把奖励发掉
+        from ..affinity_perks import settle_quests
+
+        await settle_quests(session, actor, now=now)
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"群 {group_id} 成员 {actor} 每日任务结算失败(忽略)")
     return bool(change.applied)
 
 

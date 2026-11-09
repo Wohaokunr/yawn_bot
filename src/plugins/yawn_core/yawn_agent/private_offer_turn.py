@@ -107,7 +107,28 @@ async def gather_facts(bot: Any, user_id: int, settings: OfferSettings) -> po.Fa
         friend=friend,
         paused=auto_paused(user_id),
         busy=user_turn_lock(user_id).locked(),
+        affinity_locked=await _offers_locked(user_id),
     )
+
+
+async def _offers_locked(user_id: int) -> bool:
+    """好感玩法开着、而他的等级还没解锁“主动提议”时为 True；查不到按没锁。"""
+
+    try:
+        from ..affinity_perks import cached_points, has_unlock, load_points, policy
+
+        pol = policy()
+        if not pol.enabled or pol.unlock_level("offers") is None:
+            return False
+        points = cached_points(user_id)
+        if points is None:
+            from nonebot_plugin_orm import get_session
+
+            async with get_session() as session:
+                points = await load_points(session, user_id)
+        return not has_unlock(points, "offers", pol)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def gather_candidates(user_id: int, record: dict[str, Any], now: datetime, settings: OfferSettings) -> list[po.Candidate]:

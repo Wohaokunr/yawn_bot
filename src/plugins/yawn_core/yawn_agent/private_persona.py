@@ -424,6 +424,17 @@ def _snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def self_edit_limit(base: int, user_id: int) -> int:
+    """每天自己改人设的次数：策略基础值 + 好感等级加成。"""
+
+    try:
+        from ..affinity_perks import bonus_limit  # noqa: TID252
+
+        return bonus_limit(int(base), user_id, "persona_edit_bonus")
+    except Exception:  # noqa: BLE001
+        return int(base)
+
+
 def _apply(
     user_id: int,
     *,
@@ -449,9 +460,10 @@ def _apply(
         if by == BY_SELF:
             if raw.get("locked"):
                 raise PersonaEditError("管理员锁定了你的私聊人设，暂时不能自己改", status=403, code="permission")
-            if count_self and self_edits_today(raw) >= policy.self_edit_daily:
+            edit_limit = self_edit_limit(policy.self_edit_daily, user_id)
+            if count_self and self_edits_today(raw) >= edit_limit:
                 raise PersonaEditError(
-                    f"今天已经改了 {policy.self_edit_daily} 次人设，明天再来吧", status=429, code="quota"
+                    f"今天已经改了 {edit_limit} 次人设，明天再来吧", status=429, code="quota"
                 )
         before = resolve_from_record(record, policy)
         history = [item for item in raw.get("history") or [] if isinstance(item, dict)]

@@ -103,6 +103,10 @@ class CheckinResult:
     milestone_points: int = 0
     affinity_changes: tuple[affinity.AffinityChange, ...] = field(default=())
     next_milestone: Optional[int] = None
+    # 好感等级的签到积分加成、签到暴击卡翻倍的部分（affinity_economy.checkin_bonus）
+    level_bonus_points: int = 0
+    lucky_bonus_points: int = 0
+    bonus_level: str = ""
 
     @property
     def ok(self) -> bool:
@@ -139,7 +143,16 @@ class CheckinResult:
             "points": self.points,
         }
         if self.ok:
-            payload["reward_points"] = self.reward + self.milestone_points
+            payload["reward_points"] = (
+                self.reward
+                + self.milestone_points
+                + self.level_bonus_points
+                + self.lucky_bonus_points
+            )
+            if self.level_bonus_points:
+                payload["affinity_level_bonus_points"] = self.level_bonus_points
+            if self.lucky_bonus_points:
+                payload["lucky_card_doubled"] = True
             payload["exp_gain"] = self.exp_gain
             payload["rank_today"] = self.rank_today
             payload["affinity_up"] = self.affinity_gain > 0
@@ -292,7 +305,12 @@ async def perform_checkin(  # noqa: PLR0913
 
     milestone = streak if streak in MILESTONES else None
     milestone_points, milestone_affinity = MILESTONES.get(streak, (0, 0))
-    summary.points = int(summary.points or 0) + reward + milestone_points
+    from .affinity_economy import checkin_bonus
+
+    bonus = await checkin_bonus(session, user_id, reward, now=moment)
+    summary.points = (
+        int(summary.points or 0) + reward + milestone_points + bonus.total
+    )
 
     gained_exp = exp_reward(streak)
     membership.exp = int(membership.exp or 0) + gained_exp
@@ -350,6 +368,9 @@ async def perform_checkin(  # noqa: PLR0913
         milestone_points=milestone_points,
         affinity_changes=tuple(changes),
         next_milestone=next_milestone(streak),
+        level_bonus_points=bonus.level_points,
+        lucky_bonus_points=bonus.lucky_points,
+        bonus_level=bonus.level,
     )
 
 
@@ -477,6 +498,12 @@ def format_checkin_reply(result: CheckinResult) -> str:
         lines.append(
             f"🎉 连签 {result.milestone} 天达成！额外奖励 {result.milestone_points} 积分"
         )
+    if result.level_bonus_points:
+        lines.append(
+            f"💗 好感「{result.bonus_level}」签到加成 +{result.level_bonus_points} 积分"
+        )
+    if result.lucky_bonus_points:
+        lines.append(f"🎯 签到暴击卡生效，积分翻倍 +{result.lucky_bonus_points}")
     gain = result.affinity_gain
     if gain > 0:
         level = result.leveled_up_to
@@ -502,7 +529,9 @@ def format_batch_reply(results: list[tuple[str, CheckinResult]]) -> str:
             extra = f"，连签 {result.streak_days} 天"
             if result.milestone:
                 extra += f"（🎉 {result.milestone} 天里程碑）"
-            lines.append(f"✅ {name}：+{result.reward} 积分{extra}")
+            bonus = result.level_bonus_points + result.lucky_bonus_points
+            plus = f"（含好感加成 {bonus}）" if bonus else ""
+            lines.append(f"✅ {name}：+{result.reward + bonus} 积分{plus}{extra}")
             gained += result.affinity_gain
         else:
             lines.append(f"☑️ {name}：今天已签，连签 {result.streak_days} 天")

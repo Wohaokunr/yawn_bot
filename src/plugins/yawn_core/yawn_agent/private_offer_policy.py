@@ -54,6 +54,7 @@ REASON_LABELS: dict[str, str] = {
     "user_off": "他自己关掉了主动提议",
     "paused": "他用 /退出 暂停了私聊 Agent",
     "not_friend": "不是好友",
+    "affinity_level": "好感等级还没解锁主动提议",
     "quiet": "夜间不打扰时段",
     "dnd": "他设的免打扰时段",
     "snoozed": "他让我先别问（暂停中）",

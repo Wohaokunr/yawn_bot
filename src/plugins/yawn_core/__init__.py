@@ -7,6 +7,7 @@ from nonebot import get_driver, logger
 from sqlalchemy import event
 
 from . import (
+    affinity_commands,
     ai_chat,
     checkin,
     command_catalog,
@@ -28,6 +29,7 @@ from .command_catalog import unregister_command_group
 
 __all__ = [
     "SubPluginLoadStatus",
+    "affinity_commands",
     "ai_chat",
     "checkin",
     "command_catalog",

@@ -108,6 +108,13 @@ def _daily_limit(user_id: int, limit: int) -> int:
     if limit <= 0:
         return limit
     try:
+        from ..affinity_perks import bonus_limit  # noqa: TID252
+
+        # 好感等级加成算在后台上限之内的“额外额度”，再按人设档位收窄
+        limit = bonus_limit(limit, user_id, "private_sticker_bonus")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from .private_persona import sticker_scale
 
         scale = sticker_scale(user_id)

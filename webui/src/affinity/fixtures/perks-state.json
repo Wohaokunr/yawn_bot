@@ -1,0 +1,939 @@
+{
+ "enabled": true,
+ "level": "熟人",
+ "levelIndex": 2,
+ "current": {
+  "level": "熟人",
+  "tone": "比较熟了，可以开开玩笑",
+  "behavior": "可以开玩笑、吐槽，记得他说过的事并自然提起",
+  "bonuses": [
+   {
+    "key": "private_turns_pct",
+    "label": "私聊每天能聊的轮数",
+    "value": 25,
+    "unit": "%"
+   },
+   {
+    "key": "private_web_bonus",
+    "label": "私聊每天联网搜索次数",
+    "value": 2,
+    "unit": "次"
+   },
+   {
+    "key": "private_sticker_bonus",
+    "label": "私聊每天表情包条数",
+    "value": 4,
+    "unit": "次"
+   },
+   {
+    "key": "web_search_bonus",
+    "label": "群里每天网页搜索次数",
+    "value": 4,
+    "unit": "次"
+   },
+   {
+    "key": "sandbox_bonus",
+    "label": "群里每天代码沙箱次数",
+    "value": 4,
+    "unit": "次"
+   },
+   {
+    "key": "sticker_collect_bonus",
+    "label": "群里每天收藏表情包张数",
+    "value": 4,
+    "unit": "次"
+   },
+   {
+    "key": "persona_edit_bonus",
+    "label": "每天自己改私聊人设次数",
+    "value": 2,
+    "unit": "次"
+   },
+   {
+    "key": "memory_bonus",
+    "label": "爱好/喜好这类记忆每类多记几样",
+    "value": 2,
+    "unit": "次"
+   },
+   {
+    "key": "checkin_points_pct",
+    "label": "签到积分",
+    "value": 10,
+    "unit": "%"
+   }
+  ],
+  "gift_daily": 5,
+  "shop_discount_pct": 5,
+  "unlocks": [
+   {
+    "key": "interact.highfive",
+    "label": "击掌",
+    "description": "/击掌 和 Bot 击个掌"
+   },
+   {
+    "key": "interact.pat",
+    "label": "摸头",
+    "description": "/摸头 摸摸 Bot 的头"
+   },
+   {
+    "key": "interact.hug",
+    "label": "抱抱",
+    "description": "/抱抱 给 Bot 一个拥抱"
+   },
+   {
+    "key": "offers",
+    "label": "主动提议",
+    "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+   },
+   {
+    "key": "nickname",
+    "label": "专属称呼",
+    "description": "/叫我 <称呼>：群里和私聊的 Bot 都按你定的称呼叫你"
+   },
+   {
+    "key": "levelup_gift",
+    "label": "升级礼包",
+    "description": "每升一级送一份道具礼包"
+   }
+  ],
+  "levelup_items": {
+   "shield": 1,
+   "lucky_card": 1
+  }
+ },
+ "next": {
+  "level": "朋友",
+  "to_next": 80,
+  "unlocks": [
+   {
+    "key": "interact.cuddle",
+    "label": "贴贴",
+    "description": "/贴贴 和 Bot 贴贴"
+   },
+   {
+    "key": "care",
+    "label": "久别问候",
+    "description": "好几天没聊时，Bot 会在私聊里主动问候你一句"
+   }
+  ],
+  "better": [
+   {
+    "key": "private_turns_pct",
+    "label": "私聊每天能聊的轮数",
+    "delta": 25,
+    "unit": "%"
+   },
+   {
+    "key": "private_web_bonus",
+    "label": "私聊每天联网搜索次数",
+    "delta": 2,
+    "unit": "次"
+   },
+   {
+    "key": "private_sticker_bonus",
+    "label": "私聊每天表情包条数",
+    "delta": 2,
+    "unit": "次"
+   },
+   {
+    "key": "web_search_bonus",
+    "label": "群里每天网页搜索次数",
+    "delta": 4,
+    "unit": "次"
+   },
+   {
+    "key": "sandbox_bonus",
+    "label": "群里每天代码沙箱次数",
+    "delta": 4,
+    "unit": "次"
+   },
+   {
+    "key": "sticker_collect_bonus",
+    "label": "群里每天收藏表情包张数",
+    "delta": 2,
+    "unit": "次"
+   },
+   {
+    "key": "persona_edit_bonus",
+    "label": "每天自己改私聊人设次数",
+    "delta": 2,
+    "unit": "次"
+   },
+   {
+    "key": "memory_bonus",
+    "label": "爱好/喜好这类记忆每类多记几样",
+    "delta": 2,
+    "unit": "次"
+   },
+   {
+    "key": "checkin_points_pct",
+    "label": "签到积分",
+    "delta": 5,
+    "unit": "%"
+   }
+  ],
+  "gift_daily": 6,
+  "shop_discount_pct": 10,
+  "levelup_items": {
+   "repair_card": 1,
+   "lucky_card": 2
+  }
+ },
+ "ladder": [
+  {
+   "floor": 0,
+   "name": "陌生",
+   "level": "陌生",
+   "tone": "还不太熟，礼貌友好即可",
+   "behavior": "先礼貌友好，别开过头的玩笑，也别装熟",
+   "bonuses": [],
+   "gift_daily": 3,
+   "shop_discount_pct": 0,
+   "unlocks": [
+    {
+     "key": "interact.highfive",
+     "label": "击掌",
+     "description": "/击掌 和 Bot 击个掌"
+    }
+   ],
+   "levelup_items": {}
+  },
+  {
+   "floor": 20,
+   "name": "面熟",
+   "level": "面熟",
+   "tone": "见过几次，可以随意一点",
+   "behavior": "可以随意一点，偶尔接个梗",
+   "bonuses": [
+    {
+     "key": "private_turns_pct",
+     "label": "私聊每天能聊的轮数",
+     "value": 10,
+     "unit": "%"
+    },
+    {
+     "key": "private_web_bonus",
+     "label": "私聊每天联网搜索次数",
+     "value": 1,
+     "unit": "次"
+    },
+    {
+     "key": "private_sticker_bonus",
+     "label": "私聊每天表情包条数",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "web_search_bonus",
+     "label": "群里每天网页搜索次数",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "sandbox_bonus",
+     "label": "群里每天代码沙箱次数",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "sticker_collect_bonus",
+     "label": "群里每天收藏表情包张数",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "checkin_points_pct",
+     "label": "签到积分",
+     "value": 5,
+     "unit": "%"
+    }
+   ],
+   "gift_daily": 4,
+   "shop_discount_pct": 0,
+   "unlocks": [
+    {
+     "key": "interact.highfive",
+     "label": "击掌",
+     "description": "/击掌 和 Bot 击个掌"
+    },
+    {
+     "key": "interact.pat",
+     "label": "摸头",
+     "description": "/摸头 摸摸 Bot 的头"
+    },
+    {
+     "key": "offers",
+     "label": "主动提议",
+     "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+    },
+    {
+     "key": "levelup_gift",
+     "label": "升级礼包",
+     "description": "每升一级送一份道具礼包"
+    }
+   ],
+   "levelup_items": {
+    "repair_card": 1
+   }
+  },
+  {
+   "floor": 60,
+   "name": "熟人",
+   "level": "熟人",
+   "tone": "比较熟了，可以开开玩笑",
+   "behavior": "可以开玩笑、吐槽，记得他说过的事并自然提起",
+   "bonuses": [
+    {
+     "key": "private_turns_pct",
+     "label": "私聊每天能聊的轮数",
+     "value": 25,
+     "unit": "%"
+    },
+    {
+     "key": "private_web_bonus",
+     "label": "私聊每天联网搜索次数",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "private_sticker_bonus",
+     "label": "私聊每天表情包条数",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "web_search_bonus",
+     "label": "群里每天网页搜索次数",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "sandbox_bonus",
+     "label": "群里每天代码沙箱次数",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "sticker_collect_bonus",
+     "label": "群里每天收藏表情包张数",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "persona_edit_bonus",
+     "label": "每天自己改私聊人设次数",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "memory_bonus",
+     "label": "爱好/喜好这类记忆每类多记几样",
+     "value": 2,
+     "unit": "次"
+    },
+    {
+     "key": "checkin_points_pct",
+     "label": "签到积分",
+     "value": 10,
+     "unit": "%"
+    }
+   ],
+   "gift_daily": 5,
+   "shop_discount_pct": 5,
+   "unlocks": [
+    {
+     "key": "interact.highfive",
+     "label": "击掌",
+     "description": "/击掌 和 Bot 击个掌"
+    },
+    {
+     "key": "interact.pat",
+     "label": "摸头",
+     "description": "/摸头 摸摸 Bot 的头"
+    },
+    {
+     "key": "interact.hug",
+     "label": "抱抱",
+     "description": "/抱抱 给 Bot 一个拥抱"
+    },
+    {
+     "key": "offers",
+     "label": "主动提议",
+     "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+    },
+    {
+     "key": "nickname",
+     "label": "专属称呼",
+     "description": "/叫我 <称呼>：群里和私聊的 Bot 都按你定的称呼叫你"
+    },
+    {
+     "key": "levelup_gift",
+     "label": "升级礼包",
+     "description": "每升一级送一份道具礼包"
+    }
+   ],
+   "levelup_items": {
+    "shield": 1,
+    "lucky_card": 1
+   }
+  },
+  {
+   "floor": 150,
+   "name": "朋友",
+   "level": "朋友",
+   "tone": "是朋友，说话可以亲近自然",
+   "behavior": "像朋友一样说话，会关心他的近况，帮忙时更上心",
+   "bonuses": [
+    {
+     "key": "private_turns_pct",
+     "label": "私聊每天能聊的轮数",
+     "value": 50,
+     "unit": "%"
+    },
+    {
+     "key": "private_web_bonus",
+     "label": "私聊每天联网搜索次数",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "private_sticker_bonus",
+     "label": "私聊每天表情包条数",
+     "value": 6,
+     "unit": "次"
+    },
+    {
+     "key": "web_search_bonus",
+     "label": "群里每天网页搜索次数",
+     "value": 8,
+     "unit": "次"
+    },
+    {
+     "key": "sandbox_bonus",
+     "label": "群里每天代码沙箱次数",
+     "value": 8,
+     "unit": "次"
+    },
+    {
+     "key": "sticker_collect_bonus",
+     "label": "群里每天收藏表情包张数",
+     "value": 6,
+     "unit": "次"
+    },
+    {
+     "key": "persona_edit_bonus",
+     "label": "每天自己改私聊人设次数",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "memory_bonus",
+     "label": "爱好/喜好这类记忆每类多记几样",
+     "value": 4,
+     "unit": "次"
+    },
+    {
+     "key": "checkin_points_pct",
+     "label": "签到积分",
+     "value": 15,
+     "unit": "%"
+    }
+   ],
+   "gift_daily": 6,
+   "shop_discount_pct": 10,
+   "unlocks": [
+    {
+     "key": "interact.highfive",
+     "label": "击掌",
+     "description": "/击掌 和 Bot 击个掌"
+    },
+    {
+     "key": "interact.pat",
+     "label": "摸头",
+     "description": "/摸头 摸摸 Bot 的头"
+    },
+    {
+     "key": "interact.hug",
+     "label": "抱抱",
+     "description": "/抱抱 给 Bot 一个拥抱"
+    },
+    {
+     "key": "interact.cuddle",
+     "label": "贴贴",
+     "description": "/贴贴 和 Bot 贴贴"
+    },
+    {
+     "key": "offers",
+     "label": "主动提议",
+     "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+    },
+    {
+     "key": "nickname",
+     "label": "专属称呼",
+     "description": "/叫我 <称呼>：群里和私聊的 Bot 都按你定的称呼叫你"
+    },
+    {
+     "key": "care",
+     "label": "久别问候",
+     "description": "好几天没聊时，Bot 会在私聊里主动问候你一句"
+    },
+    {
+     "key": "levelup_gift",
+     "label": "升级礼包",
+     "description": "每升一级送一份道具礼包"
+    }
+   ],
+   "levelup_items": {
+    "repair_card": 1,
+    "lucky_card": 2
+   }
+  },
+  {
+   "floor": 320,
+   "name": "好朋友",
+   "level": "好朋友",
+   "tone": "关系很好，可以更亲昵、多关心对方",
+   "behavior": "可以更亲昵、偶尔撒娇，翻翻你们的旧梗，他心情不好时多陪陪",
+   "bonuses": [
+    {
+     "key": "private_turns_pct",
+     "label": "私聊每天能聊的轮数",
+     "value": 75,
+     "unit": "%"
+    },
+    {
+     "key": "private_web_bonus",
+     "label": "私聊每天联网搜索次数",
+     "value": 6,
+     "unit": "次"
+    },
+    {
+     "key": "private_sticker_bonus",
+     "label": "私聊每天表情包条数",
+     "value": 8,
+     "unit": "次"
+    },
+    {
+     "key": "web_search_bonus",
+     "label": "群里每天网页搜索次数",
+     "value": 12,
+     "unit": "次"
+    },
+    {
+     "key": "sandbox_bonus",
+     "label": "群里每天代码沙箱次数",
+     "value": 12,
+     "unit": "次"
+    },
+    {
+     "key": "sticker_collect_bonus",
+     "label": "群里每天收藏表情包张数",
+     "value": 8,
+     "unit": "次"
+    },
+    {
+     "key": "persona_edit_bonus",
+     "label": "每天自己改私聊人设次数",
+     "value": 6,
+     "unit": "次"
+    },
+    {
+     "key": "memory_bonus",
+     "label": "爱好/喜好这类记忆每类多记几样",
+     "value": 6,
+     "unit": "次"
+    },
+    {
+     "key": "checkin_points_pct",
+     "label": "签到积分",
+     "value": 20,
+     "unit": "%"
+    }
+   ],
+   "gift_daily": 8,
+   "shop_discount_pct": 15,
+   "unlocks": [
+    {
+     "key": "interact.highfive",
+     "label": "击掌",
+     "description": "/击掌 和 Bot 击个掌"
+    },
+    {
+     "key": "interact.pat",
+     "label": "摸头",
+     "description": "/摸头 摸摸 Bot 的头"
+    },
+    {
+     "key": "interact.hug",
+     "label": "抱抱",
+     "description": "/抱抱 给 Bot 一个拥抱"
+    },
+    {
+     "key": "interact.cuddle",
+     "label": "贴贴",
+     "description": "/贴贴 和 Bot 贴贴"
+    },
+    {
+     "key": "interact.lift",
+     "label": "举高高",
+     "description": "/举高高 把 Bot 举起来"
+    },
+    {
+     "key": "nickname",
+     "label": "专属称呼",
+     "description": "/叫我 <称呼>：群里和私聊的 Bot 都按你定的称呼叫你"
+    },
+    {
+     "key": "offers",
+     "label": "主动提议",
+     "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+    },
+    {
+     "key": "care",
+     "label": "久别问候",
+     "description": "好几天没聊时，Bot 会在私聊里主动问候你一句"
+    },
+    {
+     "key": "levelup_gift",
+     "label": "升级礼包",
+     "description": "每升一级送一份道具礼包"
+    }
+   ],
+   "levelup_items": {
+    "shield": 1,
+    "repair_card": 1,
+    "quest_refresh": 1
+   }
+  },
+  {
+   "floor": 600,
+   "name": "挚友",
+   "level": "挚友",
+   "tone": "非常亲近的老朋友，像老友一样相处",
+   "behavior": "像多年老友一样相处，彼此都很了解，有默契，说话不用客套",
+   "bonuses": [
+    {
+     "key": "private_turns_pct",
+     "label": "私聊每天能聊的轮数",
+     "value": 100,
+     "unit": "%"
+    },
+    {
+     "key": "private_web_bonus",
+     "label": "私聊每天联网搜索次数",
+     "value": 10,
+     "unit": "次"
+    },
+    {
+     "key": "private_sticker_bonus",
+     "label": "私聊每天表情包条数",
+     "value": 10,
+     "unit": "次"
+    },
+    {
+     "key": "web_search_bonus",
+     "label": "群里每天网页搜索次数",
+     "value": 20,
+     "unit": "次"
+    },
+    {
+     "key": "sandbox_bonus",
+     "label": "群里每天代码沙箱次数",
+     "value": 20,
+     "unit": "次"
+    },
+    {
+     "key": "sticker_collect_bonus",
+     "label": "群里每天收藏表情包张数",
+     "value": 10,
+     "unit": "次"
+    },
+    {
+     "key": "persona_edit_bonus",
+     "label": "每天自己改私聊人设次数",
+     "value": 10,
+     "unit": "次"
+    },
+    {
+     "key": "memory_bonus",
+     "label": "爱好/喜好这类记忆每类多记几样",
+     "value": 8,
+     "unit": "次"
+    },
+    {
+     "key": "checkin_points_pct",
+     "label": "签到积分",
+     "value": 30,
+     "unit": "%"
+    }
+   ],
+   "gift_daily": 10,
+   "shop_discount_pct": 20,
+   "unlocks": [
+    {
+     "key": "interact.highfive",
+     "label": "击掌",
+     "description": "/击掌 和 Bot 击个掌"
+    },
+    {
+     "key": "interact.pat",
+     "label": "摸头",
+     "description": "/摸头 摸摸 Bot 的头"
+    },
+    {
+     "key": "interact.hug",
+     "label": "抱抱",
+     "description": "/抱抱 给 Bot 一个拥抱"
+    },
+    {
+     "key": "interact.cuddle",
+     "label": "贴贴",
+     "description": "/贴贴 和 Bot 贴贴"
+    },
+    {
+     "key": "interact.lift",
+     "label": "举高高",
+     "description": "/举高高 把 Bot 举起来"
+    },
+    {
+     "key": "nickname",
+     "label": "专属称呼",
+     "description": "/叫我 <称呼>：群里和私聊的 Bot 都按你定的称呼叫你"
+    },
+    {
+     "key": "offers",
+     "label": "主动提议",
+     "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+    },
+    {
+     "key": "care",
+     "label": "久别问候",
+     "description": "好几天没聊时，Bot 会在私聊里主动问候你一句"
+    },
+    {
+     "key": "levelup_gift",
+     "label": "升级礼包",
+     "description": "每升一级送一份道具礼包"
+    }
+   ],
+   "levelup_items": {
+    "shield": 2,
+    "repair_card": 2,
+    "lucky_card": 2
+   }
+  }
+ ],
+ "wallet": {
+  "total": 320,
+  "groups": [
+   {
+    "group_id": 900001,
+    "group_name": "猫猫群",
+    "points": 320
+   }
+  ]
+ },
+ "bag": {
+  "items": [
+   {
+    "key": "lucky_card",
+    "name": "签到暴击卡",
+    "count": 2,
+    "description": "签到暴击卡：今天下一次签到积分翻倍"
+   },
+   {
+    "key": "shield",
+    "name": "好感护盾",
+    "count": 1,
+    "description": "好感护盾：14 天内长时间不来往也不会掉好感"
+   }
+  ],
+  "shield_until": "",
+  "lucky_today": false
+ },
+ "quests": {
+  "enabled": true,
+  "day": "2026-11-09",
+  "items": [
+   {
+    "key": "gift",
+    "title": "送我一份礼物",
+    "progress": 0,
+    "target": 1,
+    "done": false,
+    "claimed": false
+   },
+   {
+    "key": "checkin_multi",
+    "title": "在 2 个群签到",
+    "progress": 0,
+    "target": 2,
+    "done": false,
+    "claimed": false
+   },
+   {
+    "key": "group_chat",
+    "title": "在群里找我聊 2 次",
+    "progress": 0,
+    "target": 2,
+    "done": false,
+    "claimed": false
+   }
+  ],
+  "reward_affinity": 2,
+  "all_done_item": "lucky_card",
+  "all_done_item_name": "签到暴击卡",
+  "bonus_claimed": false,
+  "all_done": false
+ },
+ "gifts": {
+  "favorite": "flower",
+  "sentToday": 0,
+  "dailyLimit": 5,
+  "dailyAffinityCap": 10,
+  "favoriteMultiplier": 2,
+  "menu": [
+   {
+    "key": "candy",
+    "name": "糖果",
+    "emoji": "🍬",
+    "price": 10,
+    "finalPrice": 10,
+    "affinity": 1
+   },
+   {
+    "key": "milk_tea",
+    "name": "奶茶",
+    "emoji": "🧋",
+    "price": 30,
+    "finalPrice": 28,
+    "affinity": 2
+   },
+   {
+    "key": "flower",
+    "name": "鲜花",
+    "emoji": "💐",
+    "price": 60,
+    "finalPrice": 57,
+    "affinity": 3
+   },
+   {
+    "key": "cake",
+    "name": "蛋糕",
+    "emoji": "🍰",
+    "price": 120,
+    "finalPrice": 114,
+    "affinity": 5
+   },
+   {
+    "key": "star",
+    "name": "星星灯",
+    "emoji": "🌟",
+    "price": 300,
+    "finalPrice": 285,
+    "affinity": 10
+   }
+  ],
+  "totals": {},
+  "log": []
+ },
+ "shop": [
+  {
+   "key": "repair_card",
+   "name": "补签卡",
+   "description": "补签卡：连签断了 7 天内，在某个群续上（把断掉的那几天算作签过）",
+   "price": 80,
+   "final_price": 76,
+   "min_level": "陌生",
+   "unlocked": true,
+   "have": 0,
+   "max_hold": 3
+  },
+  {
+   "key": "shield",
+   "name": "好感护盾",
+   "description": "好感护盾：14 天内长时间不来往也不会掉好感",
+   "price": 60,
+   "final_price": 57,
+   "min_level": "面熟",
+   "unlocked": true,
+   "have": 1,
+   "max_hold": 3
+  },
+  {
+   "key": "lucky_card",
+   "name": "签到暴击卡",
+   "description": "签到暴击卡：今天下一次签到积分翻倍",
+   "price": 40,
+   "final_price": 38,
+   "min_level": "陌生",
+   "unlocked": true,
+   "have": 2,
+   "max_hold": 5
+  },
+  {
+   "key": "quest_refresh",
+   "name": "任务刷新券",
+   "description": "任务刷新券：把今天没完成的任务换一批",
+   "price": 20,
+   "final_price": 19,
+   "min_level": "陌生",
+   "unlocked": true,
+   "have": 0,
+   "max_hold": 5
+  }
+ ],
+ "nickname": "阿明",
+ "nicknameActive": true,
+ "nicknameUnlockLevel": "熟人",
+ "interactions": [
+  {
+   "word": "击掌",
+   "key": "interact.highfive",
+   "unlocked": true,
+   "needLevel": "陌生",
+   "count": 0
+  },
+  {
+   "word": "摸头",
+   "key": "interact.pat",
+   "unlocked": true,
+   "needLevel": "面熟",
+   "count": 0
+  },
+  {
+   "word": "抱抱",
+   "key": "interact.hug",
+   "unlocked": true,
+   "needLevel": "熟人",
+   "count": 0
+  },
+  {
+   "word": "贴贴",
+   "key": "interact.cuddle",
+   "unlocked": false,
+   "needLevel": "朋友",
+   "count": 0
+  },
+  {
+   "word": "举高高",
+   "key": "interact.lift",
+   "unlocked": false,
+   "needLevel": "好朋友",
+   "count": 0
+  }
+ ],
+ "levelHistory": [
+  {
+   "level": "熟人",
+   "at": "2026-11-08T10:00:00",
+   "up": true
+  },
+  {
+   "level": "面熟",
+   "at": "2026-11-01T10:00:00",
+   "up": true
+  }
+ ],
+ "itemLog": []
+}

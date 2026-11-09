@@ -47,8 +47,8 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "status",
         "他的状态",
-        "签到、积分、关系等级、好感进度、共同的群；涉及这些先查再说",
-        ("my_status", "checkin"),
+        "签到、积分、关系等级、好感进度、共同的群；好感有什么用、送礼、商店道具、补签、每日任务、专属称呼；涉及这些先查再说",
+        ("my_status", "checkin", "affinity"),
     ),
     Family(
         "memory",

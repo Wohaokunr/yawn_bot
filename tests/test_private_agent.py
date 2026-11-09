@@ -678,6 +678,10 @@ async def test_turn_respects_daily_cap(maker, monkeypatch) -> None:
     _script(monkeypatch, [_message("hi")])
     monkeypatch.setattr(pagent, "now_beijing", lambda: NOW)
     monkeypatch.setattr(bridge.private_agent_config, "private_agent_daily_turns", 1)
+    # 只测基础上限：这位用户是「熟人」，好感权益会多给轮数（见 test_affinity_perks）
+    perks = importlib.import_module(f"{_PKG}.affinity_perks")
+    apol = importlib.import_module(f"{_PKG}.affinity_policy")
+    monkeypatch.setattr(perks, "load_policy", lambda: apol.AffinityPolicy(enabled=False))
     async with maker() as session:
         chat = ChatSession(user_id=USER, group_id=None, created_at=NOW, updated_at=NOW)
         session.add(chat)

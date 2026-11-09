@@ -63,6 +63,14 @@ SOURCE_RULES: dict[str, SourceRule] = {
     "group_chat": SourceRule("群聊互动", 4),
     # 管理员在 WebUI 手动调整，可正可负。
     "manual": SourceRule("管理员调整", None, allow_negative=True),
+    # 用签到积分送礼物；实际日上限由 affinity_policy.gift_affinity_daily_cap 决定。
+    "gift": SourceRule("送礼", 10),
+    # 完成每日任务；实际日上限 = 每个任务奖励 × 每天任务数。
+    "quest": SourceRule("每日任务", 6),
+    # /击掌 /摸头 等互动；实际日上限由 interact_affinity_daily_cap 决定。
+    "interact": SourceRule("互动", 3),
+    # 长时间没有来往的衰减（只扣不加，默认只扣到当前等级下限）。
+    "decay": SourceRule("久未来往", None, allow_negative=True),
 }
 
 
@@ -128,11 +136,23 @@ def level_for(points: int | None) -> AffinityLevel:
     return AffinityLevel(index, name, floor, next_floor, next_name)
 
 
+def level_tone(name: str) -> str:
+    """等级的相处提示：WebUI 策略里改过就用改过的，否则用内置的 LEVEL_TONE。"""
+
+    try:
+        from .affinity_policy import load_policy
+
+        tone = load_policy().perks(name).tone
+    except Exception:  # noqa: BLE001
+        tone = ""
+    return tone or LEVEL_TONE.get(name, "")
+
+
 def level_words(points: int | None) -> str:
     """给 Prompt 用的一句话：“好朋友（关系很好，可以更亲昵、多关心对方）”。"""
 
     level = level_for(points)
-    return f"{level.name}（{LEVEL_TONE.get(level.name, '')}）"
+    return f"{level.name}（{level_tone(level.name)}）"
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +285,7 @@ async def grant(  # noqa: C901, PLR0913
     requested = int(amount)
     if requested < 0 and not rule.allow_negative:
         raise ValueError(f"来源 {source} 不允许扣好感")
+    daily_cap = _daily_cap(source, rule)
     if requested == 0 or ledger_known_missing():
         return AffinityChange(
             source, requested, 0, 0, 0, available=not ledger_known_missing()
@@ -275,9 +296,9 @@ async def grant(  # noqa: C901, PLR0913
         async with session.begin_nested():
             applied = requested
             capped = False
-            if rule.daily_cap is not None and requested > 0:
+            if daily_cap is not None and requested > 0:
                 remaining = max(
-                    rule.daily_cap - await used_today(session, user_id, source, day), 0
+                    daily_cap - await used_today(session, user_id, source, day), 0
                 )
                 if remaining < requested:
                     applied = remaining
@@ -313,7 +334,43 @@ async def grant(  # noqa: C901, PLR0913
         _mark_missing()
         return AffinityChange(source, requested, 0, 0, 0, available=False)
     _mark_available()
-    return AffinityChange(source, requested, applied, before, after, capped=capped)
+    change = AffinityChange(source, requested, applied, before, after, capped=capped)
+    _after_grant(change, user_id=user_id, source=source, group_id=group_id, now=moment)
+    return change
+
+
+def _daily_cap(source: str, rule: SourceRule) -> Optional[int]:
+    """来源的每日上限：礼物/互动/任务由好感玩法策略决定，其余用 SOURCE_RULES。"""
+
+    try:
+        from .affinity_perks import dynamic_daily_cap
+
+        value = dynamic_daily_cap(source)
+    except Exception:  # noqa: BLE001
+        value = False
+    if value is False:
+        return rule.daily_cap
+    return value  # type: ignore[return-value]
+
+
+def _after_grant(change: AffinityChange, **kwargs: Any) -> None:
+    """任务进度、升级记录、余额缓存（affinity_perks）；任何异常都不影响好感本身。"""
+
+    try:
+        from .affinity_perks import after_grant
+
+        after_grant(change, **kwargs)
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("好感钩子失败(忽略)")
+
+
+def _remember(user_id: int, points: int) -> None:
+    try:
+        from .affinity_perks import remember_points
+
+        remember_points(user_id, points)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +405,7 @@ async def snapshot(
 
     user = await session.get(BotUser, user_id)
     points = max(int(user.affinity or 0), 0) if user is not None else 0
+    _remember(user_id, points)
     today: dict[str, int] = {}
     available = not ledger_known_missing()
     if available:
@@ -469,6 +527,7 @@ __all__ = [
     "group_ranking",
     "ledger_known_missing",
     "level_for",
+    "level_tone",
     "level_words",
     "recent_events",
     "reset_ledger_state",

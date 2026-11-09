@@ -192,6 +192,7 @@ def test_gate_respects_switches_and_wishes() -> None:
     assert _gate().ok
     assert _gate(env_on=False).reason == "env_off"
     assert _gate(agent_on=False).reason == "agent_off"
+    assert _gate(facts=_facts(affinity_locked=True)).reason == "affinity_level"
     assert _gate(settings=Settings(enabled=False)).reason == "policy_off"
     assert _gate(settings=Settings(blocked_users=[USER])).reason == "blocked"
     assert _gate(settings=Settings(user_mode="allowlist")).reason == "not_listed"
