@@ -296,6 +296,19 @@ async def check_group_create(session: Any, bot: Any, user_id: int, group_id: int
         raise HubError("这个群的定时任务只允许群主或管理员设", code="permission", hint="照实告诉他，可以请管理员来设")
 
 
+async def check_mention_all(bot: Any, user_id: int, group_id: int, *, wanted: bool | None, had: bool = False) -> None:
+    """私聊/网页给群任务新加 @全体成员 前查权限（原来就有的不再查，别人改时间不被挡）。"""
+
+    if not wanted or had:
+        return
+    from .schedule_policy import mention_all_denied
+
+    is_manager = await is_live_manager(bot, int(group_id), int(user_id))
+    reason = mention_all_denied(load_settings(), actor_is_admin=bool(is_manager))
+    if reason:
+        raise HubError(reason, code="permission", hint="去掉 @全体成员，或改成 @ 具体的成员")
+
+
 async def create_group_task(
     session: Any,
     *,

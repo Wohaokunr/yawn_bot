@@ -1,4 +1,4 @@
-# ruff: noqa: TID252, TRY003, E501, C901
+# ruff: noqa: TID252, TRY003, E501, C901, PLR0912
 """定时任务工具族：让成员通过 Agent 设、查、改、取消定时任务。
 
 规则校验、限额和落库都在 ``schedule_store``；到点执行在 ``schedule_runner``。
@@ -12,10 +12,10 @@ from typing import Any
 
 from ...data_models.bot_user import BotUser
 from ...data_models.user_group import UserGroup
-from ..capabilities import user_can_manage_group
+from ..capabilities import cached_bot_role, user_can_manage_group
 from ..context import now_beijing
 from ..log import dbg
-from ..schedule_policy import load_settings
+from ..schedule_policy import load_settings, mention_all_denied
 from ..schedule_spec import format_datetime
 from ..schedule_store import (
     OPEN_STATUSES,
@@ -26,12 +26,14 @@ from ..schedule_store import (
     TaskDraft,
     apply_draft,
     cancel_task,
+    check_mention_members,
     clip,
     create_task,
     get_task,
     list_tasks,
     pause_task,
     resume_task,
+    task_mentions,
     task_public_dict,
     validate_draft,
 )
@@ -70,7 +72,7 @@ _SCHEDULE_KEYS = (
     "skip_dates",
 )
 _QUOTA_CODES = frozenset({"group_limit", "member_limit"})
-_PERMISSION_CODES = frozenset({"agent_mode_closed", "unsafe_instruction"})
+_PERMISSION_CODES = frozenset({"agent_mode_closed", "unsafe_instruction", "mention_all_closed", "mention_closed"})
 _RECENT_HISTORY = 3
 
 
@@ -118,6 +120,31 @@ async def _actor_is_admin(context: ToolExecutionContext) -> bool:
     if context.actor_user_id is None:
         return False
     return bool(await user_can_manage_group(context.bot, context.group_id, context.actor_user_id))
+
+
+def _mention_args(args: dict[str, Any], task: Any = None) -> tuple[bool, list[Any]]:
+    """工具参数里的 @ 目标；修改时没传的那一项保留任务原来的。"""
+
+    old_all, old_members = task_mentions(task) if task is not None else (False, [])
+    mention_all = bool(args["mention_all"]) if "mention_all" in args else old_all
+    raw = args.get("mention_user_ids") if "mention_user_ids" in args else old_members
+    return mention_all, list(raw or [])
+
+
+async def _check_mention_all(context: ToolExecutionContext, settings: Any, *, wanted: bool, had: bool) -> None:
+    """新加 @全体成员 时查权限和 Bot 身份；原来就有的保持不动（别人改时间不该被挡）。"""
+
+    if not wanted or had:
+        return
+    reason = mention_all_denied(settings, actor_is_admin=await _actor_is_admin(context))
+    if reason:
+        raise ToolError(reason, code=ERROR_PERMISSION, hint="去掉 mention_all；要提醒的人不多可以用 mention_user_ids 逐个 @")
+    if cached_bot_role(context.bot, context.group_id) == "member":
+        raise ToolError(
+            "我在本群不是管理员，QQ 不让我 @全体成员",
+            code=ERROR_PERMISSION,
+            hint="如实说明；可以请群主把我设成管理员，或者改成 @ 具体的成员",
+        )
 
 
 async def _owned_task(context: ToolExecutionContext, task_id: int) -> Any:
@@ -169,6 +196,8 @@ async def _create(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
     if settings.who_can_create == "admins" and not is_admin:
         raise ToolError("本群的定时任务只允许群主或管理员设置", code=ERROR_PERMISSION, hint="如实说明，可以请管理员来设")
     now = now_beijing()
+    mention_all, mention_ids = _mention_args(args)
+    await _check_mention_all(context, settings, wanted=mention_all, had=False)
     draft = TaskDraft(
         instruction=str(args.get("instruction") or ""),
         schedule=schedule_from_args(args),
@@ -176,13 +205,17 @@ async def _create(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
         mode=str(args.get("mode") or "agent"),
         max_runs=args.get("max_runs"),
         mention_creator=bool(args.get("mention_me", True)),
+        mention_all=mention_all,
+        mention_user_ids=mention_ids,
     )
     try:
         if args.get("dry_run"):
             validated = validate_draft(draft, settings=settings, now=now)
+            await check_mention_members(context.session, context.group_id, validated.mention_targets)
             return ToolHandlerResult(
                 {
                     "dry_run": True,
+                    "mentions": validated.mention_targets,
                     "schedule": validated.description,
                     "upcoming": [format_datetime(item) for item in validated.upcoming],
                     "mode": validated.mode,
@@ -382,6 +415,9 @@ async def _update(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
             await context.session.flush()
             return ToolHandlerResult({"resumed": task.status == STATUS_ACTIVE, "task": task_public_dict(task, now=now, preview_count=3)}, mutated_db=True, needs_commit=True)
         settings = load_settings()
+        had_all, _old_members = task_mentions(task)
+        mention_all, mention_ids = _mention_args(args, task)
+        await _check_mention_all(context, settings, wanted=mention_all, had=had_all)
         schedule = schedule_from_args(args) if args.get("kind") else dict(task.schedule or {})
         if not args.get("kind") and any(args.get(key) not in (None, "", []) for key in (*_SCHEDULE_KEYS, "window_start", "window_end")):
             raise ToolError("改时间需要同时给出 kind 和完整的新规则", code=ERROR_INVALID_ARGS, hint='例如 kind=daily times=["09:00"]')
@@ -392,8 +428,10 @@ async def _update(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
             mode=str(args.get("mode") or task.mode),
             max_runs=args.get("max_runs") if args.get("max_runs") is not None else task.max_runs,
             mention_creator=bool(args["mention_me"]) if "mention_me" in args else bool(task.mention_creator),
+            mention_all=mention_all,
+            mention_user_ids=mention_ids,
         )
-        if not any(key in args for key in ("instruction", "title", "mode", "max_runs", "mention_me", "kind")):
+        if not any(key in args for key in ("instruction", "title", "mode", "max_runs", "mention_me", "mention_all", "mention_user_ids", "kind")):
             raise ToolError("没有要修改的内容", code=ERROR_INVALID_ARGS, hint="传要改的字段，或 action=pause/resume")
         validated = validate_draft(
             draft,
@@ -402,6 +440,8 @@ async def _update(args: dict[str, Any], context: ToolExecutionContext) -> ToolHa
             anchor=task.created_at if not args.get("kind") else now,
             run_count=int(task.run_count or 0) if not args.get("kind") else 0,
         )
+        if "mention_user_ids" in args:
+            await check_mention_members(context.session, context.group_id, validated.mention_targets)
         if args.get("kind"):
             # 换了规则就重新计数：新规则的 max_runs 从现在起算。
             task.run_count = 0

@@ -130,6 +130,8 @@ _SCHEDULE_FIELDS: dict[str, Any] = {
     "skip_dates": {"type": "array", "items": {"type": "string"}, "maxItems": 60, "description": "跳过的日期 YYYY-MM-DD（节假日等）"},
     "max_runs": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "循环任务总共执行几次后自动结束"},
     "mention_me": {"type": "boolean", "description": "到点时是否 @ 设任务的人（默认 true；给全群的播报可设 false）"},
+    "mention_all": {"type": "boolean", "description": "到点时 @全体成员（“提醒所有人/大家”）；默认只有群主/管理员能设，且 Bot 要是管理员。修改时传 false 取消"},
+    "mention_user_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 50, "description": "到点时还要 @ 的其他群成员 QQ 号（“到点提醒@小明和@小红”）；只知道昵称先用 find_group_member 查。修改时传了就整体替换，传 [] 清空"},
 }
 
 
@@ -1082,7 +1084,7 @@ TOOL_DEFINITIONS = (
         required=("instruction", "kind"),
         permission_level=TOOL_PERMISSION_STATE_WRITE,
         family="schedule",
-        keywords=("定时", "定时任务", "提醒我", "叫我", "到点", "闹钟", "每天", "每周", "每月", "每年", "几点", "分钟后", "小时后", "明天", "早上", "晚上", "循环", "周期", "倒计时", "cron", "日程", "打卡提醒", "生日"),
+        keywords=("定时", "定时任务", "提醒我", "叫我", "到点", "闹钟", "每天", "每周", "每月", "每年", "几点", "分钟后", "小时后", "明天", "早上", "晚上", "循环", "周期", "倒计时", "cron", "日程", "打卡提醒", "生日", "提醒大家", "提醒所有人", "@全体"),
         prerequisites="时间一律按北京时间；at 写 YYYY-MM-DD HH:MM（看实时状态里的 clock 换算“明天/下周”），只写 HH:MM 表示下一次到这个钟点",
     ),
     ToolDefinition(
@@ -1092,7 +1094,7 @@ TOOL_DEFINITIONS = (
             "scope": {"type": "string", "enum": ["mine", "group"], "description": "mine 只看调用者自己设的（默认），group 看全群"},
             "include_finished": {"type": "boolean", "description": "是否包括已完成/已取消的任务"},
             "task_id": {"type": "integer", "minimum": 1, "description": "只看这一个任务（含接下来几次触发时间和最近运行记录）"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
         },
         family="schedule",
         keywords=("我的提醒", "有哪些提醒", "定时任务列表", "查看定时", "设了什么", "下次提醒", "提醒还在吗"),

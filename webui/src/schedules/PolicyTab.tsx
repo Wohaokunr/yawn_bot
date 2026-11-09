@@ -149,6 +149,29 @@ export function PolicyTab(): React.JSX.Element {
         </div>
       </Card>
 
+      <Card size="small" title="到点 @ 谁">
+        <p className="sbx-muted">成员设任务时可以让 Bot 到点 @ 群里的其他成员，或 @全体成员。@全体 需要 Bot 是群主/管理员，QQ 还限制每天的次数；发不出去时会自动去掉 @全体，提醒正文照常发。</p>
+        <div className="sbx-field">
+          <span className="sbx-field-label">谁能设“到点 @全体成员”{draft.mentionAllWho !== server.mentionAllWho && <Tag color="gold">已修改</Tag>}</span>
+          <Radio.Group value={draft.mentionAllWho} onChange={(event) => set("mentionAllWho", event.target.value as ScheduleSettings["mentionAllWho"])} optionType="button"
+            options={[{ value: "admins", label: "仅群主/管理员" }, { value: "members", label: "所有群成员" }, { value: "off", label: "不允许" }]} />
+          <span className="sbx-muted">管理台手动建的任务不受这一项限制（关闭时除外）。</span>
+        </div>
+        <div className="sbx-field-grid sch-field-grid-3">
+          {(["maxMentionMembers"] as const).map((key) => {
+            const range = SETTING_RANGES[key];
+            return (
+              <label className="sbx-field" key={key}>
+                <span className="sbx-field-label">{range.label}{draft[key] !== server[key] && <Tag color="gold">原 {server[key]}</Tag>}</span>
+                <InputNumber min={range.min} max={range.max} value={draft[key]} status={errors[key] ? "error" : undefined}
+                  onChange={(value) => set(key, typeof value === "number" ? Math.round(value) : range.min)} addonAfter={range.unit} style={{ width: "100%" }} aria-label={range.label} />
+                {errors[key] && <span className="sbx-field-error">{errors[key]}</span>}
+              </label>
+            );
+          })}
+        </div>
+      </Card>
+
       <Card size="small" title="私聊与跨端">
         <p className="sbx-muted">私聊提醒和群定时任务共用同一套规则（每天/每周/每月/cron/时间窗/起止日期）；私聊提醒存在每人的个人数据里，私聊内容不会进任何群的提示词。</p>
         {CROSS_SWITCHES.map((item) => (

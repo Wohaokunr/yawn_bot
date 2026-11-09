@@ -5,7 +5,7 @@
 写入；坏文件一律回落默认值。任务本身在数据表 ``AgentScheduledTask`` 里。
 
 策略只收窄能力：总开关、群开放范围、谁能建任务、每群/每人同时有效的任务数、
-最小触发间隔、最远可以排到多久以后、每群每天最多执行几次、错过触发怎么补、
+最小触发间隔、到点能 @ 谁、最远可以排到多久以后、每群每天最多执行几次、错过触发怎么补、
 连续失败几次自动暂停、夜间免打扰。
 """
 
@@ -24,6 +24,33 @@ from .context import now_beijing
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 STATE_DIR = PROJECT_ROOT / "data" / "agent_schedule"
 _CLOCK_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
+SETTINGS_VERSION = 2
+# 版本 1 的默认上限 → 版本 2 的默认上限。只有还停在旧默认值的才升级，
+# 管理员手动改过的值（哪怕比新默认小）原样保留。
+_V2_LIMIT_UPGRADES: dict[str, tuple[int, int]] = {
+    "max_active_per_member": (5, 70),
+    "max_active_per_group": (20, 300),
+    "group_daily_runs": (60, 300),
+}
+
+
+def upgrade_settings_payload(data: Any) -> Any:
+    """把旧版本设置文件里的旧默认上限升到新默认值；其余字段不动。"""
+
+    if not isinstance(data, dict):
+        return data
+    try:
+        version = int(data.get("settings_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= SETTINGS_VERSION:
+        return data
+    upgraded = dict(data)
+    for key, (old, new) in _V2_LIMIT_UPGRADES.items():
+        if key in upgraded and upgraded[key] == old:
+            upgraded[key] = new
+    upgraded["settings_version"] = SETTINGS_VERSION
+    return upgraded
 
 
 class ScheduleSettings(BaseModel):
@@ -39,12 +66,14 @@ class ScheduleSettings(BaseModel):
     who_can_create: Literal["members", "admins"] = "members"
     # 关掉后只能建 notify（到点直接发提醒，不调模型、不用工具）。
     allow_agent_mode: bool = True
-    max_active_per_group: int = Field(default=20, ge=1, le=500)
-    max_active_per_member: int = Field(default=5, ge=1, le=100)
+    # 2026-11 放宽：每人 5 → 70、每群 20 → 300（每群必须容得下几个人各设满）。
+    max_active_per_group: int = Field(default=300, ge=1, le=2000)
+    max_active_per_member: int = Field(default=70, ge=1, le=500)
     # 循环任务两次触发之间至少隔多久；群管理员建的任务也受它约束。
     min_interval_minutes: int = Field(default=10, ge=1, le=1440)
     max_horizon_days: int = Field(default=366, ge=1, le=730)
-    group_daily_runs: int = Field(default=60, ge=1, le=2000)
+    # 每人能设 70 个之后，60 次/天会让每天的提醒到下午就被额度吃掉，一并放宽。
+    group_daily_runs: int = Field(default=300, ge=1, le=5000)
     # 进程停机/繁忙导致超过宽限还没执行：skip 直接跳到下一次；run_once 补跑一次。
     misfire_grace_minutes: int = Field(default=10, ge=1, le=1440)
     missed_policy: Literal["skip", "run_once"] = "run_once"
@@ -62,6 +91,12 @@ class ScheduleSettings(BaseModel):
     run_timeout_seconds: int = Field(default=300, ge=30, le=1800)
     notify_prefix: str = Field(default="⏰ ", max_length=8)
     history_limit: int = Field(default=20, ge=5, le=100)
+    # ── 到点 @ 谁 ──────────────────────────────────────────────────
+    # 谁能设“到点 @全体成员”：off 关闭；admins 仅群主/管理员（默认）；members 任何成员。
+    # QQ 本身还要求 Bot 是群主/管理员，且 @全体 有每日次数限制，发不出去时自动降级成普通消息。
+    mention_all_who: Literal["off", "admins", "members"] = "admins"
+    # 一个任务到点最多 @ 几位群成员（不含设任务的人自己）；0 表示不允许 @ 其他成员。
+    max_mention_members: int = Field(default=20, ge=0, le=50)
     # ── 私聊 ↔ 群聊打通（schedule_hub）──────────────────────────────
     # 私聊里给自己所在的群设定时任务（会发到群里，必须他下一句确认）。
     cross_create: bool = True
@@ -76,6 +111,8 @@ class ScheduleSettings(BaseModel):
     private_min_interval_minutes: int = Field(default=5, ge=1, le=1440)
     # 私聊提醒发送失败后的重试次数（2/5/15 分钟退避），用完才放弃这一次。
     private_retry_limit: int = Field(default=3, ge=0, le=10)
+    # 设置文件的版本：旧文件（没有这个字段）里仍是旧默认值的上限，读取时升到新默认值。
+    settings_version: int = SETTINGS_VERSION
 
     @field_validator("allowed_groups", "blocked_groups")
     @classmethod
@@ -131,7 +168,7 @@ class _Store:
             if mtime is not None:
                 with contextlib.suppress(OSError, ValueError, ValidationError):
                     settings = ScheduleSettings.model_validate(
-                        json.loads(path.read_text(encoding="utf-8"))
+                        upgrade_settings_payload(json.loads(path.read_text(encoding="utf-8")))
                     )
             self._settings = settings
             self._settings_mtime = mtime
@@ -208,6 +245,16 @@ def record_run_usage(group_id: int, result: str, *, counts: bool) -> None:
     _store.record(group_id, result, counts=counts)
 
 
+def mention_all_denied(settings: ScheduleSettings, *, actor_is_admin: bool) -> str | None:
+    """这个人能不能设“到点 @全体成员”；None 表示可以，否则是给模型/网页的原因。"""
+
+    if settings.mention_all_who == "off":
+        return "管理员关闭了定时任务 @全体成员"
+    if settings.mention_all_who == "admins" and not actor_is_admin:
+        return "只有群主或管理员能设到点 @全体成员 的定时任务"
+    return None
+
+
 def exposure_reason(group_id: int, *, actor_is_admin: bool) -> str | None:
     """工具发现阶段：定时任务工具族能不能用；None 表示可用。
 
@@ -229,14 +276,17 @@ def record_private_usage(result: str) -> None:
 
 
 __all__ = [
+    "SETTINGS_VERSION",
     "STATE_DIR",
     "ScheduleSettings",
     "exposure_reason",
     "group_runs_today",
     "load_settings",
+    "mention_all_denied",
     "record_private_usage",
     "record_run_usage",
     "reset_settings_cache",
     "save_settings",
+    "upgrade_settings_payload",
     "usage_snapshot",
 ]

@@ -49,6 +49,8 @@ const settings: ScheduleSettings = {
   privateMaxActive: 30,
   privateMinIntervalMinutes: 5,
   privateRetryLimit: 3,
+  mentionAllWho: "admins",
+  maxMentionMembers: 20,
 };
 
 describe("schedule-meta", () => {

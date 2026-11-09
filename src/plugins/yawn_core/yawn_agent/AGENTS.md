@@ -226,6 +226,9 @@
 - `agent` 模式的唤醒回合：设置 contextvar `ScheduledWake`，构造 `trigger_source="scheduled_task"`、`message_id=None` 的合成事件交给 `dialogue.process_group_message`，创建者作为 actor（`mention_creator` 时进 `mentions` 以便 @）。`context_loader` 把 `wake.prompt_payload()` 放进 `context["scheduled_wake"]`，`prompt.py` 据此追加 `core.scheduled_wake` 段。**唤醒回合里隐藏并拦截**特权/高危工具和 `schedule_task`（`tools._wake_blocks`），防止定时任务自我繁殖或无人值守地管群。`notify` 模式不调模型，直接 `send_outbound_message` 并落库。
 - 不得在没有本轮成功的 `schedule_task`/`update_scheduled_task` 时声称“已经定好了”，没有 `cancel_scheduled_task` 时声称“取消了”（`speech_claims.py` 的 `schedule_set`/`schedule_cancel` 族）。
 - 指令文本创建时过 `persona.text_overrides_policy`，拒绝 CQ 码与 @全体；指令只在到点时作为“创建者当时的请求”交给模型，不提升权限。
+- **到点 @ 谁（2026-11，迁移 `f6b8d0a2c4e6` 加 `mention_targets` JSON 列，旧行 NULL 当空）**：`["all", QQ号...]`，读写一律走 `schedule_store.split_mention_targets/task_mentions/normalize_mentions`。`TaskDraft.mention_all/mention_user_ids` 为 `None` 表示“不改”，`apply_draft` 保留原值——新增调用方只在用户明确改 @ 时传。成员必须是 `UserGroup` 里的本群成员（`check_mention_members`，新建在 `create_task` 里查，修改由调用方查）。@全体 的权限（策略 `mention_all_who`，默认仅群主/管理员）由各入口查：群工具 `_check_mention_all`（还看 `cached_bot_role`，Bot 是普通成员直接拒）、私聊/个人网页 `schedule_hub.check_mention_all`；**已有的 @全体 不再查**，否则别人改时间会被挡。
+- 出站校验禁止模型发 @全体：notify 模式由 `schedule_runner.with_mention_all` 在校验后的消息前补 `at all`；agent 模式由调度器先代发一句“@全体成员 ⏰ 标题”（`mention_all_sent` 告诉模型别再 @），被 @ 的成员进 `mentions`、提示词字段 `remind_members`。QQ 拒发时结构降级会丢掉 `all`，正文照发。
+- 上限（2026-11 放宽）：每人 70、每群 300、每群每日 300 次；`schedule_policy.upgrade_settings_payload` 把旧设置文件里仍是旧默认值（5/20/60）的字段升上来，改过的值不动（`settings_version`）。`/提醒` 命令那套（`reminder.py`）同步放宽到每人 70、每群 300。
 - 不改 `dialogue.py`（已接近 1500 行上限）：唤醒语义全部通过 contextvar + `context_loader` + `prompt.py` + `tools.py` 接入。新增 schedule 工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_schedule.py`。
 
 ### 私聊 ↔ 群聊定时任务打通（2026-11）

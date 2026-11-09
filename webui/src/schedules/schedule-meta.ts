@@ -370,11 +370,11 @@ type NumericSettingKey = {
 }[keyof ScheduleSettings];
 
 export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: number; unit: string; label: string }> = {
-  maxActivePerGroup: { min: 1, max: 500, unit: "个", label: "每群进行中的任务上限" },
-  maxActivePerMember: { min: 1, max: 100, unit: "个", label: "每位成员进行中的任务上限" },
+  maxActivePerGroup: { min: 1, max: 2000, unit: "个", label: "每群进行中的任务上限" },
+  maxActivePerMember: { min: 1, max: 500, unit: "个", label: "每位成员进行中的任务上限" },
   minIntervalMinutes: { min: 1, max: 1440, unit: "分钟", label: "循环任务最小间隔" },
   maxHorizonDays: { min: 1, max: 730, unit: "天", label: "最远能定到多久以后" },
-  groupDailyRuns: { min: 1, max: 2000, unit: "次/天", label: "每群每日执行次数" },
+  groupDailyRuns: { min: 1, max: 5000, unit: "次/天", label: "每群每日执行次数" },
   misfireGraceMinutes: { min: 1, max: 1440, unit: "分钟", label: "迟到宽限" },
   catchUpMaxHours: { min: 0, max: 72, unit: "小时", label: "最多补跑多久以前的" },
   maxConsecutiveFailures: { min: 1, max: 20, unit: "次", label: "连续失败几次自动暂停" },
@@ -384,6 +384,7 @@ export const SETTING_RANGES: Record<NumericSettingKey, { min: number; max: numbe
   privateMaxActive: { min: 1, max: 200, unit: "个", label: "每人私聊提醒上限" },
   privateMinIntervalMinutes: { min: 1, max: 1440, unit: "分钟", label: "私聊循环提醒最小间隔" },
   privateRetryLimit: { min: 0, max: 10, unit: "次", label: "私聊提醒发送失败重试" },
+  maxMentionMembers: { min: 0, max: 50, unit: "人", label: "一个任务最多 @ 几位成员" },
 };
 
 const GROUP_ID_RE = /^\d{4,12}$/;

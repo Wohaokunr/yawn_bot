@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from ..data_models.agent_scheduled_task import AgentScheduledTask
+from ..data_models.user_group import UserGroup
 from .persona import text_overrides_policy
 from .schedule_spec import (
     ScheduleError,
@@ -46,6 +48,7 @@ MAX_INSTRUCTION_CHARS = 600
 MAX_PREVIEW_CHARS = 300
 MAX_ERROR_CHARS = 240
 LEASE_SECONDS = 15 * 60
+MENTION_ALL = "all"
 _WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 _CQ_RE = re.compile(r"\[CQ:", re.IGNORECASE)
 
@@ -97,7 +100,7 @@ def validate_instruction(value: Any) -> str:
         raise ScheduleRuleError(
             "任务内容里有试图覆盖系统规则、伪造消息或 @全体成员 的内容",
             code="unsafe_instruction",
-            hint="定时任务只能是普通的群聊任务",
+            hint="要到点 @全体成员 请用 mention_all=true，正文里不要写 @全体",
         )
     return instruction
 
@@ -112,6 +115,10 @@ class TaskDraft:
     mode: str = "agent"
     max_runs: int | None = None
     mention_creator: bool = True
+    # 到点 @全体成员 / @这些群成员（QQ 号）。权限（谁能 @全体）由调用方先查。
+    # 两个都是 None 表示“不改”：修改任务时保留原来的 @ 目标（老调用方不会把它清掉）。
+    mention_all: bool | None = None
+    mention_user_ids: list[int] | None = None
 
 
 @dataclass(slots=True)
@@ -123,8 +130,89 @@ class ValidatedDraft:
     max_runs: int | None
     mention_creator: bool
     first_run: datetime
+    # None = 草稿没提 @ 目标（修改时保留原值，新建时当空）。
+    mention_targets: list[Any] | None = None
     upcoming: list[datetime] = field(default_factory=list)
     description: str = ""
+
+
+_ALL_WORDS = frozenset({MENTION_ALL, "全体", "全体成员", "所有人"})
+
+
+def normalize_mentions(*, mention_all: Any, user_ids: Any, settings: ScheduleSettings) -> list[Any]:
+    """整理“到点 @ 谁”：去重、按策略限数量；返回 ``["all"?, QQ号...]``。"""
+
+    raw = list(user_ids) if isinstance(user_ids, (list, tuple)) else ([] if user_ids in (None, "") else [user_ids])
+    wants_all = bool(mention_all)
+    members: list[int] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip().lower() in _ALL_WORDS:
+            wants_all = True
+            continue
+        try:
+            user_id = int(item)
+        except (TypeError, ValueError):
+            user_id = 0
+        if isinstance(item, bool) or user_id <= 0:
+            raise ScheduleRuleError(f"@ 的成员必须是 QQ 号：{item}", code="bad_mention", hint="只知道昵称时先用 find_group_member 查 user_id")
+        if user_id not in members:
+            members.append(user_id)
+    if wants_all and settings.mention_all_who == "off":
+        raise ScheduleRuleError(
+            "管理员关闭了定时任务 @全体成员",
+            code="mention_all_closed",
+            hint="去掉 mention_all，或改成 @ 具体的成员",
+        )
+    if len(members) > settings.max_mention_members:
+        if settings.max_mention_members == 0:
+            raise ScheduleRuleError("管理员没开放定时任务 @ 其他成员", code="mention_closed", hint="只能提醒设任务的人自己")
+        raise ScheduleRuleError(
+            f"一个定时任务最多 @ {settings.max_mention_members} 位成员，这次有 {len(members)} 位",
+            code="too_many_mentions",
+            hint="人多就用 @全体成员（需要群主/管理员），或者拆成几个任务",
+        )
+    return ([MENTION_ALL] if wants_all else []) + members
+
+
+def split_mention_targets(raw: Any) -> tuple[bool, list[int]]:
+    """``mention_targets`` → (@全体成员?, [成员 QQ 号])；NULL/坏数据当空。"""
+
+    if not isinstance(raw, list):
+        return False, []
+    mention_all = MENTION_ALL in [item for item in raw if isinstance(item, str)]
+    members: list[int] = []
+    for item in raw:
+        if isinstance(item, (bool, str)):
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            value = int(item)
+            if value > 0 and value not in members:
+                members.append(value)
+    return mention_all, members
+
+
+def task_mentions(task: Any) -> tuple[bool, list[int]]:
+    return split_mention_targets(getattr(task, "mention_targets", None))
+
+
+async def check_mention_members(session: Any, group_id: int, targets: list[Any] | None) -> None:
+    """要 @ 的成员必须是本群已知成员（和普通发言 @ 的规则一致）。"""
+
+    _all, members = split_mention_targets(targets)
+    if not members or session is None:
+        return
+    rows = (
+        await session.execute(
+            select(UserGroup.user_id).where(UserGroup.group_id == group_id, UserGroup.user_id.in_(members))
+        )
+    ).scalars().all()
+    missing = [item for item in members if item not in {int(row) for row in rows}]
+    if missing:
+        raise ScheduleRuleError(
+            f"这些 QQ 号不是本群已知成员，不能 @：{', '.join(str(item) for item in missing[:5])}",
+            code="mention_not_member",
+            hint="用 find_group_member 查真实的 user_id；没在群里说过话的人可能还不认识",
+        )
 
 
 def validate_draft(
@@ -187,6 +275,11 @@ def validate_draft(
         max_runs=max_runs,
         mention_creator=bool(draft.mention_creator),
         first_run=fires[0],
+        mention_targets=(
+            None
+            if draft.mention_all is None and draft.mention_user_ids is None
+            else normalize_mentions(mention_all=draft.mention_all, user_ids=draft.mention_user_ids, settings=settings)
+        ),
         upcoming=fires,
         description=describe(spec, max_runs=max_runs if spec.recurring else None)[:200],
     )
@@ -245,6 +338,11 @@ async def create_task(
     """校验并新建任务；返回 (任务, 是否复用了已有任务, 校验结果)。只 flush 不 commit。"""
 
     validated = validate_draft(draft, settings=settings, now=now)
+    validated.mention_targets = list(validated.mention_targets or [])
+    if creator_user_id in validated.mention_targets:
+        validated.mention_targets = [item for item in validated.mention_targets if item != creator_user_id]
+        validated.mention_creator = True
+    await check_mention_members(session, group_id, validated.mention_targets)
     if enforce_quota:
         group_open = await count_open(session, group_id)
         if group_open >= settings.max_active_per_group:
@@ -278,6 +376,7 @@ async def create_task(
         status=STATUS_ACTIVE,
         status_reason="",
         mention_creator=validated.mention_creator,
+        mention_targets=list(validated.mention_targets),
         max_runs=validated.max_runs,
         run_count=0,
         failure_count=0,
@@ -452,6 +551,12 @@ def apply_draft(task: AgentScheduledTask, validated: ValidatedDraft, *, now: dat
     task.schedule = validated.spec.as_dict()
     task.schedule_kind = validated.spec.kind
     task.description = validated.description
+    creator = int(getattr(task, "creator_user_id", 0) or 0)
+    if validated.mention_targets is not None:
+        if creator in validated.mention_targets:
+            validated.mention_targets = [item for item in validated.mention_targets if item != creator]
+            validated.mention_creator = True
+        task.mention_targets = list(validated.mention_targets)
     task.mention_creator = validated.mention_creator
     task.max_runs = validated.max_runs if validated.spec.recurring else int(task.run_count or 0) + 1
     if task.status in {STATUS_COMPLETED, STATUS_FAILED} or (restart and task.status == STATUS_CANCELLED):
@@ -536,6 +641,13 @@ def task_public_dict(task: AgentScheduledTask, *, now: datetime | None = None, p
         data["last_result"] = task.last_result
     if task.status_reason:
         data["status_reason"] = task.status_reason
+    mention_all, members = task_mentions(task)
+    if mention_all:
+        data["mention_all"] = True
+    if members:
+        data["mention_user_ids"] = members
+    if not task.mention_creator:
+        data["mention_me"] = False
     if task.source_kind and task.source_kind != "agent":
         from .schedule_wake import SOURCE_LABELS
 
@@ -549,6 +661,7 @@ def task_public_dict(task: AgentScheduledTask, *, now: datetime | None = None, p
 __all__ = [
     "LEASE_SECONDS",
     "MAX_INSTRUCTION_CHARS",
+    "MENTION_ALL",
     "MODES",
     "OPEN_STATUSES",
     "STATUSES",
@@ -563,6 +676,7 @@ __all__ = [
     "ValidatedDraft",
     "apply_draft",
     "cancel_task",
+    "check_mention_members",
     "claim_due",
     "clip",
     "count_open",
@@ -572,11 +686,14 @@ __all__ = [
     "get_task",
     "is_missing_table",
     "list_tasks",
+    "normalize_mentions",
     "pause_task",
     "preview_runs",
     "push_history",
     "remaining_runs",
     "resume_task",
+    "split_mention_targets",
+    "task_mentions",
     "task_public_dict",
     "task_spec",
     "validate_draft",

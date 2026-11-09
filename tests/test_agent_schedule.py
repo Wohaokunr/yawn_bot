@@ -735,6 +735,9 @@ def test_migration_matches_model_on_agent_branch() -> None:
     migration = importlib.import_module("data.nonebot_plugin_orm.migrations.yawn_core.d7f9b1c3e5a7_agent_scheduled_tasks")
     assert migration.down_revision == "c4e6a8b0d2f3"
     source = Path(migration.__file__).read_text(encoding="utf-8")
+    # 之后加列的迁移也算（mention_targets 在 f6b8d0a2c4e6 里加）。
+    later = importlib.import_module("data.nonebot_plugin_orm.migrations.yawn_core.f6b8d0a2c4e6_schedule_mention_targets")
+    source += Path(later.__file__).read_text(encoding="utf-8")
     for column in task_models.AgentScheduledTask.__table__.columns.keys():  # noqa: SIM118
         assert f'"{column}"' in source, column
     for index in task_models.AgentScheduledTask.__table__.indexes:

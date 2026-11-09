@@ -49,6 +49,10 @@ export interface MyScheduleInput {
   schedule: ScheduleRule;
   maxRuns: number | null;
   mentionMe: boolean;
+  /** 群任务：到点 @全体成员（要你是这个群的群主/管理员） */
+  mentionAll?: boolean;
+  /** 群任务：到点还要 @ 的群成员 QQ 号 */
+  mentionUserIds?: string[];
 }
 
 export interface MySchedulePreview {

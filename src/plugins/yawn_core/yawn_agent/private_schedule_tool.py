@@ -26,8 +26,10 @@ from .schedule_store import (
     TaskDraft,
     apply_draft,
     cancel_task,
+    check_mention_members,
     pause_task,
     resume_task,
+    task_mentions,
     task_public_dict,
     validate_draft,
 )
@@ -87,6 +89,8 @@ TOOL_PROPERTIES: dict[str, Any] = {
     "skip_dates": {"type": "array", "items": {"type": "string"}, "maxItems": 60},
     "max_runs": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "循环总共几次后结束"},
     "mention_me": {"type": "boolean", "description": "群任务到点要不要 @ 他（默认要）"},
+    "mention_all": {"type": "boolean", "description": "群任务到点 @全体成员（只有他是那个群的群主/管理员才行）；edit 时传 false 取消"},
+    "mention_user_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 50, "description": "群任务到点还要 @ 的群成员 QQ 号；edit 时传了就整体替换，[] 清空"},
     "scope": {"type": "string", "enum": ["mine", "managed"], "description": "list：mine 他自己的（默认）；managed 再加上他当群主/管理员的群里别人设的"},
     "channel": {"type": "string", "enum": ["all", "private", "group"]},
     "include_finished": {"type": "boolean"},
@@ -205,6 +209,31 @@ def _private_args(args: dict[str, Any], action: str, item_id: int | None = None)
     return payload
 
 
+def _draft_mentions(args: dict[str, Any], task: Any = None) -> tuple[bool | None, list[int] | None]:
+    """参数里的 @ 目标；都没传时返回 (None, None) = 不改。"""
+
+    if "mention_all" not in args and "mention_user_ids" not in args:
+        return None, None
+    old_all, old_members = task_mentions(task) if task is not None else (False, [])
+    mention_all = bool(args["mention_all"]) if "mention_all" in args else old_all
+    members = list(args.get("mention_user_ids") or []) if "mention_user_ids" in args else old_members
+    return mention_all, members
+
+
+async def _check_mention_all(ctx: Any, group_id: int, *, wanted: bool | None, had: bool = False) -> None:
+    try:
+        await hub.check_mention_all(ctx.bot, ctx.user_id, group_id, wanted=wanted, had=had)
+    except hub.HubError as exc:
+        raise _error(exc) from exc
+
+
+def _mention_summary(*, mention_all: bool | None, members: list[int] | None) -> str:
+    parts = (["@全体成员"] if mention_all else []) + [f"@{item}" for item in (members or [])[:5]]
+    if members and len(members) > 5:
+        parts.append(f"等 {len(members)} 人")
+    return f"，到点 {' '.join(parts)}" if parts else ""
+
+
 def _done(action: str, result: dict[str, Any]) -> dict[str, Any]:
     return {"done": True, "action": action, **result}
 
@@ -218,6 +247,8 @@ async def _add(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         result = organizer.reminders(ctx.user_id, _private_args(args, "add"), ctx.now, origin={"kind": "private"})
         return _done("add", {"where": "私聊", **result})
     group = _pick_group(ctx, str(args["group"]))
+    mention_all, mention_ids = _draft_mentions(args)
+    await _check_mention_all(ctx, int(group.group_id), wanted=mention_all)
     draft = TaskDraft(
         instruction=str(args.get("content") or ""),
         schedule=group_schedule(args),
@@ -225,6 +256,8 @@ async def _add(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         mode=str(args.get("mode") or "notify"),
         max_runs=args.get("max_runs"),
         mention_creator=bool(args.get("mention_me", True)),
+        mention_all=mention_all,
+        mention_user_ids=mention_ids,
     )
     if not draft.schedule:
         raise ToolError("要给时间", code=ERROR_INVALID_ARGS, hint="at、in_minutes 或 kind+times 等")
@@ -237,7 +270,7 @@ async def _add(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         raise _unavailable() from exc
     verb = "到点在群里办" if preview["mode"] == "agent" else "到点在群里发"
     what = draft.instruction if len(draft.instruction) <= 60 else draft.instruction[:60] + "…"
-    summary = f"给群「{group.name}」设定时任务：{preview['rule']}，{verb}「{what}」"
+    summary = f"给群「{group.name}」设定时任务：{preview['rule']}，{verb}「{what}」{_mention_summary(mention_all=mention_all, members=mention_ids)}"
     draft_dict = {
         "instruction": draft.instruction,
         "schedule": draft.schedule,
@@ -245,6 +278,8 @@ async def _add(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         "mode": draft.mode,
         "max_runs": draft.max_runs,
         "mention_creator": draft.mention_creator,
+        "mention_all": draft.mention_all,
+        "mention_user_ids": draft.mention_user_ids,
     }
     return _ask(ctx, group.group_id, group.name, "create", draft_dict, summary, preview=preview)
 
@@ -318,6 +353,8 @@ async def _confirm(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         mode=str(item.draft.get("mode") or "notify"),
         max_runs=item.draft.get("max_runs"),
         mention_creator=bool(item.draft.get("mention_creator", True)),
+        mention_all=item.draft.get("mention_all"),
+        mention_user_ids=item.draft.get("mention_user_ids"),
     )
     try:
         if item.kind == "edit" and item.task_id is not None:
@@ -381,6 +418,7 @@ async def _apply_group_edit(task: Any, draft: TaskDraft, ctx: Any, *, rule_chang
             anchor=ctx.now if rule_changed else task.created_at,
             run_count=0 if rule_changed else int(task.run_count or 0),
         )
+        await check_mention_members(ctx.session, int(task.group_id), validated.mention_targets)
     except ScheduleRuleError as exc:
         raise ToolError(str(exc), code=ERROR_INVALID_ARGS, hint=exc.hint or None) from exc
     if rule_changed:
@@ -422,6 +460,8 @@ async def _group_op(action: str, task_id: int, args: dict[str, Any], ctx: Any) -
         cancel_task(task, now=ctx.now, by_user_id=ctx.user_id, reason="在私聊里取消")
     elif action == "edit":
         rule_changed = bool(args.get("kind") or args.get("at") or args.get("in_minutes"))
+        mention_all, mention_ids = _draft_mentions(args, task)
+        await _check_mention_all(ctx, int(task.group_id), wanted=mention_all, had=task_mentions(task)[0])
         draft = TaskDraft(
             instruction=str(args.get("content") or task.instruction),
             schedule=group_schedule(args) if rule_changed else dict(task.schedule or {}),
@@ -429,13 +469,16 @@ async def _group_op(action: str, task_id: int, args: dict[str, Any], ctx: Any) -
             mode=str(args.get("mode") or task.mode),
             max_runs=args.get("max_runs") if args.get("max_runs") is not None else task.max_runs,
             mention_creator=bool(args["mention_me"]) if "mention_me" in args else bool(task.mention_creator),
+            mention_all=mention_all,
+            mention_user_ids=mention_ids,
         )
-        if not any(args.get(key) not in (None, "", []) for key in ("content", "title", "mode", "max_runs", "mention_me", "kind", "at", "in_minutes")):
+        mentions_changed = mention_all is not None
+        if not mentions_changed and not any(args.get(key) not in (None, "", []) for key in ("content", "title", "mode", "max_runs", "mention_me", "kind", "at", "in_minutes")):
             raise ToolError("没有要改的内容", code=ERROR_INVALID_ARGS, hint="传 content 或新的时间")
-        if args.get("content") or args.get("mode"):
-            # 改的是到点发到群里的内容：和新建一样要他确认。
+        if args.get("content") or args.get("mode") or mentions_changed:
+            # 改的是到点发到群里的内容或要 @ 的人：和新建一样要他确认。
             preview = hub.preview_group_draft(draft, ctx.now)
-            summary = f"把群「{group_name}」的定时任务 g{task_id} 改成：{preview['rule']}，「{draft.instruction[:60]}」"
+            summary = f"把群「{group_name}」的定时任务 g{task_id} 改成：{preview['rule']}，「{draft.instruction[:60]}」{_mention_summary(mention_all=mention_all, members=mention_ids)}"
             draft_dict = {
                 "instruction": draft.instruction,
                 "schedule": draft.schedule,
@@ -443,6 +486,8 @@ async def _group_op(action: str, task_id: int, args: dict[str, Any], ctx: Any) -
                 "mode": draft.mode,
                 "max_runs": draft.max_runs,
                 "mention_creator": draft.mention_creator,
+                "mention_all": draft.mention_all,
+                "mention_user_ids": draft.mention_user_ids,
                 "rule_changed": rule_changed,
             }
             return _ask(ctx, int(task.group_id), group_name, "edit", draft_dict, summary, preview=preview, task_id=task_id)

@@ -265,7 +265,7 @@ def test_preview_describes_rule_without_saving(api: TestClient) -> None:
 def test_settings_round_trip_and_validation(api: TestClient) -> None:
     current = api.get(f"{BASE}/settings").json()["data"]
     settings = current["settings"]
-    assert settings == current["defaults"] and settings["maxActivePerGroup"] == 20
+    assert settings == current["defaults"] and settings["maxActivePerGroup"] == 300
     settings.update({"groupMode": "allowlist", "allowedGroups": [str(GROUP), ""], "minIntervalMinutes": 30})
     saved = api.put(f"{BASE}/settings", json=settings)
     assert saved.status_code == 200

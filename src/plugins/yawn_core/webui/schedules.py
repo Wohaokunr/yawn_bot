@@ -42,12 +42,14 @@ from ..yawn_agent.schedule_store import (
     TaskDraft,
     apply_draft,
     cancel_task,
+    check_mention_members,
     create_task,
     get_task,
     list_tasks,
     pause_task,
     preview_runs,
     resume_task,
+    task_mentions,
     validate_draft,
 )
 from ..yawn_agent.schedule_wake import SOURCE_LABELS
@@ -93,6 +95,8 @@ def task_payload(task: AgentScheduledTask, *, group_name: str | None = None, det
         "status": task.status,
         "statusReason": task.status_reason or None,
         "mentionCreator": bool(task.mention_creator),
+        "mentionAll": task_mentions(task)[0],
+        "mentionUserIds": [str(item) for item in task_mentions(task)[1]],
         "maxRuns": task.max_runs,
         "runCount": int(task.run_count or 0),
         "failureCount": int(task.failure_count or 0),
@@ -483,7 +487,21 @@ class TaskBody(BaseModel):
     schedule: dict[str, Any]
     max_runs: int | None = Field(default=None, ge=1, le=10000)
     mention_creator: bool = True
+    # 不传 = 不改（编辑时保留原来的 @ 目标）。QQ 号用字符串。
+    mention_all: bool | None = None
+    mention_user_ids: list[str] | None = Field(default=None, max_length=50)
     revision: int | None = None
+
+    def mention_ids(self) -> list[int] | None:
+        if self.mention_user_ids is None:
+            return None
+        result: list[int] = []
+        for item in self.mention_user_ids:
+            text = str(item).strip()
+            if not text.isdigit() or int(text) <= 0:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"要 @ 的成员必须是 QQ 号：{text}")
+            result.append(int(text))
+        return result
 
 
 class PreviewBody(BaseModel):
@@ -553,6 +571,8 @@ async def schedule_create(body: TaskBody, _session: AdminWriteSession) -> dict[s
                     mode=body.mode,
                     max_runs=body.max_runs,
                     mention_creator=body.mention_creator,
+                    mention_all=body.mention_all,
+                    mention_user_ids=body.mention_ids(),
                 ),
                 settings=load_settings(),
                 now=now,
@@ -589,12 +609,15 @@ async def schedule_update(task_id: int, body: TaskBody, _session: AdminWriteSess
                     mode=body.mode,
                     max_runs=body.max_runs,
                     mention_creator=body.mention_creator,
+                    mention_all=body.mention_all,
+                    mention_user_ids=body.mention_ids(),
                 ),
                 settings=load_settings(),
                 now=now,
                 anchor=now if rule_changed else task.created_at,
                 run_count=0 if rule_changed else int(task.run_count or 0),
             )
+            await check_mention_members(session, int(task.group_id), validated.mention_targets)
             if rule_changed:
                 task.run_count = 0
                 task.created_at = now
@@ -737,10 +760,12 @@ class SettingsBody(BaseModel):
     private_max_active: int = 30
     private_min_interval_minutes: int = 5
     private_retry_limit: int = 3
+    mention_all_who: Literal["off", "admins", "members"] = "admins"
+    max_mention_members: int = 20
 
 
 def _settings_payload(settings: ScheduleSettings) -> dict[str, Any]:
-    data = {to_camel(key): value for key, value in settings.model_dump().items()}
+    data = {to_camel(key): value for key, value in settings.model_dump().items() if key != "settings_version"}
     data["allowedGroups"] = [str(item) for item in settings.allowed_groups]
     data["blockedGroups"] = [str(item) for item in settings.blocked_groups]
     return data

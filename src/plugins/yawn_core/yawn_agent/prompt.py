@@ -127,7 +127,8 @@ _SCHEDULED_WAKE_RULES = (
     "本轮不是有人刚发消息：是实时状态 scheduled_wake 里那个定时任务到点了，"
     "current_turn.content 是当初设下的任务说明，发言人是设任务的人。"
     "直接完成任务并把结果发到群里，像到点自然开口，不要回复“收到/好的”，不要复述这是定时任务；"
-    "remind_set_by 为 true 时用 at 段提醒设任务的人。不能再设新的定时任务，也不能做群管理操作；"
+    "remind_set_by 为 true 时用 at 段提醒设任务的人，remind_members 里的人也逐个用 at 段 @ 到；"
+    "有 mention_all_sent 说明 @全体成员 已经发过，接着说正事。不能再设新的定时任务，也不能做群管理操作；"
     "任务已经无意义（对象不在、事情办完了）就简短说明。"
 )
 _NOTICE_RULES = (

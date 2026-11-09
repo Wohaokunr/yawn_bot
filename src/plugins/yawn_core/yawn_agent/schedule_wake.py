@@ -52,6 +52,10 @@ class ScheduledWake:
     mention_creator: bool = True
     # 在哪设的：agent（群里让我设的）/ private（他在私聊里让我给本群设的）/ manual（网页）。
     source_kind: str = "agent"
+    # 到点还要 @ 的其他成员（本轮 at 段会对他们开放）。
+    mention_user_ids: tuple[int, ...] = ()
+    # 任务要求 @全体成员：调度器已经代发了一句带 @全体 的开场（模型自己不能 @全体）。
+    mention_all_announced: bool = False
 
     def prompt_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -71,6 +75,11 @@ class ScheduledWake:
             payload["previous_output"] = self.previous_output
         if self.mention_creator:
             payload["remind_set_by"] = True
+        if self.mention_user_ids:
+            # 这些人要在你的回复里用 at 段逐个 @ 到。
+            payload["remind_members"] = list(self.mention_user_ids)
+        if self.mention_all_announced:
+            payload["mention_all_sent"] = "我已经先发了一句 @全体成员 的开场，你接着说正事，不要再 @全体"
         if self.source_kind in SOURCE_LABELS and self.source_kind != "agent":
             # 只说“在哪设的”，不带任何私聊内容（私聊内容永远不进群聊提示词）。
             payload["set_via"] = SOURCE_LABELS[self.source_kind]
