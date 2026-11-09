@@ -1,0 +1,228 @@
+/* 好感玩法：个人页的权益/玩法标签与管理台「好感度」页。颜色只用主题变量，深色自动跟随。 */
+
+.aff-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.aff-grid > .aff-span,
+.aff-span {
+  grid-column: 1 / -1;
+}
+
+.aff-bonus-list,
+.aff-quest-list,
+.aff-ladder {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aff-bonus-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--ink-secondary);
+}
+
+.aff-bonus-list .anticon {
+  color: var(--warning);
+}
+
+.aff-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.aff-ladder li {
+  display: grid;
+  grid-template-columns: 64px 48px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--ink-tertiary);
+}
+
+.aff-ladder li.is-passed {
+  color: var(--ink-secondary);
+}
+
+.aff-ladder li.is-current {
+  background: var(--brand-50);
+  color: var(--ink);
+}
+
+.aff-ladder-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.aff-quest-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.aff-quest-list li.is-done span:first-child {
+  color: var(--ink-tertiary);
+  text-decoration: line-through;
+}
+
+.aff-gift-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.aff-gift {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.aff-gift:hover:not(:disabled) {
+  border-color: var(--brand);
+}
+
+.aff-gift:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.aff-gift:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.aff-gift.is-favorite {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.aff-gift-emoji {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.aff-interact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aff-nickname {
+  display: flex;
+  gap: 8px;
+  max-width: 420px;
+}
+
+.aff-group-select {
+  min-width: 120px;
+}
+
+/* 管理台 */
+.aff-admin-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.aff-dist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aff-dist li {
+  display: grid;
+  grid-template-columns: 64px 1fr 48px;
+  gap: 8px;
+  align-items: center;
+}
+
+.aff-dist-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  overflow: hidden;
+}
+
+.aff-dist-fill {
+  display: block;
+  height: 100%;
+  background: var(--brand);
+}
+
+.aff-level-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.aff-number-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px 12px;
+}
+
+.aff-number-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.aff-save-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.aff-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: center;
+}
+
+.aff-form-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 560px) {
+  .aff-ladder li {
+    grid-template-columns: 56px 1fr;
+  }
+  .aff-ladder-text {
+    grid-column: 1 / -1;
+  }
+  .aff-nickname {
+    flex-wrap: wrap;
+  }
+}

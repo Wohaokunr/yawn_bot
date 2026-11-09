@@ -112,8 +112,14 @@ def test_merge_speaker_standing_extends_or_prepends() -> None:
     alone = standing.merge_speaker_standing(
         [], speaker_id=MEMBER, speaker_name="小明", standing=record, now=NOW
     )
+    # 好感玩法（affinity_perks）再补一句这一级能亲近到什么程度
     assert alone == [
-        {"user_id": MEMBER, "name": "小明", "overall": affinity.level_words(30)}
+        {
+            "user_id": MEMBER,
+            "name": "小明",
+            "overall": affinity.level_words(30),
+            "what_you_can_do": "可以随意一点，偶尔接个梗",
+        }
     ]
     assert (
         standing.merge_speaker_standing(

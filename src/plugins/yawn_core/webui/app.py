@@ -28,6 +28,8 @@ from nonebot import get_driver, logger
 from nonebot_plugin_orm import get_session
 
 from ..data_models.web_admin_audit import WebAdminAudit
+from .affinity_routes import me_router as affinity_me_router
+from .affinity_routes import router as affinity_router
 from .agent import router as agent_router
 from .agent_prompt_routes import router as agent_prompt_router
 from .audits import router as audits_router
@@ -135,6 +137,8 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(guest_access_router)
     app.include_router(groups_router)
     app.include_router(users_router)
+    app.include_router(affinity_router)
+    app.include_router(affinity_me_router)
     app.include_router(agent_router)
     app.include_router(agent_prompt_router)
     app.include_router(private_offer_router)

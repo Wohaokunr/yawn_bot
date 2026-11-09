@@ -1,13 +1,15 @@
 import { CalendarOutlined, FireOutlined, HeartOutlined, HistoryOutlined, PieChartOutlined } from "@ant-design/icons";
+import { MyAffinityPlay } from "../affinity/AffinityPlayPanel";
 import { Alert, Empty, Progress, Segmented, Skeleton, Tag, Typography } from "antd";
 import { useMemo, useState } from "react";
 import { PageHeader, QueryErrorAlert } from "../shared";
 import { type AffinityState, spaceApi } from "./me-space-api";
-import { MeSection, StatTile, useResource } from "./space-ui";
+import { MeSection, StatTile, UrlTabs, useResource } from "./space-ui";
 import "./me.css";
 import "./me-space.css";
 
 const { Text } = Typography;
+const TAB_KEYS = ["overview", "perks", "play"] as const;
 
 export function MyAffinityPage(): React.JSX.Element {
   const { query, data } = useResource<AffinityState>(["me", "affinity"], () => spaceApi.affinity());
@@ -22,7 +24,7 @@ export function MyAffinityPage(): React.JSX.Element {
   const groupNames = useMemo(() => new Map((data?.groups ?? []).map((group) => [group.groupId, group.groupName])), [data]);
 
   return <div className="me-page">
-    <PageHeader title="好感与签到" subtitle="和 Bot 越熟，它说话越亲近。签到、私聊、在群里和它互动都会涨好感。" onRefresh={query.reload} refreshing={query.refreshing} />
+    <PageHeader title="好感与签到" subtitle="和 Bot 越熟，它说话越亲近、给你的额度越多、能解锁的玩法越多。签到、私聊、群里互动、送礼、做每日任务都会涨好感。" onRefresh={query.reload} refreshing={query.refreshing} />
     {query.error && !data && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
     {!data ? <Skeleton active paragraph={{ rows: 6 }} /> : <>
       {!data.available && <Alert type="info" showIcon message="好感流水还没启用" description="管理员完成数据库迁移后，这里会显示每一笔变化。" />}
@@ -51,6 +53,24 @@ export function MyAffinityPage(): React.JSX.Element {
         <StatTile label="最长连签" value={`${Math.max(0, ...data.groups.map((group) => group.streakDays))} 天`} tone="warning" />
       </div>
 
+      <UrlTabs keys={TAB_KEYS} fallback="overview" items={[
+        { key: "overview", label: "来源与签到", children: <AffinityOverview data={data} breakdown={breakdown} events={events} groupNames={groupNames} eventFilter={eventFilter} setEventFilter={setEventFilter} /> },
+        { key: "perks", label: "等级权益", children: <MyAffinityPlay view="perks" /> },
+        { key: "play", label: "任务·送礼·商店", children: <MyAffinityPlay view="play" /> },
+      ]} />
+    </>}
+  </div>;
+}
+
+function AffinityOverview({ data, breakdown, events, groupNames, eventFilter, setEventFilter }: {
+  data: AffinityState;
+  breakdown: Array<{ source: string; total: number; label: string; width: number }>;
+  events: AffinityState["events"];
+  groupNames: Map<string, string | null>;
+  eventFilter: string;
+  setEventFilter: (value: string) => void;
+}): React.JSX.Element {
+  return <>
       <div className="me-two-col">
         <MeSection icon={<PieChartOutlined />} title="近 30 天从哪来">
           {breakdown.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="最近 30 天没有变化" /> : (
@@ -96,6 +116,5 @@ export function MyAffinityPage(): React.JSX.Element {
           </ul>
         )}
       </MeSection>
-    </>}
-  </div>;
+  </>;
 }

@@ -121,6 +121,9 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "delegate_task": ("delegate_task",),
     "delegate_project": ("delegate_task",),
     "checkin": ("checkin_for_me",),
+    "affinity.buy": ("affinity_action",),
+    "affinity.use": ("affinity_action",),
+    "affinity.gift": ("affinity_action",),
     "my_status.checkin": ("get_my_checkin",),
     "my_status.board": ("get_my_checkin",),
     "reminders.add": ("schedule_task",),
@@ -851,7 +854,15 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         # 他又说话了：之前“等他说完”的计时器作废，由这一轮接着聊。
         turn_taking.cancel_wait(user_id)
     arrivals_at_start = turn_taking.arrivals(user_id)
-    cap = int(private_agent_config.private_agent_daily_turns)
+    from ..affinity_perks import bonus_limit, load_points
+
+    # 好感等级越高，每天能和 Agent 私聊的轮数越多（基础为 0 = 不限时不变）
+    cap = bonus_limit(
+        int(private_agent_config.private_agent_daily_turns),
+        user_id,
+        "private_turns_pct",
+        points=await load_points(session, user_id),
+    )
     if cap and await turns_today(session, user_id, now) >= cap:
         dbg(f"私聊用户 {user_id} 今日 Agent 轮数已达 {cap}，退回纯对话")
         return None
@@ -1370,6 +1381,10 @@ async def _after_turn(session: Any, user_id: int, now: datetime) -> None:
             note="私聊聊天",
             now=now,
         )
+        from ..affinity_perks import settle_quests
+
+        # 每日任务“私聊聊几轮”做完了就把奖励发掉
+        await settle_quests(session, user_id, now=now)
         await session.commit()
     except Exception:  # noqa: BLE001
         dbg_exc(f"私聊用户 {user_id} 好感记录失败(忽略)")

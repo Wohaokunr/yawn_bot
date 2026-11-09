@@ -284,7 +284,10 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
         # 原 chat_history 的 stats（搜索并进了 recall）。
         return await chat_history(ctx, {"action": "stats"})
     if action == "quota":
-        cap = int(private_agent_config.private_agent_daily_turns)
+        from ..affinity_perks import bonus_limit, load_points
+
+        points = await load_points(ctx.session, ctx.user_id)
+        cap = bonus_limit(int(private_agent_config.private_agent_daily_turns), ctx.user_id, "private_turns_pct", points=points)
         used = await turns_today(ctx.session, ctx.user_id, ctx.now)
         record = store.load(ctx.user_id)
         web_used = _web_used_today(record, ctx.now)
@@ -292,7 +295,7 @@ async def my_data(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, An
             "turns_today": used,
             "turn_limit": cap or None,
             "turns_left": max(cap - used, 0) if cap else None,
-            "web_searches_left": max(_web_daily() - web_used, 0),
+            "web_searches_left": max(_web_daily(ctx.user_id) - web_used, 0),
             **_task_and_computer_quota(record, ctx),
         }
     if action == "wipe":
@@ -440,8 +443,13 @@ async def feedback(ctx: PrivateToolContext, args: dict[str, Any]) -> dict[str, A
 # ── 联网搜索 ─────────────────────────────────────────────
 
 
-def _web_daily() -> int:
-    return int(private_agent_config.private_agent_web_daily)
+def _web_daily(user_id: int | None = None) -> int:
+    """私聊每天联网次数：基础配置 + 好感等级加成（基础为 0 表示没开放，不加）。"""
+
+    base = int(private_agent_config.private_agent_web_daily)
+    from ..affinity_perks import bonus_limit
+
+    return bonus_limit(base, user_id, "private_web_bonus")
 
 
 def _web_used_today(record: dict[str, Any], now: datetime) -> int:
@@ -473,13 +481,13 @@ def _web_reserve(ctx: PrivateToolContext, kind: str) -> Any:
         flags = record["flags"]
         if flags.get("web_day") != day:
             flags["web_day"], flags["web_used"] = day, 0
-        if int(flags["web_used"]) >= _web_daily():
+        if int(flags["web_used"]) >= _web_daily(ctx.user_id):
             return False
         flags["web_used"] = int(flags["web_used"]) + 1
         return True
 
     if not store.update(ctx.user_id, take):
-        raise ToolError(f"你今天的联网搜索次数（{_web_daily()} 次）用完了", code=ERROR_QUOTA, hint="如实说明，不要换工具绕过")
+        raise ToolError(f"你今天的联网搜索次数（{_web_daily(ctx.user_id)} 次）用完了", code=ERROR_QUOTA, hint="如实说明，不要换工具绕过")
     ctx.web_calls += 1
     return settings
 

@@ -374,9 +374,10 @@ async def reserve_call(  # noqa: PLR0913
     used_member = int(usage["members"].get(cooldown_key, 0))
     used_group = int(usage["groups"].get(str(group_id), 0))
     billed_today = int(usage["totals"].get("billed", 0))
-    if used_member >= settings.member_daily_calls:
+    member_limit = member_daily_limit(settings.member_daily_calls, user_id)
+    if used_member >= member_limit:
         raise WebSearchPolicyError(
-            "member_quota", f"你今天的网页搜索次数已用完（配额 {settings.member_daily_calls} 次）"
+            "member_quota", f"你今天的网页搜索次数已用完（配额 {member_limit} 次）"
         )
     if used_group >= settings.group_daily_calls:
         raise WebSearchPolicyError(
@@ -393,6 +394,17 @@ async def reserve_call(  # noqa: PLR0913
     )
 
 
+def member_daily_limit(base: int, user_id: int | None) -> int:
+    """成员每日次数：后台配额 + 好感等级加成（affinity_perks，读余额缓存）。"""
+
+    try:
+        from ..affinity_perks import bonus_limit  # noqa: TID252
+
+        return bonus_limit(int(base), user_id, "web_search_bonus")
+    except Exception:  # noqa: BLE001
+        return int(base)
+
+
 def quota_status(group_id: int, user_id: int | None) -> dict[str, Any]:
     settings = load_settings()
     usage = _store.usage()
@@ -403,10 +415,11 @@ def quota_status(group_id: int, user_id: int | None) -> dict[str, Any]:
     }
     if user_id is not None:
         used_member = int(usage["members"].get(f"{group_id}:{user_id}", 0))
+        member_limit = member_daily_limit(settings.member_daily_calls, user_id)
         status.update(
             member_used=used_member,
-            member_limit=settings.member_daily_calls,
-            member_left=max(settings.member_daily_calls - used_member, 0),
+            member_limit=member_limit,
+            member_left=max(member_limit - used_member, 0),
         )
     return status
 

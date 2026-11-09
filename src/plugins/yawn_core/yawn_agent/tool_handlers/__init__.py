@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from ..tool_execution import ToolExecutionContext, ToolHandlerResult
 from . import (
     admin,
+    affinity,
     bridge,
     checkin,
     files,
@@ -40,6 +41,7 @@ _MODULES = (
     schedule,
     sticker,
     checkin,
+    affinity,
     bridge,
 )
 for module in _MODULES:

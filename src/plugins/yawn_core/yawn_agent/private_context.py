@@ -762,6 +762,17 @@ async def last_chat(session: Any, user_id: int, now: datetime) -> dict[str, Any]
     return payload
 
 
+def _affinity_extras(user_id: int, points: int, now: datetime) -> dict[str, Any]:
+    """好感玩法字段：专属称呼、这一级能做到什么程度、刚升级、今天收到的礼物（只有词语）。"""
+
+    try:
+        from ..affinity_perks import speaker_view
+
+        return speaker_view(user_id, points, now, channel="private")
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 async def build_private_context(
     session: Any,
     user_id: int,
@@ -823,7 +834,8 @@ async def build_private_context(
         },
         "relationship": {
             "level": snap.level.name,
-            "how_to_treat": affinity.LEVEL_TONE.get(snap.level.name, ""),
+            "how_to_treat": affinity.level_tone(snap.level.name),
+            **_affinity_extras(user_id, snap.points, now),
         },
     }
     if user is not None and user.first_interaction_at:

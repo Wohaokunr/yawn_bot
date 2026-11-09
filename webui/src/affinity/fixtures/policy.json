@@ -1,0 +1,437 @@
+{
+ "policy": {
+  "enabled": true,
+  "levels": [
+   {
+    "level": "陌生",
+    "tone": "还不太熟，礼貌友好即可",
+    "behavior": "先礼貌友好，别开过头的玩笑，也别装熟",
+    "private_turns_pct": 0,
+    "private_web_bonus": 0,
+    "private_sticker_bonus": 0,
+    "web_search_bonus": 0,
+    "sandbox_bonus": 0,
+    "sticker_collect_bonus": 0,
+    "persona_edit_bonus": 0,
+    "memory_bonus": 0,
+    "checkin_points_pct": 0,
+    "gift_daily": 3,
+    "shop_discount_pct": 0,
+    "unlocks": [
+     "interact.highfive"
+    ],
+    "levelup_items": {}
+   },
+   {
+    "level": "面熟",
+    "tone": "见过几次，可以随意一点",
+    "behavior": "可以随意一点，偶尔接个梗",
+    "private_turns_pct": 10,
+    "private_web_bonus": 1,
+    "private_sticker_bonus": 2,
+    "web_search_bonus": 2,
+    "sandbox_bonus": 2,
+    "sticker_collect_bonus": 2,
+    "persona_edit_bonus": 0,
+    "memory_bonus": 0,
+    "checkin_points_pct": 5,
+    "gift_daily": 4,
+    "shop_discount_pct": 0,
+    "unlocks": [
+     "interact.highfive",
+     "interact.pat",
+     "offers",
+     "levelup_gift"
+    ],
+    "levelup_items": {
+     "repair_card": 1
+    }
+   },
+   {
+    "level": "熟人",
+    "tone": "比较熟了，可以开开玩笑",
+    "behavior": "可以开玩笑、吐槽，记得他说过的事并自然提起",
+    "private_turns_pct": 25,
+    "private_web_bonus": 2,
+    "private_sticker_bonus": 4,
+    "web_search_bonus": 4,
+    "sandbox_bonus": 4,
+    "sticker_collect_bonus": 4,
+    "persona_edit_bonus": 2,
+    "memory_bonus": 2,
+    "checkin_points_pct": 10,
+    "gift_daily": 5,
+    "shop_discount_pct": 5,
+    "unlocks": [
+     "interact.highfive",
+     "interact.pat",
+     "interact.hug",
+     "offers",
+     "nickname",
+     "levelup_gift"
+    ],
+    "levelup_items": {
+     "shield": 1,
+     "lucky_card": 1
+    }
+   },
+   {
+    "level": "朋友",
+    "tone": "是朋友，说话可以亲近自然",
+    "behavior": "像朋友一样说话，会关心他的近况，帮忙时更上心",
+    "private_turns_pct": 50,
+    "private_web_bonus": 4,
+    "private_sticker_bonus": 6,
+    "web_search_bonus": 8,
+    "sandbox_bonus": 8,
+    "sticker_collect_bonus": 6,
+    "persona_edit_bonus": 4,
+    "memory_bonus": 4,
+    "checkin_points_pct": 15,
+    "gift_daily": 6,
+    "shop_discount_pct": 10,
+    "unlocks": [
+     "interact.highfive",
+     "interact.pat",
+     "interact.hug",
+     "interact.cuddle",
+     "offers",
+     "nickname",
+     "care",
+     "levelup_gift"
+    ],
+    "levelup_items": {
+     "repair_card": 1,
+     "lucky_card": 2
+    }
+   },
+   {
+    "level": "好朋友",
+    "tone": "关系很好，可以更亲昵、多关心对方",
+    "behavior": "可以更亲昵、偶尔撒娇，翻翻你们的旧梗，他心情不好时多陪陪",
+    "private_turns_pct": 75,
+    "private_web_bonus": 6,
+    "private_sticker_bonus": 8,
+    "web_search_bonus": 12,
+    "sandbox_bonus": 12,
+    "sticker_collect_bonus": 8,
+    "persona_edit_bonus": 6,
+    "memory_bonus": 6,
+    "checkin_points_pct": 20,
+    "gift_daily": 8,
+    "shop_discount_pct": 15,
+    "unlocks": [
+     "interact.highfive",
+     "interact.pat",
+     "interact.hug",
+     "interact.cuddle",
+     "interact.lift",
+     "nickname",
+     "offers",
+     "care",
+     "levelup_gift"
+    ],
+    "levelup_items": {
+     "shield": 1,
+     "repair_card": 1,
+     "quest_refresh": 1
+    }
+   },
+   {
+    "level": "挚友",
+    "tone": "非常亲近的老朋友，像老友一样相处",
+    "behavior": "像多年老友一样相处，彼此都很了解，有默契，说话不用客套",
+    "private_turns_pct": 100,
+    "private_web_bonus": 10,
+    "private_sticker_bonus": 10,
+    "web_search_bonus": 20,
+    "sandbox_bonus": 20,
+    "sticker_collect_bonus": 10,
+    "persona_edit_bonus": 10,
+    "memory_bonus": 8,
+    "checkin_points_pct": 30,
+    "gift_daily": 10,
+    "shop_discount_pct": 20,
+    "unlocks": [
+     "interact.highfive",
+     "interact.pat",
+     "interact.hug",
+     "interact.cuddle",
+     "interact.lift",
+     "nickname",
+     "offers",
+     "care",
+     "levelup_gift"
+    ],
+    "levelup_items": {
+     "shield": 2,
+     "repair_card": 2,
+     "lucky_card": 2
+    }
+   }
+  ],
+  "gifts": [
+   {
+    "key": "candy",
+    "name": "糖果",
+    "emoji": "🍬",
+    "price": 10,
+    "affinity": 1,
+    "enabled": true
+   },
+   {
+    "key": "milk_tea",
+    "name": "奶茶",
+    "emoji": "🧋",
+    "price": 30,
+    "affinity": 2,
+    "enabled": true
+   },
+   {
+    "key": "flower",
+    "name": "鲜花",
+    "emoji": "💐",
+    "price": 60,
+    "affinity": 3,
+    "enabled": true
+   },
+   {
+    "key": "cake",
+    "name": "蛋糕",
+    "emoji": "🍰",
+    "price": 120,
+    "affinity": 5,
+    "enabled": true
+   },
+   {
+    "key": "star",
+    "name": "星星灯",
+    "emoji": "🌟",
+    "price": 300,
+    "affinity": 10,
+    "enabled": true
+   }
+  ],
+  "gift_affinity_daily_cap": 10,
+  "favorite_multiplier": 2,
+  "shop": [
+   {
+    "key": "repair_card",
+    "name": "补签卡",
+    "price": 80,
+    "description": "补签卡：连签断了 7 天内，在某个群续上（把断掉的那几天算作签过）",
+    "min_level": "陌生",
+    "max_hold": 3,
+    "enabled": true
+   },
+   {
+    "key": "shield",
+    "name": "好感护盾",
+    "price": 60,
+    "description": "好感护盾：14 天内长时间不来往也不会掉好感",
+    "min_level": "面熟",
+    "max_hold": 3,
+    "enabled": true
+   },
+   {
+    "key": "lucky_card",
+    "name": "签到暴击卡",
+    "price": 40,
+    "description": "签到暴击卡：今天下一次签到积分翻倍",
+    "min_level": "陌生",
+    "max_hold": 5,
+    "enabled": true
+   },
+   {
+    "key": "quest_refresh",
+    "name": "任务刷新券",
+    "price": 20,
+    "description": "任务刷新券：把今天没完成的任务换一批",
+    "min_level": "陌生",
+    "max_hold": 5,
+    "enabled": true
+   }
+  ],
+  "quests": {
+   "enabled": true,
+   "per_day": 3,
+   "reward_affinity": 2,
+   "all_done_item": "lucky_card"
+  },
+  "decay": {
+   "enabled": true,
+   "idle_days": 14,
+   "per_day": 1,
+   "keep_level": true
+  },
+  "care": {
+   "idle_days": 4,
+   "give_up_days": 45
+  },
+  "interact_affinity_daily_cap": 3,
+  "announce_levelup": true
+ },
+ "meta": {
+  "levels": [
+   {
+    "floor": 0,
+    "name": "陌生"
+   },
+   {
+    "floor": 20,
+    "name": "面熟"
+   },
+   {
+    "floor": 60,
+    "name": "熟人"
+   },
+   {
+    "floor": 150,
+    "name": "朋友"
+   },
+   {
+    "floor": 320,
+    "name": "好朋友"
+   },
+   {
+    "floor": 600,
+    "name": "挚友"
+   }
+  ],
+  "unlocks": [
+   {
+    "key": "interact.highfive",
+    "label": "击掌",
+    "description": "/击掌 和 Bot 击个掌"
+   },
+   {
+    "key": "interact.pat",
+    "label": "摸头",
+    "description": "/摸头 摸摸 Bot 的头"
+   },
+   {
+    "key": "interact.hug",
+    "label": "抱抱",
+    "description": "/抱抱 给 Bot 一个拥抱"
+   },
+   {
+    "key": "interact.cuddle",
+    "label": "贴贴",
+    "description": "/贴贴 和 Bot 贴贴"
+   },
+   {
+    "key": "interact.lift",
+    "label": "举高高",
+    "description": "/举高高 把 Bot 举起来"
+   },
+   {
+    "key": "nickname",
+    "label": "专属称呼",
+    "description": "/叫我 <称呼>：群里和私聊的 Bot 都按你定的称呼叫你"
+   },
+   {
+    "key": "offers",
+    "label": "主动提议",
+    "description": "私聊里 Bot 会隔一阵主动问你要不要帮忙做点事"
+   },
+   {
+    "key": "care",
+    "label": "久别问候",
+    "description": "好几天没聊时，Bot 会在私聊里主动问候你一句"
+   },
+   {
+    "key": "levelup_gift",
+    "label": "升级礼包",
+    "description": "每升一级送一份道具礼包"
+   }
+  ],
+  "items": [
+   {
+    "key": "repair_card",
+    "description": "补签卡：连签断了 7 天内，在某个群续上（把断掉的那几天算作签过）"
+   },
+   {
+    "key": "shield",
+    "description": "好感护盾：14 天内长时间不来往也不会掉好感"
+   },
+   {
+    "key": "lucky_card",
+    "description": "签到暴击卡：今天下一次签到积分翻倍"
+   },
+   {
+    "key": "quest_refresh",
+    "description": "任务刷新券：把今天没完成的任务换一批"
+   }
+  ],
+  "bonusFields": [
+   {
+    "key": "private_turns_pct",
+    "label": "私聊每天能聊的轮数"
+   },
+   {
+    "key": "private_web_bonus",
+    "label": "私聊每天联网搜索次数"
+   },
+   {
+    "key": "private_sticker_bonus",
+    "label": "私聊每天表情包条数"
+   },
+   {
+    "key": "web_search_bonus",
+    "label": "群里每天网页搜索次数"
+   },
+   {
+    "key": "sandbox_bonus",
+    "label": "群里每天代码沙箱次数"
+   },
+   {
+    "key": "sticker_collect_bonus",
+    "label": "群里每天收藏表情包张数"
+   },
+   {
+    "key": "persona_edit_bonus",
+    "label": "每天自己改私聊人设次数"
+   },
+   {
+    "key": "memory_bonus",
+    "label": "爱好/喜好这类记忆每类多记几样"
+   },
+   {
+    "key": "checkin_points_pct",
+    "label": "签到积分"
+   }
+  ],
+  "quests": [
+   {
+    "key": "checkin",
+    "title": "签到一次",
+    "target": 1
+   },
+   {
+    "key": "checkin_multi",
+    "title": "在 2 个群签到",
+    "target": 2
+   },
+   {
+    "key": "private_chat",
+    "title": "私聊和我聊 3 轮",
+    "target": 3
+   },
+   {
+    "key": "group_chat",
+    "title": "在群里找我聊 2 次",
+    "target": 2
+   },
+   {
+    "key": "gift",
+    "title": "送我一份礼物",
+    "target": 1
+   },
+   {
+    "key": "interact",
+    "title": "和我互动一次（/击掌 等）",
+    "target": 1
+   }
+  ]
+ }
+}

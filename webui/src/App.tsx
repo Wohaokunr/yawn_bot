@@ -37,6 +37,9 @@ const GuestAccessPage = lazy(() =>
 const WebAuditsPage = lazy(() =>
   import("./audits").then(({ WebAuditsPage: Page }) => ({ default: Page })),
 );
+const AffinityAdminPage = lazy(() =>
+  import("./affinity/AffinityAdminPage").then(({ AffinityAdminPage: Page }) => ({ default: Page })),
+);
 const SchedulesPage = lazy(() =>
   import("./schedules/SchedulesPage").then(({ SchedulesPage: Page }) => ({ default: Page })),
 );
@@ -245,6 +248,7 @@ function App(): React.JSX.Element {
           <Route path="groups" element={<GroupsPage />} />
           <Route path="groups/:groupId" element={<GroupDetailPage />} />
           <Route path="users" element={<UsersPage />} />
+          <Route path="affinity" element={<AffinityAdminPage />} />
           <Route path="games" element={<GamesPage />} />
           <Route path="modules" element={<ModulesPage />} />
           <Route path="fanqie" element={<FanqiePage />} />

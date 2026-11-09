@@ -94,9 +94,12 @@ async def _save(args: dict[str, Any], context: ToolExecutionContext) -> dict[str
     is_admin = await _actor_is_admin(context)
     if settings.collect_admin_only and not is_admin:
         raise ToolError("本群只有群主/管理员能收藏表情包", code=ERROR_PERMISSION)
-    if not is_admin and collects_today(context.group_id, context.actor_user_id) >= settings.member_daily_collect:
+    from ...affinity_perks import bonus_limit
+
+    collect_limit = bonus_limit(settings.member_daily_collect, context.actor_user_id, "sticker_collect_bonus")
+    if not is_admin and collects_today(context.group_id, context.actor_user_id) >= collect_limit:
         raise ToolError(
-            f"你今天已经收藏了 {settings.member_daily_collect} 张，明天再来",
+            f"你今天已经收藏了 {collect_limit} 张，明天再来",
             code=ERROR_QUOTA,
         )
     name = str(args.get("name") or "").strip()

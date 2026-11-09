@@ -313,6 +313,30 @@ TOOL_DEFINITIONS = (
         keywords=("签到了吗", "连签", "签到几天", "我的积分", "好感度", "我们关系"),
     ),
     ToolDefinition(
+        "my_affinity",
+        "查调用者本人在好感玩法里的现状（只读，不含数值）：overview 概况（等级、这一级的权益和解锁、下一级解锁什么、今日任务、背包、签到积分、今日心仪礼物）；"
+        "perks 各等级权益；gifts 礼物清单和价格；shop 商店；bag 背包和护盾；quests 今天的三个任务。他问“好感有什么用”“我能解锁什么”“送什么礼物”时先查再说",
+        {"view": {"type": "string", "enum": ["overview", "perks", "gifts", "shop", "bag", "quests"]}},
+        family="checkin",
+        keywords=("好感有什么用", "好感权益", "解锁", "每日任务", "好感任务", "背包", "道具", "好感商店", "送什么礼物"),
+    ),
+    ToolDefinition(
+        "affinity_action",
+        "替调用者本人做好感玩法里的事（花的是他自己的签到积分）：gift 送你礼物（item 礼物名、count 数量）；buy 商店兑换道具；"
+        "use 用道具（补签卡续本群连签、好感护盾、签到暴击卡、任务刷新券）；nickname 设专属称呼（nickname 写称呼，写“清除”取消，要到一定等级）；"
+        "interact 互动动作（item 写 击掌/摸头/抱抱/贴贴/举高高，等级不够会被婉拒）。只在他明确要求时用，结果照实说，失败别说办成了",
+        {
+            "action": {"type": "string", "enum": ["gift", "buy", "use", "nickname", "interact"]},
+            "item": {"type": "string", "minLength": 1, "maxLength": 20, "description": "礼物名 / 道具名 / 互动动作"},
+            "count": {"type": "integer", "minimum": 1, "maximum": 10},
+            "nickname": {"type": "string", "minLength": 1, "maxLength": 12},
+        },
+        required=("action",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="checkin",
+        keywords=("送你", "送礼", "给你买", "兑换", "补签", "用补签卡", "护盾", "暴击卡", "叫我", "摸摸头", "抱抱", "贴贴", "击掌", "举高高"),
+    ),
+    ToolDefinition(
         "move_to_private",
         "把调用者本人的这件事转到私聊接着办（你私聊他开口，私聊那边能派后台任务、用虚拟电脑、发文件、记提醒）：他说“私聊说/私聊发我”，"
         "或者事情费时间、内容很长、要发文件、是他的私事不适合在群里说时用。topic 用他的说法写清楚要办什么（只写他本人的事，不写别人的消息）。"

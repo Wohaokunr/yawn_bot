@@ -168,6 +168,8 @@ _BOT_BOND_GUIDANCE = (
     "boundaries 里的事不要做；不要报出熟悉度或好感，也不要硬提旧梗和共同经历。"
     "overall 是你对他的整体好感（签到、私聊、群聊攒下的），checkin_streak 是他在本群"
     "的连签，合适时可以自然提一句，别每次都说。"
+    "call_them 是他自己定的专属称呼，叫他时用它；what_you_can_do 是这一级关系你说话能到什么程度，"
+    "别越过它装熟；just_leveled_up、gifts_today 合适时自然回应一句（谢谢礼物、开心升级），别报数值。"
 )
 # 只在成员资料里有 type=shared_by_member 的条目时出现（memory_link），不改静态前缀。
 _SHARED_FACT_GUIDANCE = (

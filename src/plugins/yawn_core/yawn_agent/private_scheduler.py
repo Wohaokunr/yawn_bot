@@ -1,5 +1,5 @@
 # ruff: noqa: E501, C901, TID252, RUF001, FBT001, PLR0913, PLR0917
-"""私聊 Agent 的后台调度：到点提醒、早安问候、签到提醒、生日祝福、倒数日当天提醒。
+"""私聊 Agent 的后台调度：到点提醒、早安问候、签到提醒、生日祝福、倒数日当天提醒、久别问候（好感解锁）。
 
 每 20 秒扫一遍有个人数据的用户（``private_store``）。规则：
 
@@ -206,6 +206,8 @@ async def run_tick(
                 messages.append(
                     _voice(store.load(user_id), f"今天还有 {missing} 个群没签到哦，回我一句“帮我签到”就好～")
                 )
+        if proactive_ok:
+            messages.extend(await _affinity_nudges(user_id, now))
         for text in messages:
             if not await send(user_id, text):
                 break
@@ -215,6 +217,23 @@ async def run_tick(
             except Exception:  # noqa: BLE001
                 dbg_exc(f"私聊主动消息入库失败 用户 {user_id}")
     return sent
+
+
+async def _affinity_nudges(user_id: int, now: datetime) -> list[str]:
+    """好感解锁的“久别问候”：他关了主动消息或在免打扰时不发；失败一律跳过。"""
+
+    try:
+        record = store.load(user_id)
+        prefs = record.get("prefs") or {}
+        if prefs.get("proactive") is False or in_quiet_hours(prefs, now):
+            return []
+        from ..affinity_perks import private_nudges
+
+        texts = await private_nudges(user_id, now, name=_name(prefs))
+        return [_voice(record, text) for text in texts]
+    except Exception:  # noqa: BLE001
+        dbg_exc(f"私聊用户 {user_id} 好感问候检查失败(忽略)")
+        return []
 
 
 async def _run_firing(
