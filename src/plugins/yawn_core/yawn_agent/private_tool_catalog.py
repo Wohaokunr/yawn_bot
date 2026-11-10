@@ -63,6 +63,12 @@ FAMILIES: tuple[Family, ...] = (
         ("notes", "todos", "mood", "chat_prefs"),
     ),
     Family(
+        "stickers",
+        "表情包",
+        "他发来的表情包想收藏/你喜欢想偷走、按情绪找能发的表情包、看他存过哪些",
+        ("stickers",),
+    ),
+    Family(
         "time",
         "提醒与定时",
         "到点提醒他、到点替他去办、倒数日、群定时任务",

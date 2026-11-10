@@ -157,8 +157,12 @@ def sticker_instruction(
     max_per_message: int = 1,
     complexity: str = "normal",
     short_scene: bool = False,
+    steal: bool = False,
 ) -> str:
-    """菜单 + 用法。``menu`` 是 ``(名字, 一句说明)``，``tags`` 是 ``(情绪, 张数)``。"""
+    """菜单 + 用法。``menu`` 是 ``(名字, 一句说明)``，``tags`` 是 ``(情绪, 张数)``。
+
+    ``steal`` 为真时补一句：看到群友发的好玩表情包可以用 ``steal_sticker`` 偷来自己用。
+    """
 
     if not menu and not tags:
         return ""
@@ -178,11 +182,20 @@ def sticker_instruction(
     if tags:
         rendered_tags = "、".join(tag if count <= 1 else f"{tag}×{count}" for tag, count in tags)
         lines.append(f"也可以按情绪写 [表情:情绪]，系统从这一类里挑一张：{rendered_tags}。")
+    if steal:
+        lines.append(STEAL_HINT)
     return "".join(lines)
+
+
+STEAL_HINT = (
+    "群友发了你喜欢、以后用得上的表情包，可以调 steal_sticker 把它偷来自己用（不用谁同意，名字可以不起；"
+    "手边没有这个工具就 discover_tools 打开 reaction）。偶尔偷一张就好，别见图就偷，普通照片和截图不偷。"
+)
 
 
 __all__ = [
     "MAX_MARKERS",
+    "STEAL_HINT",
     "STICKER_SEGMENT_TYPE",
     "describe_sticker_markup",
     "drop_sticker_at",

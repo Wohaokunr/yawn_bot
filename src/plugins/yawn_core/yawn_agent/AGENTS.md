@@ -218,6 +218,11 @@
 - 库存储在 `AGENT_FILE_ROOT/reactions/index.json`（`sticker_library.py`，兼容旧 `reactions` 索引）；策略与用量是 JSON（`data/agent_stickers/`，`sticker_policy.py`），不需要迁移。新增提示词文本登记在 `prompt_sections.py`（`speech.sticker`、`proactive.sticker`）。
 - 发送为 `image` 段 + `sub_type=1` + `summary="[名字]"`；历史转述统一写成 `[表情包: 名字]`，与成员发来的表情包同一写法。
 - 收藏走 `save_sticker`（族 `reaction`，state_write）：只认当前消息/引用里的图片或近期附件编号，按 `collect_mode` 决定直接可用还是待审核；成员已退出记忆的不收。没有本轮成功的 `save_sticker` 不得声称“收藏了”（`speech_claims.py` 的 `sticker_save` 族）。
+- **AI 标注（`sticker_labeler.py`）**：识图走 `llm.complete(task="agent_image", multimodal=True, max_tokens=NO_OUTPUT_LIMIT)`，WebUI 批量和收藏/偷图这种没人在等的调用标 `priority="background"`。提示词登记为 `sticker.label`（system）与 `sticker.label_request`（user）；模型输出只经 `parse_label` 宽容解析，再过 `clean_name`/`clean_tags`/`clean_description`，名字撞了已有名字时可以同名（`match_stickers` 同名轮换）。识图模型不可用、关了 `ai_label_enabled`、解析失败一律降级：上传退回文件名，收藏/偷图要模型自己给 name。
+- 写回只走 `sticker_library.apply_label`（留 `label_undo` 快照，`undo_label` 一键撤回）；`merge_label` 的 fill/merge/replace 只改 fields 里列出的字段，`fill` 不动人起的名字（`placeholder_name` 视为没起名）。AI 说不适合当表情包且 `ai_label_review_unsafe` 开着时转待审核。批量任务（`sticker_label_jobs`）是进程内状态，同时只跑一个、上限 500 张。
+- 上传、`save_sticker`、`steal_sticker`、私聊 `stickers.steal` 统一经 `sticker_intake.intake_image` 入库（sha256 去重、AI 补全、`origin` 来源）。不要在别处另写一份入库逻辑。
+- **偷图（`steal_sticker`，族 `reaction`，state_write）**：Bot 自己觉得好就把别人发的表情包收进库，`source="stolen"`，`origin` 记群、发图人、消息编号与是否 QQ 表情包。门控：真实 actor、表情包总开关与本群开放、`steal_mode`（off/review/auto）、每群每日 `group_daily_steals`、冷却 `steal_cooldown_seconds`、“别偷我的图”名单 `steal_protected_users`、发图人没有隐私退出、不偷 Bot 自己发的图；**是不是表情包只看结构**（图片段 `sub_type == 1`），普通照片只有 `steal_photos` 开着才收且一律待审核。偷图提示（`STEAL_HINT`）只在对话场景、`can_steal` 为真时追加在表情包菜单后，不进主动发言；唤醒回合拦截（`WAKE_BLOCKED_TOOLS`）。没有本轮成功的 `steal_sticker`/`save_sticker` 不得声称“偷到了”（`speech_claims.py` 的 `sticker_steal` 族）。
+- 私聊 `stickers` 工具（`private_sticker_tool.py`，族 `stickers`）：steal 取他本轮或 10 分钟内发的图（`remember_media`，进程内有界），受 `private_steal_enabled`、`private_daily_steals`（超级管理员不计）、冷却与名单约束；私聊来的照片一律待审核；search 只查所有群可用的；mine 只列他本人收藏/被偷的。声明核验别名 `stickers.steal`。
 - `delete_member_memories` 必须同时调 `sticker_library.forget_member`。新增 reaction 族工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_sticker.py`。
 
 ## 定时任务

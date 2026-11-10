@@ -25,8 +25,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 WAKE_TRIGGER_SOURCE = "scheduled_task"
-# 唤醒回合里禁止的工具：再建任务会让一个任务无限繁殖。
-WAKE_BLOCKED_TOOLS = frozenset({"schedule_task"})
+# 唤醒回合里禁止的工具：再建任务会让一个任务无限繁殖；偷图要有人在场时才偷。
+WAKE_BLOCKED_TOOLS = frozenset({"schedule_task", "steal_sticker"})
 SOURCE_LABELS = {
     "agent": "群里让我设的",
     "private": "他在私聊里让我给本群设的",

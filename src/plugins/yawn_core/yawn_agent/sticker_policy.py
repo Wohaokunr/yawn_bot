@@ -66,6 +66,27 @@ class StickerSettings(BaseModel):
     private_enabled: bool = True
     private_daily_limit: int = Field(default=20, ge=0, le=1000)
     private_cooldown_seconds: int = Field(default=20, ge=0, le=86400)
+    # ── AI 标注（识图模型起名、打标签、写什么时候发、认图上的字）──
+    ai_label_enabled: bool = True
+    # WebUI 上传时没填名字/标签的，交给 AI 补；关掉就退回文件名。
+    ai_label_on_upload: bool = True
+    # 群友收藏（save_sticker）和 Bot 偷图时，模型没给名字/标签就让识图模型补。
+    ai_label_on_collect: bool = True
+    # 管理员的命名要求，追加在标注提示词后面（如“名字用网络梗、四个字以内”）。
+    ai_label_style: str = Field(default="", max_length=300)
+    # 识图模型判断“不适合当表情包”（色情/血腥/隐私）的图：收藏/偷图一律进待审核。
+    ai_label_review_unsafe: bool = True
+    # ── Bot 偷图（steal_sticker / 私聊 stickers.steal）──
+    # off=不偷；review=偷来先进待审核；auto=直接能用（AI 判断不安全的仍进待审核）。
+    steal_mode: Literal["off", "review", "auto"] = "auto"
+    # 只偷 QQ 标成表情包的图（sub_type=1）；打开后普通照片/截图也能偷。
+    steal_photos: bool = False
+    group_daily_steals: int = Field(default=5, ge=0, le=200)
+    steal_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
+    private_steal_enabled: bool = True
+    private_daily_steals: int = Field(default=5, ge=0, le=200)
+    # 这些成员发的图不偷（他们说过“别偷我的图”）。
+    steal_protected_users: list[int] = Field(default_factory=list, max_length=500)
 
     def group_open(self, group_id: int) -> bool:
         if group_id in self.blocked_groups:
@@ -76,7 +97,13 @@ class StickerSettings(BaseModel):
 
 
 def _empty_usage(day: str) -> dict[str, Any]:
-    return {"day": day, "groups": {}, "collects": {}, "totals": {"sent": 0, "dropped": 0, "collected": 0}}
+    return {
+        "day": day,
+        "groups": {},
+        "collects": {},
+        "steals": {},
+        "totals": {"sent": 0, "dropped": 0, "collected": 0, "stolen": 0, "labeled": 0},
+    }
 
 
 class _Store:
@@ -85,6 +112,7 @@ class _Store:
         self._settings: StickerSettings | None = None
         self._settings_mtime: float | None = None
         self._last_sent: dict[int, float] = {}
+        self._last_steal: dict[str, float] = {}
         self._recent: dict[int, deque[str]] = {}
 
     @staticmethod
@@ -140,7 +168,7 @@ class _Store:
         if not isinstance(data, dict) or data.get("day") != today:
             return _empty_usage(today)
         base = _empty_usage(today)
-        for key in ("groups", "collects"):
+        for key in ("groups", "collects", "steals"):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
         totals = data.get("totals")
@@ -205,6 +233,37 @@ class _Store:
             with contextlib.suppress(OSError):
                 self._write_json(self.usage_path(), usage)
 
+    def note_steal(self, key: str) -> None:
+        with self._lock:
+            if len(self._last_steal) >= _GROUP_MEMORY:
+                self._last_steal.clear()
+            self._last_steal[key] = time.monotonic()
+            usage = self._load_usage()
+            usage["steals"][key] = int(usage["steals"].get(key, 0)) + 1
+            usage["totals"]["stolen"] = int(usage["totals"].get("stolen", 0)) + 1
+            with contextlib.suppress(OSError):
+                self._write_json(self.usage_path(), usage)
+
+    def note_labeled(self, count: int) -> None:
+        if count <= 0:
+            return
+        with self._lock:
+            usage = self._load_usage()
+            usage["totals"]["labeled"] = int(usage["totals"].get("labeled", 0)) + count
+            with contextlib.suppress(OSError):
+                self._write_json(self.usage_path(), usage)
+
+    def steals_today(self, key: str) -> int:
+        return int(self.usage().get("steals", {}).get(key, 0))
+
+    def steal_cooldown(self, key: str, seconds: int) -> float:
+        if seconds <= 0:
+            return 0.0
+        last = self._last_steal.get(key)
+        if last is None:
+            return 0.0
+        return max(seconds - (time.monotonic() - last), 0.0)
+
     def collects_today(self, group_id: int, user_id: int) -> int:
         return int(self.usage().get("collects", {}).get(f"{group_id}:{user_id}", 0))
 
@@ -232,6 +291,7 @@ class _Store:
     def reset_runtime(self) -> None:
         with self._lock:
             self._last_sent.clear()
+            self._last_steal.clear()
             self._recent.clear()
             self._settings = None
             self._settings_mtime = None
@@ -266,6 +326,28 @@ def note_dropped(count: int) -> None:
 
 def note_collect(group_id: int, user_id: int) -> None:
     _store.note_collect(int(group_id), int(user_id))
+
+
+def steal_key(group_id: int | None, user_id: int | None = None) -> str:
+    """偷图计数的键：群里按群（``g<群号>``），私聊按人（``p<QQ>``）。"""
+
+    return f"g{int(group_id)}" if group_id else f"p{int(user_id or 0)}"
+
+
+def note_steal(key: str) -> None:
+    _store.note_steal(key)
+
+
+def note_labeled(count: int) -> None:
+    _store.note_labeled(int(count))
+
+
+def steals_today(key: str) -> int:
+    return _store.steals_today(key)
+
+
+def steal_cooldown_remaining(key: str) -> float:
+    return _store.steal_cooldown(key, load_settings().steal_cooldown_seconds)
 
 
 def collects_today(group_id: int, user_id: int) -> int:
@@ -404,11 +486,16 @@ __all__ = [
     "menu_entries",
     "note_collect",
     "note_dropped",
+    "note_labeled",
     "note_sent",
+    "note_steal",
     "pick_sticker",
     "recent_sent",
     "reset_for_tests",
     "save_settings",
     "stats_snapshot",
+    "steal_cooldown_remaining",
+    "steal_key",
+    "steals_today",
     "usage_snapshot",
 ]

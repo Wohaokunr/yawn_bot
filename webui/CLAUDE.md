@@ -46,7 +46,7 @@ CI（`.github/workflows/ci.yml`）对前端跑 test / typecheck / build；仓库
 | `/environment` | `environment.tsx`（页面：分类导航 + 单分类字段列表 / 跨分类搜索结果，状态在 URL `env.*`）、`environment-editors.tsx`（按类型的字段编辑器、Token 编辑器）、`environment-components.tsx`（提供商/档位卡片、任务路由表、体检、待重启横幅、保存栏与预览）、`environment-fields.ts`（纯逻辑：分类、筛选、校验——镜像后端 `environment_schema.py`）、`environment-config.ts`（模型档位/任务路由表）、`environment.css` | `environment*.py` |
 | `/sandbox` | `sandbox/`（`SandboxPage.tsx` 状态条 + 概览/运行记录/工作区文件/控制台/策略五个标签；`sandbox-meta.ts` 纯逻辑与校验，`sandbox-api.ts` 接口；状态在 URL `sandbox.*`，控制台草稿存 `localStorage`） | `sandbox.py` |
 | `/web-search` | `web-search/`（`WebSearchPage.tsx` 状态条 + 概览/最近调用/试搜/策略与限额四个标签，复用沙箱页的 `sbx-*` 样式；`web-search-meta.ts` 纯逻辑与校验，`web-search-api.ts` 接口；标签在 URL `web.tab`） | `web_search.py` |
-| `/stickers` | `stickers/`（`StickersPage.tsx` 状态条 + 表情包库/发送与收藏策略/提示词预览三个标签；`stickers-meta.ts` 纯逻辑与校验，`stickers-api.ts` 接口，上传走原始字节；标签在 URL `stk.tab`） | `stickers.py` |
+| `/stickers` | `stickers/`（`StickersPage.tsx` 状态条 + 表情包库/AI 标注与偷图/发送与收藏策略/菜单预览四个标签，库里可按来源和 AI 状态筛选、批量 AI 标注与撤销，编辑框里能让 AI 重新识别；`StickerUpload.tsx` 上传框：选图后自动 AI 预览（并发 2，改过的格子不覆盖、库里已有的提前标出、可粘贴）；`StickerAiTab.tsx` 识图模型状态、批量重标任务（每 1.5 秒轮询）、试一张、Bot 偷来的表情包；`stickers-meta.ts` 纯逻辑与校验，`stickers-api.ts` 接口，上传与预览走原始字节；标签在 URL `stk.tab`（`library`/`ai`/`policy`/`preview`）） | `stickers.py` |
 | `/schedules` | `schedules/`（`SchedulesPage.tsx` 状态条 + 任务/私聊提醒/运行记录/策略四个标签；`PrivateTab.tsx` 所有人的私聊提醒（来源标签、筛选在 URL `schedules.p*`、详情抽屉 `schedules.private=QQ:编号`）；`TasksTab.tsx` 列表、批量与详情抽屉，`TaskEditor.tsx` 新建/编辑抽屉与后端实时预览，`schedule-meta.ts` 纯逻辑：规则表单 ⇄ 规则对象、预校验、策略范围；规则对象保持 snake_case 与 Agent 工具一致；状态在 URL `schedules.*`） | `schedules.py` |
 | `/guest-access` | `guest-access.tsx` | `guest_access_routes.py` |
 | `/audits` | `audits.tsx` | `audits.py` |

@@ -5,6 +5,8 @@ import {
   EyeOutlined,
   PictureOutlined,
   ReloadOutlined,
+  RobotOutlined,
+  RollbackOutlined,
   SafetyCertificateOutlined,
   SaveOutlined,
   SmileOutlined,
@@ -37,28 +39,37 @@ import { useSearchParams } from "react-router-dom";
 import { QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "../shared";
 import { updateSearchParams } from "../sandbox/sandbox-meta";
 import { parseGroupIds } from "../web-search/web-search-meta";
-import { stickerImageUrl, stickersApi, uploadSticker } from "./stickers-api";
+import { AiTab, JobBanner, useLabelJobs } from "./StickerAiTab";
+import { UploadModal } from "./StickerUpload";
+import { stickerImageUrl, stickersApi } from "./stickers-api";
 import {
+  AI_FILTER_LABELS,
   cleanName,
   COLLECT_LABELS,
+  confidenceText,
+  describeOrigin,
+  describeSteal,
   describeStickerAccess,
   FILTER_LABELS,
   filterStickers,
   formatBytes,
   FREQUENCY_HINTS,
-  nameFromFile,
+  isAiLabeled,
+  LABEL_MODE_HINTS,
+  LABEL_MODE_LABELS,
   parseTags,
   SOURCE_LABELS,
+  STEAL_LABELS,
   STICKER_SETTING_RANGES,
   stickerSettingsEqual,
   stickerState,
   validateStickerSettings,
 } from "./stickers-meta";
-import type { StickerFilter, StickerNumericKey } from "./stickers-meta";
-import type { Sticker, StickerBulkAction, StickerOverview, StickerPromptPreview, StickerSettings } from "./types";
+import type { AiFilter, SourceFilter, StickerFilter, StickerNumericKey } from "./stickers-meta";
+import type { LabelMode, Sticker, StickerBulkAction, StickerLabel, StickerOverview, StickerPromptPreview, StickerSettings } from "./types";
 
-type StickerTab = "library" | "policy" | "preview";
-const TABS: StickerTab[] = ["library", "policy", "preview"];
+type StickerTab = "library" | "ai" | "policy" | "preview";
+const TABS: StickerTab[] = ["library", "ai", "policy", "preview"];
 const STATE_COLORS: Record<Exclude<StickerFilter, "all">, string> = { active: "green", pending: "gold", disabled: "default" };
 
 function parseTab(value: string | null): StickerTab {
@@ -85,6 +96,10 @@ export function StickerStatusBar({ overview, onReload, reloading }: { overview: 
       <div className="sbx-status-chips">
         <Tag color="green">可用 {counts.active}</Tag>
         {counts.pending > 0 && <Tag color="gold">待审核 {counts.pending}</Tag>}
+        {counts.stolen > 0 && <Tooltip title={describeSteal(settings)}><Tag color="purple">偷来 {counts.stolen}</Tag></Tooltip>}
+        <Tooltip title={overview.vision.ready ? `识图模型：${overview.vision.model}` : "没有能看图的模型，AI 标注用不了"}>
+          <Tag icon={<RobotOutlined />} color={overview.vision.ready && settings.aiLabelEnabled ? "blue" : "default"}>AI 标注 {counts.aiLabeled}/{counts.total}</Tag>
+        </Tooltip>
         <Tooltip title="今日真正发出去的表情包（全部群）">
           <Tag>今日发出 {usage.totals.sent ?? 0}</Tag>
         </Tooltip>
@@ -108,6 +123,12 @@ function StickerCard({ sticker, selected, onSelect, onOpen }: { sticker: Sticker
         <strong title={sticker.name}>{sticker.name}</strong>
         <div className="stk-tags">
           {state !== "active" && <Tag color={STATE_COLORS[state]}>{FILTER_LABELS[state]}</Tag>}
+          {sticker.source === "stolen" && <Tag color="purple">偷的</Tag>}
+          {isAiLabeled(sticker) && (
+            <Tooltip title={`AI 标注${sticker.ai?.text ? ` · 图上写着“${sticker.ai.text}”` : ""}${sticker.ai?.safe === false ? " · AI 觉得可能不合适" : ""}`}>
+              <Tag color={sticker.ai?.safe === false ? "red" : "blue"} icon={<RobotOutlined />} className="stk-ai-tag" aria-label="AI 标注过" />
+            </Tooltip>
+          )}
           {sticker.tags.slice(0, 3).map((tag) => <Tag key={tag}>{tag}</Tag>)}
         </div>
         <span className="sbx-muted">{sticker.uses > 0 ? `发过 ${sticker.uses} 次` : "还没发过"}{sticker.groups.length > 0 ? ` · 限 ${sticker.groups.length} 个群` : ""}</span>
@@ -124,7 +145,10 @@ function EditModal({ sticker, groupNames, onClose, onChanged }: { sticker: Stick
   const [groups, setGroups] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [suggestion, setSuggestion] = useState<StickerLabel | null>(null);
+  const [labeling, setLabeling] = useState(false);
   useEffect(() => {
+    setSuggestion(null);
     if (!sticker) return;
     setName(sticker.name);
     setTags(sticker.tags);
@@ -161,6 +185,25 @@ function EditModal({ sticker, groupNames, onClose, onChanged }: { sticker: Stick
       approve ? "已审核通过" : "已保存",
     );
   const addedGroup = sticker.addedGroup ? groupNames[sticker.addedGroup] ?? sticker.addedGroup : null;
+  const origin = describeOrigin(sticker, groupNames);
+  const askAi = async () => {
+    setLabeling(true);
+    try {
+      const result = await stickersApi.label(sticker.id, { apply: false, mode: "replace" });
+      if (result.label?.ok) setSuggestion(result.label);
+      else message.warning(result.label?.reasonText ?? "AI 没认出来");
+    } catch (error) {
+      message.error(errorText(error, "AI 识别失败"));
+    } finally {
+      setLabeling(false);
+    }
+  };
+  const adopt = (label: StickerLabel) => {
+    setName(label.name);
+    setTags(label.tags);
+    if (label.description) setDescription(label.description);
+    setSuggestion(null);
+  };
   return (
     <Modal
       open
@@ -181,6 +224,35 @@ function EditModal({ sticker, groupNames, onClose, onChanged }: { sticker: Stick
         <div className="stk-edit-preview">
           {sticker.fileMissing ? <span className="stk-missing">文件丢失</span> : <img src={stickerImageUrl(sticker)} alt={sticker.name} />}
           <span className="sbx-muted">{formatBytes(sticker.size)} · {SOURCE_LABELS[sticker.source]}{addedGroup ? ` · 来自 ${addedGroup}` : ""}{sticker.addedBy ? `（${sticker.addedBy}）` : ""}</span>
+          {origin && <span className="sbx-muted">{origin}</span>}
+        </div>
+        <div className="stk-ai-box">
+          <div className="stk-ai-box-head">
+            <span>
+              <RobotOutlined /> {isAiLabeled(sticker) ? `AI 标注过${sticker.ai?.labeledAt ? `（${sticker.ai.labeledAt}）` : ""}` : "还没让 AI 看过"}
+              {sticker.ai?.confidence != null && isAiLabeled(sticker) ? ` · ${confidenceText(sticker.ai.confidence)}` : ""}
+            </span>
+            <span className="stk-actions">
+              {sticker.canUndoLabel && (
+                <Button size="small" icon={<RollbackOutlined />} disabled={busy} onClick={() => void run(() => stickersApi.undoLabel(sticker.id), "已撤销 AI 标注")}>撤销 AI 标注</Button>
+              )}
+              <Button size="small" icon={<RobotOutlined />} loading={labeling} onClick={() => void askAi()}>AI 重新识别</Button>
+            </span>
+          </div>
+          {sticker.ai?.text ? <span className="sbx-muted">图上的字：{sticker.ai.text}</span> : null}
+          {sticker.ai && !sticker.ai.safe && <Alert type="warning" showIcon message="AI 觉得这张可能不适合当表情包" />}
+          {suggestion && (
+            <div className="stk-suggestion" aria-label="AI 建议">
+              <span>
+                建议：<strong>{suggestion.name}</strong> {suggestion.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}
+                {suggestion.description ? <span className="sbx-muted"> · {suggestion.description}</span> : null}
+              </span>
+              <span className="stk-actions">
+                <Button size="small" type="primary" onClick={() => adopt(suggestion)}>填进表单</Button>
+                <Button size="small" type="text" onClick={() => setSuggestion(null)}>不用</Button>
+              </span>
+            </div>
+          )}
         </div>
         <label className="sbx-field">
           <span className="sbx-field-label">名字（模型写 [表情:名字] 发它）</span>
@@ -210,134 +282,20 @@ function EditModal({ sticker, groupNames, onClose, onChanged }: { sticker: Stick
   );
 }
 
-interface UploadItem {
-  key: string;
-  file: File;
-  name: string;
-  tags: string;
-  status: "waiting" | "uploading" | "done" | "duplicate" | "failed";
-  error?: string;
-  preview: string;
-}
-
-function UploadModal({ open, onClose, onUploaded, maxBytes }: { open: boolean; onClose: () => void; onUploaded: () => void; maxBytes: number }): React.JSX.Element {
-  const [items, setItems] = useState<UploadItem[]>([]);
-  const [busy, setBusy] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (!open) {
-      setItems((current) => {
-        for (const item of current) URL.revokeObjectURL(item.preview);
-        return [];
-      });
-    }
-  }, [open]);
-  const addFiles = (files: FileList | File[]) => {
-    const next = [...files]
-      .filter((file) => file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(file.name))
-      .map((file, index) => ({
-        key: `${Date.now()}-${index}-${file.name}`,
-        file,
-        name: nameFromFile(file.name),
-        tags: "",
-        status: file.size > maxBytes ? ("failed" as const) : ("waiting" as const),
-        error: file.size > maxBytes ? `超过 ${formatBytes(maxBytes)}` : undefined,
-        preview: URL.createObjectURL(file),
-      }));
-    setItems((current) => [...current, ...next]);
-  };
-  const patch = (key: string, change: Partial<UploadItem>) => setItems((current) => current.map((item) => (item.key === key ? { ...item, ...change } : item)));
-  const pending = items.filter((item) => item.status === "waiting");
-  const ready = pending.length > 0 && pending.every((item) => cleanName(item.name));
-  const uploadAll = async () => {
-    setBusy(true);
-    let uploaded = 0;
-    for (const item of pending) {
-      patch(item.key, { status: "uploading" });
-      try {
-        const result = await uploadSticker(item.file, { name: cleanName(item.name), tags: parseTags(item.tags) });
-        patch(item.key, { status: result.created ? "done" : "duplicate" });
-        if (result.created) uploaded += 1;
-      } catch (error) {
-        patch(item.key, { status: "failed", error: errorText(error, "上传失败") });
-      }
-    }
-    setBusy(false);
-    if (uploaded > 0) onUploaded();
-  };
-  return (
-    <Modal
-      open={open}
-      title="上传表情包"
-      onCancel={onClose}
-      width={640}
-      footer={[
-        <Button key="close" onClick={onClose}>关闭</Button>,
-        <Button key="upload" type="primary" icon={<CloudUploadOutlined />} loading={busy} disabled={!ready} onClick={() => void uploadAll()}>上传 {pending.length || ""} 张</Button>,
-      ]}
-    >
-      <div
-        className="stk-drop"
-        role="button"
-        tabIndex={0}
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") inputRef.current?.click();
-        }}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => {
-          event.preventDefault();
-          addFiles(event.dataTransfer.files);
-        }}
-      >
-        <PictureOutlined />
-        <span>点击或把图片拖到这里（PNG / JPG / GIF / WebP，单张不超过 {formatBytes(maxBytes)}）</span>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
-          multiple
-          hidden
-          aria-label="选择表情包图片"
-          onChange={(event) => {
-            if (event.target.files) addFiles(event.target.files);
-            event.target.value = "";
-          }}
-        />
-      </div>
-      {items.length > 0 && (
-        <ul className="stk-upload-list" aria-label="待上传">
-          {items.map((item) => (
-            <li key={item.key} className={`is-${item.status}`}>
-              <img src={item.preview} alt="" />
-              <div className="stk-upload-fields">
-                <Input size="small" value={item.name} maxLength={16} placeholder="名字（必填）" disabled={item.status !== "waiting"} status={item.status === "waiting" && !cleanName(item.name) ? "error" : undefined} onChange={(event) => patch(item.key, { name: event.target.value })} aria-label="名字" />
-                <Input size="small" value={item.tags} placeholder="标签，逗号分隔" disabled={item.status !== "waiting"} onChange={(event) => patch(item.key, { tags: event.target.value })} aria-label="标签" />
-              </div>
-              <span className="stk-upload-state">
-                {item.status === "done" && <Tag color="green">已上传</Tag>}
-                {item.status === "duplicate" && <Tag>库里已有</Tag>}
-                {item.status === "uploading" && <Tag color="blue">上传中</Tag>}
-                {item.status === "failed" && <Tooltip title={item.error}><Tag color="red">失败</Tag></Tooltip>}
-                {item.status === "waiting" && <Button size="small" type="text" onClick={() => setItems((current) => current.filter((row) => row.key !== item.key))}>移除</Button>}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Modal>
-  );
-}
-
 function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChanged: () => void }): React.JSX.Element {
   const { message, modal } = AntApp.useApp();
   const [filter, setFilter] = useState<StickerFilter>(overview.counts.pending > 0 ? "pending" : "all");
   const [keyword, setKeyword] = useState("");
   const [tag, setTag] = useState<string | null>(null);
+  const [source, setSource] = useState<SourceFilter>("any");
+  const [ai, setAi] = useState<AiFilter>("any");
+  const [labelMode, setLabelMode] = useState<LabelMode>("fill");
+  const { running, track, cancel } = useLabelJobs(overview.labelJobs, onChanged);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const rows = useMemo(() => filterStickers(overview.stickers, filter, keyword, tag), [overview.stickers, filter, keyword, tag]);
+  const rows = useMemo(() => filterStickers(overview.stickers, filter, keyword, tag, source, ai), [overview.stickers, filter, keyword, tag, source, ai]);
+  const aiReady = overview.vision.ready && overview.settings.aiLabelEnabled;
   const counts = { all: overview.counts.total, active: overview.counts.active, pending: overview.counts.pending, disabled: overview.counts.disabled };
   const editingSticker = overview.stickers.find((item) => item.id === editing) ?? null;
   const ids = [...selected].filter((id) => overview.stickers.some((item) => item.id === id));
@@ -351,6 +309,16 @@ function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChan
       message.error(errorText(error, "操作失败"));
     }
   };
+  const labelSelected = async () => {
+    try {
+      const job = await stickersApi.startJob({ scope: "selected", ids, mode: labelMode });
+      track(job);
+      setSelected(new Set());
+      message.success(`开始让 AI 标注 ${job.total} 张`);
+    } catch (error) {
+      message.error(errorText(error, "没能开始"));
+    }
+  };
   return (
     <div className="stk-library">
       <div className="stk-stats">
@@ -358,14 +326,17 @@ function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChan
         <Card size="small"><Statistic title="今日发出" value={overview.usage.totals.sent ?? 0} suffix="张" /></Card>
         <Card size="small"><Statistic title="今日被拦下" value={overview.usage.totals.dropped ?? 0} suffix="次" /></Card>
         <Card size="small"><Statistic title="今日群友收藏" value={overview.usage.totals.collected ?? 0} suffix="张" /></Card>
+        <Card size="small"><Statistic title="今日 Bot 偷图" value={overview.usage.totals.stolen ?? 0} suffix="张" /></Card>
+        <Card size="small"><Statistic title="今日 AI 标注" value={overview.usage.totals.labeled ?? 0} suffix="张" /></Card>
       </div>
+      {running && <JobBanner job={running} onCancel={() => void cancel(running.id)} />}
       <div className="web-toolbar">
         <Segmented
           value={filter}
           onChange={(value) => setFilter(value as StickerFilter)}
           options={(Object.keys(FILTER_LABELS) as StickerFilter[]).map((key) => ({ value: key, label: `${FILTER_LABELS[key]} ${counts[key]}` }))}
         />
-        <Input.Search allowClear placeholder="搜名字、标签、说明" style={{ maxWidth: 240 }} value={keyword} onChange={(event) => setKeyword(event.target.value)} />
+        <Input.Search allowClear placeholder="搜名字、标签、说明、图上的字" style={{ maxWidth: 260 }} value={keyword} onChange={(event) => setKeyword(event.target.value)} />
         <Select
           allowClear
           placeholder="按标签"
@@ -374,6 +345,20 @@ function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChan
           onChange={(value: string | undefined) => setTag(value ?? null)}
           options={overview.tags.map((item) => ({ value: item.tag, label: `${item.tag}（${item.count}）` }))}
         />
+        <Select
+          aria-label="按来源"
+          style={{ minWidth: 120 }}
+          value={source}
+          onChange={(value: SourceFilter) => setSource(value)}
+          options={[{ value: "any", label: "全部来源" }, ...(Object.keys(SOURCE_LABELS) as Sticker["source"][]).map((key) => ({ value: key, label: SOURCE_LABELS[key] }))]}
+        />
+        <Select
+          aria-label="按 AI 标注"
+          style={{ minWidth: 140 }}
+          value={ai}
+          onChange={(value: AiFilter) => setAi(value)}
+          options={(Object.keys(AI_FILTER_LABELS) as AiFilter[]).map((key) => ({ value: key, label: AI_FILTER_LABELS[key] }))}
+        />
         <span className="sbx-toolbar-spacer" />
         <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => setUploading(true)}>上传</Button>
       </div>
@@ -381,6 +366,13 @@ function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChan
         <div className="stk-bulk" role="toolbar" aria-label="批量操作">
           <span>已选 {ids.length} 张</span>
           <Button size="small" icon={<CheckOutlined />} onClick={() => void bulk("approve")}>审核通过</Button>
+          {aiReady && (
+            <span className="stk-bulk-ai">
+              <Select size="small" value={labelMode} onChange={(value: LabelMode) => setLabelMode(value)} aria-label="AI 标注方式" style={{ minWidth: 132 }} options={(Object.keys(LABEL_MODE_LABELS) as LabelMode[]).map((key) => ({ value: key, label: LABEL_MODE_LABELS[key], title: LABEL_MODE_HINTS[key] }))} />
+              <Button size="small" icon={<RobotOutlined />} disabled={Boolean(running)} onClick={() => void labelSelected()}>AI 标注</Button>
+            </span>
+          )}
+          <Button size="small" icon={<RollbackOutlined />} onClick={() => void bulk("undo_label")}>撤销 AI 标注</Button>
           <Button size="small" onClick={() => void bulk("enable")}>启用</Button>
           <Button size="small" icon={<StopOutlined />} onClick={() => void bulk("disable")}>停用</Button>
           <Button
@@ -403,7 +395,7 @@ function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChan
       {rows.length === 0 ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={overview.stickers.length === 0 ? "库里还没有表情包：上传几张，或者在群里让 Bot“收藏这个表情”" : "没有符合条件的表情包"}
+          description={overview.stickers.length === 0 ? "库里还没有表情包：上传几张（AI 会帮你起名字），或者在群里让 Bot“收藏这个表情”，Bot 也会自己偷群友的表情包" : "没有符合条件的表情包"}
         />
       ) : (
         <div className="stk-grid">
@@ -426,7 +418,7 @@ function LibraryTab({ overview, onChanged }: { overview: StickerOverview; onChan
         </div>
       )}
       <EditModal sticker={editingSticker} groupNames={overview.groupNames} onClose={() => setEditing(null)} onChanged={onChanged} />
-      <UploadModal open={uploading} maxBytes={overview.settings.maxBytes} onClose={() => setUploading(false)} onUploaded={onChanged} />
+      <UploadModal open={uploading} maxBytes={overview.settings.maxBytes} aiReady={overview.vision.ready} aiEnabled={overview.settings.aiLabelEnabled && overview.settings.aiLabelOnUpload} onClose={() => setUploading(false)} onUploaded={onChanged} />
     </div>
   );
 }
@@ -496,6 +488,10 @@ function PolicyTab({ overview, onSaved }: { overview: StickerOverview; onSaved: 
     setBase(server);
   }, [server]);
   const dirty = !stickerSettingsEqual(draft, server);
+  const [protectedText, setProtectedText] = useState(server.stealProtectedUsers.join("\n"));
+  useEffect(() => {
+    if (draft.stealProtectedUsers.join(",") !== protectedText.split(/[\s,，、]+/).filter((item) => /^\d{5,12}$/.test(item)).join(",")) setProtectedText(draft.stealProtectedUsers.join("\n"));
+  }, [draft.stealProtectedUsers]);
   useUnsavedChanges(dirty);
   const errors = useMemo(() => validateStickerSettings(draft), [draft]);
   const update = <K extends keyof StickerSettings>(key: K, value: StickerSettings[K]) => setDraft({ ...draft, [key]: value });
@@ -603,6 +599,72 @@ function PolicyTab({ overview, onSaved }: { overview: StickerOverview; onSaved: 
           {num("privateDailyLimit")}
           {num("privateCooldownSeconds")}
         </Card>
+        <Card size="small" title={<span><RobotOutlined /> AI 标注</span>}>
+          <div className="sbx-switch-row">
+            <Switch checked={draft.aiLabelEnabled} onChange={(value) => update("aiLabelEnabled", value)} aria-label="启用 AI 标注" />
+            <div>
+              <strong>让识图模型给表情包起名、打标签</strong>
+              <span className="sbx-muted">{overview.vision.ready ? `识图模型：${overview.vision.model}` : "还没有能看图的模型（AI_VISION_MODEL），开着也用不了"}</span>
+            </div>
+          </div>
+          <div className="sbx-switch-row">
+            <Switch checked={draft.aiLabelOnUpload} disabled={!draft.aiLabelEnabled} onChange={(value) => update("aiLabelOnUpload", value)} aria-label="上传时自动补全" />
+            <div><strong>上传时补全空着的名字和标签</strong><span className="sbx-muted">关掉后上传要手填名字。</span></div>
+          </div>
+          <div className="sbx-switch-row">
+            <Switch checked={draft.aiLabelOnCollect} disabled={!draft.aiLabelEnabled} onChange={(value) => update("aiLabelOnCollect", value)} aria-label="收藏和偷图时自动起名" />
+            <div><strong>群友收藏、Bot 偷图时没写名字就让 AI 起</strong><span className="sbx-muted">关掉后由对话模型自己起名。</span></div>
+          </div>
+          <div className="sbx-switch-row">
+            <Switch checked={draft.aiLabelReviewUnsafe} disabled={!draft.aiLabelEnabled} onChange={(value) => update("aiLabelReviewUnsafe", value)} aria-label="不合适的进待审核" />
+            <div><strong>AI 觉得不合适的图进待审核</strong><span className="sbx-muted">色情、血腥、带隐私（证件、聊天记录）的图不会直接能用。</span></div>
+          </div>
+          <label className="sbx-field">
+            <span className="sbx-field-label">命名要求（追加在标注提示词后面）</span>
+            <Input.TextArea
+              value={draft.aiLabelStyle}
+              maxLength={300}
+              showCount
+              autoSize={{ minRows: 2, maxRows: 4 }}
+              disabled={!draft.aiLabelEnabled}
+              status={errors.aiLabelStyle ? "error" : undefined}
+              placeholder="如：名字用网络梗，四个字以内；标签用开心/难过/无语/震惊这类情绪词"
+              onChange={(event) => update("aiLabelStyle", event.target.value)}
+            />
+          </label>
+        </Card>
+        <Card size="small" title="Bot 偷图（steal_sticker）">
+          <Radio.Group
+            value={draft.stealMode}
+            onChange={(event) => update("stealMode", event.target.value as StickerSettings["stealMode"])}
+            optionType="button"
+            options={(["off", "review", "auto"] as const).map((key) => ({ value: key, label: STEAL_LABELS[key] }))}
+          />
+          <p className="sbx-muted">群友发了好玩的表情包，Bot 觉得以后用得上会自己存下来（不用谁开口）。{describeSteal(draft)}。</p>
+          <div className="sbx-switch-row">
+            <Switch checked={draft.stealPhotos} onChange={(value) => update("stealPhotos", value)} aria-label="也偷普通照片" />
+            <div><strong>普通照片、截图也能偷</strong><span className="sbx-muted">默认只偷 QQ 标成表情包的图。私聊里的照片一律进待审核。</span></div>
+          </div>
+          {num("groupDailySteals")}
+          {num("stealCooldownSeconds")}
+          <div className="sbx-switch-row">
+            <Switch checked={draft.privateStealEnabled} onChange={(value) => update("privateStealEnabled", value)} aria-label="私聊里也能存" />
+            <div><strong>私聊里也能存他发来的表情包</strong></div>
+          </div>
+          {num("privateDailySteals")}
+          <label className="sbx-field">
+            <span className="sbx-field-label">别偷这些人的图（QQ 号，每行一个）</span>
+            <Input.TextArea
+              value={protectedText}
+              autoSize={{ minRows: 1, maxRows: 4 }}
+              placeholder="说过“别偷我的图”的群友"
+              onChange={(event) => {
+                setProtectedText(event.target.value);
+                update("stealProtectedUsers", event.target.value.split(/[\s,，、]+/).map((item) => item.trim()).filter((item) => /^\d{5,12}$/.test(item)));
+              }}
+            />
+          </label>
+        </Card>
       </div>
     </div>
   );
@@ -689,7 +751,7 @@ export function StickersPage(): React.JSX.Element {
       <div className="sbx-heading">
         <div>
           <h2 className="sbx-title"><SmileOutlined /> 表情包</h2>
-          <p>Agent 在回复里写 [表情:名字] 就会单独发一张表情包，和分条消息一样有节奏；这里管表情包库、发送频率和群友收藏</p>
+          <p>Agent 在回复里写 [表情:名字] 就会单独发一张表情包，和分条消息一样有节奏；这里管表情包库、AI 自动起名打标签、Bot 偷图、发送频率和群友收藏</p>
         </div>
       </div>
       <StickerStatusBar overview={overview} reloading={query.refreshing} onReload={query.reload} />
@@ -700,6 +762,7 @@ export function StickersPage(): React.JSX.Element {
         destroyOnHidden
         items={[
           { key: "library", label: <span><PictureOutlined /> 表情包库</span>, children: <LibraryTab overview={overview} onChanged={query.reload} /> },
+          { key: "ai", label: <span><RobotOutlined /> AI 标注与偷图</span>, children: <AiTab overview={overview} onChanged={query.reload} /> },
           { key: "policy", label: <span><SafetyCertificateOutlined /> 策略与频率</span>, children: <PolicyTab overview={overview} onSaved={query.reload} /> },
           { key: "preview", label: <span><EyeOutlined /> 菜单预览</span>, children: <PreviewTab overview={overview} /> },
         ]}

@@ -146,7 +146,15 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
             rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:收藏|存|加)(?:好|进|到|下|了)[^。！？!?\n]{{0,6}}(?:表情包|表情|这张|图)"
             r"|(?:表情包|表情|这张)(?:已经|已)?(?:收藏|存)(?:好|下|进去)(?:了|啦)"
         ),
-        frozenset({"save_sticker"}),
+        frozenset({"save_sticker", "steal_sticker"}),
+    ),
+    # 偷图：没真的偷进库就说“偷到了/顺走了/归我了”，以后同样发不出来。
+    "sticker_steal": (
+        re.compile(
+            r"(?:偷|顺|薅|抢)(?:走|到|来|了)(?:了|啦)?[^。！？!?\n]{0,6}(?:表情包|表情|这张|图)"
+            r"|(?:表情包|表情|这张图?)[^。！？!?\n]{0,4}(?:归我了|我收下了|被我偷|我偷走)"
+        ),
+        frozenset({"steal_sticker", "save_sticker"}),
     ),
 }
 

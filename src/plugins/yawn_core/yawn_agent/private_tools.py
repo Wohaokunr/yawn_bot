@@ -40,6 +40,8 @@ from .private_offers import TOOL_DESCRIPTION as _OFFERS_DESCRIPTION
 from .private_offers import TOOL_PROPERTIES as _OFFERS_PROPERTIES
 from .private_schedule_tool import TOOL_DESCRIPTION as _SCHEDULES_DESCRIPTION
 from .private_schedule_tool import TOOL_PROPERTIES as _SCHEDULES_PROPERTIES
+from .private_sticker_tool import DESCRIPTION as _STICKER_DESCRIPTION
+from .private_sticker_tool import PROPERTIES as _STICKER_PROPERTIES
 from .prompt_sections import PRIVATE_TOOL_SECTION_PREFIX, apply_section
 from .tool_args import (
     ERROR_INVALID_ARGS,
@@ -594,6 +596,17 @@ AFFINITY_TOOLS: tuple[PrivateTool, ...] = (
     ),
 )
 AFFINITY_NAMES = frozenset(tool.name for tool in AFFINITY_TOOLS)
+# 表情包（private_sticker_tool）：私聊里偷/收藏他发来的表情包、找表情包、看他存过的。
+STICKER_TOOLS: tuple[PrivateTool, ...] = (
+    PrivateTool(
+        "stickers",
+        _STICKER_DESCRIPTION,
+        _STICKER_PROPERTIES,
+        ("action",),
+        writes=True,
+    ),
+)
+STICKER_NAMES = frozenset(tool.name for tool in STICKER_TOOLS)
 # 只给超级管理员的工具：普通用户的 schema 里看不到。
 SUPERUSER_TOOLS = frozenset({"bot_status"})
 ALL_TOOLS: tuple[PrivateTool, ...] = (
@@ -606,6 +619,7 @@ ALL_TOOLS: tuple[PrivateTool, ...] = (
     + SCHEDULE_TOOLS
     + OFFER_TOOLS
     + AFFINITY_TOOLS
+    + STICKER_TOOLS
     + COMPUTER_TOOLS
     + TASK_TOOLS
 )
@@ -749,6 +763,8 @@ class PrivateToolContext:
     opened: set[str] = field(default_factory=set)
     # 本轮已成功执行过的只读调用（工具名+参数）：一模一样的再来一次就不重复执行、不重复塞结果
     seen_calls: set[str] = field(default_factory=set)
+    # 他这条消息带的媒体段（图片/文件…），stickers.steal 取图用；不进提示词
+    media: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _match_groups(ctx: PrivateToolContext, raw: str | None) -> list[SharedGroup]:
@@ -1604,6 +1620,10 @@ async def execute_private_tool(  # noqa: PLR0915
             result = _offers_tool(args, ctx)
         elif name in AFFINITY_NAMES:
             result = await _affinity_tool(args, ctx)
+        elif name in STICKER_NAMES:
+            from .private_sticker_tool import stickers_tool
+
+            result = await stickers_tool(args, ctx)
         else:
             result = await _execute_extra(name, args, ctx)
     except Exception as exc:  # noqa: BLE001
@@ -1612,7 +1632,7 @@ async def execute_private_tool(  # noqa: PLR0915
     if name == "my_status":
         # 声明核验：查过签到/签到榜才能说“你今天签了/排第几”
         ctx.succeeded.add(f"my_status.{args.get('view')}")
-    if name in (MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES | OFFER_NAMES) and isinstance(result, dict) and result.get("done"):
+    if name in (MANAGE_NAMES | BRIDGE_NAMES | SCHEDULE_NAMES | OFFER_NAMES | STICKER_NAMES) and isinstance(result, dict) and result.get("done"):
         # 声明核验：只有真正执行了（不是“待确认”）才算办成
         ctx.succeeded.add(f"{name}.done")
         ctx.succeeded.add(f"{name}.{result.get('action')}")

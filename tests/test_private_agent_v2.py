@@ -59,8 +59,8 @@ def test_tool_table_is_complete_and_safe() -> None:
     names = [tool.name for tool in ptools.ALL_TOOLS]
     # 2026-11 精简：六个状态查询并成 my_status，what_you_remember/chat_history 并进 recall/my_data，
     # webui_onboarding 并进 webui_account，toolbox 只在电脑用不了时出现 → 33 个；
-    # 2026-11 好感玩法加了 affinity → 34 个
-    assert len(names) == len(set(names)) == 34
+    # 2026-11 好感玩法加了 affinity → 34 个；表情包偷图加了 stickers → 35 个
+    assert len(names) == len(set(names)) == 35
     for old in ptools.LEGACY_ALIASES:
         assert old not in names and ptools.LEGACY_ALIASES[old][0] in names
     # 虚拟电脑 4 个（含能力包目录与执行）+ 小助手任务 3 个，只在可用时才出现在 schema 里

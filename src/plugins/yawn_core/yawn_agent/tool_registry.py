@@ -472,17 +472,32 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "save_sticker",
-        "把群成员发的一张图收藏进表情包库（成员明确要你收藏/存下某张表情时用）；默认取本条或引用消息里的图",
+        "把群成员发的一张图收藏进表情包库（成员明确要你收藏/存下某张表情时用）；默认取本条或引用消息里的图。"
+        "name/tags 可以不写，系统会让识图模型看图起名打标签",
         {
-            "name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "几个字说明它表达什么，如“捂脸笑”“狗头”“震惊”；以后用 [表情:名字] 发它"},
-            "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10}, "maxItems": 6, "description": '情绪/场景标签，如 ["无语","尴尬"]'},
+            "name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "几个字说明它表达什么，如“捂脸笑”“狗头”“震惊”；以后用 [表情:名字] 发它。不写就让识图模型起"},
+            "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10}, "maxItems": 6, "description": '情绪/场景标签，如 ["无语","尴尬"]；不写就让识图模型打'},
             "description": {"type": "string", "maxLength": 120, "description": "什么时候适合发（可选）"},
             "id": {"type": "string", "minLength": 1, "maxLength": 32, "description": "图片 id：本条消息的媒体序号或 list_chat_attachments 的 id；省略=本条/引用消息里的图，没有就取群里最近一张"},
         },
-        required=("name",),
         permission_level=TOOL_PERMISSION_STATE_WRITE,
         family="reaction",
         keywords=("收藏表情", "存表情", "收藏这个", "存下来", "加进表情包", "表情包库"),
+    ),
+    ToolDefinition(
+        "steal_sticker",
+        "“偷”走群友发的一张表情包存进你自己的表情包库，以后你也能发：看到好玩、你以后用得上的表情包时自己决定偷，不用谁开口；"
+        "默认取本条/引用消息里的表情包，没有就取群里最近一张。名字和标签可以不写，系统让识图模型看图起。偷到之后可以俏皮地提一句，也可以不说",
+        {
+            "id": {"type": "string", "minLength": 1, "maxLength": 32, "description": "图片 id（本条消息的媒体序号或 list_chat_attachments 的 id）；省略=本条/引用消息里的表情包，没有就取群里最近一张"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "可选：几个字的名字，以后用 [表情:名字] 发它"},
+            "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10}, "maxItems": 6, "description": "可选：情绪/场景标签"},
+            "description": {"type": "string", "maxLength": 120, "description": "可选：什么时候适合发"},
+            "reason": {"type": "string", "maxLength": 60, "description": "可选：为什么想偷它（给识图模型起名做参考）"},
+        },
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="reaction",
+        keywords=("偷图", "偷表情", "偷走", "这张归我", "表情包"),
     ),
     ToolDefinition(
         "send_message",
