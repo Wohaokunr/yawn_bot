@@ -137,6 +137,8 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "schedules.resume": ("update_scheduled_task",),
     "schedules.cancel": ("cancel_scheduled_task",),
     "my_data.wipe": ("forget_about_me",),
+    # 私聊偷图/收藏表情包：只有 stickers.steal 真的入库了才能说“偷到了/收藏好了”
+    "stickers.steal": ("steal_sticker", "save_sticker"),
     # 群管代办：只有真正执行了（group_manage.<动作>）才允许说“禁言好了/公告发了”
     "group_manage.mute": ("mute_member",),
     "group_manage.unmute": ("unmute_member",),
@@ -914,6 +916,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
     vision = await private_vision.prepare_private_vision(
         request.bot, user_id, request.media
     )
+    if request.media:
+        # 之后几轮还能 stickers.steal 他刚发的表情包（进程内 10 分钟，只记引用不取字节）。
+        from .private_sticker_tool import remember_media
+
+        remember_media(user_id, request.media)
     if tasks_enabled():
         from . import private_team
 
@@ -1065,6 +1072,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         computer=bool(computer),
         attachment_refs=[str(row["ref"]) for row in attachments if row.get("ref")],
         available=available,
+        media=list(request.media or []),
     )
     if scheduled is not None:
         # 定时代办的一轮：不许再设提醒/定时任务（防自我繁殖），不许无人值守地去群里说话或管群。

@@ -167,7 +167,20 @@ def sticker_turn_instruction(
         max_per_message=settings.max_per_message,
         complexity=complexity,
         short_scene=scene in _SHORT_SCENES,
+        # 偷图只在有人在说话的对话回合提（主动插话/暖场没有工具，也没有调用者）。
+        steal=scene not in _PROACTIVE_SCENES and can_steal(int(group_id)),
     )
 
 
-__all__ = ["has_sticker_segments", "resolve_plan_stickers", "sticker_turn_instruction"]
+def can_steal(group_id: int) -> bool:
+    """本群现在能不能偷图（只看策略和今日次数，不看聊天内容）。"""
+
+    from .sticker_policy import load_settings, steal_key, steals_today
+
+    settings = load_settings()
+    if settings.steal_mode == "off" or settings.group_daily_steals <= 0:
+        return False
+    return steals_today(steal_key(group_id)) < settings.group_daily_steals
+
+
+__all__ = ["can_steal", "has_sticker_segments", "resolve_plan_stickers", "sticker_turn_instruction"]

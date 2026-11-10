@@ -38,6 +38,18 @@ const settings: StickerSettings = {
   privateEnabled: true,
   privateDailyLimit: 20,
   privateCooldownSeconds: 20,
+  aiLabelEnabled: true,
+  aiLabelOnUpload: true,
+  aiLabelOnCollect: true,
+  aiLabelStyle: "",
+  aiLabelReviewUnsafe: true,
+  stealMode: "auto",
+  stealPhotos: false,
+  groupDailySteals: 5,
+  stealCooldownSeconds: 300,
+  privateStealEnabled: true,
+  privateDailySteals: 5,
+  stealProtectedUsers: [],
 };
 
 function sticker(overrides: Partial<Sticker>): Sticker {
@@ -59,6 +71,10 @@ function sticker(overrides: Partial<Sticker>): Sticker {
     uses: 3,
     lastUsed: null,
     fileMissing: false,
+    ai: null,
+    origin: null,
+    canUndoLabel: false,
+    placeholderName: false,
     ...overrides,
   };
 }
@@ -69,7 +85,10 @@ function overview(overrides: Partial<StickerOverview> = {}): StickerOverview {
     defaults: settings,
     frequencyLabels: { rare: "偶尔", normal: "适中", often: "爱发" },
     usage: { day: "2026-10-27", totals: { sent: 4, dropped: 1, collected: 1 }, groups: [{ groupId: "123456", sent: 4, groupName: "测试群" }], groupLimit: 60 },
-    counts: { total: 2, active: 1, pending: 1, disabled: 0 },
+    counts: { total: 2, active: 1, pending: 1, disabled: 0, stolen: 0, aiLabeled: 0, unlabeled: 2 },
+    sourceLabels: { upload: "上传", member: "群友收藏", stolen: "Bot 偷的" },
+    vision: { ready: true, model: "mimo-v2.5", provider: "默认", stats: { requests: 0, ok: 0, failed: 0, cached: 0, cacheSize: 0, lastError: null } },
+    labelJobs: [],
     stickers: [
       sticker({ id: "s1", name: "狗头" }),
       sticker({ id: "s2", name: "白眼", tags: ["无语"], status: "pending", source: "member", addedBy: "42", addedGroup: "123456", uses: 0 }),
@@ -149,5 +168,41 @@ describe("StickersPage", () => {
     fireEvent.click(await screen.findByText("测试群（123456）"));
     fireEvent.click(screen.getByRole("button", { name: /预览/ }));
     expect(await screen.findByLabelText("提示词预览")).toHaveTextContent("可用表情包：狗头。");
+  });
+  it("starts a batch AI labeling job for unlabeled stickers", async () => {
+    state.api.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/stickers") return { data: overview(), meta: {} };
+      if (path === "/stickers/label-jobs" && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ scope: "unlabeled", mode: "fill" });
+        return { data: { job: { id: "j1", status: "running", mode: "fill", modeLabel: "只补空的", fields: ["name"], total: 2, done: 0, changed: 0, unchanged: 0, failed: 0, held: 0, createdAt: 0, finishedAt: null, elapsedMs: 0 } }, meta: {} };
+      }
+      if (path === "/stickers/label-jobs") return { data: { jobs: [], vision: overview().vision }, meta: {} };
+      throw new Error(`unexpected ${path}`);
+    });
+    renderPage("/stickers?stk.tab=ai");
+    fireEvent.click(await screen.findByRole("button", { name: /标注没标过的 2 张/ }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/stickers/label-jobs", expect.objectContaining({ method: "POST" })));
+  });
+
+  it("lists stickers the bot stole with where they came from", async () => {
+    const stolen = sticker({ id: "s3", name: "偷来的猫", source: "stolen", origin: { via: "steal", groupId: "123456", senderId: "42", senderName: "小明", messageId: null, qqSticker: true } });
+    state.api.mockImplementation(async (path: string) => {
+      if (path === "/stickers") return { data: overview({ stickers: [stolen], counts: { total: 1, active: 1, pending: 0, disabled: 0, stolen: 1, aiLabeled: 0, unlabeled: 1 } }), meta: {} };
+      if (path === "/stickers/label-jobs") return { data: { jobs: [], vision: overview().vision }, meta: {} };
+      throw new Error(`unexpected ${path}`);
+    });
+    renderPage("/stickers?stk.tab=ai");
+    expect(await screen.findByText("Bot 偷来的表情包（1）")).toBeInTheDocument();
+    expect(screen.getAllByText(/小明（42） 发的/).length).toBeGreaterThan(0);
+  });
+
+  it("warns when no vision model is configured", async () => {
+    state.api.mockImplementation(async (path: string) => {
+      if (path === "/stickers") return { data: overview({ vision: { ready: false, model: "", provider: "", stats: { requests: 0, ok: 0, failed: 0, cached: 0, cacheSize: 0, lastError: null } } }), meta: {} };
+      if (path === "/stickers/label-jobs") return { data: { jobs: [], vision: overview().vision }, meta: {} };
+      throw new Error(`unexpected ${path}`);
+    });
+    renderPage("/stickers?stk.tab=ai");
+    expect((await screen.findAllByText(/AI_VISION_MODEL/)).length).toBeGreaterThan(0);
   });
 });

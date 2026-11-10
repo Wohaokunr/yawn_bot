@@ -27,7 +27,8 @@ INDEX_NAME = "index.json"
 STATUS_ACTIVE = "active"
 STATUS_PENDING = "pending"
 STATUSES = frozenset({STATUS_ACTIVE, STATUS_PENDING})
-SOURCES = frozenset({"manual", "upload", "member"})
+SOURCES = frozenset({"manual", "upload", "member", "stolen"})
+SOURCE_LABELS = {"manual": "手动放入", "upload": "WebUI 上传", "member": "群友收藏", "stolen": "Bot 偷的"}
 MAX_STICKERS = 2000
 MAX_NAME_CHARS = 16
 MAX_TAGS = 8
@@ -93,6 +94,25 @@ def clean_description(value: object) -> str:
     return text[:MAX_DESCRIPTION_CHARS]
 
 
+_PLACEHOLDER_RE = re.compile(
+    r"^(?:img|image|pic|photo|screenshot|mmexport|wx_camera|qq图片|微信图片|截图|屏幕截图|下载|未命名|新建|tmp|temp|dsc|s[0-9a-f]{6,})[\s_\-0-9a-f]*$",
+    re.IGNORECASE,
+)
+_HEXISH_RE = re.compile(r"^[0-9a-f_\-]{8,}$", re.IGNORECASE)
+
+
+def looks_like_placeholder(name: str, sticker_id: str = "") -> bool:
+    """名字是不是文件名/编号这种“没起过名”的占位（AI 补全时可以覆盖）。纯函数。"""
+
+    text = str(name or "").strip()
+    if not text:
+        return True
+    if sticker_id and text.casefold() == sticker_id[:MAX_NAME_CHARS].casefold():
+        return True
+    folded = text.replace(" ", "")
+    return bool(_PLACEHOLDER_RE.match(folded) or _HEXISH_RE.match(folded) or folded.isdigit())
+
+
 def _clean_groups(values: object) -> tuple[int, ...]:
     output: list[int] = []
     for raw in values if isinstance(values, (list, tuple)) else []:
@@ -146,6 +166,32 @@ class Sticker:
     @property
     def label(self) -> str:
         return self.name or (self.tags[0] if self.tags else self.sticker_id)
+
+    @property
+    def ai(self) -> dict[str, Any]:
+        """AI 标注元数据（模型、把握、图上文字、是否安全、时间）；没标注过为空。"""
+
+        value = self.extra.get("ai")
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def origin(self) -> dict[str, Any]:
+        """偷图/收藏的来源（群、发图的人、消息编号、私聊）；只给 WebUI 看，不进提示词。"""
+
+        value = self.extra.get("origin")
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def ocr_text(self) -> str:
+        return str(self.ai.get("text") or "")[:120]
+
+    @property
+    def can_undo_label(self) -> bool:
+        return isinstance(self.extra.get("label_undo"), dict)
+
+    @property
+    def placeholder_name(self) -> bool:
+        return looks_like_placeholder(self.name, self.sticker_id)
 
     def to_index(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -379,7 +425,8 @@ def match_stickers(
             return "id", [item]
     named = [item for item in stickers if _fold(item.name) == folded]
     if named:
-        return "name", named[:1]
+        # 同名的好几张（AI 标注常把同一种情绪起成同一个名字）都算候选，由 pick_sticker 轮换。
+        return "name", named
     tagged = [item for item in stickers if any(_fold(tag) == folded for tag in item.tags)]
     if tagged:
         return "tag", tagged
@@ -402,6 +449,8 @@ def add_sticker(
     added_by: int | None = None,
     added_group: int | None = None,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    ai: dict[str, Any] | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> tuple[Sticker, bool]:
     """存一张图进库；同一张图（内容哈希相同）已在库里时返回旧记录和 False。"""
 
@@ -457,11 +506,119 @@ def add_sticker(
             mime=mime,
             created_at=stamp,
             updated_at=stamp,
+            extra={
+                **({"ai": _clean_meta(ai)} if ai else {}),
+                **({"origin": _clean_meta(origin)} if origin else {}),
+            },
         )
         entries.append(sticker)
         return sticker, True
 
     return _library.mutate(change)
+
+
+def _clean_meta(value: dict[str, Any] | None) -> dict[str, Any]:
+    """元数据只留短的标量（字符串截到 120 字），防止索引被塞进大块内容。"""
+
+    output: dict[str, Any] = {}
+    for key, item in (value or {}).items():
+        if not isinstance(key, str) or len(output) >= 16:  # noqa: PLR2004
+            continue
+        if isinstance(item, bool) or item is None or isinstance(item, (int, float)):
+            output[key[:32]] = item
+        else:
+            output[key[:32]] = str(item)[:120]
+    return output
+
+
+def find_by_sha256(digest: str) -> Sticker | None:
+    target = str(digest or "").strip().casefold()
+    return next((item for item in all_stickers() if target and item.sha256 == target), None)
+
+
+def digest_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def known_names(limit: int = 60) -> list[str]:
+    """库里已有的名字（去重，按用得多少无关，按入库顺序的后 limit 个），给 AI 起名时避免撞名。"""
+
+    names = list(dict.fromkeys(item.name for item in all_stickers() if item.name))
+    return names[-limit:]
+
+
+def apply_label(
+    sticker_id: str,
+    changes: dict[str, Any],
+    meta: dict[str, Any],
+    *,
+    keep_undo: bool = True,
+) -> Sticker:
+    """写入 AI 标注：改名字/标签/说明（已清洗过的 ``changes``），记下 ``ai`` 元数据，
+    并把改之前的名字/标签/说明存进 ``label_undo``，WebUI 能一键撤销。"""
+
+    def change(entries: list[Sticker]) -> Sticker:
+        for index, item in enumerate(entries):
+            if item.sticker_id != sticker_id:
+                continue
+            updates: dict[str, Any] = {}
+            if changes.get("name"):
+                name = clean_name(changes["name"])
+                if name:
+                    updates["name"] = name
+            if changes.get("tags") is not None:
+                updates["tags"] = clean_tags(changes["tags"])
+            if changes.get("description") is not None:
+                updates["description"] = clean_description(changes["description"])
+            extra = dict(item.extra)
+            extra["ai"] = _clean_meta(meta)
+            if keep_undo and updates:
+                extra["label_undo"] = {
+                    "name": item.name,
+                    "tags": list(item.tags),
+                    "description": item.description,
+                    "at": _now_text(),
+                }
+            updated = replace(item, **updates, extra=extra, updated_at=_now_text())
+            entries[index] = updated
+            return updated
+        raise StickerError("not_found", "表情包不存在")
+
+    return _library.mutate(change)
+
+
+def undo_label(sticker_id: str) -> Sticker:
+    """撤销最近一次 AI 标注：名字/标签/说明恢复成标注前的样子。"""
+
+    def change(entries: list[Sticker]) -> Sticker:
+        for index, item in enumerate(entries):
+            if item.sticker_id != sticker_id:
+                continue
+            previous = item.extra.get("label_undo")
+            if not isinstance(previous, dict):
+                raise StickerError("no_undo", "这张没有可以撤销的 AI 标注")
+            extra = {key: value for key, value in item.extra.items() if key != "label_undo"}
+            if isinstance(extra.get("ai"), dict):
+                extra["ai"] = {**extra["ai"], "undone": True}
+            updated = replace(
+                item,
+                name=clean_name(previous.get("name")) or item.name,
+                tags=clean_tags(previous.get("tags") or []),
+                description=clean_description(previous.get("description")),
+                extra=extra,
+                updated_at=_now_text(),
+            )
+            entries[index] = updated
+            return updated
+        raise StickerError("not_found", "表情包不存在")
+
+    return _library.mutate(change)
+
+
+def search_text(item: Sticker) -> str:
+    """WebUI 搜索用：名字、标签、说明、图上的字。"""
+
+    return " ".join([item.name, *item.tags, item.description, item.ocr_text])
 
 
 def update_sticker(sticker_id: str, **fields: Any) -> Sticker:
@@ -522,14 +679,26 @@ def forget_member(group_id: int, user_id: int) -> int:
     target = int(user_id)
     group = int(group_id)
 
+    def sent_by(item: Sticker) -> bool:
+        origin = item.origin
+        return str(origin.get("sender_id") or "") == str(target) and str(origin.get("group_id") or "") == str(group)
+
     def mine(item: Sticker) -> bool:
-        return item.added_by == target and item.added_group == group
+        return (item.added_by == target and item.added_group == group) or sent_by(item)
 
     def change(entries: list[Sticker]) -> int:
         count = 0
         for index, item in enumerate(entries):
             if mine(item):
-                entries[index] = replace(item, added_by=None)
+                extra = dict(item.extra)
+                if sent_by(item):
+                    # 偷图记录里“谁发的”也抹掉（名字、号码），图和群号留给管理员处理。
+                    extra["origin"] = {key: value for key, value in item.origin.items() if key not in {"sender_id", "sender_name"}}
+                entries[index] = replace(
+                    item,
+                    added_by=None if item.added_by == target and item.added_group == group else item.added_by,
+                    extra=extra,
+                )
                 count += 1
         return count
 
@@ -559,24 +728,32 @@ def reset_cache_for_tests() -> None:
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
+    "SOURCE_LABELS",
     "STATUS_ACTIVE",
     "STATUS_PENDING",
     "Sticker",
     "StickerError",
     "add_sticker",
     "all_stickers",
+    "apply_label",
     "available_stickers",
     "clean_description",
     "clean_name",
     "clean_tags",
     "delete_sticker",
+    "digest_of",
+    "find_by_sha256",
     "forget_member",
     "get_sticker",
     "index_path",
+    "known_names",
     "library_root",
+    "looks_like_placeholder",
     "match_stickers",
+    "search_text",
     "sniff_image",
     "sticker_path",
     "tag_counts",
+    "undo_label",
     "update_sticker",
 ]

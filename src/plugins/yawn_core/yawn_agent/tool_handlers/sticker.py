@@ -5,6 +5,11 @@
 base64 → OneBot 接口 → 白名单下载 → 共享目录），模型永远看不到 URL 和路径。
 是否直接可用看策略：``auto`` 直接可用、``review`` 进待审核（群主/管理员收藏的
 直接可用）、``off`` 不收。
+
+``steal_sticker`` 是 Bot 自己的“偷图”：群友发了好玩的表情包，Bot 觉得以后用得上就存下来，
+不用谁开口。闸门比收藏更紧：``steal_mode``、每群每日次数与冷却、默认只偷 QQ 标成表情包的图、
+发图的人退出记忆或在“别偷我的图”名单里都不偷。两者没写名字/标签时都由识图模型补
+（``sticker_intake``），识图模型判断不适合当表情包的进待审核。
 """
 
 from __future__ import annotations
@@ -12,13 +17,21 @@ from __future__ import annotations
 from typing import Any
 
 from ..sandbox_inbox import Attachment, InboxError, collect_recent, fetch_bytes
+from ..sticker_intake import IntakeResult, intake_image
 from ..sticker_library import (
     STATUS_ACTIVE,
     STATUS_PENDING,
     StickerError,
-    add_sticker,
 )
-from ..sticker_policy import collects_today, load_settings, note_collect
+from ..sticker_policy import (
+    collects_today,
+    load_settings,
+    note_collect,
+    note_steal,
+    steal_cooldown_remaining,
+    steal_key,
+    steals_today,
+)
 from ..tool_args import (
     ERROR_INVALID_ARGS,
     ERROR_NOT_FOUND,
@@ -32,7 +45,7 @@ from ..tool_support import _opted_out_user_ids
 from .web import _actor_is_admin
 
 FAMILY = "reaction"
-NAMES = frozenset(["save_sticker"])
+NAMES = frozenset(["save_sticker", "steal_sticker"])
 RECENT_MINUTES = 15
 
 _FETCH_HINTS = {
@@ -46,7 +59,16 @@ def _images(items: list[Any]) -> list[Attachment]:
     return [item for item in items if isinstance(item, Attachment) and item.media_type == "image"]
 
 
-async def _pick(args: dict[str, Any], context: ToolExecutionContext) -> Attachment:
+def is_sticker_image(attachment: Attachment) -> bool:
+    """QQ 把表情包图片标成 ``sub_type=1``（与 message_parser._is_sticker 一致），只看结构。"""
+
+    sub_type = attachment.ref.get("sub_type")
+    if sub_type is None:
+        sub_type = attachment.ref.get("subType")
+    return str(sub_type or "") == "1"
+
+
+async def _pick(args: dict[str, Any], context: ToolExecutionContext, *, prefer_stickers: bool = False) -> Attachment:
     wanted = str(args.get("id") or "").strip()
     current = _images(list(context.attachments))
     if wanted:
@@ -56,7 +78,10 @@ async def _pick(args: dict[str, Any], context: ToolExecutionContext) -> Attachme
     elif current:
         # 引用的那张优先：“@Bot 收藏这个”最常见的写法是回复那张表情。
         replies = [item for item in current if item.source == "reply"]
-        return (replies or current)[0]
+        pool = replies or current
+        if prefer_stickers:
+            pool = [item for item in pool if is_sticker_image(item)] or pool
+        return pool[0]
     recent = _images(
         await collect_recent(
             context.session,
@@ -75,6 +100,8 @@ async def _pick(args: dict[str, Any], context: ToolExecutionContext) -> Attachme
             hint="不写 id 默认收藏本条或引用消息里的图；也可以用 list_chat_attachments 看最近的图片 id",
         )
     if recent:
+        if prefer_stickers:
+            return next((item for item in recent if is_sticker_image(item)), recent[0])
         return recent[0]
     raise ToolError(
         "本条消息、引用的消息和最近的群消息里都没有图片",
@@ -103,7 +130,7 @@ async def _save(args: dict[str, Any], context: ToolExecutionContext) -> dict[str
             code=ERROR_QUOTA,
         )
     name = str(args.get("name") or "").strip()
-    if not name:
+    if not name and not (settings.ai_label_enabled and settings.ai_label_on_collect):
         raise ToolError("要给表情包起个名字", code=ERROR_INVALID_ARGS, hint="name 写几个字说明它表达什么，如“捂脸笑”“狗头”")
     attachment = await _pick(args, context)
     if attachment.sender_id is not None and context.session is not None:
@@ -120,7 +147,7 @@ async def _save(args: dict[str, Any], context: ToolExecutionContext) -> dict[str
         ) from exc
     status = STATUS_ACTIVE if settings.collect_mode == "auto" or is_admin else STATUS_PENDING
     try:
-        sticker, created = add_sticker(
+        result = await intake_image(
             fetched.data,
             name=name,
             tags=args.get("tags") or [],
@@ -129,12 +156,38 @@ async def _save(args: dict[str, Any], context: ToolExecutionContext) -> dict[str
             status=status,
             added_by=context.actor_user_id,
             added_group=context.group_id,
-            max_bytes=settings.max_bytes,
+            origin=_origin(attachment, context, via="collect"),
+            use_ai=settings.ai_label_on_collect,
+            settings=settings,
         )
     except StickerError as exc:
-        raise ToolError(str(exc), code=ERROR_INVALID_ARGS if exc.reason in {"no_name", "not_image"} else ERROR_QUOTA) from exc
-    if created:
+        raise ToolError(
+            str(exc),
+            code=ERROR_INVALID_ARGS if exc.reason in {"no_name", "not_image"} else ERROR_QUOTA,
+            hint="识图模型没起出名字：自己看图起一个，name 重新调用一次" if exc.reason == "no_name" else None,
+        ) from exc
+    if result.created:
         note_collect(context.group_id, context.actor_user_id)
+    return _payload(result, context)
+
+
+def _origin(attachment: Attachment, context: ToolExecutionContext, *, via: str) -> dict[str, Any]:
+    """来源只给 WebUI 看（谁发的、哪条消息），不进提示词；成员要求忘掉时会被抹掉。"""
+
+    origin: dict[str, Any] = {"via": via, "group_id": context.group_id, "from": attachment.source}
+    if attachment.sender_id is not None:
+        origin["sender_id"] = attachment.sender_id
+    if attachment.sender_name:
+        origin["sender_name"] = attachment.sender_name[:24]
+    if attachment.message_id is not None:
+        origin["message_id"] = attachment.message_id
+    if is_sticker_image(attachment):
+        origin["qq_sticker"] = True
+    return origin
+
+
+def _payload(result: IntakeResult, context: ToolExecutionContext) -> dict[str, Any]:
+    sticker, created = result.sticker, result.created
     payload: dict[str, Any] = {
         "saved": created,
         "already_in_library": not created,
@@ -152,12 +205,89 @@ async def _save(args: dict[str, Any], context: ToolExecutionContext) -> dict[str
         payload["next"] = "告诉对方已经交给管理员审核，审核通过后才会用；不要说已经能用了"
     if not created:
         payload["note"] = "库里已经有这张图了，没有重复收藏"
+    if result.named_by == "ai":
+        payload["named_by"] = "识图模型看图起的名字和标签"
+    if result.held_for_review:
+        payload["status"] = "待管理员审核"
+        payload["next"] = "这张图识图模型觉得不太适合当表情包，交给管理员审核了；如实告诉对方，不要说已经能用了"
+    return payload
+
+
+async def _steal(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    if context.actor_user_id is None:
+        raise ToolError("只有群成员在和你说话的回合里才能偷图", code=ERROR_PERMISSION)
+    settings = load_settings()
+    if not settings.enabled or not settings.group_open(context.group_id):
+        raise ToolError("本群没有开放表情包功能", code=ERROR_PERMISSION, hint="不要说偷到了")
+    if settings.steal_mode == "off":
+        raise ToolError("管理员关了偷图", code=ERROR_PERMISSION, hint="不要说偷到了；成员想要可以让他说“收藏这个”")
+    key = steal_key(context.group_id)
+    if steals_today(key) >= settings.group_daily_steals:
+        raise ToolError(f"本群今天已经偷了 {settings.group_daily_steals} 张，明天再偷", code=ERROR_QUOTA, hint="不要说偷到了")
+    wait = steal_cooldown_remaining(key)
+    if wait > 0:
+        raise ToolError(f"刚偷过一张，还要等 {int(wait) + 1} 秒", code=ERROR_QUOTA, hint="这次就算了，不要说偷到了")
+    attachment = await _pick(args, context, prefer_stickers=True)
+    if not settings.steal_photos and not is_sticker_image(attachment):
+        raise ToolError(
+            "这张不是表情包（是普通照片/截图），不偷",
+            code=ERROR_PERMISSION,
+            hint="只偷 QQ 标成表情包的图；成员真想存可以让他说“收藏这个”",
+        )
+    if attachment.sender_id is not None:
+        if context.bot is not None and str(attachment.sender_id) == str(getattr(context.bot, "self_id", "")):
+            raise ToolError("这是你自己发的图，不用偷", code=ERROR_INVALID_ARGS)
+        if attachment.sender_id in settings.steal_protected_users:
+            raise ToolError("发图的人说过别偷他的图", code=ERROR_PERMISSION, hint="尊重他，别偷，也别提名单的事")
+        if context.session is not None:
+            opted_out = await _opted_out_user_ids(context.session, context.group_id)
+            if attachment.sender_id in opted_out:
+                raise ToolError("发图的人退出了记忆，不能偷他的图", code=ERROR_PERMISSION)
+    try:
+        fetched = await fetch_bytes(context.bot, context.group_id, attachment, max_bytes=settings.max_bytes)
+    except InboxError as exc:
+        raise ToolError(
+            "没取到这张图",
+            code=ERROR_UPSTREAM,
+            hint=_FETCH_HINTS.get(exc.reason, "这次没偷成，不要说偷到了"),
+        ) from exc
+    status = STATUS_ACTIVE if settings.steal_mode == "auto" else STATUS_PENDING
+    hint = str(args.get("reason") or "").strip()[:60]
+    try:
+        result = await intake_image(
+            fetched.data,
+            name=str(args.get("name") or ""),
+            tags=args.get("tags") or [],
+            description=str(args.get("description") or ""),
+            source="stolen",
+            status=status,
+            added_group=context.group_id,
+            origin=_origin(attachment, context, via="steal"),
+            hint=f"偷图时的想法：{hint}" if hint else "",
+            settings=settings,
+        )
+    except StickerError as exc:
+        raise ToolError(
+            str(exc),
+            code=ERROR_INVALID_ARGS if exc.reason in {"no_name", "not_image"} else ERROR_QUOTA,
+            hint="自己看图起个名字，name 再调用一次" if exc.reason == "no_name" else "这次没偷成，不要说偷到了",
+        ) from exc
+    if result.created:
+        note_steal(key)
+    payload = _payload(result, context)
+    payload["stolen"] = payload.pop("saved")
+    if result.created and result.sticker.usable:
+        payload["tone"] = "可以俏皮地说一句“这张我偷了”，也可以什么都不说，下次直接用"
+    elif not result.created:
+        payload["note"] = "库里早就有这张了，不用偷"
     return payload
 
 
 async def handle(name: str, args: dict[str, Any], context: ToolExecutionContext) -> ToolHandlerResult:
     if name == "save_sticker":
         return ToolHandlerResult(await _save(args, context))
+    if name == "steal_sticker":
+        return ToolHandlerResult(await _steal(args, context))
     raise ValueError(f"{FAMILY} handler 不支持工具: {name}")
 
 
