@@ -605,29 +605,53 @@ async def search_my_chats(
 
 
 @router.get("/chats/{chat_id}/messages")
-async def my_chat_messages(
+async def my_chat_messages(  # noqa: PLR0913, PLR0917
     chat_id: int,
     session: UserReadSession,
     before: int | None = Query(default=None, ge=1),
+    after: int | None = Query(default=None, ge=1),
+    around: int | None = Query(default=None, ge=1),
     limit: int = Query(default=_MESSAGE_PAGE, ge=1, le=200),
 ) -> dict[str, Any]:
-    """一段对话的消息，按时间正序；``before`` 往前翻页（消息编号）。"""
+    """一段对话的消息，按时间正序；``before`` 往前翻页、``after`` 往后翻页（消息编号），
+    ``around`` 取某条消息前后各半页（从搜索结果跳过来用）。"""
 
     user_id = _uid(session)
     async with get_session() as db:
         await _own_chat(db, user_id, chat_id)
-        query = select(ChatMessage).where(
+        base = select(ChatMessage).where(
             ChatMessage.session_id == chat_id, ChatMessage.is_deleted.is_(False)
         )
-        if before is not None:
-            query = query.where(ChatMessage.id < before)
-        rows = list(
-            (await db.execute(query.order_by(ChatMessage.id.desc()).limit(limit + 1)))
-            .scalars()
-            .all()
-        )
-    more = len(rows) > limit
-    rows = list(reversed(rows[:limit]))
+
+        async def older(than: int | None, count: int) -> tuple[list[Any], bool]:
+            query = base if than is None else base.where(ChatMessage.id < than)
+            found = list(
+                (await db.execute(query.order_by(ChatMessage.id.desc()).limit(count + 1)))
+                .scalars()
+                .all()
+            )
+            return list(reversed(found[:count])), len(found) > count
+
+        async def newer(than: int, count: int, *, inclusive: bool = False) -> tuple[list[Any], bool]:
+            edge = ChatMessage.id >= than if inclusive else ChatMessage.id > than
+            found = list(
+                (await db.execute(base.where(edge).order_by(ChatMessage.id).limit(count + 1)))
+                .scalars()
+                .all()
+            )
+            return found[:count], len(found) > count
+
+        has_newer = False
+        if around is not None:
+            half = max(limit // 2, 1)
+            head, more = await older(around, half)
+            tail, has_newer = await newer(around, half, inclusive=True)
+            rows = head + tail
+        elif after is not None:
+            rows, has_newer = await newer(after, limit)
+            more = True
+        else:
+            rows, more = await older(before, limit)
     return ok(
         [
             {
@@ -639,7 +663,12 @@ async def my_chat_messages(
             for row in rows
             if row.role in {"user", "assistant"}
         ],
-        {"hasMore": more, "before": str(rows[0].id) if rows else None},
+        {
+            "hasMore": more,
+            "before": str(rows[0].id) if rows else None,
+            "hasNewer": has_newer,
+            "after": str(rows[-1].id) if rows else None,
+        },
     )
 
 
@@ -670,8 +699,12 @@ async def delete_my_chat(chat_id: int, session: UserWriteSession) -> dict[str, A
 
 
 @router.get("/chats/{chat_id}/export")
-async def export_my_chat(chat_id: int, session: UserReadSession) -> Response:
-    """把一段对话导出成纯文本。"""
+async def export_my_chat(
+    chat_id: int,
+    session: UserReadSession,
+    fmt: str = Query(default="txt", alias="format", pattern="^(txt|md|json)$"),
+) -> Response:
+    """把一段对话导出成纯文本、Markdown 或 JSON。"""
 
     user_id = _uid(session)
     async with get_session() as db:
@@ -691,18 +724,43 @@ async def export_my_chat(chat_id: int, session: UserReadSession) -> Response:
             .scalars()
             .all()
         )
-    lines = [f"# {title}", ""]
-    for row in rows:
-        if row.role not in {"user", "assistant"}:
-            continue
-        who = "我" if row.role == "user" else "Bot"
-        stamp = row.created_at.strftime("%Y-%m-%d %H:%M") if row.created_at else ""
-        lines.append(f"[{stamp}] {who}：{row.content}")
+    messages = [
+        {
+            "who": "我" if row.role == "user" else "Bot",
+            "role": row.role,
+            "at": row.created_at.strftime("%Y-%m-%d %H:%M") if row.created_at else "",
+            "content": str(row.content or ""),
+        }
+        for row in rows
+        if row.role in {"user", "assistant"}
+    ]
+    if fmt == "json":
+        body = json.dumps(
+            {"id": str(chat_id), "title": title, "messages": messages},
+            ensure_ascii=False,
+            indent=2,
+        )
+        media = "application/json; charset=utf-8"
+    elif fmt == "md":
+        parts = [f"# {title}", ""]
+        day = ""
+        for message in messages:
+            if message["at"][:10] != day:
+                day = message["at"][:10]
+                parts += [f"## {day or '未知日期'}", ""]
+            parts += [f"**{message['who']}** `{message['at'][11:]}`", "", message["content"], ""]
+        body = "\n".join(parts)
+        media = "text/markdown; charset=utf-8"
+    else:
+        lines = [f"# {title}", ""]
+        lines += [f"[{m['at']}] {m['who']}：{m['content']}" for m in messages]
+        body = "\n".join(lines) + "\n"
+        media = "text/plain; charset=utf-8"
     return Response(
-        "\n".join(lines) + "\n",
-        media_type="text/plain; charset=utf-8",
+        body,
+        media_type=media,
         headers={
-            "Content-Disposition": f'attachment; filename="yawnbot-chat-{chat_id}.txt"',
+            "Content-Disposition": f'attachment; filename="yawnbot-chat-{chat_id}.{fmt}"',
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "no-store",
         },

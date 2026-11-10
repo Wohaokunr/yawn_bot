@@ -5,6 +5,7 @@ import { Shell } from "./app-shell";
 import { api, setCsrfToken } from "./api";
 import type { AuthSessionData, LoginInfo } from "./auth-session";
 import { Login } from "./login";
+import { useUiPrefs } from "./me/hub-ui";
 import { OverviewPage } from "./overview";
 
 const GroupsPage = lazy(() =>
@@ -97,6 +98,18 @@ const MyGroupsPage = lazy(() =>
 const MyGamesPage = lazy(() =>
   import("./me/MyGamesPage").then(({ MyGamesPage: Page }) => ({ default: Page })),
 );
+const MySearchPage = lazy(() =>
+  import("./me/MySearchPage").then(({ MySearchPage: Page }) => ({ default: Page })),
+);
+const MyCalendarPage = lazy(() =>
+  import("./me/MyCalendarPage").then(({ MyCalendarPage: Page }) => ({ default: Page })),
+);
+const MyInsightsPage = lazy(() =>
+  import("./me/MyInsightsPage").then(({ MyInsightsPage: Page }) => ({ default: Page })),
+);
+const MyAchievementsPage = lazy(() =>
+  import("./me/MyAchievementsPage").then(({ MyAchievementsPage: Page }) => ({ default: Page })),
+);
 const GuestGroupPage = lazy(() =>
   import("./guest-home").then(({ GuestGroupPage: Page }) => ({ default: Page })),
 );
@@ -141,6 +154,18 @@ function LoginNotice({ info }: { info?: LoginInfo }): null {
     (text.warn ? notification.warning : notification.info)({ message: text.title, description: text.description, placement: "topRight", duration: 8 });
   }, [info, notification]);
   return null;
+}
+
+/** 打开网站根路径时去他自己选的“登录后先看哪一页”（跟着账号走）。 */
+function MeLanding(): React.JSX.Element {
+  const { prefs } = useUiPrefs();
+  const [waited, setWaited] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setWaited(true), 1500);
+    return () => window.clearTimeout(timer);
+  }, []);
+  if (!prefs && !waited) return <div className="route-loading"><Spin size="large" /></div>;
+  return <Navigate to={prefs?.landing ?? "/me"} replace />;
 }
 
 function App(): React.JSX.Element {
@@ -204,8 +229,12 @@ function App(): React.JSX.Element {
         <LoginNotice info={session.login} />
         <Routes>
           <Route element={<Shell session={session} onLogout={logout} />}>
-            <Route index element={<Navigate to="/me" replace />} />
+            <Route index element={<MeLanding />} />
             <Route path="me" element={<MeHomePage />} />
+            <Route path="me/search" element={<MySearchPage />} />
+            <Route path="me/calendar" element={<MyCalendarPage />} />
+            <Route path="me/insights" element={<MyInsightsPage />} />
+            <Route path="me/achievements" element={<MyAchievementsPage />} />
             <Route path="me/groups" element={<MyGroupsPage />} />
             <Route path="me/groups/:groupId" element={<MyGroupPage />} />
             <Route path="me/assistant" element={<MyAssistantPage />} />

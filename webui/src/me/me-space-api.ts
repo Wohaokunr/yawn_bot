@@ -290,7 +290,7 @@ export interface GameStats {
 }
 
 export const EXPORT_URL = "/webui/api/v1/me/export";
-export const chatExportUrl = (chatId: string): string => `/webui/api/v1/me/chats/${enc(chatId)}/export`;
+export const chatExportUrl = (chatId: string, format: "txt" | "md" | "json" = "txt"): string => `/webui/api/v1/me/chats/${enc(chatId)}/export${format === "txt" ? "" : `?format=${format}`}`;
 
 export const spaceApi = {
   dashboard: () => api<Dashboard>("/me/dashboard").then((r) => r.data),
@@ -341,9 +341,12 @@ export const spaceApi = {
   joinedGroups: () => api<JoinedGroup[]>("/me/joined-groups").then((r) => r.data),
 
   chats: () => api<ChatRow[]>("/me/chats").then((r) => r.data),
-  chatMessages: (chatId: string, before?: string) =>
-    api<ChatMessageRow[]>(`/me/chats/${enc(chatId)}/messages?limit=60${before ? `&before=${enc(before)}` : ""}`)
-      .then((r) => ({ rows: r.data, hasMore: Boolean(r.meta.hasMore), before: (r.meta.before as string | null) ?? null })),
+  chatMessages: (chatId: string, cursor?: string | { before?: string; after?: string; around?: string }) => {
+    const at = typeof cursor === "string" ? { before: cursor } : cursor ?? {};
+    const query = Object.entries(at).filter(([, value]) => value).map(([key, value]) => `&${key}=${enc(String(value))}`).join("");
+    return api<ChatMessageRow[]>(`/me/chats/${enc(chatId)}/messages?limit=60${query}`)
+      .then((r) => ({ rows: r.data, hasMore: Boolean(r.meta.hasMore), before: (r.meta.before as string | null) ?? null, hasNewer: Boolean(r.meta.hasNewer), after: (r.meta.after as string | null) ?? null }));
+  },
   searchChats: (q: string) => api<ChatHit[]>(`/me/chats/search?q=${enc(q)}`).then((r) => r.data),
   renameChat: (chatId: string, title: string) => api<{ id: string; title: string }>(`/me/chats/${enc(chatId)}`, json("PATCH", { title })).then((r) => r.data),
   deleteChat: (chatId: string) => api<{ deleted: string }>(`/me/chats/${enc(chatId)}`, json("DELETE")).then((r) => r.data),

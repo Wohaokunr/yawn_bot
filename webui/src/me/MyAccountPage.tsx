@@ -1,5 +1,5 @@
-import { BulbOutlined, CommentOutlined, DatabaseOutlined, DownloadOutlined, KeyOutlined, MessageOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
-import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Form, Input, Progress, Typography } from "antd";
+import { BgColorsOutlined, BulbOutlined, CommentOutlined, DatabaseOutlined, DeleteOutlined, DownloadOutlined, KeyOutlined, MessageOutlined, SafetyCertificateOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Form, Input, Modal, Progress, Segmented, Select, Switch, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { setCsrfToken } from "../api";
@@ -8,7 +8,13 @@ import { meApi } from "./me-api";
 import { EXPORT_URL, spaceApi } from "./me-space-api";
 import { formatQqTime, passwordProblem, passwordStrength } from "./me-meta";
 import { MyDevicesCards } from "./MyDevicesCards";
+import { USER_NAV } from "../nav-config";
+import { announceMeChanged, copyText, type Density, type FontScale, useLocalPrefs, useUiPrefs } from "./hub-ui";
+import { type ClearSection, hubApi } from "./me-hub-api";
+import { GO_KEYS, SHORTCUTS, suggestPassword } from "./me-hub-meta";
 import "./me.css";
+import "./me-space.css";
+import "./me-v3.css";
 
 const { Text, Paragraph } = Typography;
 
@@ -24,6 +30,85 @@ export function formatBeijing(epochSeconds: number | null | undefined): string {
   return formatQqTime(new Date((epochSeconds + 8 * 3600) * 1000).toISOString());
 }
 
+const CLEARABLE: Array<{ section: ClearSection; label: string; count: string }> = [
+  { section: "todos", label: "待办", count: "todos" },
+  { section: "notes", label: "笔记", count: "notes" },
+  { section: "countdowns", label: "倒数日", count: "countdowns" },
+  { section: "moods", label: "心情", count: "moods" },
+];
+
+/** 显示偏好：密度、字号、少动效只存在这台设备；打开网页先到哪一页跟着账号走。 */
+function DisplayCard(): React.JSX.Element {
+  const { local, setLocal } = useLocalPrefs();
+  const { prefs, save } = useUiPrefs();
+  const landings = (prefs?.landings ?? ["/me"]).map((key) => ({ value: key, label: USER_NAV.find((entry) => entry.key === key)?.label ?? key }));
+  return <Card size="small" title={<span><BgColorsOutlined /> 显示偏好</span>}>
+    <div className="me-pref-grid">
+      <div className="me-pref-item">
+        <strong>排版</strong>
+        <Segmented<Density> value={local.density} onChange={(density) => setLocal({ density })} options={[{ value: "cozy", label: "宽松" }, { value: "compact", label: "紧凑" }]} aria-label="排版密度" />
+        <Text type="secondary" className="me-hint">紧凑一屏能看到更多行。</Text>
+      </div>
+      <div className="me-pref-item">
+        <strong>字号</strong>
+        <Segmented<FontScale> value={local.font} onChange={(font) => setLocal({ font })} options={[{ value: "s", label: "小" }, { value: "m", label: "标准" }, { value: "l", label: "大" }]} aria-label="字号" />
+        <Text type="secondary" className="me-hint">只调“我的空间”里的正文。</Text>
+      </div>
+      <div className="me-pref-item">
+        <strong>少一点动效</strong>
+        <Switch checked={local.calm} onChange={(calm) => setLocal({ calm })} aria-label="少一点动效" />
+        <Text type="secondary" className="me-hint">关掉过渡和闪烁；系统开了“减少动态效果”时会自动关。</Text>
+      </div>
+      <div className="me-pref-item">
+        <strong>打开网页先到</strong>
+        <Select value={prefs?.landing ?? "/me"} onChange={(landing) => save({ landing })} options={landings} disabled={!prefs} aria-label="打开网页先到哪一页" className="me-full" />
+        <Text type="secondary" className="me-hint">这一项跟着账号走，换设备也一样。</Text>
+      </div>
+    </div>
+    <Paragraph type="secondary" className="me-hint">前三项只存在这台设备。深浅色在右上角切换。主页上显示哪些板块，在主页右上角“自定义主页”里调。{prefs?.onboardingDismissed && <Button type="link" size="small" onClick={() => save({ onboardingDismissed: false })}>重新显示上手清单</Button>}</Paragraph>
+  </Card>;
+}
+
+/** 整类清空：要亲手输入类别名才放行。 */
+function ClearCard({ counts, onCleared }: { counts: Record<string, number>; onCleared: () => void }): React.JSX.Element {
+  const { message } = AntApp.useApp();
+  const [target, setTarget] = useState<(typeof CLEARABLE)[number] | null>(null);
+  const [typed, setTyped] = useState("");
+  const [working, setWorking] = useState(false);
+  const submit = async (): Promise<void> => {
+    if (!target || typed.trim() !== target.label) return;
+    setWorking(true);
+    try {
+      const result = await hubApi.clearSection(target.section, typed.trim());
+      message.success(`清掉了 ${result.cleared} 条${target.label}`);
+      announceMeChanged();
+      onCleared();
+      setTarget(null);
+    } catch (reason) {
+      message.error(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setWorking(false);
+    }
+  };
+  return <Card size="small" title={<span><DeleteOutlined /> 清空某一类</span>}>
+    <Paragraph type="secondary" className="me-hint">一次删掉一整类，删了找不回来。建议先在左边导出一份。提醒在<Link to="/me/schedules">我的定时任务</Link>里一条条管。</Paragraph>
+    <ul className="me-danger-list">
+      {CLEARABLE.map((row) => (
+        <li key={row.section}>
+          <span className="me-plain-main"><strong>{row.label}</strong><Text type="secondary" className="me-hint">现在有 {counts[row.count] ?? 0} 条</Text></span>
+          <Button danger size="small" disabled={!(counts[row.count] ?? 0)} onClick={() => { setTyped(""); setTarget(row); }}>清空{row.label}</Button>
+        </li>
+      ))}
+    </ul>
+    <Modal open={target !== null} title={target ? `清空全部${target.label}？` : ""} okText="清空" okButtonProps={{ danger: true, disabled: !target || typed.trim() !== target.label, loading: working }} onOk={() => void submit()} onCancel={() => setTarget(null)} destroyOnHidden>
+      {target && <div className="me-stack">
+        <Text>会删掉全部 {counts[target.count] ?? 0} 条{target.label}，Bot 在私聊里也翻不到了。这一步不能撤销。</Text>
+        <Input autoFocus value={typed} onChange={(event) => setTyped(event.target.value)} onPressEnter={() => void submit()} placeholder={`输入“${target.label}”确认`} aria-label={`输入${target.label}确认`} />
+      </div>}
+    </Modal>
+  </Card>;
+}
+
 export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): React.JSX.Element {
   const { message } = AntApp.useApp();
   const query = useApiQuery({ queryKey: ["me"], fetcher: () => meApi.profile() });
@@ -35,6 +120,11 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
   const me = query.data;
   const dash = useApiQuery({ queryKey: ["me", "dashboard"], fetcher: () => spaceApi.dashboard() });
   const counts = dash.data?.counts ?? {};
+  const [suggested, setSuggested] = useState("");
+  const useSuggested = async (): Promise<void> => {
+    form.setFieldsValue({ next: suggested, confirm: suggested });
+    message[(await copyText(suggested)) ? "success" : "info"]("填好了，记得把它存进密码管理器");
+  };
 
   const submit = async (values: { current: string; next: string }): Promise<void> => {
     setSaving(true);
@@ -93,6 +183,10 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
           <Form.Item name="current" label="当前密码" rules={[{ required: true, message: "请输入当前密码" }]}>
             <Input.Password autoComplete="current-password" />
           </Form.Item>
+          <div className="me-suggest">
+            <Button size="small" icon={<ThunderboltOutlined />} onClick={() => setSuggested(suggestPassword())}>帮我想一个</Button>
+            {suggested && <><code>{suggested}</code><Button size="small" type="link" onClick={() => void useSuggested()}>用这个并复制</Button></>}
+          </div>
           <Form.Item
             name="next"
             label="新密码"
@@ -121,6 +215,8 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
       </Card>
     </div>
 
+    <h3 className="me-account-heading">显示</h3>
+    <DisplayCard />
     <h3 className="me-account-heading">数据</h3>
     <div className="me-account-grid">
       <Card size="small" title={<span><DatabaseOutlined /> 我的数据</span>}>
@@ -139,9 +235,8 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
           <Link to="/me/chats"><CommentOutlined /> 管理聊天记录</Link>
         </div>
       </Card>
-
+      <ClearCard counts={counts} onCleared={dash.reload} />
     </div>
-
     <h3 className="me-account-heading">帮助</h3>
     <Collapse
       className="me-account-help"
@@ -156,6 +251,14 @@ export function MyAccountPage({ onLoggedOut }: { onLoggedOut: () => void }): Rea
             <li>记不住指令也没关系，直接跟 Bot 说“帮我弄个网页登录的设置码”。</li>
           </ul>
           <Text type="secondary">密码和设置码都不要发给任何人，Bot 和管理员不会找你要。</Text>
+        </div>,
+      }, {
+        key: "keys",
+        label: <span><ThunderboltOutlined /> 键盘快捷键</span>,
+        children: <div>
+          <ul className="me-key-list">{SHORTCUTS.map((row) => <li key={row.keys}><kbd>{row.keys}</kbd><span>{row.what}</span></li>)}</ul>
+          <Text type="secondary" className="me-hint">先按 G，再按：</Text>
+          <div className="me-key-grid">{Object.entries(GO_KEYS).map(([key, target]) => <span key={key}><kbd>{key.toUpperCase()}</kbd> {target.label}</span>)}</div>
         </div>,
       }]}
     />

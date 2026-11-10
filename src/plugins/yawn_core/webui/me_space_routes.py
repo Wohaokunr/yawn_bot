@@ -404,6 +404,16 @@ async def clear_my_done_todos(session: UserWriteSession) -> dict[str, Any]:
     user_id = _uid(session)
     now = now_beijing()
     result = _run(organizer.todos, user_id, {"action": "clear_done"}, now)
+    if result.get("cleared"):
+        # 成就里“完成过多少待办”不该因为清理而倒退
+
+        def remember(record: dict[str, Any]) -> None:
+            web = record.setdefault("web", {})
+            web["todos_cleared"] = int(web.get("todos_cleared") or 0) + int(
+                result["cleared"]
+            )
+
+        store.update(user_id, remember)
     await _changed(user_id)
     return ok(
         {
