@@ -70,6 +70,8 @@ def empty_record() -> dict[str, Any]:
         "memory_link": {},
         # 主动提议（private_offers）：他自己的开关/间隔/静音的种类、最近问过什么、问过的事的冷却
         "offers": {},
+        # 网页「我的空间」的东西：界面偏好 ui、成就解锁时间 achievements、清掉的已完成待办数
+        "web": {},
     }
 
 

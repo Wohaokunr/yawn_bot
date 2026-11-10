@@ -17,7 +17,9 @@ import { api, openStatusStream, setCsrfToken } from "./api";
 import type { AuthSessionData } from "./auth-session";
 import { CommandPalette } from "./command-palette";
 import { ScrollRegion } from "./layout";
-import { ADMIN_NAV, GUEST_NAV, homePathForRole, type NavEntry, navForRole, selectedNavKey, USER_NAV, USER_TABBAR_KEYS } from "./nav-config";
+import { clearLocalPrefsFromDom, resetHubStores, useInbox } from "./me/hub-ui";
+import { MeHeaderTools } from "./me/MeShellExtras";
+import { ADMIN_NAV, GUEST_NAV, homePathForRole, type NavEntry, navForRole, selectedNavKey, USER_NAV, USER_TABBAR_KEYS, USER_TABBAR_LABELS } from "./nav-config";
 import { confirmDiscardChanges, type EntityChangeDetail } from "./shared";
 import { ThemeToggle } from "./theme";
 
@@ -36,6 +38,29 @@ function menuItems(entries: NavEntry[]): MenuItem[] {
       ? [{ type: "group" as const, label, children: children.map(toItem) }]
       : children.map(toItem)
   ));
+}
+
+/** 个人账号的侧栏：同一份导航，条目后面带“等你处理”的数字。 */
+function userMenuItems(badges: Record<string, number>): MenuItem[] {
+  return menuItems(USER_NAV).map((item) => {
+    const decorate = (entry: MenuItem): MenuItem => {
+      if (!entry || !("key" in entry) || !("label" in entry)) return entry;
+      const count = badges[String(entry.key)] ?? 0;
+      if (!count) return entry;
+      return { ...entry, label: <span className="me-nav-label">{entry.label}<span className="me-nav-badge" aria-label={`${count} 件等你处理`}>{count > 99 ? "99+" : count}</span></span> } as MenuItem;
+    };
+    if (item && "children" in item && Array.isArray(item.children)) return { ...item, children: item.children.map(decorate) } as MenuItem;
+    return decorate(item);
+  });
+}
+
+/** 只在个人账号登录时挂载：取提醒中心的角标。 */
+function UserBadges({ onChange }: { onChange: (badges: Record<string, number>) => void }): null {
+  const { inbox } = useInbox();
+  useEffect(() => {
+    onChange(inbox?.badges ?? {});
+  }, [inbox, onChange]);
+  return null;
 }
 
 const ADMIN_NAV_ITEMS = menuItems(ADMIN_NAV);
@@ -126,11 +151,23 @@ export function Shell({
   const isUser = session.role === "user";
 
   // 标签页标题跟着角色走：普通用户看到的是“我的空间”，不是“管理台”
+  const titleKey = selectedNavKey(location.pathname, session.role);
   useEffect(() => {
     const previous = document.title;
-    document.title = isUser ? "我的空间 · YawnBot" : isGuest ? "访客视图 · YawnBot" : previous;
+    // 个人账号：标签页标题带上当前页面的名字，开着好几个标签时分得清
+    const page = isUser ? USER_NAV.find((entry) => entry.key === titleKey)?.label : undefined;
+    document.title = isUser ? `${page && titleKey !== "/me" ? `${page} · ` : ""}我的空间 · YawnBot` : isGuest ? "访客视图 · YawnBot" : previous;
     return () => { document.title = previous; };
-  }, [isUser, isGuest]);
+  }, [isUser, isGuest, titleKey]);
+  const [badges, setBadges] = useState<Record<string, number>>({});
+  // 换账号或退出时清掉上一位的偏好缓存和本机显示设置
+  useEffect(() => {
+    if (!isUser) return undefined;
+    return () => {
+      resetHubStores();
+      clearLocalPrefsFromDom();
+    };
+  }, [isUser, session.userId]);
   // 访客和个人账号都没有管理员实时流、群组搜索与“未保存”跟踪
   const limited = isGuest || isUser;
   const canUseAdminStream = !limited && session.capabilities.realtimeAdminStream;
@@ -151,7 +188,8 @@ export function Shell({
     const tab = new URLSearchParams(location.search).get("tab") ?? "";
     return `${location.pathname}?tab=${tab}`;
   }, [location.pathname, location.search]);
-  const navItems = isGuest ? GUEST_NAV_ITEMS : isUser ? USER_NAV_ITEMS : ADMIN_NAV_ITEMS;
+  const userNavItems = useMemo(() => (Object.keys(badges).length ? userMenuItems(badges) : USER_NAV_ITEMS), [badges]);
+  const navItems = isGuest ? GUEST_NAV_ITEMS : isUser ? userNavItems : ADMIN_NAV_ITEMS;
   const navEntries: NavEntry[] = navForRole(session.role);
 
   const toggleCollapsed = useCallback(() => {
@@ -315,6 +353,7 @@ export function Shell({
               <span className="palette-trigger-text">{limited ? "搜索页面" : "搜索页面或群组"}</span>
               <kbd className="palette-kbd">Ctrl K</kbd>
             </button>
+            {isUser && <MeHeaderTools onNavigate={go} />}
             {isGuest ? (
               <Tag color="blue" icon={<EyeOutlined />}>访客 · 只读</Tag>
             ) : isUser ? (
@@ -360,6 +399,7 @@ export function Shell({
           </ScrollRegion>
         </Content>
       </Layout>
+      {isUser && <UserBadges onChange={setBadges} />}
       {isUser && (
         <nav className="mobile-tabbar" aria-label="常用页面">
           {USER_TABBAR_KEYS.map((key) => {
@@ -373,8 +413,8 @@ export function Shell({
                 aria-current={selected === key ? "page" : undefined}
                 onClick={() => go(key)}
               >
-                {entry.icon}
-                <span>{entry.label === "我的主页" ? "主页" : entry.label === "我在的群" ? "群" : entry.label}</span>
+                <span className="mobile-tabbar-icon">{entry.icon}{(badges[key] ?? 0) > 0 && <span className="me-tab-dot" aria-hidden="true" />}</span>
+                <span>{USER_TABBAR_LABELS[key] ?? entry.label}</span>
               </button>
             );
           })}

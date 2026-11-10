@@ -5,9 +5,12 @@ import type { TabsProps } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { type ApiQuery, useApiQuery } from "../shared";
+import { announceMeChanged } from "./hub-ui";
 import { pickTab } from "./me-space-meta";
 
 const { Text } = Typography;
+
+export const STALE_AFTER_MS = 60_000;
 
 /** 取数 + 本地可覆盖：写操作返回新数据后直接 setData，不必整页重新拉。 */
 export function useResource<T>(queryKey: readonly unknown[], fetcher: () => Promise<T>): { query: ApiQuery<T>; data: T | null; setData: (next: T) => void } {
@@ -16,6 +19,17 @@ export function useResource<T>(queryKey: readonly unknown[], fetcher: () => Prom
   useEffect(() => {
     if (query.data !== null) setData(query.data);
   }, [query.data]);
+  // 标签页放到后台超过一分钟，切回来时自动刷新一次（私聊里刚让 Bot 记的东西马上能看到）
+  const reload = query.reload;
+  useEffect(() => {
+    let hiddenAt = 0;
+    const onVisible = (): void => {
+      if (document.visibilityState === "hidden") hiddenAt = Date.now();
+      else if (hiddenAt && Date.now() - hiddenAt > STALE_AFTER_MS) reload();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [reload]);
   return { query, data, setData };
 }
 
@@ -29,6 +43,8 @@ export function useAction(): { busy: string | null; run: <R>(key: string, task: 
       const result = await task();
       const text = typeof success === "function" ? success(result) : success;
       if (text) message.success(text);
+      // 提醒中心和侧栏角标跟着刷新
+      announceMeChanged();
       return result;
     } catch (reason) {
       message.error(reason instanceof Error ? reason.message : String(reason));

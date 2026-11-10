@@ -1,12 +1,14 @@
-import { BulbOutlined, DeleteOutlined, EyeInvisibleOutlined, HistoryOutlined, PlusOutlined, ShareAltOutlined, TeamOutlined, UndoOutlined } from "@ant-design/icons";
-import { Alert, Button, Checkbox, Empty, Input, Modal, Popconfirm, Select, Skeleton, Switch, Tag, Tooltip, Typography } from "antd";
-import { useState } from "react";
+import { BulbOutlined, CopyOutlined, DeleteOutlined, EyeInvisibleOutlined, HistoryOutlined, PlusOutlined, SearchOutlined, ShareAltOutlined, TeamOutlined, UndoOutlined } from "@ant-design/icons";
+import { Alert, App as AntApp, Button, Checkbox, Empty, Input, Modal, Popconfirm, Select, Skeleton, Switch, Tag, Tooltip, Typography } from "antd";
+import { useEffect, useState } from "react";
 import { PageHeader, QueryErrorAlert } from "../shared";
 import { type MemoryFact, type MemoryState, spaceApi } from "./me-space-api";
 import { formatQqTime } from "./me-meta";
-import { MeSection, UrlTabs, useAction, useResource } from "./space-ui";
+import { copyText, Highlight } from "./hub-ui";
+import { MeSection, StatTile, UrlTabs, useAction, useResource } from "./space-ui";
 import "./me.css";
 import "./me-space.css";
+import "./me-v3.css";
 
 const { Text, Paragraph } = Typography;
 const TABS = ["facts", "groups", "link", "forgotten"] as const;
@@ -59,6 +61,14 @@ function FactsTab({ data, setData }: { data: MemoryState; setData: (next: Memory
   const [content, setContent] = useState("");
   const [forgetting, setForgetting] = useState<MemoryFact | null>(null);
   const known = new Set(data.facts.map((fact) => fact.key));
+  const { message } = AntApp.useApp();
+  const [keyword, setKeyword] = useState("");
+  const needle = keyword.trim().toLowerCase();
+  const facts = data.facts.filter((fact) => !needle || `${fact.label} ${fact.content}`.toLowerCase().includes(needle));
+  const copyAll = async (): Promise<void> => {
+    if (await copyText(data.facts.map((fact) => `${fact.label}：${fact.content}`).join("\n"))) message.success(`复制了 ${data.facts.length} 条`);
+    else message.warning("浏览器不让复制");
+  };
 
   return <div className="me-stack">
     {data.recap && (
@@ -72,16 +82,17 @@ function FactsTab({ data, setData }: { data: MemoryState; setData: (next: Memory
       </MeSection>
     )}
 
-    <MeSection icon={<BulbOutlined />} title="Bot 在私聊里记得你的事" hint="只在你和 Bot 的私聊里用；要不要让群里也知道，在“群聊和私聊怎么互通”里定。">
-      {data.facts.length === 0 ? (
+    <MeSection icon={<BulbOutlined />} title="Bot 在私聊里记得你的事" hint="只在你和 Bot 的私聊里用；要不要让群里也知道，在“群聊和私聊怎么互通”里定。" extra={data.facts.length > 0 ? <Button size="small" icon={<CopyOutlined />} onClick={() => void copyAll()}>复制全部</Button> : undefined}>
+      {data.facts.length > 5 && <Input allowClear prefix={<SearchOutlined aria-hidden="true" />} placeholder="在记忆里找" value={keyword} onChange={(event) => setKeyword(event.target.value)} className="me-list-search" aria-label="在记忆里找" />}
+      {data.facts.length > 0 && facts.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`没有提到“${keyword}”的记忆`} /> : data.facts.length === 0 ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没记住什么。可以在下面亲口告诉它，或在私聊里说“记住我喜欢……”" />
       ) : (
         <ul className="me-fact-list">
-          {data.facts.map((fact) => (
+          {facts.map((fact) => (
             <li key={fact.key}>
               <span className="me-fact-label">{fact.label}</span>
               <span className="me-plain-main">
-                <span className="me-fact-content">{fact.content}</span>
+                <span className="me-fact-content"><Highlight text={fact.content} needle={keyword} /></span>
                 <Text type="secondary" className="me-hint">{fact.sourceLabel} · 更新于 {formatQqTime(fact.updatedAt)}{fact.expiresAt ? ` · ${formatQqTime(fact.expiresAt).slice(0, 10)} 后自动淡忘` : ""}</Text>
               </span>
               {fact.protected ? <Tooltip title="管理员设置的，不能在这里删；有问题联系管理员"><Tag>管理员设置</Tag></Tooltip> : (
@@ -109,10 +120,19 @@ function FactsTab({ data, setData }: { data: MemoryState; setData: (next: Memory
 }
 
 function GroupsTab({ data }: { data: MemoryState }): React.JSX.Element {
+  const [group, setGroup] = useState<string | null>(null);
+  const names = [...new Set(data.groupProfile.flatMap((item) => item.groups))];
+  const rows = data.groupProfile.filter((item) => group === null || item.groups.includes(group));
   return <MeSection icon={<TeamOutlined />} title="群里对你的了解" hint="Bot 在你所在的群里整理出的、关于你自己的画像（不显示是谁说的）。这些只在群里用；想让它在私聊里也别提，去“互通”里关掉。">
+    {names.length > 1 && (
+      <div className="me-chip-row" role="group" aria-label="按群筛选">
+        <Tag.CheckableTag checked={group === null} onChange={() => setGroup(null)}>全部 {data.groupProfile.length}</Tag.CheckableTag>
+        {names.map((name) => <Tag.CheckableTag key={name} checked={group === name} onChange={(on) => setGroup(on ? name : null)}>{name}</Tag.CheckableTag>)}
+      </div>
+    )}
     {data.groupProfile.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="群里还没有关于你的画像" /> : (
       <ul className="me-fact-list">
-        {data.groupProfile.map((item, index) => (
+        {rows.map((item, index) => (
           <li key={`${item.key}-${index}`}>
             <span className="me-fact-label">{item.label}</span>
             <span className="me-plain-main">
@@ -200,12 +220,26 @@ function ForgottenTab({ data, setData }: { data: MemoryState; setData: (next: Me
 
 export function MyMemoryPage(): React.JSX.Element {
   const { query, data, setData } = useResource<MemoryState>(["me", "memory"], () => spaceApi.memory());
+  // 上手清单里“看看 Bot 记得你什么”这一步：来过就算
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("yawnbot.me.visited.memory", "1");
+    } catch {
+      // 存不了就算了
+    }
+  }, []);
   return <div className="me-page">
     <PageHeader title="Bot 记得我" subtitle="看看 Bot 记住了你什么，不想让它记的随时让它忘掉。" onRefresh={query.reload} refreshing={query.refreshing} />
     {query.error && !data && <QueryErrorAlert error={query.error} onRetry={query.reload} />}
     {!data ? <Skeleton active paragraph={{ rows: 6 }} /> : !data.available ? (
       <Alert type="warning" showIcon message="记忆暂时不可用" description="管理员还没有完成数据库迁移，稍后再来。" />
-    ) : (
+    ) : (<>
+      <div className="me-stat-row">
+        <StatTile label="私聊里记得" value={`${data.facts.length} 件事`} tone="brand" sub={data.recap ? "有一份对话回顾" : undefined} />
+        <StatTile label="群里了解到" value={`${data.groupProfile.length} 条`} sub={`来自 ${new Set(data.groupProfile.flatMap((item) => item.groups)).size} 个群`} />
+        <StatTile label="共享给群" value={data.settings.shareKeys.length ? `${data.settings.shareKeys.length} 类` : "没有"} sub={data.settings.groupsInPrivate ? "私聊里可以提群里的事" : "私聊不提群里的事"} />
+        <StatTile label="别再记回来" value={data.tombstones.length} />
+      </div>
       <UrlTabs
         keys={TABS}
         fallback="facts"
@@ -216,6 +250,6 @@ export function MyMemoryPage(): React.JSX.Element {
           { key: "forgotten", label: `别再记回来 ${data.tombstones.length}`, children: <ForgottenTab data={data} setData={setData} /> },
         ]}
       />
-    )}
+    </>)}
   </div>;
 }

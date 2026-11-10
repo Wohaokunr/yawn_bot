@@ -19,6 +19,9 @@ import { MyGamesPage } from "./MyGamesPage";
 import { MyGroupsPage } from "./MyGroupsPage";
 import { MyMemoryPage } from "./MyMemoryPage";
 import { MyTasksPage } from "./MyTasksPage";
+import { chatExportUrl } from "./me-space-api";
+import { resetHubStores } from "./hub-ui";
+import { addDays, todayIso } from "./me-hub-meta";
 
 const ok = (data: unknown, meta: Record<string, unknown> = {}) => Promise.resolve({ data, meta });
 
@@ -51,6 +54,8 @@ const MEMORY = {
   recap: { summary: "聊了周末去哪玩", openThreads: ["电影票"], updatedAt: "2026-11-03 22:00" },
 };
 
+const UI_PREFS = { homeHidden: [], homeOrder: [], landing: "/me", pinnedChats: [], starred: [], onboardingDismissed: false, seenAchievements: [], seenNotices: [], homeBlocks: [], landings: ["/me", "/me/assistant"] };
+
 function renderAt(path: string): void {
   render(
     <AntApp>
@@ -75,8 +80,16 @@ describe("我的空间 2.0", () => {
     vi.stubGlobal("ResizeObserver", class { observe(): void {} unobserve(): void {} disconnect(): void {} });
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn() })));
     state.api.mockReset();
+    resetHubStores();
+    window.localStorage.clear();
     state.api.mockImplementation((path: string, init?: RequestInit) => {
       const method = init?.method ?? "GET";
+      if (path === "/me/ui-prefs" && method === "GET") return ok(UI_PREFS);
+      if (path === "/me/ui-prefs" && method === "PUT") return ok({ ...UI_PREFS, ...(JSON.parse(String(init?.body)) as object) });
+      if (path.startsWith("/me/checkin/history")) return ok({ today: "2026-11-04", since: "2026-07-08", days: [{ day: "2026-11-04", groups: 1, reward: 10 }], activeDays: 1, anyStreak: 1, reward: 10 });
+      if (path === "/me/checkin" && method === "POST") return ok({ results: [{ groupId: "900001", groupName: "猫猫群", status: "ok", streakDays: 5, reward: 12 }], signed: 1, already: 0, disabled: 0, reward: 12, affinityGain: 2, levelUp: null, quests: { claimed: [], affinity: 0, bonus_item: null } });
+      if (path === "/me/assistant/todos/batch" && method === "POST") return ok({ ...TODOS, items: [TODOS.items[1]], pending: 0, affected: 1 });
+      if (path === "/me/assistant/todos/bulk" && method === "POST") return ok({ ...TODOS, added: 2, skipped: [] });
       if (path === "/me/assistant/todos" && method === "GET") return ok(TODOS);
       if (path === "/me/assistant/todos" && method === "POST") return ok({ ...TODOS, items: [{ ...TODO, id: 9, content: "洗衣服", overdue: false, dueInDays: null, due: null }, ...TODOS.items], pending: 2, added: 9 });
       if (path === "/me/assistant/todos/7" && method === "PATCH") return ok({ ...TODOS, items: [{ ...TODO, done: true }, TODOS.items[1]], pending: 0, done: 2 });
@@ -110,7 +123,7 @@ describe("我的空间 2.0", () => {
     expect(await screen.findByText("交作业")).toBeInTheDocument();
     expect(screen.getByText("逾期 1 天")).toBeInTheDocument();
     expect(screen.queryByText("买牛奶")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText("要做什么？回车记下"), { target: { value: "洗衣服" } });
+    fireEvent.change(screen.getByLabelText("新待办内容"), { target: { value: "洗衣服" } });
     fireEvent.click(screen.getByRole("button", { name: /添\s?加/ }));
     await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/todos", expect.objectContaining({ method: "POST", body: JSON.stringify({ content: "洗衣服", priority: "normal", due: null }) })));
     expect(await screen.findByText("洗衣服")).toBeInTheDocument();
@@ -139,6 +152,68 @@ describe("我的空间 2.0", () => {
     fireEvent.click(await screen.findByRole("radio", { name: /很好/ }));
     fireEvent.click(screen.getByRole("button", { name: /记\s?下/ }));
     await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/moods", expect.objectContaining({ method: "POST", body: JSON.stringify({ score: 5, note: null }) })));
+  });
+
+  it("parses a date and priority typed into the quick-add box", async () => {
+    renderAt("/me/assistant");
+    await screen.findByText("交作业");
+    fireEvent.change(screen.getByLabelText("新待办内容"), { target: { value: "明天 洗衣服 !重要" } });
+    expect(screen.getByText("会记成：洗衣服")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /添\s?加/ }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/todos", expect.objectContaining({ method: "POST", body: JSON.stringify({ content: "洗衣服", priority: "high", due: addDays(todayIso(), 1) }) })));
+  });
+
+  it("groups todos by date and runs a batch action on the selection", async () => {
+    renderAt("/me/assistant");
+    await screen.findByText("交作业");
+    expect(screen.getByText("逾期 · 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^批\s?量$/ }));
+    fireEvent.click(screen.getByLabelText("选择：交作业"));
+    expect(screen.getByText("选了 1 条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "顺延一天" }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/todos/batch", expect.objectContaining({ method: "POST", body: JSON.stringify({ ids: [7], action: "postpone", days: 1 }) })));
+  });
+
+  it("pastes many todos at once and strips list markers", async () => {
+    renderAt("/me/assistant");
+    await screen.findByText("交作业");
+    fireEvent.click(screen.getByRole("button", { name: "一次加很多条" }));
+    fireEvent.change(await screen.findByLabelText("多条待办"), { target: { value: "- 买牛奶\n2. 周五 交报告\n\n" } });
+    fireEvent.click(screen.getByRole("button", { name: "加 2 条" }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/assistant/todos/bulk", expect.objectContaining({ method: "POST", body: JSON.stringify({ lines: ["买牛奶", "周五 交报告"], priority: "normal", due: null }) })));
+  });
+
+  it("jumps to the message a search hit points at", async () => {
+    renderAt("/me/chats?chat=5&at=2&q=早");
+    expect(await screen.findByText("2026-11-04")).toBeInTheDocument();
+    expect(state.api).toHaveBeenCalledWith("/me/chats/5/messages?limit=60&around=2");
+    expect(screen.getByLabelText("在这段对话里找", { selector: "input" })).toHaveValue("早");
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "置顶这段对话" }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/ui-prefs", expect.objectContaining({ method: "PUT", body: JSON.stringify({ pinnedChats: ["5"] }) })));
+  });
+
+  it("signs in from the affinity page", async () => {
+    state.api.mockImplementationOnce(() => ok({ userId: "1", points: 70, level: "熟人", levelIndex: 2, nextLevel: "朋友", toNext: 80, progress: 0.11, today: {}, todayTotal: 0, available: true, levels: [], sources: {}, breakdown30d: {}, events: [], groups: [{ groupId: "900001", groupName: "猫猫群", groupAffinity: 3, checkedToday: false, streakDays: 4, totalDays: 10, points: 100, exp: 50, lastCheckinDate: "2026-11-03" }], tones: {} }));
+    renderAt("/me/affinity");
+    expect(await screen.findByText("今天还有 1 个群没签")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /一键签到/ }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/checkin", expect.objectContaining({ method: "POST", body: "{}" })));
+    expect(await screen.findByText(/猫猫群：积分 \+12/)).toBeInTheDocument();
+  });
+
+  it("applies a chat preset with only the changed fields", async () => {
+    renderAt("/me/chat");
+    fireEvent.click(await screen.findByRole("button", { name: /干脆利落/ }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/chat/prefs", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ replyLength: "short", emoji: "none", proactive: false }) })));
+    expect(screen.getByRole("button", { name: /刚刚好/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("gives the werewolf record a title and filters recent games", async () => {
+    renderAt("/me/games");
+    expect(await screen.findByText("新手村民")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("输的"));
+    expect(await screen.findByText("没有符合条件的对局")).toBeInTheDocument();
   });
 
   it("saves only changed chat prefs and pauses auto reply", async () => {
@@ -179,7 +254,9 @@ describe("我的空间 2.0", () => {
     fireEvent.click(await screen.findByText("早呀"));
     expect(await screen.findByText("2026-11-04")).toBeInTheDocument();
     expect(screen.getByText("早")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /导\s?出/ })).toHaveAttribute("href", "/webui/api/v1/me/chats/5/export");
+    expect(screen.getByRole("button", { name: /导\s?出/ })).toBeInTheDocument();
+    expect(chatExportUrl("5")).toBe("/webui/api/v1/me/chats/5/export");
+    expect(chatExportUrl("5", "md")).toBe("/webui/api/v1/me/chats/5/export?format=md");
     const search = screen.getByPlaceholderText("搜索聊天内容");
     fireEvent.change(search, { target: { value: "早" } });
     fireEvent.keyDown(search, { key: "Enter", code: "Enter", keyCode: 13 });

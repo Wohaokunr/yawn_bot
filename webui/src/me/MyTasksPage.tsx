@@ -1,18 +1,25 @@
-import { CloudServerOutlined, ProjectOutlined, RobotOutlined, StopOutlined } from "@ant-design/icons";
-import { Alert, Button, Collapse, Empty, Popconfirm, Progress, Segmented, Skeleton, Tag, Timeline, Typography } from "antd";
-import { useMemo, useState } from "react";
+import { CloudServerOutlined, CopyOutlined, ProjectOutlined, RobotOutlined, SearchOutlined, StopOutlined, SyncOutlined } from "@ant-design/icons";
+import { Alert, App as AntApp, Button, Collapse, Empty, Input, Popconfirm, Progress, Segmented, Skeleton, Tag, Timeline, Typography } from "antd";
+import { useEffect, useMemo, useState } from "react";
 import { PageHeader, QueryErrorAlert } from "../shared";
 import { type HelperState, type HelperTask, spaceApi } from "./me-space-api";
 import { formatQqTime } from "./me-meta";
 import { formatBytes, OPEN_TASK_STATES, TASK_STATE_COLOR } from "./me-space-meta";
+import { copyText } from "./hub-ui";
+import { formatDuration, secondsBetween } from "./me-hub-meta";
 import { MeSection, StatTile, useAction, useResource } from "./space-ui";
 import "./me.css";
 import "./me-space.css";
+import "./me-v3.css";
 
 const { Text, Paragraph } = Typography;
 
+type TaskFilter = "all" | "open" | "done" | "failed";
+
 function TaskBody({ task }: { task: HelperTask }): React.JSX.Element {
+  const { message } = AntApp.useApp();
   const last = task.progress.at(-1);
+  const took = secondsBetween(task.startedAt, task.finishedAt);
   return <div className="me-stack">
     {task.goal && <Paragraph><Text type="secondary">要做的事：</Text>{task.goal}</Paragraph>}
     {task.question && task.state === "blocked" && <Alert type="warning" showIcon message="它在等你回答" description={<>{task.question}<br /><Text type="secondary">直接在私聊里回复 Bot 就行。</Text></>} />}
@@ -23,19 +30,39 @@ function TaskBody({ task }: { task: HelperTask }): React.JSX.Element {
         items={task.progress.map((row, index) => ({ key: index, children: <span><Text type="secondary" className="me-hint me-mono">{(row.at ?? "").slice(11, 16)}</Text> {row.note}</span> }))}
       />
     )}
-    {task.summary && <Paragraph className="me-recap"><Text strong>结果：</Text>{task.summary}</Paragraph>}
+    {task.summary && <Paragraph className="me-recap"><Text strong>结果：</Text>{task.summary} <Button type="link" size="small" icon={<CopyOutlined />} onClick={async () => { if (await copyText(task.summary ?? "")) message.success("复制了"); else message.warning("浏览器不让复制"); }}>复制</Button></Paragraph>}
     {task.error && <Alert type="error" showIcon message="没做成" description={task.error} />}
     {task.files.length > 0 && <div className="me-chip-row">{task.files.map((file) => <Tag key={file}>📎 {file}</Tag>)}</div>}
-    <Text type="secondary" className="me-hint">建于 {formatQqTime(task.createdAt)}{task.startedAt ? ` · 开始 ${formatQqTime(task.startedAt)}` : ""}{task.finishedAt ? ` · 结束 ${formatQqTime(task.finishedAt)}` : ""}{task.toolsets.length ? ` · 用到：${task.toolsets.join("、")}` : ""}</Text>
+    <Text type="secondary" className="me-hint">建于 {formatQqTime(task.createdAt)}{task.startedAt ? ` · 开始 ${formatQqTime(task.startedAt)}` : ""}{task.finishedAt ? ` · 结束 ${formatQqTime(task.finishedAt)}` : ""}{took !== null ? ` · 用了 ${formatDuration(took)}` : ""}{task.toolsets.length ? ` · 用到：${task.toolsets.join("、")}` : ""}</Text>
   </div>;
 }
 
 export function MyTasksPage(): React.JSX.Element {
   const { query, data, setData } = useResource<HelperState>(["me", "tasks"], () => spaceApi.tasks());
   const { busy, run } = useAction();
-  const [filter, setFilter] = useState<"open" | "all">("all");
-  const tasks = useMemo(() => (data?.tasks ?? []).filter((task) => filter === "all" || OPEN_TASK_STATES.has(task.state)), [data, filter]);
+  const [filter, setFilter] = useState<TaskFilter>("all");
+  const [keyword, setKeyword] = useState("");
+  const tasks = useMemo(() => {
+    const needle = keyword.trim().toLowerCase();
+    return (data?.tasks ?? []).filter((task) => {
+      if (needle && !`${task.title ?? ""} ${task.goal ?? ""} ${task.summary ?? ""} ${task.id}`.toLowerCase().includes(needle)) return false;
+      if (filter === "open") return OPEN_TASK_STATES.has(task.state);
+      if (filter === "done") return task.state === "done";
+      if (filter === "failed") return task.state === "failed" || task.state === "cancelled";
+      return true;
+    });
+  }, [data, filter, keyword]);
   const open = (data?.tasks ?? []).filter((task) => OPEN_TASK_STATES.has(task.state)).length;
+  const done = (data?.tasks ?? []).filter((task) => task.state === "done").length;
+  const failed = (data?.tasks ?? []).filter((task) => task.state === "failed" || task.state === "cancelled").length;
+  const waiting = (data?.tasks ?? []).filter((task) => task.state === "blocked");
+  // 有任务在跑时每 10 秒自己刷新一次，做完就停
+  const reload = query.reload;
+  useEffect(() => {
+    if (open === 0) return undefined;
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") reload(); }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [open, reload]);
 
   return <div className="me-page">
     <PageHeader title="后台小助手" subtitle="在私聊里让 Bot “去查一下/整理一下/写个东西”时，它会派小助手在后台做，做完私聊告诉你。" onRefresh={query.reload} refreshing={query.refreshing} />
@@ -49,10 +76,13 @@ export function MyTasksPage(): React.JSX.Element {
         {data.computer && <StatTile label="我的虚拟电脑" value={`${data.computer.runsToday}/${data.computer.dailyLimit}`} sub={`今天运行次数 · 收件箱 ${formatBytes(data.computer.inboxBytes)}`} />}
       </div>
 
-      <MeSection icon={<RobotOutlined />} title="任务" extra={<Segmented size="small" value={filter} onChange={setFilter} options={[{ value: "all", label: `全部 ${data.tasks.length}` }, { value: "open", label: `进行中 ${open}` }]} />}>
-        {tasks.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={filter === "open" ? "没有进行中的任务" : "还没有派过任务。可以在私聊里说“帮我在后台查一下……”"} /> : (
+      {waiting.length > 0 && <Alert type="warning" showIcon message={`${waiting.length} 个任务在等你回答`} description={waiting.map((task) => task.question).filter(Boolean).join("；") || "直接在私聊里回复 Bot 就行。"} />}
+      <MeSection icon={<RobotOutlined />} title="任务" hint={open > 0 ? <span><SyncOutlined spin /> 有任务在跑，这一页每 10 秒自己刷新</span> : undefined} extra={<Segmented<TaskFilter> size="small" value={filter} onChange={setFilter} options={[{ value: "all", label: `全部 ${data.tasks.length}` }, { value: "open", label: `进行中 ${open}` }, { value: "done", label: `做完 ${done}` }, ...(failed ? [{ value: "failed" as const, label: `没做成 ${failed}` }] : [])]} aria-label="筛选任务" />}>
+        {data.tasks.length > 3 && <Input allowClear prefix={<SearchOutlined aria-hidden="true" />} placeholder="按标题、目标、结果找" value={keyword} onChange={(event) => setKeyword(event.target.value)} className="me-list-search" aria-label="搜索任务" />}
+        {tasks.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={data.tasks.length ? "没有符合条件的任务" : "还没有派过任务。可以在私聊里说“帮我在后台查一下……”"} /> : (
           <Collapse
             className="me-task-collapse"
+            defaultActiveKey={waiting.map((task) => task.id)}
             items={tasks.map((task) => ({
               key: task.id,
               label: <span className="me-task-head"><Tag color={TASK_STATE_COLOR[task.state] ?? "default"}>{task.status}</Tag><strong>{task.title || task.goal || task.id}</strong><Text type="secondary" className="me-hint me-mono">{task.id}</Text></span>,

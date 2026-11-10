@@ -1,5 +1,9 @@
 import {
   AuditOutlined,
+  BarChartOutlined,
+  CalendarOutlined,
+  SearchOutlined,
+  StarOutlined,
   BookOutlined,
   BulbOutlined,
   CommentOutlined,
@@ -63,7 +67,9 @@ export const GUEST_NAV: NavEntry[] = [
 // QQ 个人账号（群管理员 / 普通用户）只看自己的东西：主页不分组，其余按“助理 / 我和 Bot / 群与成长 / 账号”分组。
 export const USER_NAV: NavEntry[] = [
   { key: "/me", label: "我的主页", icon: <HomeOutlined />, group: "", description: "今日概览：待办、提醒、心情、签到与快捷入口", keywords: "home 主页 今天 概览 dashboard" },
+  { key: "/me/search", label: "搜一搜", icon: <SearchOutlined />, group: "", description: "一次搜遍我的待办、笔记、提醒、Bot 记得我的事和聊天记录", keywords: "search 搜索 查找 全局" },
   { key: "/me/assistant", label: "小本本", icon: <ProfileOutlined />, group: "私人助理", description: "待办、笔记、倒数日、心情，和私聊里让 Bot 记的是同一份", keywords: "todo 待办 笔记 note 倒数日 countdown 心情 mood 日记" },
+  { key: "/me/calendar", label: "日历", icon: <CalendarOutlined />, group: "私人助理", description: "一个月里到期的待办、提醒、倒数日、心情、签到", keywords: "calendar 日历 月历 日程 安排" },
   { key: "/me/schedules", label: "我的定时任务", icon: <FieldTimeOutlined />, group: "私人助理", description: "私聊提醒和我在群里设的定时任务", keywords: "schedule 定时 提醒 闹钟 cron 群任务" },
   { key: "/me/tasks", label: "后台小助手", icon: <RobotOutlined />, group: "私人助理", description: "让 Bot 在后台帮我做的事：进度、结果、取消，以及我的虚拟电脑", keywords: "task 任务 小助手 后台 项目 电脑 sandbox" },
   { key: "/me/chat", label: "私聊设置", icon: <ControlOutlined />, group: "我和 Bot", description: "称呼、回复长短、免打扰、早安与签到提醒、主动提议", keywords: "chat 私聊 设置 偏好 免打扰 称呼 早安 生日 主动 提议 暂停" },
@@ -73,7 +79,9 @@ export const USER_NAV: NavEntry[] = [
   { key: "/me/groups", label: "我在的群", icon: <TeamOutlined />, group: "群与成长", description: "我在的所有群：身份、签到、本群功能；管理的群可以进去管", keywords: "group 群 管理 签到 功能" },
   { key: "/me/affinity", label: "好感与签到", icon: <HeartOutlined />, group: "群与成长", description: "和 Bot 的好感等级、来源、流水与各群连签", keywords: "affinity 好感 等级 签到 连签 积分 流水" },
   { key: "/me/games", label: "狼人杀战绩", icon: <TrophyOutlined />, group: "群与成长", description: "我的胜率、常玩角色、阵营表现与最近对局", keywords: "werewolf 狼人杀 战绩 胜率 角色 对局 game" },
-  { key: "/me/account", label: "账号与数据", icon: <LockOutlined />, group: "账号", description: "改密码、退出所有设备、导出我的数据", keywords: "password 密码 安全 退出 设备 导出 数据 export 隐私" },
+  { key: "/me/insights", label: "数据洞察", icon: <BarChartOutlined />, group: "群与成长", description: "最近的聊天、待办、心情、签到走势，和我在各群的名次", keywords: "insights 洞察 统计 周报 趋势 排名 数据" },
+  { key: "/me/achievements", label: "成就", icon: <StarOutlined />, group: "群与成长", description: "签到、关系、小本本、聊天、游戏里达成的成就和进度", keywords: "achievement 成就 徽章 勋章 进度" },
+  { key: "/me/account", label: "账号与数据", icon: <LockOutlined />, group: "账号", description: "改密码、登录设备、显示偏好、导出和清空我的数据", keywords: "password 密码 安全 退出 设备 导出 数据 export 隐私 显示 字号 紧凑 清空" },
 ];
 
 export function navForRole(role: SessionRole): NavEntry[] {
@@ -104,4 +112,7 @@ export function selectedNavKey(pathname: string, role: boolean | SessionRole): s
 }
 
 /** 手机上的底部标签栏（只给 QQ 个人账号）：最常用的四项 + “更多”打开完整侧栏。 */
-export const USER_TABBAR_KEYS = ["/me", "/me/assistant", "/me/chats", "/me/groups"] as const;
+export const USER_TABBAR_KEYS = ["/me", "/me/assistant", "/me/calendar", "/me/affinity"] as const;
+
+/** 底部标签栏上的短名字 */
+export const USER_TABBAR_LABELS: Record<string, string> = { "/me": "主页", "/me/assistant": "小本本", "/me/calendar": "日历", "/me/affinity": "签到" };

@@ -8,6 +8,7 @@ import { EMOJI_OPTIONS, isBirthday, isClock, quietLabel, REPLY_LENGTH_OPTIONS } 
 import { MeSection, StatTile, useAction, useResource } from "./space-ui";
 import "./me.css";
 import "./me-space.css";
+import "./me-v3.css";
 
 const { Text } = Typography;
 
@@ -19,6 +20,33 @@ type PrefKey = keyof ChatPrefs;
 /** 选项类（分段、开关）一改就存；文字类在离开输入框或回车时存。整页没有“保存”按钮。 */
 const CHOICE_KEYS: PrefKey[] = ["replyLength", "emoji", "proactive"];
 const QUIET_KEYS: PrefKey[] = ["quietStart", "quietEnd"];
+
+const PRESETS: Array<{ key: string; title: string; hint: string; patch: Partial<ChatPrefs> }> = [
+  { key: "brief", title: "干脆利落", hint: "回得短，不用表情，不主动找你", patch: { replyLength: "short", emoji: "none", proactive: false } },
+  { key: "normal", title: "刚刚好", hint: "正常长度，偶尔用表情", patch: { replyLength: "normal", emoji: "some", proactive: true } },
+  { key: "chatty", title: "话痨模式", hint: "可以多说，表情多一点，会主动找你", patch: { replyLength: "long", emoji: "lots", proactive: true } },
+  { key: "night", title: "晚上别吵", hint: "23:00 到 07:30 免打扰", patch: { quietStart: "23:00", quietEnd: "07:30" } },
+];
+
+/** 一键套一组常用设置；只提交和现在不一样的字段。 */
+function Presets({ data, onSaved }: { data: ChatSettings; onSaved: (next: ChatSettings) => void }): React.JSX.Element {
+  const { busy, run } = useAction();
+  const prefs = data.prefs as unknown as Record<string, unknown>;
+  return <div className="me-preset-row" role="group" aria-label="一键套用">
+    {PRESETS.map((preset) => {
+      const changes = Object.fromEntries(Object.entries(preset.patch).filter(([key, value]) => prefs[key] !== value)) as Partial<ChatPrefs>;
+      const active = Object.keys(changes).length === 0;
+      return <button key={preset.key} type="button" className="me-preset" disabled={busy !== null} aria-pressed={active} onClick={async () => {
+        if (active) return;
+        const next = await run(`preset-${preset.key}`, () => spaceApi.patchChatPrefs(changes), `换成「${preset.title}」了`);
+        if (next) onSaved(next);
+      }}>
+        <strong>{preset.title}{active && <Tag color="success" className="me-inline-tag">现在就是</Tag>}</strong>
+        <span>{preset.hint}</span>
+      </button>;
+    })}
+  </div>;
+}
 
 function PrefsForm({ data, onSaved }: { data: ChatSettings; onSaved: (next: ChatSettings) => void }): React.JSX.Element {
   const [form] = Form.useForm<ChatPrefs>();
@@ -262,6 +290,7 @@ export function MyChatSettingsPage(): React.JSX.Element {
         </div>
       </MeSection>
       <MeSection icon={<MessageOutlined />} title="说话方式与打扰" hint={<>改完自动保存：选项点一下就生效，文字填好后点别处或回车。想改 Bot 的自称和性格，去 <Link to="/me/persona">私聊人设</Link>。</>}>
+        <Presets data={data} onSaved={setData} />
         <PrefsForm data={data} onSaved={setData} />
       </MeSection>
       <OffersCard />
