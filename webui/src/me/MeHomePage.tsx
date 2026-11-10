@@ -208,7 +208,7 @@ function QuestCard({ perks, onChange }: { perks: PerksState; onChange: (next: Pe
         {!perks.enabled || !quests.enabled ? <Text type="secondary" className="me-hint">每日任务没开。</Text> : <>
           <Progress percent={questPercent(quests)} size="small" strokeColor="var(--brand)" format={() => `${questDone(quests)}/${quests.items.length}`} aria-label="今日任务进度" />
           <ul className="me-quest-list">
-            {quests.items.map((item) => <li key={item.key} className={item.done ? "is-done" : undefined}><span>{item.done ? "✅" : "⬜"} {item.title}</span><Text type="secondary" className="me-hint">{item.progress}/{item.target}{item.claimed ? " · 已领" : ""}</Text></li>)}
+            {quests.items.map((item) => <li key={item.key} className={item.done ? "is-done" : undefined}><span>{item.done ? "✓" : "○"} {item.title}</span><Text type="secondary" className="me-hint">{item.progress}/{item.target}{item.claimed ? " · 已领" : ""}</Text></li>)}
           </ul>
           {unclaimed(quests) > 0 && <Button size="small" type="primary" loading={busy === "home-claim"} onClick={() => void claim()}>领取 {unclaimed(quests)} 个奖励</Button>}
         </>}

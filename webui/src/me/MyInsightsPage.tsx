@@ -47,11 +47,10 @@ export function MyInsightsPage(): React.JSX.Element {
         </MeSection>
       )}
 
+      <div className="me-two-col">
       <MeSection icon={<BarChartOutlined />} title="活跃日历" hint={`聊天、完成待办、签到都算。${data.totals.activeDays}/${data.days} 天来过，最长连续 ${data.activeStreak} 天。`} extra={<HeatLegend />}>
         <Heatmap columns={activity.columns} max={activity.max} label="每天的活跃程度" tip={(cell) => `${cell.day}：${cell.value ? "来过" : "没来"}`} />
       </MeSection>
-
-      <div className="me-two-col">
         <MeSection icon={<CommentOutlined />} title="每天说了几句" hint={data.bestDay ? `最多的一天是 ${data.bestDay.day.slice(5)}，说了 ${data.bestDay.mine} 句` : "这段时间还没聊过"}>
           <Columns values={tail.map((row) => row.mine)} label="每天和 Bot 说的话" tip={(value, index) => `${tail[index].day.slice(5)}：${value ?? 0} 句`} />
         </MeSection>
@@ -64,11 +63,10 @@ export function MyInsightsPage(): React.JSX.Element {
         <MeSection icon={<HeartOutlined />} title="好感变化" hint={`这段时间合计 ${data.totals.affinity >= 0 ? "+" : ""}${data.totals.affinity}`}>
           <Columns values={tail.map((row) => Math.max(row.affinity, 0))} label="每天涨的好感" tip={(_value, index) => `${tail[index].day.slice(5)}：${tail[index].affinity >= 0 ? "+" : ""}${tail[index].affinity}`} />
         </MeSection>
-      </div>
-
       <MeSection icon={<BarChartOutlined />} title="星期几最爱聊">
         <Columns values={data.weekdays} labels={WEEKDAY_LABELS.map((label) => `周${label}`)} label="按星期的聊天分布" tip={(value, index) => `周${WEEKDAY_LABELS[index]}：${value ?? 0} 句`} />
       </MeSection>
+      </div>
 
       <MeSection icon={<CrownOutlined />} title="我在各群排第几" hint="只显示你自己的名次和群里的人数，看不到别人是谁。">
         {data.ranks.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还不在任何群里" /> : (

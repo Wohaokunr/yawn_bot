@@ -1391,3 +1391,43 @@ button.me-cal-cell:focus-visible {
   font-size: 13px;
   user-select: all;
 }
+
+/* 截图验收后的修正 */
+.me-today-list li .me-today-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.me-cal-side .me-plain-list > li {
+  flex-wrap: nowrap;
+}
+
+.me-cal-side .me-plain-main {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.me-cols {
+  justify-content: space-around;
+}
+
+.me-col {
+  max-width: 56px;
+}
+
+@media (min-width: 769px) {
+  .me-cal-dots {
+    display: flex;
+  }
+
+  .me-cal-dots i:not(.is-checkin) {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  /* 手机上待办卡占满一行，标题不至于被截得只剩两三个字 */
+  .me-today > :first-child {
+    grid-column: 1 / -1;
+  }
+}
