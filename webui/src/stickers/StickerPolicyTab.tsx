@@ -477,4 +477,3 @@ export function PolicyTab({ overview, onSaved }: { overview: StickerOverview; on
     </div>
   );
 }
-
