@@ -223,6 +223,14 @@
 - 上传、`save_sticker`、`steal_sticker`、私聊 `stickers.steal` 统一经 `sticker_intake.intake_image` 入库（sha256 去重、AI 补全、`origin` 来源）。不要在别处另写一份入库逻辑。
 - **偷图（`steal_sticker`，族 `reaction`，state_write）**：Bot 自己觉得好就把别人发的表情包收进库，`source="stolen"`，`origin` 记群、发图人、消息编号与是否 QQ 表情包。门控：真实 actor、表情包总开关与本群开放、`steal_mode`（off/review/auto）、每群每日 `group_daily_steals`、冷却 `steal_cooldown_seconds`、“别偷我的图”名单 `steal_protected_users`、发图人没有隐私退出、不偷 Bot 自己发的图；**是不是表情包只看结构**（图片段 `sub_type == 1`），普通照片只有 `steal_photos` 开着才收且一律待审核。偷图提示（`STEAL_HINT`）只在对话场景、`can_steal` 为真时追加在表情包菜单后，不进主动发言；唤醒回合拦截（`WAKE_BLOCKED_TOOLS`）。没有本轮成功的 `steal_sticker`/`save_sticker` 不得声称“偷到了”（`speech_claims.py` 的 `sticker_steal` 族）。
 - 私聊 `stickers` 工具（`private_sticker_tool.py`，族 `stickers`）：steal 取他本轮或 10 分钟内发的图（`remember_media`，进程内有界），受 `private_steal_enabled`、`private_daily_steals`（超级管理员不计）、冷却与名单约束；私聊来的照片一律待审核；search 只查所有群可用的；mine 只列他本人收藏/被偷的。声明核验别名 `stickers.steal`。
+- **3.0（别名/合集/回收站/按群设置）**：`match_stickers` 返回 `(how, 候选)`，顺序固定为编号 → 名字 → 别名 → 情绪标签，全部要完全对上（只折叠空格和大小写），**发送层不做模糊匹配**；对不上的名字经 `note_miss` 记给管理员（WebUI 一键设成别名），`sticker_insights.suggest_for_miss` 的“可能是这张”只给人看，不参与发送。
+- 是否可用一律问 `sticker_library.is_available(item, group_id)`（状态、回收站、开放群、合集停用/限群都在里面），不要再直接用 `Sticker.available_in`。合集（`StickerPack`）和拉黑的图（sha256）与表情包存在同一个 `index.json`；写盘前留 `index.json.bak`，索引坏了从备份读回（`library_health()`）。新字段都有默认值且默认值不写进索引，旧索引不用迁移。
+- 删除默认进回收站（`trash_sticker`，`trash_days` 天后由 WebUI 打开回收站/体检时 `auto_purge` 清掉；设 0 则直接删）；`delete_sticker(block=True)` 同时拉黑内容哈希，之后上传/收藏/偷图都拒收，直到 `unblock_hash`。重新上传回收站里的同一张图是“恢复”，不是新建。成员自己删（`sticker_self_service.remove_own`）不进回收站：那是他的数据。
+- 每个群的实际设置一律取 `sticker_policy.effective_settings(group_id)`（全局 + `group_overrides`），不要在群聊路径上直接 `load_settings()`。`GroupOverride.enabled` 优先于允许/禁用名单。
+- 发送闸门新增的几项（安静时段、每小时上限、两次之间至少隔几条文字、同图间隔、单张每日上限）都只看计数和时间，**不看聊天内容**；`outbound` 发纯文字时调 `note_plain` 给“隔几条”计数。被拦原因分类计进 `drops`。同一条发言里两个标记不会发同一张。
+- 菜单由 `menu_plan` 生成（置顶 → 新图照顾/权重高 → 按 `menu_strategy`），每项带 `why`，同一主标签不占满菜单；`weight=0` 的不进菜单但写名字仍能发。菜单文字的长度由 `menu_hint_chars`、`menu_show_tags` 控制。
+- 成员自助（群聊工具 `my_stickers`、私聊 `stickers` 的 mine/stats/rename/remove/protect/unprotect）共用 `sticker_self_service`：只能动自己收藏的或从自己这儿偷的；受 `member_manage_own`、`member_self_protect` 开关约束。没有本轮成功的调用不得声称“改好了/删了/以后不偷了”（`speech_claims` 的 `sticker_manage` 族）。
+- 图片尺寸/帧数由 `sticker_meta.image_info` 只读文件头得到（不引入 Pillow）；导出/导入走 `sticker_archive`（zip，默认不带来源群、收藏人等隐私字段，导入时校验路径和大小）；体检 `sticker_health` 与统计 `sticker_insights` 都是确定性的，不调模型。
 - `delete_member_memories` 必须同时调 `sticker_library.forget_member`。新增 reaction 族工具时同步 `tests/test_agent_hot_path.py` 的 `EXPECTED_FAMILY_TOOL_COUNT` 与 `tests/test_agent_sticker.py`。
 
 ## 定时任务

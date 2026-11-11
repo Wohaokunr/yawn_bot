@@ -856,7 +856,7 @@ def test_insights_summarise_usage_misses_and_gaps() -> None:
     library.apply_label(used.sticker_id, {}, {"model": "m", "mood": "开心"})
     add("没用过", tags=["无语"])
     policy.note_sent(GROUP, [used.sticker_id])
-    policy.note_private_sent(USER, [used.sticker_id])
+    policy.note_private_sent(987654321, [used.sticker_id])
     policy.note_miss("狗头保", GROUP)
     data = insights.build_insights(days=7)
     assert len(data["history"]) == 7 and data["history"][-1]["sent"] == 1 and data["totals"]["uses"] == 2 and data["totals"]["neverUsed"] == 1
@@ -865,7 +865,7 @@ def test_insights_summarise_usage_misses_and_gaps() -> None:
     assert data["misses"][0]["name"] == "狗头保" and data["misses"][0]["suggestions"][0]["name"] == "狗头"
     assert "开心" not in data["moodGaps"] and len(data["moodGaps"]) == len(labeler.MOODS) - 2
     assert {row["groupId"] for row in data["groups"]} >= {str(GROUP)}
-    assert str(USER) not in json.dumps(data, ensure_ascii=False)
+    assert "987654321" not in json.dumps(data, ensure_ascii=False)
 
 
 # ---- WebUI -------------------------------------------------------------------
