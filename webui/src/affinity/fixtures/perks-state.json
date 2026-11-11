@@ -799,7 +799,9 @@
     "emoji": "🍬",
     "price": 10,
     "finalPrice": 10,
-    "affinity": 1
+    "affinity": 1,
+    "minLevel": "陌生",
+    "unlocked": true
    },
    {
     "key": "milk_tea",
@@ -807,7 +809,9 @@
     "emoji": "🧋",
     "price": 30,
     "finalPrice": 28,
-    "affinity": 2
+    "affinity": 2,
+    "minLevel": "陌生",
+    "unlocked": true
    },
    {
     "key": "flower",
@@ -815,7 +819,9 @@
     "emoji": "💐",
     "price": 60,
     "finalPrice": 57,
-    "affinity": 3
+    "affinity": 3,
+    "minLevel": "陌生",
+    "unlocked": true
    },
    {
     "key": "cake",
@@ -823,7 +829,9 @@
     "emoji": "🍰",
     "price": 120,
     "finalPrice": 114,
-    "affinity": 5
+    "affinity": 5,
+    "minLevel": "陌生",
+    "unlocked": true
    },
    {
     "key": "star",
@@ -831,7 +839,49 @@
     "emoji": "🌟",
     "price": 300,
     "finalPrice": 285,
-    "affinity": 10
+    "affinity": 10,
+    "minLevel": "陌生",
+    "unlocked": true
+   },
+   {
+    "key": "fish",
+    "name": "小鱼干",
+    "emoji": "🐟",
+    "price": 15,
+    "finalPrice": 14,
+    "affinity": 1,
+    "minLevel": "陌生",
+    "unlocked": true
+   },
+   {
+    "key": "letter",
+    "name": "手写信",
+    "emoji": "💌",
+    "price": 80,
+    "finalPrice": 76,
+    "affinity": 4,
+    "minLevel": "熟人",
+    "unlocked": true
+   },
+   {
+    "key": "music_box",
+    "name": "音乐盒",
+    "emoji": "🎶",
+    "price": 200,
+    "finalPrice": 190,
+    "affinity": 8,
+    "minLevel": "朋友",
+    "unlocked": false
+   },
+   {
+    "key": "meteor",
+    "name": "流星",
+    "emoji": "🌠",
+    "price": 500,
+    "finalPrice": 475,
+    "affinity": 15,
+    "minLevel": "好朋友",
+    "unlocked": false
    }
   ],
   "totals": {},
@@ -857,7 +907,7 @@
    "final_price": 57,
    "min_level": "面熟",
    "unlocked": true,
-   "have": 1,
+   "have": 0,
    "max_hold": 3
   },
   {
@@ -868,7 +918,7 @@
    "final_price": 38,
    "min_level": "陌生",
    "unlocked": true,
-   "have": 2,
+   "have": 0,
    "max_hold": 5
   },
   {
@@ -881,6 +931,28 @@
    "unlocked": true,
    "have": 0,
    "max_hold": 5
+  },
+  {
+   "key": "mood_candy",
+   "name": "心情糖",
+   "description": "心情糖：哄 Bot 开心，今天它对你的心情变成“被你哄得很开心”",
+   "price": 25,
+   "final_price": 24,
+   "min_level": "陌生",
+   "unlocked": true,
+   "have": 0,
+   "max_hold": 5
+  },
+  {
+   "key": "mystery_box",
+   "name": "神秘礼盒",
+   "description": "神秘礼盒：打开随机得到一件其他道具",
+   "price": 70,
+   "final_price": 66,
+   "min_level": "熟人",
+   "unlocked": true,
+   "have": 0,
+   "max_hold": 3
   }
  ],
  "nickname": "阿明",
@@ -935,5 +1007,343 @@
    "up": true
   }
  ],
- "itemLog": []
+ "itemLog": [],
+ "bond": {
+  "title": "聊得来",
+  "speechStyle": "像同学之间聊天，可以吐槽、接梗，偶尔用他的口头禅",
+  "initiative": 1,
+  "initiativeText": "可以接他的话，但别追着聊",
+  "daysTogether": 1,
+  "firstDay": "2026-11-09",
+  "activeDays": 1,
+  "streak": 1,
+  "bestStreak": 1,
+  "nextStreakMilestone": 3,
+  "trend": "平稳",
+  "mood": {
+   "key": "playful",
+   "label": "想恶作剧",
+   "emoji": "😜",
+   "hint": "今天有点皮，可以多开点玩笑（照顾分寸）"
+  },
+  "fortune": {
+   "day": "2026-11-09",
+   "tier": "吉",
+   "lucky_gift": "💌手写信",
+   "yi": "认真吃饭",
+   "ji": "和人抬杠",
+   "advice": "按自己的节奏来就好。"
+  },
+  "weekly": {
+   "enabled": true,
+   "week": "2026-W46",
+   "ends": "2026-11-15",
+   "items": [
+    {
+     "key": "w_gift",
+     "title": "本周送我 3 次礼物",
+     "progress": 0,
+     "target": 3,
+     "done": false,
+     "claimed": false
+    },
+    {
+     "key": "w_private",
+     "title": "本周私聊聊 15 轮",
+     "progress": 0,
+     "target": 15,
+     "done": false,
+     "claimed": false
+    },
+    {
+     "key": "w_active",
+     "title": "本周有 5 天来找我",
+     "progress": 1,
+     "target": 5,
+     "done": false,
+     "claimed": false
+    }
+   ],
+   "reward_affinity": 5,
+   "all_done_item": "shield",
+   "all_done_item_name": "好感护盾",
+   "bonus_claimed": false,
+   "all_done": false
+  },
+  "badges": [
+   {
+    "key": "first_gift",
+    "name": "初次心意",
+    "emoji": "🎁",
+    "description": "第一次送 Bot 礼物",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 1,
+    "reward_item": ""
+   },
+   {
+    "key": "gift_lover",
+    "name": "礼物达人",
+    "emoji": "🎀",
+    "description": "累计送出 30 份礼物",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 30,
+    "reward_item": "mood_candy"
+   },
+   {
+    "key": "favorite_hit",
+    "name": "懂我心意",
+    "emoji": "💝",
+    "description": "送中今日心仪礼物 5 次",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 5,
+    "reward_item": "lucky_card"
+   },
+   {
+    "key": "interact_20",
+    "name": "形影不离",
+    "emoji": "🤝",
+    "description": "互动 20 次",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 20,
+    "reward_item": ""
+   },
+   {
+    "key": "interact_all",
+    "name": "五连互动",
+    "emoji": "🌈",
+    "description": "击掌、摸头、抱抱、贴贴、举高高都做过",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 5,
+    "reward_item": "mood_candy"
+   },
+   {
+    "key": "streak_7",
+    "name": "一周不断",
+    "emoji": "🔥",
+    "description": "连续 7 天来找 Bot",
+    "earned": false,
+    "earned_at": null,
+    "progress": 1,
+    "target": 7,
+    "reward_item": ""
+   },
+   {
+    "key": "streak_30",
+    "name": "月度常客",
+    "emoji": "🌟",
+    "description": "连续 30 天来找 Bot",
+    "earned": false,
+    "earned_at": null,
+    "progress": 1,
+    "target": 30,
+    "reward_item": "shield"
+   },
+   {
+    "key": "streak_100",
+    "name": "百日相伴",
+    "emoji": "👑",
+    "description": "连续 100 天来找 Bot",
+    "earned": false,
+    "earned_at": null,
+    "progress": 1,
+    "target": 100,
+    "reward_item": "mystery_box"
+   },
+   {
+    "key": "fortune_7",
+    "name": "缘分常客",
+    "emoji": "🔮",
+    "description": "抽了 7 次今日缘分",
+    "earned": false,
+    "earned_at": null,
+    "progress": 1,
+    "target": 7,
+    "reward_item": ""
+   },
+   {
+    "key": "daikichi",
+    "name": "天选之人",
+    "emoji": "🍀",
+    "description": "抽到过大吉",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 1,
+    "reward_item": "lucky_card"
+   },
+   {
+    "key": "moment_5",
+    "name": "心动收藏家",
+    "emoji": "💓",
+    "description": "被 Bot 记下 5 个心动瞬间",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 5,
+    "reward_item": ""
+   },
+   {
+    "key": "weekly_1",
+    "name": "周常达人",
+    "emoji": "📅",
+    "description": "完成一整周的周任务",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 1,
+    "reward_item": ""
+   },
+   {
+    "key": "nickname",
+    "name": "专属称呼",
+    "emoji": "🏷️",
+    "description": "让 Bot 用你定的称呼叫你",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 1,
+    "reward_item": ""
+   },
+   {
+    "key": "letter",
+    "name": "收到来信",
+    "emoji": "💌",
+    "description": "收到 Bot 写的信",
+    "earned": false,
+    "earned_at": null,
+    "progress": 0,
+    "target": 1,
+    "reward_item": ""
+   },
+   {
+    "key": "friend",
+    "name": "成为朋友",
+    "emoji": "🫶",
+    "description": "和 Bot 的关系到了「朋友」",
+    "earned": false,
+    "earned_at": null,
+    "progress": 2,
+    "target": 3,
+    "reward_item": ""
+   },
+   {
+    "key": "best",
+    "name": "挚友",
+    "emoji": "💞",
+    "description": "和 Bot 的关系到了「挚友」",
+    "earned": false,
+    "earned_at": null,
+    "progress": 2,
+    "target": 5,
+    "reward_item": "mystery_box"
+   },
+   {
+    "key": "days_100",
+    "name": "相识百日",
+    "emoji": "🗓️",
+    "description": "认识 Bot 满 100 天",
+    "earned": false,
+    "earned_at": null,
+    "progress": 1,
+    "target": 100,
+    "reward_item": ""
+   },
+   {
+    "key": "active_50",
+    "name": "来往 50 天",
+    "emoji": "✨",
+    "description": "累计有 50 天来找过 Bot",
+    "earned": false,
+    "earned_at": null,
+    "progress": 1,
+    "target": 50,
+    "reward_item": ""
+   }
+  ],
+  "moments": [
+   {
+    "kind": "up",
+    "reason": "陪我聊到半夜",
+    "at": "2026-11-10T23:40:00",
+    "channel": "private",
+    "changed": true
+   }
+  ],
+  "letters": [
+   {
+    "level": "熟人",
+    "at": "2026-11-08T21:00:00",
+    "sent": true,
+    "text": "阿明：\n谢谢你常来找我。\n—— 你的 Bot"
+   }
+  ],
+  "daily": [
+   {
+    "day": "2026-10-27",
+    "gain": 0
+   },
+   {
+    "day": "2026-10-28",
+    "gain": 0
+   },
+   {
+    "day": "2026-10-29",
+    "gain": 0
+   },
+   {
+    "day": "2026-10-30",
+    "gain": 0
+   },
+   {
+    "day": "2026-10-31",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-01",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-02",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-03",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-04",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-05",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-06",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-07",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-08",
+    "gain": 0
+   },
+   {
+    "day": "2026-11-09",
+    "gain": 1
+   }
+  ]
+ }
 }

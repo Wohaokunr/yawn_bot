@@ -72,6 +72,18 @@ _global_size = 0
 _report_locks: dict[int, asyncio.Lock] = {}
 
 
+def _daily_limit(user_id: int) -> int:
+    """每人每天能派几件活：后台上限 + 好感等级加成（affinity_perks，读余额缓存；0=不限时不变）。"""
+
+    base = int(private_agent_config.private_agent_task_daily)
+    try:
+        from ..affinity_perks import bonus_limit
+
+        return bonus_limit(base, user_id, "private_task_bonus")
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def register_reporter(
     reporter: Reporter | None, notifier: Notifier | None = None
 ) -> None:
@@ -302,7 +314,7 @@ def start_task(
             hint="自己尽力回答，或如实说做不了",
         )
     per_user = int(private_agent_config.private_agent_task_per_user)
-    daily = int(private_agent_config.private_agent_task_daily)
+    daily = _daily_limit(user_id)
     today = now.date().isoformat()
 
     def create(record: dict[str, Any]) -> dict[str, Any]:
@@ -633,7 +645,7 @@ def start_project(
         )
     cleaned = _clean_members(members)
     per_user = int(private_agent_config.private_agent_task_per_user)
-    daily = int(private_agent_config.private_agent_task_daily)
+    daily = _daily_limit(user_id)
     today = now.date().isoformat()
 
     def create(record: dict[str, Any]) -> dict[str, Any]:

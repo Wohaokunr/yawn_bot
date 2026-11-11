@@ -1,6 +1,6 @@
 // 好感玩法接口：管理台 /affinity/*、/users/{id}/affinity/*，个人页 /me/affinity/*。
 import { api } from "../api";
-import type { ActionResponse, AffinityPolicy, AffinityStats, PerksState, PolicyPayload } from "./types";
+import type { ActionResponse, AffinityPolicy, FortuneResult, AffinityStats, PerksState, PolicyPayload } from "./types";
 
 const enc = encodeURIComponent;
 const post = (body?: unknown): RequestInit => (body === undefined ? { method: "POST" } : { method: "POST", body: JSON.stringify(body) });
@@ -25,5 +25,6 @@ export const affinityMeApi = {
   use: (item: string, groupId?: string | null) => api<ActionResponse>("/me/affinity/use", post({ item, groupId: groupId ?? null })).then((r) => r.data),
   interact: (action: string) => api<ActionResponse>("/me/affinity/interact", post({ action })).then((r) => r.data),
   nickname: (nickname: string) => api<ActionResponse>("/me/affinity/nickname", { method: "PUT", body: JSON.stringify({ nickname }) }).then((r) => r.data),
+  fortune: () => api<ActionResponse<FortuneResult>>("/me/affinity/fortune", post()).then((r) => r.data),
   claim: () => api<ActionResponse>("/me/affinity/quests/claim", post()).then((r) => r.data),
 };

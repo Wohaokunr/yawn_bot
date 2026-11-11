@@ -172,6 +172,13 @@ _BOT_BOND_GUIDANCE = (
     "call_them 是他自己定的专属称呼，叫他时用它；what_you_can_do 是这一级关系你说话能到什么程度，"
     "别越过它装熟；just_leveled_up、gifts_today 合适时自然回应一句（谢谢礼物、开心升级），别报数值。"
 )
+# 只在 bot_bonds 里出现好感 3.0 羁绊字段时追加（affinity_bond.AFFINITY_PROMPT_KEYS），不改静态前缀。
+_AFFINITY_GUIDANCE = (
+    "title 是你们关系的头衔，speech_style 是这一级你跟他说话的风格，initiative 是你能多主动；"
+    "your_mood 是你今天的心情，带进语气里但别每句都说；missed_you、first_time_today、streak_together、anniversary_today、"
+    "fortune_today、almost_next_level、last_moment、trend、together 是你们最近的来往，挑一件合适的自然提一句（问候、想念、恭喜、调侃），"
+    "不要一次全提，也不要报数值。他真心让你开心或明显恶意冒犯你时，可以用 affinity_moment 在心里记一下"
+)
 # 只在成员资料里有 type=shared_by_member 的条目时出现（memory_link），不改静态前缀。
 _SHARED_FACT_GUIDANCE = (
     "memories 里 type=shared_by_member 的，是这位成员自己允许你在群里也知道的事（称呼、爱好之类），"
@@ -195,6 +202,14 @@ _MEDIA_FALLBACK_PREFIXES = (
     *(f"[第{index}张图片" for index in range(1, 9)),
 )
 _MODEL_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "file", "input_image"})
+
+
+def _has_affinity_fields(bonds: Any) -> bool:
+    try:
+        from ..affinity_bond import AFFINITY_PROMPT_KEYS  # noqa: TID252
+    except Exception:  # noqa: BLE001
+        return False
+    return any(isinstance(item, dict) and AFFINITY_PROMPT_KEYS & item.keys() for item in bonds or [])
 
 
 def canonical_json(value: Any) -> str:
@@ -650,6 +665,8 @@ def build_prompt(  # noqa: PLR0912, PLR0913, PLR0915
         bond = ContentBuilder()
         if speaker.get("bot_bonds"):
             bond.add("core.bot_bond_guidance", apply_section("core.bot_bond_guidance", _BOT_BOND_GUIDANCE, group_id=gid))
+            if _has_affinity_fields(speaker.get("bot_bonds")):
+                bond.add("core.affinity_guidance", apply_section("core.affinity_guidance", _AFFINITY_GUIDANCE, group_id=gid))
         if any(
             isinstance(item, dict) and item.get("type") == "shared_by_member"
             for item in speaker.get("memories") or []

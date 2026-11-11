@@ -215,6 +215,177 @@
   gap: 8px;
 }
 
+/* ── 羁绊 ─────────────────────────────────────────────────────────── */
+
+.aff-gift.is-locked {
+  opacity: 0.55;
+}
+
+.aff-bond-hero {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.aff-bond-mood {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.aff-bond-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.aff-bond-main .aff-tags {
+  margin-top: 4px;
+}
+
+.aff-bond-title {
+  font-size: 22px;
+  color: var(--ink);
+}
+
+.aff-bond-streak {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 96px;
+  text-align: center;
+}
+
+.aff-bond-streak .anticon {
+  color: var(--warning);
+  font-size: 20px;
+}
+
+.aff-bond-streak strong {
+  font-size: 26px;
+  color: var(--ink);
+}
+
+.aff-fortune {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.aff-fortune-tier {
+  flex: none;
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--brand-50);
+  color: var(--ink);
+  font-size: 20px;
+}
+
+.aff-badge-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.aff-badge-grid li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  color: var(--ink-tertiary);
+}
+
+.aff-badge-grid li.is-earned {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.aff-badge-emoji {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.aff-letter-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.aff-letter-text {
+  display: block;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+.aff-bars {
+  display: grid;
+  grid-template-columns: repeat(14, 1fr);
+  gap: 4px;
+  height: 96px;
+  align-items: end;
+}
+
+.aff-bar {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  gap: 2px;
+}
+
+.aff-bar-fill {
+  display: block;
+  width: 100%;
+  max-width: 18px;
+  border-radius: 4px 4px 0 0;
+  background: var(--brand);
+}
+
+.aff-bar-label {
+  font-size: 10px;
+  color: var(--ink-tertiary);
+}
+
+.aff-admin-bond-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+}
+
+.aff-milestones {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aff-milestones .aff-form-row {
+  gap: 8px;
+}
+
 @media (max-width: 560px) {
   .aff-ladder li {
     grid-template-columns: 56px 1fr;
@@ -224,5 +395,14 @@
   }
   .aff-nickname {
     flex-wrap: wrap;
+  }
+  .aff-bond-hero {
+    grid-template-columns: auto 1fr;
+  }
+  .aff-bond-streak {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    justify-content: center;
+    gap: 8px;
   }
 }

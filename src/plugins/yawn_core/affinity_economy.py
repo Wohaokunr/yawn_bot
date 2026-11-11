@@ -1,4 +1,4 @@
-# ruff: noqa: C901, E501, PLR0913, PLR2004, RUF001, SIM105, TRY003
+# ruff: noqa: C901, E501, PLR0912, PLR0913, PLR0915, PLR2004, RUF001, SIM105, TRY003
 """好感玩法的“经济”：签到积分当钱包，送礼、商店兑换、道具使用、签到加成。
 
 签到积分原来只是一个越涨越大的数，没有任何用处。现在：
@@ -140,7 +140,8 @@ def favorite_gift(now: datetime, pol: AffinityPolicy | None = None) -> Gift | No
     """今天 Bot 最喜欢的礼物（按日期轮换，所有人同一个）。"""
 
     pol = pol or load_policy()
-    gifts = [gift for gift in pol.gifts if gift.enabled]
+    # 只从人人都能送的礼物里挑（贵重礼物要等级，当“心仪”大多数人送不了）
+    gifts = [gift for gift in pol.gifts if gift.enabled and pol.level_index(gift.min_level) == 0] or [gift for gift in pol.gifts if gift.enabled]
     if not gifts:
         return None
     digest = hashlib.sha256(f"favorite:{_today(now)}".encode()).digest()
@@ -166,6 +167,8 @@ class GiftResult:
     left_today: int
     reaction: str
     quests: dict[str, Any] = field(default_factory=dict)
+    # 解锁了“回礼”时，Bot 每周回赠的一件道具名
+    return_gift: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         """给模型：不含好感数值，只有涨没涨、是不是心仪、升没升级。"""
@@ -184,6 +187,8 @@ class GiftResult:
             payload["daily_gift_affinity_cap_reached"] = True
         if self.leveled_up_to:
             payload["leveled_up_to"] = self.leveled_up_to
+        if self.return_gift:
+            payload["you_gave_back"] = self.return_gift
         return payload
 
 
@@ -223,6 +228,8 @@ async def send_gift(
     amount = _count(count)
     points = await load_points(session, user_id)
     perks = pol.perks(level_for(points).name)
+    if level_for(points).index < pol.level_index(gift.min_level):
+        raise EconomyError(f"{gift.emoji}{gift.name}太贵重啦，等我们熟到「{gift.min_level}」再送吧", code="level")
     record = store.load(user_id)
     used = gifts_used_today(record, now)
     if perks.gift_daily <= 0 or used + amount > perks.gift_daily:
@@ -234,14 +241,34 @@ async def send_gift(
     await spend(session, user_id, cost, group_id=pay_group_id)
     favorite = (fav := favorite_gift(now, pol)) is not None and fav.key == gift.key
     gain = gift.affinity * amount * (pol.favorite_multiplier if favorite else 1)
+    from .affinity_bond import FOOD_GIFTS, maybe_return_gift, mood_for
+
+    mood = mood_for(record, now) if pol.bot_mood_enabled else None
+    # Bot 今天“有点嘴馋”：吃的每份多 1 点（仍受礼物好感日上限）
+    snack_bonus = mood is not None and mood.key == "snacky" and gift.key in FOOD_GIFTS
+    if snack_bonus:
+        gain += amount
     change = await affinity.grant(
         session, user_id, "gift", gain, group_id=group_id, note=f"送了{gift.name}×{amount}" + ("（今日心仪）" if favorite else ""), now=now
     )
     after_points = change.after if change.available and change.applied else points
     remember_points(user_id, after_points)
     today = _today(now)
+    from .affinity_perks import has_unlock
+
+    can_return = has_unlock(after_points, "return_gift", pol)
+    returned: list[str] = []
 
     def write(rec: dict[str, Any]) -> None:
+        from .affinity_bond import bond
+
+        if favorite:
+            stats = bond(rec)["stats"]
+            stats["favorite"] = int(stats.get("favorite", 0) or 0) + 1
+        if can_return:
+            key = maybe_return_gift(rec, user_id, now, pol)
+            if key:
+                returned.append(pol.item_name(key))
         current = rec.get("gifts_today") or {}
         if current.get("day") != today:
             current = {"day": today, "count": 0, "names": []}
@@ -272,7 +299,10 @@ async def send_gift(
         level=level_after.name,
         leveled_up_to=level_after.name if change.leveled_up else None,
         left_today=max(perks.gift_daily - used - amount, 0),
-        reaction=gift_reaction(gift, level_after.index, favorite=favorite, capped=change.capped and change.applied < gain),
+        reaction=gift_reaction(gift, level_after.index, favorite=favorite, capped=change.capped and change.applied < gain)
+        + ("（今天有点馋，这个正好～）" if snack_bonus else "")
+        + (f" 这是给你的回礼：{returned[0]}，收好哦～" if returned else ""),
+        return_gift=returned[0] if returned else None,
     )
 
 
@@ -417,6 +447,14 @@ async def use_item(session: Any, user_id: int, item_name: str, *, group_id: int 
     elif key == "quest_refresh":
         if not (pol.quests.enabled):
             raise EconomyError("每日任务没开", code="disabled")
+    elif key == "mood_candy":
+        from .affinity_bond import bond
+
+        if bond(record).get("mood_candy_day") == today.isoformat():
+            raise EconomyError("今天已经吃过你的心情糖啦，我现在超开心的", code="not_applicable")
+        detail = {"mood": "被你哄开心了"}
+    elif key == "mystery_box":
+        detail = {}
     else:
         raise EconomyError("这个道具现在用不了", code="not_applicable")
 
@@ -435,6 +473,14 @@ async def use_item(session: Any, user_id: int, item_name: str, *, group_id: int 
             if not fresh:
                 raise EconomyError("今天的任务都做完了，不用换", code="not_applicable")
             extra["new_quests"] = fresh
+        elif key == "mood_candy":
+            from .affinity_bond import bond
+
+            bond(rec)["mood_candy_day"] = today.isoformat()
+        elif key == "mystery_box":
+            from .affinity_bond import open_mystery_box
+
+            extra["box_item"] = pol.item_name(open_mystery_box(rec, user_id, now, pol))
         store.push_limited(rec, "item_log", {"key": key, "action": "use", "at": now.isoformat(timespec="seconds"), "note": str(detail.get("group_name") or "")}, store.HISTORY_LIMIT)
         extra["left"] = int(rec["inventory"].get(key, 0))
         return extra

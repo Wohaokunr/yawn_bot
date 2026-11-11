@@ -75,6 +75,7 @@
 - `checkin_for_me` 只签**调用者本人、当前群**，没有 user_id/group_id 参数；没有真实 actor（主动发言、定时唤醒）一律拒绝；功能开关走 `check_feature_permission(..., "checkin", ...)`。
 - 群聊互动好感（`member_standing.reward_group_interaction`）只看结构：真实调用者、Bot 确实发出了回复、不是定时唤醒、成员没有隐私退出；不看说了什么。失败只记日志，不能影响回复后的状态提交。
 - 发言人层 `bot_bonds` 里的 `overall`（好感等级词）和 `checkin_streak`（连签天数）由 `load_members` 同一次查询顺带取回，不加往返；只给词语和天数，不给好感数值。私聊原文和私聊记忆永远不进群 Prompt。
+- **羁绊（好感 3.0）**：`affinity_moment`（族 checkin，state_write，`WAKE_BLOCKED_TOOLS` 拦）只给调用者本人记一次“心动/被冒犯”，每次 ±1，原因过 `memory_hygiene`（像指令或含隐私直接拒），日上下限、冷却、不掉级都在 `affinity_bond.record_moment`；**不要按关键词判断心动**，交给模型，且回复里不报数值。群聊发言人层的羁绊字段：稳定的 `title`/`speech_style`/`initiative` + 至多 `GROUP_VOLATILE_LIMIT`（4）项本轮事实；私聊里稳定部分进 system#2 的 `relationship`，每轮会变的放 system#3 的 `relationship_today`（不在 `STABLE_KEYS`），否则击穿前缀缓存。策略 `prompt_bond_enabled=false` 时都不给。
 - 声称“帮你签好了”必须有本轮成功的 `checkin_for_me`（或查过 `get_my_checkin` 如实转述），见 `speech_claims.py` 的 `checkin` 族。
 
 ## 消息发送与 OneBot

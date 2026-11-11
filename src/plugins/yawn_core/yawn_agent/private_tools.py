@@ -574,21 +574,25 @@ OFFER_TOOLS: tuple[PrivateTool, ...] = (
 )
 OFFER_NAMES = frozenset(tool.name for tool in OFFER_TOOLS)
 # 好感玩法（affinity_perks / affinity_economy）：查权益/任务/背包，送礼、兑换、用道具、称呼、互动。
-AFFINITY_VIEWS = ("overview", "perks", "gifts", "shop", "bag", "quests")
-AFFINITY_WRITES = ("gift", "buy", "use", "nickname", "interact")
+AFFINITY_VIEWS = ("overview", "perks", "gifts", "shop", "bag", "quests", "bond", "weekly", "badges")
+AFFINITY_WRITES = ("gift", "buy", "use", "nickname", "interact", "fortune", "moment")
 AFFINITY_TOOLS: tuple[PrivateTool, ...] = (
     PrivateTool(
         "affinity",
         "好感玩法（只作用于他本人，花的是他自己的签到积分；结果不报好感数值）。查：overview 概况（等级、这一级的权益和解锁、"
-        "下一级解锁什么、今日任务、背包、签到积分、今日心仪礼物）、perks 各级权益、gifts 礼物清单、shop 商店、bag 背包、quests 今日任务；"
-        "办：gift 送你礼物（item 礼物名、count）、buy 兑换道具、use 用道具（补签卡写 group 指定续哪个群）、"
-        "nickname 设专属称呼（nickname；写“清除”取消）、interact 互动（item 写 击掌/摸头/抱抱/贴贴/举高高）。"
-        "他问好感有什么用、想送你东西、要补签、让你换个称呼叫他时用；只在他明确要求时才办，失败照实说",
+        "下一级解锁什么、今日任务、背包、签到积分、今日心仪礼物）、perks 各级权益、gifts 礼物清单、shop 商店、bag 背包、quests 今日任务、"
+        "bond 羁绊（头衔、认识几天、连续来往、你今天的心情、今日缘分、你记得的心动瞬间、来信）、weekly 周任务、badges 徽章；"
+        "办：gift 送你礼物（item 礼物名、count）、buy 兑换道具、use 用道具（补签卡写 group 指定续哪个群；心情糖、神秘礼盒）、"
+        "nickname 设专属称呼（nickname；写“清除”取消）、interact 互动（item 写 击掌/摸头/抱抱/贴贴/举高高）、fortune 抽今日缘分；"
+        "moment 是你自己的：他真心让你开心或感动（kind=up）、明显恶意冒犯你（kind=down）时在心里记一下（reason 一句话），日常聊天不用记，记了别告诉他。"
+        "他问好感有什么用、想送你东西、要补签、让你换个称呼叫他时用；除 moment 外只在他明确要求时才办，失败照实说",
         {
             "action": {"type": "string", "enum": [*AFFINITY_VIEWS, *AFFINITY_WRITES]},
             "item": {"type": "string", "minLength": 1, "maxLength": 20},
             "count": {"type": "integer", "minimum": 1, "maximum": 10},
             "nickname": {"type": "string", "minLength": 1, "maxLength": 12},
+            "kind": {"type": "string", "enum": ["up", "down"]},
+            "reason": {"type": "string", "minLength": 2, "maxLength": 40},
             "group": _GROUP_SCHEMA,
         },
         ("action",),
@@ -1649,6 +1653,13 @@ async def _affinity_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[
     if action in AFFINITY_VIEWS:
         return await overview_payload(ctx.session, ctx.user_id, action, now=ctx.now)
     group_id = _single_group(ctx, str(args["group"])).group_id if args.get("group") else None
+    if action == "moment":
+        from .tool_handlers.affinity import moment_payload
+
+        async with ctx.session.begin_nested():
+            payload = await moment_payload(ctx.session, ctx.user_id, args, group_id=None, channel="private", now=ctx.now)
+        ctx.mutated = True
+        return payload
     # SAVEPOINT：积分扣了但后面失败（比如背包并发被用掉）时只回滚这一段
     async with ctx.session.begin_nested():
         payload = await action_payload(ctx.session, ctx.user_id, args, group_id=group_id, name=ctx.call_them or ctx.nickname or "", now=ctx.now)

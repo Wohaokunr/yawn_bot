@@ -49,7 +49,38 @@ export interface ShopRow {
   max_hold: number;
 }
 
-export interface GiftMenuRow { key: string; name: string; emoji: string; price: number; finalPrice: number; affinity: number }
+export interface GiftMenuRow { key: string; name: string; emoji: string; price: number; finalPrice: number; affinity: number; minLevel: string; unlocked: boolean }
+
+// ── 羁绊（好感 3.0）──────────────────────────────────────────────────
+
+export interface BondMood { key: string; label: string; emoji: string; hint: string }
+export interface BondFortune { day: string; tier: string; lucky_gift: string; yi: string; ji: string; advice: string }
+export interface WeeklyView extends Omit<QuestsView, "day"> { week: string; ends: string }
+export interface BondBadge { key: string; name: string; emoji: string; description: string; earned: boolean; earned_at: string | null; progress: number; target: number; reward_item: string }
+export interface FortuneResult extends BondFortune { first_today: boolean; affinity_up: boolean; mood?: string; message: string }
+export interface BondMoment { kind: "up" | "down"; reason: string; at: string; channel: string; changed: boolean }
+export interface BondLetter { level: string; at: string; sent: boolean; text: string }
+
+export interface BondState {
+  title: string;
+  speechStyle: string;
+  initiative: number;
+  initiativeText: string;
+  daysTogether: number;
+  firstDay: string | null;
+  activeDays: number;
+  streak: number;
+  bestStreak: number;
+  nextStreakMilestone: number | null;
+  trend: string;
+  mood: BondMood;
+  fortune: BondFortune | null;
+  weekly: WeeklyView;
+  badges: BondBadge[];
+  moments: BondMoment[];
+  letters: BondLetter[];
+  daily: Array<{ day: string; gain: number }>;
+}
 
 export interface PerksState {
   enabled: boolean;
@@ -78,12 +109,22 @@ export interface PerksState {
   interactions: Array<{ word: string; key: string; unlocked: boolean; needLevel: string | null; count: number }>;
   levelHistory: Array<{ level: string; at: string; up: boolean }>;
   itemLog: Array<{ key: string; action: string; at: string; count?: number; cost?: number; note?: string }>;
+  bond: BondState;
   /** 只有管理台返回 */
   points?: number;
   lastPrivate?: string | null;
 }
 
-export interface QuestSettle { claimed: string[]; affinity: number; bonus_item: string | null }
+export interface BondSettle {
+  streak?: { days: number };
+  streak_affinity?: number;
+  weekly?: string[];
+  weekly_bonus_item?: string;
+  anniversary?: { days: number; item: string };
+  badges?: string[];
+  items?: Record<string, number>;
+}
+export interface QuestSettle { claimed: string[]; affinity: number; bonus_item: string | null; bond?: BondSettle }
 export interface ActionResponse<R = Record<string, unknown>> { result: R; quests: QuestSettle; state: PerksState }
 
 // ── 策略 ──────────────────────────────────────────────────────────────
@@ -92,6 +133,10 @@ export interface LevelPerksPolicy {
   level: string;
   tone: string;
   behavior: string;
+  title: string;
+  speech_style: string;
+  initiative: number;
+  private_task_bonus: number;
   private_turns_pct: number;
   private_web_bonus: number;
   private_sticker_bonus: number;
@@ -107,7 +152,7 @@ export interface LevelPerksPolicy {
   levelup_items: Record<string, number>;
 }
 
-export interface GiftPolicy { key: string; name: string; emoji: string; price: number; affinity: number; enabled: boolean }
+export interface GiftPolicy { key: string; name: string; emoji: string; price: number; affinity: number; enabled: boolean; min_level: string }
 export interface ShopPolicy { key: string; name: string; price: number; description: string; min_level: string; max_hold: number; enabled: boolean }
 
 export interface AffinityPolicy {
@@ -122,6 +167,15 @@ export interface AffinityPolicy {
   care: { idle_days: number; give_up_days: number };
   interact_affinity_daily_cap: number;
   announce_levelup: boolean;
+  version: number;
+  moments: { enabled: boolean; daily_up: number; daily_down: number; allow_down: boolean; keep_level: boolean; cooldown_minutes: number };
+  streak: { enabled: boolean; milestones: Record<string, number>; milestone_items: Record<string, string> };
+  weekly: { enabled: boolean; per_week: number; reward_affinity: number; all_done_item: string };
+  fortune: { enabled: boolean; reward_affinity: number };
+  anniversary: { enabled: boolean; items: Record<string, string> };
+  badges_enabled: boolean;
+  bot_mood_enabled: boolean;
+  prompt_bond_enabled: boolean;
 }
 
 export interface PolicyMeta {
@@ -130,6 +184,11 @@ export interface PolicyMeta {
   items: Array<{ key: string; description: string }>;
   bonusFields: Array<{ key: keyof LevelPerksPolicy; label: string }>;
   quests: Array<{ key: string; title: string; target: number }>;
+  badges: Array<{ key: string; name: string; emoji: string; description: string; rewardItem: string }>;
+  weekly: Array<{ key: string; title: string; target: number }>;
+  moods: BondMood[];
+  fortuneTiers: string[];
+  initiative: Array<{ value: number; text: string }>;
 }
 
 export interface PolicyPayload { policy: AffinityPolicy; meta: PolicyMeta; defaults?: AffinityPolicy }
@@ -149,4 +208,13 @@ export interface AffinityStats {
   questsDoneToday: number;
   activeShields: number;
   favoriteToday: string | null;
+  moodToday: string;
+  bond: {
+    badges: Array<{ key: string; name: string; emoji: string; count: number }>;
+    moments30d: { up: number; down: number };
+    streakTop: Array<{ userId: string; nickname: string | null; days: number }>;
+    fortunesToday: number;
+    lettersSent: number;
+    weeklyDoneThisWeek: number;
+  };
 }

@@ -187,6 +187,8 @@ class Facts:
     busy: bool = False
     # 好感等级还没解锁“主动提议”（affinity_policy 的 offers 解锁项）
     affinity_locked: bool = False
+    # 好感等级的主动性（affinity_bond.offer_interval_factor）：越熟问得越勤；他自己设过间隔时不用
+    interval_factor: float = 1.0
 
     @property
     def last_chat_at(self) -> datetime | None:
@@ -243,8 +245,11 @@ def next_due(record: dict[str, Any], settings: OfferSettings, facts: Facts, user
         return None, 0, interval_hours(record, settings)
     anchor = max(moments)
     missed = unanswered(data, facts.last_user_at)
-    hours = interval_hours(record, settings) * (float(settings.backoff_factor) ** missed)
-    hours = min(hours, max(float(settings.max_backoff_hours), interval_hours(record, settings)))
+    base = interval_hours(record, settings)
+    if data["prefs"].get("interval_hours") is None and facts.interval_factor > 0:
+        base = max(base * float(facts.interval_factor), float(settings.user_min_interval_hours))
+    hours = base * (float(settings.backoff_factor) ** missed)
+    hours = min(hours, max(float(settings.max_backoff_hours), base))
     due = anchor + timedelta(hours=hours, minutes=jitter_minutes(user_id, anchor, int(settings.jitter_minutes)))
     return due, missed, hours
 

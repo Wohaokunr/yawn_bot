@@ -10,7 +10,8 @@
 
 个人（``/me``）：
 - ``GET /me/affinity/perks``：我的权益、下一级解锁、钱包、背包、任务、礼物与商店；
-- ``POST /me/affinity/gift|buy|use|interact|quests/claim``、``PUT /me/affinity/nickname``。
+- ``POST /me/affinity/gift|buy|use|interact|fortune|quests/claim``、``PUT /me/affinity/nickname``。
+- 3.0 起 ``perks`` 里多一份 ``bond``（头衔、认识天数、连续来往、心情、缘分、周任务、徽章、心动瞬间、来信）。
 
 业务逻辑全在 ``affinity_perks`` / ``affinity_economy`` / ``affinity_commands``；这里只做
 校验、错误码映射和提交。``EconomyError``：积分不够 409、次数/持有上限 429、等级不够 403、
@@ -29,6 +30,7 @@ from pydantic.alias_generators import to_camel
 from sqlalchemy import func, select
 
 from .. import affinity
+from .. import affinity_bond as bond
 from .. import affinity_economy as economy
 from .. import affinity_perks as perks
 from .. import affinity_store as store
@@ -91,6 +93,7 @@ def policy_meta() -> dict[str, Any]:
         "items": [{"key": key, "description": desc} for key, desc in ITEM_EFFECTS.items()],
         "bonusFields": [{"key": key, "label": label} for key, label in perks.BONUS_FIELDS.items()],
         "quests": [{"key": kind.key, "title": kind.title, "target": kind.target} for kind in perks.QUEST_KINDS],
+        **bond.bond_meta(),
     }
 
 
@@ -102,7 +105,12 @@ async def perks_payload(db: Any, user_id: int, *, now: datetime, admin: bool = F
     level = affinity.level_for(points)
     wallet = await economy.wallet(db, user_id)
 
+    user = await db.get(BotUser, user_id)
+    first_seen = getattr(user, "first_interaction_at", None) if user is not None else None
+
     def read(rec: dict[str, Any]) -> dict[str, Any]:
+        bond.backfill_first_day(rec, first_seen)
+        bond.ensure_weekly(rec, user_id, now, pol)
         return perks.quests_view(rec, user_id, now, pol)
 
     quests = store.update(user_id, read)
@@ -136,6 +144,8 @@ async def perks_payload(db: Any, user_id: int, *, now: datetime, admin: bool = F
                     "price": gift.price,
                     "finalPrice": economy.price_after_discount(gift.price, current.shop_discount_pct),
                     "affinity": gift.affinity,
+                    "minLevel": gift.min_level,
+                    "unlocked": level.index >= pol.level_index(gift.min_level),
                 }
                 for gift in pol.gifts
                 if gift.enabled
@@ -159,11 +169,37 @@ async def perks_payload(db: Any, user_id: int, *, now: datetime, admin: bool = F
         ],
         "levelHistory": list(reversed(record.get("levels") or []))[:20],
         "itemLog": list(reversed(record.get("item_log") or []))[:20],
+        "bond": _camel_bond(bond.bond_payload(user_id, points, record, now, pol)),
     }
     if admin:
         payload["points"] = points
         payload["lastPrivate"] = record.get("last_private") or None
     return payload
+
+
+def _camel_bond(info: dict[str, Any]) -> dict[str, Any]:
+    """羁绊视图转成前端习惯的驼峰键（嵌套的周任务/徽章保持后端字段名，前端类型里照写）。"""
+
+    return {
+        "title": info["title"],
+        "speechStyle": info["speech_style"],
+        "initiative": info["initiative"],
+        "initiativeText": info["initiative_text"],
+        "daysTogether": info["days_together"],
+        "firstDay": info["first_day"],
+        "activeDays": info["active_days"],
+        "streak": info["streak"],
+        "bestStreak": info["best_streak"],
+        "nextStreakMilestone": info["next_streak_milestone"],
+        "trend": info["trend"],
+        "mood": info["mood"],
+        "fortune": info["fortune"],
+        "weekly": info["weekly"],
+        "badges": info["badges"],
+        "moments": info["moments"],
+        "letters": info["letters"],
+        "daily": info["daily"],
+    }
 
 
 # ── 管理台：策略 ────────────────────────────────────────────────────
@@ -199,7 +235,7 @@ STATS_STORE_SCAN = 3000
 
 
 @router.get("/affinity/stats")
-async def get_stats(_session: AdminReadSession) -> dict[str, Any]:
+async def get_stats(_session: AdminReadSession) -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
     now = _now()
     since = now.date() - timedelta(days=29)
     async with get_session() as db:
@@ -240,8 +276,32 @@ async def get_stats(_session: AdminReadSession) -> dict[str, Any]:
     quests_done_today = 0
     shields = 0
     today = now.date().isoformat()
+    badge_counts: dict[str, int] = {}
+    moments_up = moments_down = 0
+    streaks: list[tuple[int, int]] = []
+    fortunes_today = 0
+    letters_sent = 0
+    week = bond.week_key(now.date())
+    weekly_done = 0
     for uid in store.known_user_ids()[:STATS_STORE_SCAN]:
         record = store.load(uid)
+        for key in (record.get("badges") or {}):
+            badge_counts[key] = badge_counts.get(key, 0) + 1
+        for row in record.get("moments") or []:
+            if str(row.get("at") or "")[:10] >= since.isoformat():
+                if row.get("kind") == "up":
+                    moments_up += 1
+                else:
+                    moments_down += 1
+        live = bond.live_streak(record, now.date())
+        if live >= 2:  # noqa: PLR2004
+            streaks.append((uid, live))
+        if (record.get("fortune") or {}).get("day") == today:
+            fortunes_today += 1
+        letters_sent += sum(1 for row in record.get("letters") or [] if row.get("sent"))
+        weekly = record.get("weekly") or {}
+        if weekly.get("week") == week:
+            weekly_done += sum(1 for item in weekly.get("items") or [] if item.get("done"))
         for key, count in (record.get("gift_totals") or {}).items():
             gift_totals[key] = gift_totals.get(key, 0) + int(count or 0)
         for key, count in (record.get("inventory") or {}).items():
@@ -253,6 +313,7 @@ async def get_stats(_session: AdminReadSession) -> dict[str, Any]:
         if str(record.get("shield_until") or "") >= today:
             shields += 1
     pol = load_policy()
+    names = {int(uid): nick for uid, nick, _points in rows}
     return ok(
         {
             "available": available,
@@ -279,6 +340,18 @@ async def get_stats(_session: AdminReadSession) -> dict[str, Any]:
             "questsDoneToday": quests_done_today,
             "activeShields": shields,
             "favoriteToday": (fav.name if (fav := economy.favorite_gift(now, pol)) else None),
+            "moodToday": bond.bot_mood(now).label,
+            "bond": {
+                "badges": [
+                    {"key": b.key, "name": b.name, "emoji": b.emoji, "count": badge_counts.get(b.key, 0)}
+                    for b in bond.BADGES
+                ],
+                "moments30d": {"up": moments_up, "down": moments_down},
+                "streakTop": [{"userId": str(uid), "nickname": names.get(uid), "days": days} for uid, days in sorted(streaks, key=lambda kv: -kv[1])[:10]],
+                "fortunesToday": fortunes_today,
+                "lettersSent": letters_sent,
+                "weeklyDoneThisWeek": weekly_done,
+            },
         }
     )
 
@@ -481,6 +554,22 @@ async def my_nickname(body: NicknameBody, session: UserWriteSession) -> dict[str
         if not done:
             raise economy.EconomyError(text, code="level")
         return {"done": True, "message": text}
+
+    return await _me_write(user_id, run)
+
+
+@me_router.post("/affinity/fortune")
+async def my_fortune(session: UserWriteSession) -> dict[str, Any]:
+    """抽今日缘分（每天第一次抽涨一点好感，再抽返回同一个结果）。"""
+
+    user_id = _uid(session)
+
+    async def run(db: Any, now: datetime) -> dict[str, Any]:
+        try:
+            result = await bond.draw_fortune(db, user_id, now=now)
+        except bond.BondError as error:
+            raise economy.EconomyError(str(error), code="disabled") from error
+        return {**result, "message": bond.format_fortune(result)}
 
     return await _me_write(user_id, run)
 

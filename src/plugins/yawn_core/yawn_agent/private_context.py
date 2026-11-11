@@ -763,12 +763,32 @@ async def last_chat(session: Any, user_id: int, now: datetime) -> dict[str, Any]
 
 
 def _affinity_extras(user_id: int, points: int, now: datetime) -> dict[str, Any]:
-    """好感玩法字段：专属称呼、这一级能做到什么程度、刚升级、今天收到的礼物（只有词语）。"""
+    """好感玩法字段：专属称呼、这一级能做到什么程度、刚升级、今天收到的礼物，
+    加上只随等级变的头衔/说话风格/主动性（只有词语，进长期资料）。"""
 
     try:
+        from ..affinity_bond import stable_view
         from ..affinity_perks import speaker_view
 
-        return speaker_view(user_id, points, now, channel="private")
+        view = speaker_view(user_id, points, now, channel="private", include_bond=False)
+        view.update(stable_view(points))
+    except Exception:  # noqa: BLE001
+        return {}
+    return view
+
+
+def _affinity_today(user_id: int, points: int, now: datetime, first_seen: datetime | None) -> dict[str, Any]:
+    """每天都可能变的羁绊字段（心情、想念、连续来往、纪念日、缘分……）：放本轮资料，不进长期资料。"""
+
+    try:
+        from .. import affinity_store
+        from ..affinity_bond import backfill_first_day, volatile_view
+        from ..affinity_policy import load_policy
+
+        if first_seen is not None and affinity_store.exists(user_id):
+            affinity_store.update(user_id, lambda rec: backfill_first_day(rec, first_seen))
+        record = affinity_store.load(user_id) if affinity_store.exists(user_id) else affinity_store.empty_record()
+        return volatile_view(user_id, points, record, now, load_policy())
     except Exception:  # noqa: BLE001
         return {}
 
@@ -840,6 +860,9 @@ async def build_private_context(
     }
     if user is not None and user.first_interaction_at:
         payload["user"]["known_since"] = f"{user.first_interaction_at:%Y-%m-%d}"
+    today_bond = _affinity_today(user_id, snap.points, now, user.first_interaction_at if user is not None else None)
+    if today_bond:
+        payload["relationship_today"] = today_bond
     if statuses:
         best = max(statuses, key=lambda item: item.streak_days)
         payload["checkin"] = {

@@ -1,11 +1,15 @@
 {
  "policy": {
+  "version": 3,
   "enabled": true,
   "levels": [
    {
     "level": "陌生",
     "tone": "还不太熟，礼貌友好即可",
     "behavior": "先礼貌友好，别开过头的玩笑，也别装熟",
+    "title": "萍水相逢",
+    "speech_style": "客气、简短，少用表情，不开对方的玩笑",
+    "initiative": 0,
     "private_turns_pct": 0,
     "private_web_bonus": 0,
     "private_sticker_bonus": 0,
@@ -14,6 +18,7 @@
     "sticker_collect_bonus": 0,
     "persona_edit_bonus": 0,
     "memory_bonus": 0,
+    "private_task_bonus": 0,
     "checkin_points_pct": 0,
     "gift_daily": 3,
     "shop_discount_pct": 0,
@@ -26,6 +31,9 @@
     "level": "面熟",
     "tone": "见过几次，可以随意一点",
     "behavior": "可以随意一点，偶尔接个梗",
+    "title": "点头之交",
+    "speech_style": "放松一点，可以带个表情，玩笑点到为止",
+    "initiative": 1,
     "private_turns_pct": 10,
     "private_web_bonus": 1,
     "private_sticker_bonus": 2,
@@ -34,6 +42,7 @@
     "sticker_collect_bonus": 2,
     "persona_edit_bonus": 0,
     "memory_bonus": 0,
+    "private_task_bonus": 0,
     "checkin_points_pct": 5,
     "gift_daily": 4,
     "shop_discount_pct": 0,
@@ -51,6 +60,9 @@
     "level": "熟人",
     "tone": "比较熟了，可以开开玩笑",
     "behavior": "可以开玩笑、吐槽，记得他说过的事并自然提起",
+    "title": "聊得来",
+    "speech_style": "像同学之间聊天，可以吐槽、接梗，偶尔用他的口头禅",
+    "initiative": 1,
     "private_turns_pct": 25,
     "private_web_bonus": 2,
     "private_sticker_bonus": 4,
@@ -59,6 +71,7 @@
     "sticker_collect_bonus": 4,
     "persona_edit_bonus": 2,
     "memory_bonus": 2,
+    "private_task_bonus": 1,
     "checkin_points_pct": 10,
     "gift_daily": 5,
     "shop_discount_pct": 5,
@@ -79,6 +92,9 @@
     "level": "朋友",
     "tone": "是朋友，说话可以亲近自然",
     "behavior": "像朋友一样说话，会关心他的近况，帮忙时更上心",
+    "title": "知心朋友",
+    "speech_style": "亲近自然，会分享自己的小事，帮忙时多想一步",
+    "initiative": 2,
     "private_turns_pct": 50,
     "private_web_bonus": 4,
     "private_sticker_bonus": 6,
@@ -87,6 +103,7 @@
     "sticker_collect_bonus": 6,
     "persona_edit_bonus": 4,
     "memory_bonus": 4,
+    "private_task_bonus": 2,
     "checkin_points_pct": 15,
     "gift_daily": 6,
     "shop_discount_pct": 10,
@@ -98,7 +115,8 @@
      "offers",
      "nickname",
      "care",
-     "levelup_gift"
+     "levelup_gift",
+     "letter"
     ],
     "levelup_items": {
      "repair_card": 1,
@@ -109,6 +127,9 @@
     "level": "好朋友",
     "tone": "关系很好，可以更亲昵、多关心对方",
     "behavior": "可以更亲昵、偶尔撒娇，翻翻你们的旧梗，他心情不好时多陪陪",
+    "title": "无话不谈",
+    "speech_style": "亲昵随意，可以撒娇、互损、用你们的旧梗和昵称",
+    "initiative": 3,
     "private_turns_pct": 75,
     "private_web_bonus": 6,
     "private_sticker_bonus": 8,
@@ -117,6 +138,7 @@
     "sticker_collect_bonus": 8,
     "persona_edit_bonus": 6,
     "memory_bonus": 6,
+    "private_task_bonus": 3,
     "checkin_points_pct": 20,
     "gift_daily": 8,
     "shop_discount_pct": 15,
@@ -129,7 +151,9 @@
      "nickname",
      "offers",
      "care",
-     "levelup_gift"
+     "levelup_gift",
+     "letter",
+     "return_gift"
     ],
     "levelup_items": {
      "shield": 1,
@@ -141,6 +165,9 @@
     "level": "挚友",
     "tone": "非常亲近的老朋友，像老友一样相处",
     "behavior": "像多年老友一样相处，彼此都很了解，有默契，说话不用客套",
+    "title": "灵魂搭子",
+    "speech_style": "老友的默契：话可以很短、不用客套，懂他没说出口的意思",
+    "initiative": 3,
     "private_turns_pct": 100,
     "private_web_bonus": 10,
     "private_sticker_bonus": 10,
@@ -149,6 +176,7 @@
     "sticker_collect_bonus": 10,
     "persona_edit_bonus": 10,
     "memory_bonus": 8,
+    "private_task_bonus": 5,
     "checkin_points_pct": 30,
     "gift_daily": 10,
     "shop_discount_pct": 20,
@@ -161,7 +189,9 @@
      "nickname",
      "offers",
      "care",
-     "levelup_gift"
+     "levelup_gift",
+     "letter",
+     "return_gift"
     ],
     "levelup_items": {
      "shield": 2,
@@ -177,7 +207,8 @@
     "emoji": "🍬",
     "price": 10,
     "affinity": 1,
-    "enabled": true
+    "enabled": true,
+    "min_level": "陌生"
    },
    {
     "key": "milk_tea",
@@ -185,7 +216,8 @@
     "emoji": "🧋",
     "price": 30,
     "affinity": 2,
-    "enabled": true
+    "enabled": true,
+    "min_level": "陌生"
    },
    {
     "key": "flower",
@@ -193,7 +225,8 @@
     "emoji": "💐",
     "price": 60,
     "affinity": 3,
-    "enabled": true
+    "enabled": true,
+    "min_level": "陌生"
    },
    {
     "key": "cake",
@@ -201,7 +234,8 @@
     "emoji": "🍰",
     "price": 120,
     "affinity": 5,
-    "enabled": true
+    "enabled": true,
+    "min_level": "陌生"
    },
    {
     "key": "star",
@@ -209,7 +243,44 @@
     "emoji": "🌟",
     "price": 300,
     "affinity": 10,
-    "enabled": true
+    "enabled": true,
+    "min_level": "陌生"
+   },
+   {
+    "key": "fish",
+    "name": "小鱼干",
+    "emoji": "🐟",
+    "price": 15,
+    "affinity": 1,
+    "enabled": true,
+    "min_level": "陌生"
+   },
+   {
+    "key": "letter",
+    "name": "手写信",
+    "emoji": "💌",
+    "price": 80,
+    "affinity": 4,
+    "enabled": true,
+    "min_level": "熟人"
+   },
+   {
+    "key": "music_box",
+    "name": "音乐盒",
+    "emoji": "🎶",
+    "price": 200,
+    "affinity": 8,
+    "enabled": true,
+    "min_level": "朋友"
+   },
+   {
+    "key": "meteor",
+    "name": "流星",
+    "emoji": "🌠",
+    "price": 500,
+    "affinity": 15,
+    "enabled": true,
+    "min_level": "好朋友"
    }
   ],
   "gift_affinity_daily_cap": 10,
@@ -250,6 +321,24 @@
     "min_level": "陌生",
     "max_hold": 5,
     "enabled": true
+   },
+   {
+    "key": "mood_candy",
+    "name": "心情糖",
+    "price": 25,
+    "description": "心情糖：哄 Bot 开心，今天它对你的心情变成“被你哄得很开心”",
+    "min_level": "陌生",
+    "max_hold": 5,
+    "enabled": true
+   },
+   {
+    "key": "mystery_box",
+    "name": "神秘礼盒",
+    "price": 70,
+    "description": "神秘礼盒：打开随机得到一件其他道具",
+    "min_level": "熟人",
+    "max_hold": 3,
+    "enabled": true
    }
   ],
   "quests": {
@@ -269,7 +358,54 @@
    "give_up_days": 45
   },
   "interact_affinity_daily_cap": 3,
-  "announce_levelup": true
+  "announce_levelup": true,
+  "moments": {
+   "enabled": true,
+   "daily_up": 3,
+   "daily_down": 2,
+   "allow_down": true,
+   "keep_level": true,
+   "cooldown_minutes": 10
+  },
+  "streak": {
+   "enabled": true,
+   "milestones": {
+    "3": 1,
+    "7": 3,
+    "14": 4,
+    "30": 8,
+    "60": 10,
+    "100": 15
+   },
+   "milestone_items": {
+    "7": "lucky_card",
+    "30": "shield",
+    "100": "mystery_box"
+   }
+  },
+  "weekly": {
+   "enabled": true,
+   "per_week": 3,
+   "reward_affinity": 5,
+   "all_done_item": "shield"
+  },
+  "fortune": {
+   "enabled": true,
+   "reward_affinity": 1
+  },
+  "anniversary": {
+   "enabled": true,
+   "items": {
+    "7": "lucky_card",
+    "30": "repair_card",
+    "100": "shield",
+    "200": "mystery_box",
+    "365": "mystery_box"
+   }
+  },
+  "badges_enabled": true,
+  "bot_mood_enabled": true,
+  "prompt_bond_enabled": true
  },
  "meta": {
   "levels": [
@@ -343,6 +479,16 @@
     "key": "levelup_gift",
     "label": "升级礼包",
     "description": "每升一级送一份道具礼包"
+   },
+   {
+    "key": "letter",
+    "label": "Bot 来信",
+    "description": "升到这一级时，Bot 会在私聊里给你写一封信"
+   },
+   {
+    "key": "return_gift",
+    "label": "回礼",
+    "description": "你送礼时，Bot 每周会回赠一份小道具"
    }
   ],
   "items": [
@@ -361,6 +507,14 @@
    {
     "key": "quest_refresh",
     "description": "任务刷新券：把今天没完成的任务换一批"
+   },
+   {
+    "key": "mood_candy",
+    "description": "心情糖：哄 Bot 开心，今天它对你的心情变成“被你哄得很开心”"
+   },
+   {
+    "key": "mystery_box",
+    "description": "神秘礼盒：打开随机得到一件其他道具"
    }
   ],
   "bonusFields": [
@@ -397,6 +551,10 @@
     "label": "爱好/喜好这类记忆每类多记几样"
    },
    {
+    "key": "private_task_bonus",
+    "label": "私聊后台小助手每天多派几件活"
+   },
+   {
     "key": "checkin_points_pct",
     "label": "签到积分"
    }
@@ -431,6 +589,240 @@
     "key": "interact",
     "title": "和我互动一次（/击掌 等）",
     "target": 1
+   }
+  ],
+  "badges": [
+   {
+    "key": "first_gift",
+    "name": "初次心意",
+    "emoji": "🎁",
+    "description": "第一次送 Bot 礼物",
+    "rewardItem": ""
+   },
+   {
+    "key": "gift_lover",
+    "name": "礼物达人",
+    "emoji": "🎀",
+    "description": "累计送出 30 份礼物",
+    "rewardItem": "mood_candy"
+   },
+   {
+    "key": "favorite_hit",
+    "name": "懂我心意",
+    "emoji": "💝",
+    "description": "送中今日心仪礼物 5 次",
+    "rewardItem": "lucky_card"
+   },
+   {
+    "key": "interact_20",
+    "name": "形影不离",
+    "emoji": "🤝",
+    "description": "互动 20 次",
+    "rewardItem": ""
+   },
+   {
+    "key": "interact_all",
+    "name": "五连互动",
+    "emoji": "🌈",
+    "description": "击掌、摸头、抱抱、贴贴、举高高都做过",
+    "rewardItem": "mood_candy"
+   },
+   {
+    "key": "streak_7",
+    "name": "一周不断",
+    "emoji": "🔥",
+    "description": "连续 7 天来找 Bot",
+    "rewardItem": ""
+   },
+   {
+    "key": "streak_30",
+    "name": "月度常客",
+    "emoji": "🌟",
+    "description": "连续 30 天来找 Bot",
+    "rewardItem": "shield"
+   },
+   {
+    "key": "streak_100",
+    "name": "百日相伴",
+    "emoji": "👑",
+    "description": "连续 100 天来找 Bot",
+    "rewardItem": "mystery_box"
+   },
+   {
+    "key": "fortune_7",
+    "name": "缘分常客",
+    "emoji": "🔮",
+    "description": "抽了 7 次今日缘分",
+    "rewardItem": ""
+   },
+   {
+    "key": "daikichi",
+    "name": "天选之人",
+    "emoji": "🍀",
+    "description": "抽到过大吉",
+    "rewardItem": "lucky_card"
+   },
+   {
+    "key": "moment_5",
+    "name": "心动收藏家",
+    "emoji": "💓",
+    "description": "被 Bot 记下 5 个心动瞬间",
+    "rewardItem": ""
+   },
+   {
+    "key": "weekly_1",
+    "name": "周常达人",
+    "emoji": "📅",
+    "description": "完成一整周的周任务",
+    "rewardItem": ""
+   },
+   {
+    "key": "nickname",
+    "name": "专属称呼",
+    "emoji": "🏷️",
+    "description": "让 Bot 用你定的称呼叫你",
+    "rewardItem": ""
+   },
+   {
+    "key": "letter",
+    "name": "收到来信",
+    "emoji": "💌",
+    "description": "收到 Bot 写的信",
+    "rewardItem": ""
+   },
+   {
+    "key": "friend",
+    "name": "成为朋友",
+    "emoji": "🫶",
+    "description": "和 Bot 的关系到了「朋友」",
+    "rewardItem": ""
+   },
+   {
+    "key": "best",
+    "name": "挚友",
+    "emoji": "💞",
+    "description": "和 Bot 的关系到了「挚友」",
+    "rewardItem": "mystery_box"
+   },
+   {
+    "key": "days_100",
+    "name": "相识百日",
+    "emoji": "🗓️",
+    "description": "认识 Bot 满 100 天",
+    "rewardItem": ""
+   },
+   {
+    "key": "active_50",
+    "name": "来往 50 天",
+    "emoji": "✨",
+    "description": "累计有 50 天来找过 Bot",
+    "rewardItem": ""
+   }
+  ],
+  "weekly": [
+   {
+    "key": "w_checkin",
+    "title": "本周签到 4 天",
+    "target": 4
+   },
+   {
+    "key": "w_active",
+    "title": "本周有 5 天来找我",
+    "target": 5
+   },
+   {
+    "key": "w_private",
+    "title": "本周私聊聊 15 轮",
+    "target": 15
+   },
+   {
+    "key": "w_group",
+    "title": "本周在群里找我 8 次",
+    "target": 8
+   },
+   {
+    "key": "w_gift",
+    "title": "本周送我 3 次礼物",
+    "target": 3
+   },
+   {
+    "key": "w_interact",
+    "title": "本周和我互动 6 次",
+    "target": 6
+   },
+   {
+    "key": "w_fortune",
+    "title": "本周抽 3 次今日缘分",
+    "target": 3
+   }
+  ],
+  "moods": [
+   {
+    "key": "energetic",
+    "label": "元气满满",
+    "emoji": "☀️",
+    "hint": "今天精神很好，说话可以更有活力"
+   },
+   {
+    "key": "sleepy",
+    "label": "有点犯困",
+    "emoji": "😪",
+    "hint": "今天有点困，语气慵懒一点也行，但事情照样认真做"
+   },
+   {
+    "key": "happy",
+    "label": "心情超好",
+    "emoji": "😆",
+    "hint": "今天心情很好，愿意多聊几句"
+   },
+   {
+    "key": "snacky",
+    "label": "有点嘴馋",
+    "emoji": "🍡",
+    "hint": "今天有点馋，聊到吃的会来劲"
+   },
+   {
+    "key": "thoughtful",
+    "label": "若有所思",
+    "emoji": "🌙",
+    "hint": "今天有点安静，适合认真聊聊天"
+   },
+   {
+    "key": "playful",
+    "label": "想恶作剧",
+    "emoji": "😜",
+    "hint": "今天有点皮，可以多开点玩笑（照顾分寸）"
+   },
+   {
+    "key": "clingy",
+    "label": "想被陪",
+    "emoji": "🥺",
+    "hint": "今天有点想要人陪，熟人来了会格外开心"
+   }
+  ],
+  "fortuneTiers": [
+   "大吉",
+   "中吉",
+   "小吉",
+   "吉",
+   "末吉"
+  ],
+  "initiative": [
+   {
+    "value": 0,
+    "text": "别主动找他搭话，等他先开口"
+   },
+   {
+    "value": 1,
+    "text": "可以接他的话，但别追着聊"
+   },
+   {
+    "value": 2,
+    "text": "可以主动关心他的近况，分享你看到的有趣的事"
+   },
+   {
+    "value": 3,
+    "text": "像老朋友一样，可以主动找他聊、惦记他的事"
    }
   ]
  }

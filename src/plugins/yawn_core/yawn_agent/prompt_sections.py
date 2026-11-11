@@ -277,6 +277,15 @@ SECTIONS: tuple[PromptSection, ...] = (
         tasks=_DP,
     ),
     PromptSection(
+        "core.affinity_guidance",
+        "好感羁绊使用规则",
+        "core",
+        "speaker",
+        default_ref="prompt:_AFFINITY_GUIDANCE",
+        when="成员资料的 bot_bonds 里有头衔/说话风格/心情/来往氛围这些好感 3.0 字段时",
+        tasks=_DP,
+    ),
+    PromptSection(
         "core.shared_fact_guidance",
         "成员共享事实使用规则",
         "core",

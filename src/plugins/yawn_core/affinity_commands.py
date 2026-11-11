@@ -1,4 +1,4 @@
-# ruff: noqa: E501, PLR0913, RUF001, TC002
+# ruff: noqa: ARG001, E501, PLR0911, PLR0913, PLR2004, RUF001, TC002
 """好感玩法命令：查看权益、好感榜、送礼、商店、背包、道具、每日任务、专属称呼、互动动作。
 
 逻辑都在 ``affinity_perks`` / ``affinity_economy``，这里只做事件解析、功能开关与回复。
@@ -19,6 +19,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot_plugin_orm import async_scoped_session
 
 from . import affinity
+from . import affinity_bond as bond
 from . import affinity_economy as economy
 from . import affinity_perks as perks
 from . import affinity_store as store
@@ -44,6 +45,12 @@ COMMAND_GROUP = register_command_group(
             CommandSpec(name="好感任务", aliases=("每日任务",), description="今天的三个小任务，做完自动领好感", feature="checkin"),
             CommandSpec(name="叫我", description="/叫我 小明：让 Bot 用这个称呼叫你（「熟人」解锁）；/叫我 清除", feature="checkin", display_level="advanced"),
             CommandSpec(name="击掌", aliases=("摸头", "抱抱", "贴贴", "举高高"), description="和 Bot 互动，越熟能做的越多", feature="checkin"),
+            CommandSpec(name="今日缘分", aliases=("抽签",), description="每天抽一签：吉凶、宜忌、幸运礼物；第一次抽涨一点好感", feature="checkin"),
+            CommandSpec(name="周任务", description="本周的三个任务，奖励比每日任务更多", feature="checkin"),
+            CommandSpec(name="好感回忆", aliases=("我们的回忆",), description="认识多久、连续来往、Bot 记得的心动瞬间、升级历程", feature="checkin"),
+            CommandSpec(name="羁绊徽章", aliases=("徽章",), description="18 枚羁绊徽章的进度，部分徽章送道具", feature="checkin", display_level="advanced"),
+            CommandSpec(name="来信", description="看看 Bot 写给你的信（到「朋友」起每升一级写一封）", feature="checkin", display_level="advanced"),
+            CommandSpec(name="好感周榜", description="本群这周和 Bot 走得最近的人", feature="checkin", scope="group", display_level="advanced"),
         ),
     )
 )
@@ -51,7 +58,7 @@ COMMAND_GROUP = register_command_group(
 __plugin_meta__ = PluginMetadata(
     name="好感",
     description="好感等级权益、送礼、商店、每日任务与互动",
-    usage="/好感 /好感权益 /好感榜 /送礼 /好感商店 /兑换 /背包 /使用道具 /好感任务 /叫我 /击掌 /摸头 /抱抱 /贴贴 /举高高",
+    usage="/好感 /好感权益 /好感榜 /送礼 /好感商店 /兑换 /背包 /使用道具 /好感任务 /叫我 /击掌 /摸头 /抱抱 /贴贴 /举高高 /今日缘分 /周任务 /好感回忆 /羁绊徽章 /来信 /好感周榜",
     extra={"command_group": COMMAND_GROUP},
 )
 
@@ -86,7 +93,8 @@ def format_overview(snapshot: affinity.AffinitySnapshot, record: dict[str, Any],
     pol = load_policy()
     level = snapshot.level
     current = pol.perks(level.name)
-    lines = [f"💗 和我的关系：{level.name}（{affinity.level_tone(level.name)}）"]
+    title = current.title if pol.enabled and current.title else ""
+    lines = [f"💗 和我的关系：{level.name}" + (f"·{title}" if title else "") + f"（{affinity.level_tone(level.name)}）"]
     if level.next_name:
         lines.append(f"距离「{level.next_name}」还差 {level.to_next(snapshot.points)} 点，今天 +{sum(v for v in snapshot.today.values() if v > 0)}")
     if not pol.enabled:
@@ -115,6 +123,91 @@ def format_overview(snapshot: affinity.AffinitySnapshot, record: dict[str, Any],
     name = perks.nickname_for(record, snapshot.points, pol)
     if name:
         lines.append(f"我会叫你「{name}」")
+    lines.extend(format_bond_lines(snapshot.user_id, snapshot.points, record, now))
+    return "\n".join(lines)
+
+
+def format_bond_lines(user_id: int, points: int, record: dict[str, Any], now: datetime) -> list[str]:
+    """/好感 总览里的羁绊行：认识天数、连续来往、心情、缘分、周任务、徽章。"""
+
+    pol = load_policy()
+    info = bond.bond_payload(user_id, points, record, now, pol)
+    lines: list[str] = []
+    bits = []
+    if info["days_together"]:
+        bits.append(f"认识第 {info['days_together']} 天")
+    if info["streak"] >= 2:
+        bits.append(f"🔥 连续来往 {info['streak']} 天")
+    if info["trend"] in {"升温", "降温"}:
+        bits.append("最近在升温" if info["trend"] == "升温" else "最近来往少了")
+    if bits:
+        lines.append(" · ".join(bits))
+    mood = info["mood"]
+    lines.append(f"我今天的心情：{mood['emoji']}{mood['label']}" + ("" if info["fortune"] else " · 发 /今日缘分 抽一签"))
+    weekly = info["weekly"]
+    if weekly["enabled"] and weekly["items"]:
+        done = sum(1 for q in weekly["items"] if q["done"])
+        lines.append(f"本周任务 {done}/{len(weekly['items'])} · /周任务 看详情")
+    earned = [b for b in info["badges"] if b["earned"]]
+    if earned:
+        lines.append(f"徽章 {len(earned)}/{len(info['badges'])}：" + "".join(b["emoji"] for b in earned[-8:]))
+    return lines
+
+
+def format_memories(user_id: int, points: int, record: dict[str, Any], now: datetime) -> str:
+    """/好感回忆：认识多久、最长连续、心动瞬间、送礼最多的、升级历程、来信。"""
+
+    pol = load_policy()
+    info = bond.bond_payload(user_id, points, record, now, pol)
+    level = affinity.level_for(points)
+    title = pol.perks(level.name).title
+    lines = [f"📖 我们的回忆（{level.name}" + (f"·{title}" if title else "") + "）"]
+    if info["first_day"]:
+        lines.append(f"第一次来往：{info['first_day']}，到今天第 {info['days_together']} 天")
+    lines.append(f"一共有 {info['active_days']} 天来找过我，最长连续 {info['best_streak']} 天" + (f"，现在连续 {info['streak']} 天" if info["streak"] >= 2 else ""))
+    totals = record.get("gift_totals") or {}
+    if totals:
+        key, count = max(totals.items(), key=lambda kv: kv[1])
+        gift = next((g for g in pol.gifts if g.key == key), None)
+        lines.append(f"你送我最多的是 {gift.emoji + gift.name if gift else key}（{count} 份）")
+    ups = [row for row in record.get("levels") or [] if row.get("up")]
+    if ups:
+        lines.append("升级历程：" + " → ".join(f"{row['level']}({str(row.get('at', ''))[:10]})" for row in ups[-5:]))
+    if info["moments"]:
+        lines.append("我记得的瞬间：")
+        for row in info["moments"][:5]:
+            mark = "💓" if row.get("kind") == "up" else "💧"
+            lines.append(f"  {mark} {str(row.get('at', ''))[:10]} {row.get('reason', '')}")
+    sent = [row for row in info["letters"] if row["sent"]]
+    if sent:
+        lines.append(f"我给你写过 {len(sent)} 封信，/来信 可以再看看")
+    return "\n".join(lines)
+
+
+def format_badges(user_id: int, points: int, record: dict[str, Any], now: datetime) -> str:
+    rows = bond.badges_view(record, points, now.date())
+    earned = [r for r in rows if r["earned"]]
+    lines = [f"🏅 羁绊徽章 {len(earned)}/{len(rows)}"]
+    for row in rows:
+        if row["earned"]:
+            lines.append(f"{row['emoji']} {row['name']} ✅ {row['earned_at']}")
+        else:
+            lines.append(f"🔒 {row['name']}：{row['description']}（{row['progress']}/{row['target']}）")
+    return "\n".join(lines)
+
+
+def format_weekly(view: dict[str, Any]) -> str:
+    if not view["enabled"]:
+        return "周任务现在没开"
+    lines = [f"📅 本周任务（到 {view['ends']}）："]
+    for item in view["items"]:
+        mark = "✅" if item["done"] else "⬜"
+        lines.append(f"{mark} {item['title']}（{item['progress']}/{item['target']}）")
+    reward = f"每完成一个好感 +{view['reward_affinity']}" if view["reward_affinity"] else ""
+    if view["all_done_item_name"]:
+        reward += ("，" if reward else "") + f"全部完成送{view['all_done_item_name']}"
+    if reward:
+        lines.append(reward)
     return "\n".join(lines)
 
 
@@ -151,6 +244,8 @@ def format_gift_menu(record: dict[str, Any], points: int, now: datetime) -> str:
             continue
         price = economy.price_after_discount(gift.price, level_perks.shop_discount_pct)
         mark = " ⭐今日心仪，效果翻倍" if fav and fav.key == gift.key else ""
+        if affinity.level_for(points).index < pol.level_index(gift.min_level):
+            mark += f" 🔒「{gift.min_level}」解锁"
         lines.append(f"{gift.emoji}{gift.name}：{price} 积分{mark}")
     lines.append(f"今天还能送 {max(level_perks.gift_daily - economy.gifts_used_today(record, now), 0)} 次；用法：/送礼 奶茶 2")
     return "\n".join(lines)
@@ -196,6 +291,12 @@ use_cmd = on_command("使用道具", priority=_PRIORITY, block=True)
 quest_cmd = on_command("好感任务", aliases={"每日任务"}, priority=_PRIORITY, block=True)
 nickname_cmd = on_command("叫我", priority=_PRIORITY, block=True)
 interact_cmd = on_command("击掌", aliases={"摸头", "抱抱", "贴贴", "举高高"}, priority=_PRIORITY, block=True)
+fortune_cmd = on_command("今日缘分", aliases={"抽签"}, priority=_PRIORITY, block=True)
+weekly_cmd = on_command("周任务", priority=_PRIORITY, block=True)
+memory_cmd = on_command("好感回忆", aliases={"我们的回忆"}, priority=_PRIORITY, block=True)
+badge_cmd = on_command("羁绊徽章", aliases={"徽章"}, priority=_PRIORITY, block=True)
+letter_cmd = on_command("来信", priority=_PRIORITY, block=True)
+week_board_cmd = on_command("好感周榜", priority=_PRIORITY, block=True)
 
 
 @overview_cmd.handle()
@@ -346,6 +447,10 @@ def format_use_result(result: dict[str, Any]) -> str:
         return "🎯 暴击卡生效：今天下一次签到积分翻倍！"
     if key == "quest_refresh":
         return "任务换好啦：" + "、".join(result.get("new_quests") or [])
+    if key == "mood_candy":
+        return "🍬 嗷呜～好甜！今天被你哄得超开心"
+    if key == "mystery_box":
+        return f"🎁 打开神秘礼盒……是一张{result.get('box_item') or '道具'}！"
     return f"用掉了一张{result['item']}"
 
 
@@ -463,6 +568,143 @@ async def _interact(event: MessageEvent, session: async_scoped_session, _perm: N
     await _reply(interact_cmd, event, text)
 
 
+# ── 羁绊 3.0 ────────────────────────────────────────────────────────
+
+
+@fortune_cmd.handle()
+async def _fortune(event: MessageEvent, session: async_scoped_session, _perm: None = require_feature("checkin")) -> None:  # pyright: ignore[reportArgumentType]
+    user_id = int(event.user_id)
+    now = _now()
+    try:
+        result = await bond.draw_fortune(session, user_id, group_id=_group_of(event), now=now)
+        settled = await perks.settle_quests(session, user_id, now=now)
+        await session.commit()
+    except bond.BondError as error:
+        await session.rollback()
+        await _reply(fortune_cmd, event, str(error))
+        return
+    record = store.load(user_id)
+    points = await perks.load_points(session, user_id)
+    name = perks.nickname_for(record, points) or _display_name(event)
+    text = bond.format_fortune(result, name)
+    extra = perks.quest_reply(settled)
+    await _reply(fortune_cmd, event, text + (f"\n{extra}" if extra else ""))
+
+
+@weekly_cmd.handle()
+async def _weekly(event: MessageEvent, session: async_scoped_session, _perm: None = require_feature("checkin")) -> None:  # pyright: ignore[reportArgumentType]
+    user_id = int(event.user_id)
+    now = _now()
+    settled = await perks.settle_quests(session, user_id, now=now)
+    await session.commit()
+
+    def view(record: dict[str, Any]) -> dict[str, Any]:
+        return bond.weekly_view(record, user_id, now)
+
+    text = format_weekly(store.update(user_id, view))
+    extra = perks.quest_reply(settled)
+    await _reply(weekly_cmd, event, text + (f"\n{extra}" if extra else ""))
+
+
+async def _with_first_day(session: Any, user_id: int) -> tuple[int, dict[str, Any]]:
+    """读余额，并用 BotUser.first_interaction_at 补上“认识的第一天”。"""
+
+    from .data_models.bot_user import BotUser
+
+    points = await perks.load_points(session, user_id)
+    user = await session.get(BotUser, user_id)
+    first = getattr(user, "first_interaction_at", None) if user is not None else None
+    if first is not None:
+        store.update(user_id, lambda rec: bond.backfill_first_day(rec, first))
+    return points, store.load(user_id)
+
+
+@memory_cmd.handle()
+async def _memories(event: MessageEvent, session: async_scoped_session, _perm: None = require_feature("checkin")) -> None:  # pyright: ignore[reportArgumentType]
+    user_id = int(event.user_id)
+    points, record = await _with_first_day(session, user_id)
+    await _reply(memory_cmd, event, format_memories(user_id, points, record, _now()))
+
+
+@badge_cmd.handle()
+async def _badges(event: MessageEvent, session: async_scoped_session, _perm: None = require_feature("checkin")) -> None:  # pyright: ignore[reportArgumentType]
+    user_id = int(event.user_id)
+    now = _now()
+    settled = await perks.settle_quests(session, user_id, now=now)
+    await session.commit()
+    points, record = await _with_first_day(session, user_id)
+    text = format_badges(user_id, points, record, now)
+    extra = perks.quest_reply(settled)
+    await _reply(badge_cmd, event, text + (f"\n{extra}" if extra else ""))
+
+
+@letter_cmd.handle()
+async def _letters(event: MessageEvent, _perm: None = require_feature("checkin")) -> None:  # pyright: ignore[reportArgumentType]
+    letters = [row for row in store.load(int(event.user_id)).get("letters") or [] if row.get("sent") and row.get("text")]
+    if not letters:
+        unlock = load_policy().unlock_level("letter")
+        hint = f"等我们熟到「{unlock}」，我会给你写第一封信～" if unlock else "现在还没有信哦"
+        await _reply(letter_cmd, event, hint)
+    latest = letters[-1]
+    more = f"\n（一共 {len(letters)} 封，这是最新的一封）" if len(letters) > 1 else ""
+    await _reply(letter_cmd, event, f"💌 {latest['text']}{more}")
+
+
+async def week_ranking(session: Any, group_id: int, now: datetime, *, limit: int = 10) -> list[tuple[int, int]]:
+    """本群本周（周一起）好感净涨幅排行 (user_id, 涨了多少)；流水表缺失返回空。"""
+
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    from .data_models.affinity_event import AffinityEvent
+
+    monday = now.date() - timedelta(days=now.weekday())
+    try:
+        rows = (
+            await session.execute(
+                select(AffinityEvent.user_id, func.sum(AffinityEvent.delta).label("gain"))
+                .where(AffinityEvent.group_id == group_id, AffinityEvent.day >= monday, AffinityEvent.delta > 0)
+                .group_by(AffinityEvent.user_id)
+                .order_by(func.sum(AffinityEvent.delta).desc(), AffinityEvent.user_id)
+                .limit(max(1, min(limit, 30)))
+            )
+        ).all()
+    except (OperationalError, ProgrammingError):
+        return []
+    return [(int(uid), int(gain or 0)) for uid, gain in rows]
+
+
+@week_board_cmd.handle()
+async def _week_board(event: GroupMessageEvent, session: async_scoped_session, _perm: None = require_feature("checkin")) -> None:  # pyright: ignore[reportArgumentType]
+    from sqlalchemy import select
+
+    from .data_models.bot_user import BotUser
+    from .data_models.user_group import UserGroup
+
+    ranking = await week_ranking(session, int(event.group_id), _now())
+    if not ranking:
+        await week_board_cmd.finish("这周本群还没人和我攒下好感～签到、找我聊天、抽个缘分都算")
+    ids = [uid for uid, _ in ranking]
+    names = {
+        int(uid): str(card or nick or uid)
+        for uid, card, nick in (
+            await session.execute(
+                select(UserGroup.user_id, UserGroup.group_nickname, BotUser.nickname)
+                .join(BotUser, BotUser.user_id == UserGroup.user_id)
+                .where(UserGroup.group_id == int(event.group_id), UserGroup.user_id.in_(ids))
+            )
+        ).all()
+    }
+    medals = ("🥇", "🥈", "🥉")
+    lines = ["📈 本周本群和我走得最近的人："]
+    for index, (uid, gain) in enumerate(ranking):
+        mark = medals[index] if index < len(medals) else f"{index + 1}."
+        lines.append(f"{mark} {names.get(uid, uid)} · 本周 +{gain}")
+    await week_board_cmd.finish("\n".join(lines))
+
+
 # ── 每日衰减 ────────────────────────────────────────────────────────
 
 DECAY_JOB_ID = "yawn_affinity_decay"
@@ -496,11 +738,16 @@ __all__ = [
     "NICKNAME_MAX",
     "clean_nickname",
     "do_interact",
+    "format_badges",
+    "format_bond_lines",
     "format_gift_menu",
+    "format_memories",
     "format_overview",
     "format_perk_table",
     "format_quests",
     "format_shop",
     "format_use_result",
+    "format_weekly",
     "set_nickname",
+    "week_ranking",
 ]
