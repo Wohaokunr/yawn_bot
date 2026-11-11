@@ -156,6 +156,15 @@ _CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
         ),
         frozenset({"steal_sticker", "save_sticker"}),
     ),
+    # 成员自助：没真的从库里拿掉/改名/进名单就说“删掉了/以后不偷你的图了”。
+    "sticker_manage": (
+        re.compile(
+            rf"{_COMPLETION}[^。！？!?\n]{{0,8}}(?:删|移除|拿掉|去掉)[^。！？!?\n]{{0,6}}(?:表情包|表情|这张)"
+            r"|(?:表情包|表情|这张)(?:已经|已)?(?:删掉|删除|移除|拿掉)(?:了|啦)"
+            r"|(?:以后|今后|之后)(?:都|就)?(?:不|不会再?)偷你(?:的|发的)?(?:图|表情包|表情)(?:了|啦)"
+        ),
+        frozenset({"my_stickers"}),
+    ),
 }
 
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]*|\n")

@@ -497,7 +497,7 @@ async def test_webui_upload_edit_review_and_delete() -> None:
     assert patched["name"] == "尬笑" and patched["groups"] == [str(GROUP)]
     pending, _ = library.add_sticker(_png("p"), name="待审", status="pending")
     overview = (await webui_routes.stickers_overview(None))["data"]
-    assert overview["counts"] == {"total": 2, "active": 1, "pending": 1, "disabled": 0, "stolen": 0, "aiLabeled": 0, "unlabeled": 2}
+    assert overview["counts"] == {"total": 2, "active": 1, "pending": 1, "disabled": 0, "stolen": 0, "aiLabeled": 0, "unlabeled": 2, "pinned": 0, "animated": 0, "trash": 0, "blocked": 0, "packs": 0}
     assert "file" not in json.dumps(overview["stickers"], ensure_ascii=False).replace("fileMissing", "")
     done = (await webui_routes.sticker_bulk(webui_routes.BulkBody(ids=[pending.sticker_id, "nope"], action="approve"), None))["data"]
     assert done == {"done": [pending.sticker_id], "missing": ["nope"]}

@@ -4,8 +4,8 @@ import { CloseCircleOutlined, ExperimentOutlined, RobotOutlined, ThunderboltOutl
 import { Alert, App as AntApp, Button, Card, Drawer, Empty, Popconfirm, Progress, Radio, Statistic, Table, Tag, Tooltip } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { previewLabel, stickerImageUrl, stickersApi } from "./stickers-api";
-import { confidenceText, describeJob, describeOrigin, describeSteal, jobPercent, LABEL_MODE_HINTS, LABEL_MODE_LABELS } from "./stickers-meta";
-import type { LabelJobDetail, LabelJobSummary, LabelMode, StickerLabel, StickerOverview } from "./types";
+import { confidenceText, describeJob, describeOrigin, describeSteal, formatEta, jobPercent, LABEL_MODE_HINTS, LABEL_MODE_LABELS } from "./stickers-meta";
+import type { LabelJobDetail, LabelJobSummary, LabelMode, LabelScope, StickerLabel, StickerOverview } from "./types";
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -56,7 +56,7 @@ export function JobBanner({ job, onCancel }: { job: LabelJobSummary; onCancel: (
     <div className="stk-job" role="status" aria-label="批量 AI 标注进度">
       <RobotOutlined spin={job.status === "running"} />
       <div className="stk-job-main">
-        <strong>{describeJob(job)}</strong>
+        <strong>{describeJob(job)}{job.status === "running" && formatEta(job.etaMs) ? `，${formatEta(job.etaMs)}` : ""}</strong>
         <Progress percent={jobPercent(job)} size="small" status={job.status === "running" ? "active" : job.failed ? "exception" : "success"} showInfo={false} />
       </div>
       {job.status === "running" && <Button size="small" icon={<CloseCircleOutlined />} onClick={onCancel}>取消</Button>}
@@ -90,11 +90,13 @@ function VisionCard({ overview }: { overview: StickerOverview }): React.JSX.Elem
   );
 }
 
-function CoverageCard({ overview, onStart, busy }: { overview: StickerOverview; onStart: (scope: "unlabeled" | "all", mode: LabelMode) => void; busy: boolean }): React.JSX.Element {
+function CoverageCard({ overview, onStart, busy }: { overview: StickerOverview; onStart: (scope: LabelScope, mode: LabelMode) => void; busy: boolean }): React.JSX.Element {
   const [mode, setMode] = useState<LabelMode>("fill");
   const { counts } = overview;
   const percent = counts.total ? Math.round((counts.aiLabeled / counts.total) * 100) : 0;
   const disabled = busy || !overview.vision.ready || !overview.settings.aiLabelEnabled;
+  const placeholders = overview.stickers.filter((item) => item.placeholderName).length;
+  const unsure = overview.stickers.filter((item) => item.ai && !item.ai.undone && typeof item.ai.confidence === "number" && item.ai.confidence < 0.5).length;
   return (
     <Card size="small" title={<span><ThunderboltOutlined /> 批量重新标注</span>}>
       <div className="stk-coverage">
@@ -111,6 +113,14 @@ function CoverageCard({ overview, onStart, busy }: { overview: StickerOverview; 
         <Popconfirm title={`让 AI 重新看全部 ${counts.total} 张？`} description={mode === "replace" ? "名字和标签都会换成 AI 起的（可撤销）。" : LABEL_MODE_HINTS[mode]} onConfirm={() => onStart("all", mode)} disabled={disabled || counts.total === 0}>
           <Button disabled={disabled || counts.total === 0}>全部重新标注</Button>
         </Popconfirm>
+      </div>
+      <div className="stk-actions">
+        <Tooltip title="名字还是 IMG_2033 这种文件名的，模型不知道什么时候发">
+          <Button size="small" disabled={disabled || placeholders === 0} onClick={() => onStart("placeholder", mode)}>只标名字是文件名的 {placeholders} 张</Button>
+        </Tooltip>
+        <Tooltip title="上次 AI 自己说没把握（低于 50%）的，再看一遍">
+          <Button size="small" disabled={disabled || unsure === 0} onClick={() => onStart("low_confidence", mode)}>重标 AI 没把握的 {unsure} 张</Button>
+        </Tooltip>
       </div>
     </Card>
   );
@@ -295,9 +305,9 @@ export function AiTab({ overview, onChanged }: { overview: StickerOverview; onCh
   const { message } = AntApp.useApp();
   const { jobs, running, track, cancel } = useLabelJobs(overview.labelJobs, onChanged);
   const [openJob, setOpenJob] = useState<string | null>(null);
-  const start = async (scope: "unlabeled" | "all", mode: LabelMode) => {
+  const start = async (scope: LabelScope, mode: LabelMode, retryOf?: string) => {
     try {
-      const job = await stickersApi.startJob({ scope, mode });
+      const job = await stickersApi.startJob(retryOf ? { scope, mode, retryOf } : { scope, mode });
       track(job);
       message.success(`开始标注 ${job.total} 张`);
     } catch (error) {
@@ -318,7 +328,8 @@ export function AiTab({ overview, onChanged }: { overview: StickerOverview; onCh
             {jobs.map((job) => (
               <li key={job.id}>
                 <span>{describeJob(job)}</span>
-                <span className="sbx-muted">{job.modeLabel} · {new Date(job.createdAt).toLocaleTimeString()}</span>
+                <span className="sbx-muted">{job.scopeLabel ? `${job.scopeLabel} · ` : ""}{job.modeLabel} · {new Date(job.createdAt).toLocaleTimeString()}{job.retried ? ` · ${job.retried} 张重试过` : ""}</span>
+                {job.status !== "running" && job.failed > 0 && <Button size="small" type="link" disabled={Boolean(running)} onClick={() => void start("retry_failed", job.mode, job.id)}>重试失败的 {job.failed} 张</Button>}
                 <Button size="small" type="link" onClick={() => setOpenJob(job.id)}>逐张结果</Button>
               </li>
             ))}

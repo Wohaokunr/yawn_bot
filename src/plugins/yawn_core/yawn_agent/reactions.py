@@ -17,6 +17,7 @@ from .sticker_library import (
     available_stickers,
     get_sticker,
     index_path,
+    is_available,
     library_root,
     sticker_path,
 )
@@ -47,8 +48,11 @@ def search_reactions(
         fields = [
             entry.sticker_id.casefold(),
             entry.name.casefold(),
+            *(alias.casefold() for alias in entry.aliases),
             *(tag.casefold() for tag in entry.tags),
             entry.description.casefold(),
+            # 图上的字（AI 认出来的）也能搜到：“找那张写着我裂开了的”。
+            entry.ocr_text.casefold(),
         ]
         joined = " ".join(fields)
         score = 0
@@ -80,7 +84,7 @@ def resolve_reaction(reaction_id: str, *, group_id: int | None = None) -> Path:
     entry = get_sticker(target)
     if entry is None or not entry.usable:
         raise ValueError("表情包不存在或已从索引移除")
-    if group_id is not None and not entry.available_in(group_id):
+    if group_id is not None and not is_available(entry, group_id):
         raise ValueError("这个表情包没有对本群开放")
     try:
         return sticker_path(entry)

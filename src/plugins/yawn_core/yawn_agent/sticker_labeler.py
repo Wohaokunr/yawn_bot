@@ -31,6 +31,7 @@ from typing import Any
 from .sticker_library import (
     MAX_NAME_CHARS,
     MAX_TAGS,
+    clean_aliases,
     clean_description,
     clean_name,
     clean_tags,
@@ -45,6 +46,9 @@ MAX_KNOWN_NAMES = 60
 MAX_STYLE_CHARS = 300
 KINDS = ("sticker", "photo", "screenshot", "other")
 KIND_LABELS = {"sticker": "表情包", "photo": "照片", "screenshot": "截图", "other": "其他"}
+# 情绪大类：固定的一小组词，给统计、筛选和“这一类缺不缺图”用；标签仍然是自由文字。
+MOODS = ("开心", "难过", "生气", "无语", "惊讶", "尴尬", "害羞", "得意", "委屈", "嘲讽", "疑惑", "可爱", "疲惫", "害怕", "赞同", "拒绝", "问候", "其他")
+RETRY_REASONS = frozenset({"bad_json", "empty_result"})
 
 _LABEL_SYSTEM_PROMPT = (
     "你是 QQ 群表情包管理员，负责给表情包起名字和打标签，方便聊天机器人以后在合适的时候发它。"
@@ -53,6 +57,8 @@ _LABEL_SYSTEM_PROMPT = (
     '{"name": "2~6 个字的名字，说它表达的情绪或梗，像群友叫它那样，如 捂脸笑、狗头、震惊、裂开、无语、贴贴",'
     ' "tags": ["2~4 个情绪/场景标签，每个 2~4 字，如 尴尬、开心、调侃、安慰、晚安"],'
     ' "description": "什么时候适合发，12 个字以内，如 被戳穿又不想承认时",'
+    ' "aliases": ["0~2 个群友可能用的别的叫法，每个 2~6 字，没有就写空数组"],'
+    ' "mood": "情绪大类，从这些里选一个：开心、难过、生气、无语、惊讶、尴尬、害羞、得意、委屈、嘲讽、疑惑、可爱、疲惫、害怕、赞同、拒绝、问候、其他",'
     ' "text": "图上能看清的文字原文，没有就写空字符串",'
     ' "kind": "sticker（表情包/梗图）、photo（普通照片）、screenshot（聊天或网页截图）、other 之一",'
     ' "safe": "true 或 false：含色情、血腥、歧视、真人隐私（证件、聊天记录里的真名电话等）时为 false",'
@@ -85,10 +91,14 @@ class StickerLabel:
     cached: bool = False
     duration_ms: int = 0
     warnings: list[str] = field(default_factory=list)
+    aliases: tuple[str, ...] = ()
+    mood: str = ""
+    retried: bool = False
 
     def public(self) -> dict[str, Any]:
         data = asdict(self)
         data["tags"] = list(self.tags)
+        data["aliases"] = list(self.aliases)
         data["kindLabel"] = KIND_LABELS.get(self.kind, self.kind)
         data["durationMs"] = data.pop("duration_ms")
         return data
@@ -102,6 +112,7 @@ class StickerLabel:
             "kind": self.kind,
             "safe": self.safe,
             "text": self.text,
+            "mood": self.mood,
             "labeled_at": _now_text(),
         }
 
@@ -124,7 +135,7 @@ def _now_text() -> str:
 
 
 _cache: OrderedDict[str, tuple[float, StickerLabel]] = OrderedDict()
-_stats: dict[str, int] = {"requests": 0, "ok": 0, "failed": 0, "cached": 0}
+_stats: dict[str, int] = {"requests": 0, "ok": 0, "failed": 0, "cached": 0, "retried": 0}
 _last_error: dict[str, Any] = {}
 
 
@@ -222,6 +233,10 @@ def parse_label(raw: str | None) -> StickerLabel:
     # 标签里和名字一样的不重复放（菜单里名字本身就能用）。
     tags = [tag for tag in tags if tag.casefold() != name.casefold()][: MAX_TAGS - 2]
     kind = str(data.get("kind") or "sticker").strip().casefold()
+    # 别名：不能和名字、标签重复（标签本来就能写）。
+    taken = {tag.casefold() for tag in tags}
+    aliases = tuple(alias for alias in clean_aliases(data.get("aliases") or [], name=name) if alias.casefold() not in taken and alias.casefold() not in _EMPTY_WORDS)[:2]
+    mood = str(data.get("mood") or "").strip()
     return StickerLabel(
         True,
         name=name,
@@ -232,6 +247,8 @@ def parse_label(raw: str | None) -> StickerLabel:
         safe=_parse_bool(data.get("safe"), True),
         confidence=_parse_confidence(data.get("confidence", 0.5)),
         warnings=warnings,
+        aliases=aliases,
+        mood=mood if mood in MOODS else "",
     )
 
 
@@ -284,6 +301,7 @@ async def label_image(
     use_cache: bool = True,
     background: bool = False,
     timeout: float = LABEL_TIMEOUT_SECONDS,
+    retry: bool = False,
 ) -> StickerLabel:
     """识图模型给一张图起名打标签。失败不抛异常，返回 ``ok=False`` 的结果。"""
 
@@ -300,7 +318,7 @@ async def label_image(
         cached = _cache_get(key)
         if cached is not None:
             _stats["cached"] += 1
-            result = StickerLabel(**{**asdict(cached), "tags": cached.tags, "warnings": list(cached.warnings)})
+            result = StickerLabel(**{**asdict(cached), "tags": cached.tags, "aliases": cached.aliases, "warnings": list(cached.warnings)})
             result.cached = True
             return result
     from ..llm import NO_OUTPUT_LIMIT, complete, resolve_llm_request
@@ -317,19 +335,28 @@ async def label_image(
             ],
         },
     ]
-    try:
-        raw = await complete(  # pyright: ignore[reportArgumentType]
-            messages,  # pyright: ignore[reportArgumentType]
-            task="agent_image",
-            max_tokens=NO_OUTPUT_LIMIT,
-            timeout=timeout,
-            multimodal=True,
-            priority="background" if background else None,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raw = None
-        _last_error.update({"at": _now_text(), "error": type(exc).__name__})
-    label = parse_label(raw) if raw else StickerLabel(False, reason="empty_result")
+
+    async def ask() -> StickerLabel:
+        try:
+            raw = await complete(  # pyright: ignore[reportArgumentType]
+                messages,  # pyright: ignore[reportArgumentType]
+                task="agent_image",
+                max_tokens=NO_OUTPUT_LIMIT,
+                timeout=timeout,
+                multimodal=True,
+                priority="background" if background else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raw = None
+            _last_error.update({"at": _now_text(), "error": type(exc).__name__})
+        return parse_label(raw) if raw else StickerLabel(False, reason="empty_result")
+
+    label = await ask()
+    if retry and not label.ok and label.reason in RETRY_REASONS:
+        # 偶发的空回复 / 输出不是 JSON：原样再问一次（没给出名字、不是图片这类不重试）。
+        _stats["retried"] += 1
+        label = await ask()
+        label.retried = True
     label.duration_ms = int((time.perf_counter() - started) * 1000)
     try:
         label.model = resolve_llm_request("agent_image").model
@@ -378,12 +405,20 @@ def merge_label(
             changes["tags"] = new_tags
     if "description" in fields and label.description and (mode == "replace" or not description) and label.description != description:
         changes["description"] = label.description
+    # 别名跟着名字走：replace 时换成 AI 的，其余只在还没有别名时补。
+    if "name" in fields and label.aliases:
+        existing = [str(item) for item in current.get("aliases") or []]
+        final_name = str(changes.get("name") or name)
+        proposed = list(clean_aliases(list(label.aliases), name=final_name))
+        if proposed and (mode == "replace" or not existing) and proposed != existing:
+            changes["aliases"] = proposed
     return changes
 
 
 __all__ = [
     "KINDS",
     "KIND_LABELS",
+    "MOODS",
     "REASON_TEXT",
     "StickerLabel",
     "label_image",

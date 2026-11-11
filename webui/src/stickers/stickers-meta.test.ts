@@ -15,67 +15,30 @@ import {
   parseTags,
   stickerState,
   validateStickerSettings,
+  cleanAliases,
+  describeOverride,
+  describeQuiet,
+  emptyOverride,
+  formatEta,
+  healthTone,
+  historySeries,
+  isClock,
+  overrideChanges,
+  overrideIsEmpty,
+  parseEnum,
+  sortStickers,
+  sparkPoints,
+  trashDaysLeft,
+  trendText,
 } from "./stickers-meta";
+import { fixtureSettings, fixtureSticker } from "./sticker-fixtures";
 import type { Sticker, StickerSettings } from "./types";
 
 function sticker(overrides: Partial<Sticker>): Sticker {
-  return {
-    id: "s1",
-    name: "狗头",
-    tags: ["调侃"],
-    description: "",
-    enabled: true,
-    status: "active",
-    groups: [],
-    source: "upload",
-    addedBy: null,
-    addedGroup: null,
-    size: 1024,
-    mime: "image/png",
-    createdAt: null,
-    updatedAt: null,
-    uses: 0,
-    lastUsed: null,
-    fileMissing: false,
-    ai: null,
-    origin: null,
-    canUndoLabel: false,
-    placeholderName: false,
-    ...overrides,
-  };
+  return fixtureSticker({ size: 1024, createdAt: null, updatedAt: null, uses: 0, ...overrides });
 }
 
-const settings: StickerSettings = {
-  enabled: true,
-  groupMode: "all",
-  allowedGroups: [],
-  blockedGroups: [],
-  frequency: "normal",
-  groupCooldownSeconds: 60,
-  groupDailyLimit: 60,
-  maxPerMessage: 1,
-  menuSize: 12,
-  allowProactive: true,
-  collectMode: "review",
-  collectAdminOnly: false,
-  memberDailyCollect: 10,
-  maxBytes: 3145728,
-  privateEnabled: true,
-  privateDailyLimit: 20,
-  privateCooldownSeconds: 20,
-  aiLabelEnabled: true,
-  aiLabelOnUpload: true,
-  aiLabelOnCollect: true,
-  aiLabelStyle: "",
-  aiLabelReviewUnsafe: true,
-  stealMode: "auto",
-  stealPhotos: false,
-  groupDailySteals: 5,
-  stealCooldownSeconds: 300,
-  privateStealEnabled: true,
-  privateDailySteals: 5,
-  stealProtectedUsers: [],
-};
+const settings: StickerSettings = fixtureSettings;
 
 describe("stickers-meta", () => {
   it("classifies and filters stickers", () => {
@@ -150,5 +113,102 @@ describe("stickers-meta", () => {
     expect(describeSteal({ ...settings, stealMode: "off" })).toBe("Bot 不会偷图");
     expect(validateStickerSettings({ ...settings, groupDailySteals: -1 })).toHaveProperty("groupDailySteals");
     expect(validateStickerSettings({ ...settings, aiLabelStyle: "x".repeat(400) })).toHaveProperty("aiLabelStyle");
+  });
+
+  it("filters by pack, mood and flags, and searches aliases and notes", () => {
+    const rows = [
+      sticker({ id: "a", name: "狗头", aliases: ["doge"], packs: ["p1"], pinned: true }),
+      sticker({ id: "b", name: "猫", note: "群主专属", animated: true, ai: { model: "m", confidence: 0.9, kind: "sticker", safe: true, text: "", labeledAt: null, undone: false, mood: "开心" } }),
+      sticker({ id: "c", name: "旧图", uses: 4, groups: ["1"], weight: 0, dailyCap: 2, fileMissing: true }),
+    ];
+    const ids = (extra: Parameters<typeof filterStickers>[6], keyword = "") => filterStickers(rows, "all", keyword, null, "any", "any", extra).map((row) => row.id);
+    expect(ids({ pack: "p1" })).toEqual(["a"]);
+    expect(ids({ mood: "开心" })).toEqual(["b"]);
+    expect(ids({ flag: "pinned" })).toEqual(["a"]);
+    expect(ids({ flag: "animated" })).toEqual(["b"]);
+    expect(ids({ flag: "never" })).toEqual(["a", "b"]);
+    expect(ids({ flag: "unpacked" })).toEqual(["b", "c"]);
+    expect(ids({ flag: "scoped" })).toEqual(["c"]);
+    expect(ids({ flag: "silent" })).toEqual(["c"]);
+    expect(ids({ flag: "capped" })).toEqual(["c"]);
+    expect(ids({ flag: "missing" })).toEqual(["c"]);
+    expect(ids({}, "DOGE")).toEqual(["a"]);
+    expect(ids({}, "群主")).toEqual(["b"]);
+  });
+
+  it("sorts without mutating and keeps pinned first by default", () => {
+    const rows = [
+      sticker({ id: "a", name: "乙", uses: 1, createdAt: "2026-10-01 00:00:00", size: 10 }),
+      sticker({ id: "b", name: "甲", uses: 9, createdAt: "2026-10-03 00:00:00", size: 30, pinned: true, lastUsed: "2026-10-05 00:00:00" }),
+      sticker({ id: "c", name: "丙", uses: 5, createdAt: "2026-10-02 00:00:00", size: 20 }),
+    ];
+    const order = (sort: Parameters<typeof sortStickers>[1]) => sortStickers(rows, sort).map((row) => row.id);
+    expect(order("default")).toEqual(["b", "a", "c"]);
+    expect(order("newest")).toEqual(["b", "c", "a"]);
+    expect(order("oldest")).toEqual(["a", "c", "b"]);
+    expect(order("most")).toEqual(["b", "c", "a"]);
+    expect(order("least")).toEqual(["a", "c", "b"]);
+    expect(order("size")).toEqual(["b", "c", "a"]);
+    expect(order("recent")[0]).toBe("b");
+    expect(rows.map((row) => row.id)).toEqual(["a", "b", "c"]);
+    expect(parseEnum("most", ["default", "most"], "default")).toBe("most");
+    expect(parseEnum("nope", ["default", "most"], "default")).toBe("default");
+  });
+
+  it("cleans aliases like the backend", () => {
+    expect(cleanAliases(["狗头", " doge ", "DOGE", "a", "b", "c", "d"], "狗头")).toEqual(["doge", "a", "b", "c"]);
+    expect(cleanAliases(["[坏]", ""], "x")).toEqual(["坏"]);
+  });
+
+  it("describes group overrides and spots empty ones", () => {
+    const blank = emptyOverride();
+    expect(overrideIsEmpty(blank)).toBe(true);
+    expect(describeOverride(blank)).toBe("和全局一样");
+    const changed = { ...blank, enabled: false, frequency: "often" as const, menuSize: 6 };
+    expect(overrideChanges(changed)).toEqual(["frequency", "menuSize"]);
+    expect(describeOverride(changed)).toBe("单独关闭，改了性格、菜单大小");
+    expect(overrideIsEmpty({ ...blank, note: "只有备注" })).toBe(true);
+  });
+
+  it("validates quiet hours, confidence and per-group numbers", () => {
+    expect(validateStickerSettings(settings)).toEqual({});
+    expect(validateStickerSettings({ ...settings, quietStart: "25:00" }).quietStart).toBeTruthy();
+    expect(validateStickerSettings({ ...settings, reviewBelowConfidence: 2 }).reviewBelowConfidence).toBeTruthy();
+    expect(validateStickerSettings({ ...settings, trashDays: 400 }).trashDays).toBeTruthy();
+    expect(validateStickerSettings({ ...settings, groupOverrides: { "123456": { ...emptyOverride(), menuSize: 99 } } }).groupOverrides).toContain("菜单大小");
+    expect(validateStickerSettings({ ...settings, groupOverrides: { abc: emptyOverride() } }).groupOverrides).toContain("群号");
+    expect(isClock("07:30")).toBe(true);
+    expect(isClock("7:30")).toBe(false);
+  });
+
+  it("writes quiet hours, trends and ETA in plain words", () => {
+    expect(describeQuiet(settings)).toBe("没有安静时段");
+    expect(describeQuiet({ quietEnabled: true, quietStart: "23:00", quietEnd: "07:00" })).toBe("23:00 到第二天 07:00 不发表情包");
+    expect(describeQuiet({ quietEnabled: true, quietStart: "08:00", quietEnd: "08:00" })).toBe("全天不发表情包");
+    expect(describeStickerAccess({ ...settings, groupHourlyLimit: 6, quietEnabled: true })).toContain("每小时 6 张");
+    expect(trendText({ recent: 15, previous: 10, changePercent: 50 })).toBe("比上一周期多 50%");
+    expect(trendText({ recent: 5, previous: 10, changePercent: -50 })).toBe("比上一周期少 50%");
+    expect(trendText({ recent: 5, previous: 5, changePercent: 0 })).toBe("和上一周期持平");
+    expect(trendText({ recent: 5, previous: 0, changePercent: null })).toBe("上一周期没有数据");
+    expect(trendText(undefined)).toBe("");
+    expect(formatEta(42000)).toBe("大约还要 42 秒");
+    expect(formatEta(150000)).toBe("大约还要 3 分钟");
+    expect(formatEta(null)).toBe("");
+  });
+
+  it("draws sparklines and reads history series", () => {
+    expect(sparkPoints([])).toBe("");
+    expect(sparkPoints([0, 10], 32)).toBe("0.0,31.0 100.0,1.0");
+    expect(sparkPoints([5], 32)).toBe("0.0,1.0");
+    expect(historySeries([{ day: "d", sent: 3, dropped: 0, collected: 0, stolen: 0, labeled: 0, private_sent: 1 }], "private_sent")).toEqual([1]);
+  });
+
+  it("grades health scores and counts down the trash", () => {
+    expect([healthTone(100), healthTone(70), healthTone(40)]).toEqual(["ok", "warn", "bad"]);
+    const now = new Date("2026-11-11T00:00:00");
+    expect(trashDaysLeft("2026-11-10 00:00:00", 14, now)).toBe(13);
+    expect(trashDaysLeft("2026-10-01 00:00:00", 14, now)).toBe(0);
+    expect(trashDaysLeft("2026-11-10 00:00:00", 0, now)).toBeNull();
+    expect(trashDaysLeft(null, 14, now)).toBeNull();
   });
 });

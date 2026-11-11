@@ -184,7 +184,7 @@ async def test_private_sticker_budget_and_counting(monkeypatch) -> None:
     today = "2026-11-01"
     assert delivery.private_sticker_left(USER, today) == 2
 
-    async def segment(user_id, name, budget):
+    async def segment(user_id, name, budget, sent_ids=None):
         if budget[0] <= 0:
             return None
         budget[0] -= 1

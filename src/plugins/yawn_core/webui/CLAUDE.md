@@ -43,7 +43,8 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `me_schedule_routes.py` | QQ 个人账号 `/me/schedules`：私聊提醒 + 自己设的群任务（`scope=managed` 加上自己管理的群里别人设的）统一列表（g/p 引用）、详情、预览、新建（私聊或群，群任务 `source_kind=webui_user`）、修改、暂停恢复取消；群任务权限走 `schedule_hub`，写操作记群管代办操作记录 |
 | `sandbox.py` | 「代码沙箱」管理页：状态/统计/运行历史/工作区文件/控制台/策略，全部仅管理员；runner 离线时只读接口降级为 200 + `online:false`，写接口 503；文件下载强制 `nosniff` + CSP sandbox，HTML/SVG 强制附件 |
 | `web_search.py` | 「网页搜索」管理页：状态（密钥只回显来源与掩码）/策略与限额/今日用量与费用/最近调用/试搜试读/清空缓存，全部仅管理员；试搜计入全站计费统计但不占群配额 |
-| `stickers.py` | 「表情包」管理页：库（上传/编辑/启停/审核/批量/删除、按群开放）、发送与收藏策略、偷图策略、今日用量、提示词预览；AI 标注：上传时 `auto` 补名字/标签（`fallback` 是识图不可用时的名字）、`POST /label-preview` 上传前预览、`POST /{id}/label`（预览或写回）、`POST /{id}/undo-label`、批量任务 `/label-jobs`（开始/查看/取消）、批量动作 `undo_label`。全部仅管理员 |
+| `stickers.py` | 「表情包」管理页：库（上传/编辑/启停/审核/批量/删除、按群开放）、发送与收藏策略、偷图策略、今日用量、提示词预览；AI 标注：上传时 `auto` 补名字/标签（`fallback` 是识图不可用时的名字）、`POST /label-preview` 上传前预览、`POST /{id}/label`（预览或写回）、`POST /{id}/undo-label`、批量任务 `/label-jobs`（开始/查看/取消）、批量动作 `undo_label`。全部仅管理员。3.0：删除默认进回收站（`?purge=`/`?block=`）、批量动作扩充（标签/开放群/合集/置顶/权重）、按群单独设置、`GET /prompt-preview` 带场景与菜单每项原因、`GET /resolve` 名字对照 |
+| `sticker_admin_routes.py` | 表情包 3.0 的管理接口（挂在 `stickers.py` 之前，同一前缀）：`/insights` 统计、`/misses/resolve` 把没对上的名字设成别名或忽略、`/health` 与 `/health/fix`、`/packs` 合集增删改与成员、`/trash`（恢复/清空，打开时顺手清过期的）、`/blocked` 拉黑名单、`/tags/rename`、`/tags/delete`、`/export`（zip）、`/import`（先预览再导入）、`/{id}/replace` 换图。全部仅管理员 |
 
 ## 关联位置（跨目录）
 
@@ -60,7 +61,7 @@ FastAPI 应用，挂在 NoneBot 驱动上，前缀 `/webui/api/v1`（`config.API
 | `environment*.py`、`environment_catalog.dotenv` | 各插件 `config.py`；文档 [docs/configuration/](../../../../docs/configuration/README.md) | `environment.tsx`、`environment-config.ts` |
 | `sandbox.py` | `yawn_agent/sandbox_client.py`、`sandbox_policy.py`；runner 在仓库根 `sandbox/` | `sandbox/` |
 | `web_search.py` | `yawn_agent/web_search_client.py`、`web_search_policy.py`、`web_search_output.py`、`tool_handlers/web.py` | — |
-| `stickers.py` | `yawn_agent/sticker_library.py`、`sticker_policy.py`、`sticker_send.py`、`sticker_labeler.py`、`sticker_intake.py`、`sticker_label_jobs.py` | `stickers/` |
+| `stickers.py`、`sticker_admin_routes.py` | `yawn_agent/sticker_library.py`、`sticker_policy.py`、`sticker_send.py`、`sticker_labeler.py`、`sticker_intake.py`、`sticker_label_jobs.py`、`sticker_health.py`、`sticker_insights.py`、`sticker_archive.py` | `stickers/` |
 | `schedules.py` | `yawn_agent/schedule_store.py`、`schedule_policy.py`、`schedule_runner.py`、`schedule_spec.py`、`private_schedule.py` | `schedules/` |
 | `me_schedule_routes.py` | `yawn_agent/schedule_hub.py`、`private_organizer.py`、`private_schedule.py` | `me/MySchedulesPage.tsx` |
 | `me_hub_routes.py` | `yawn_agent/private_store.py`、`private_organizer.py`、`../checkin_service.py`、`../affinity*.py` | `me/me-hub-api.ts`、`me/MeShellExtras.tsx`、`me/MySearchPage.tsx`、`MyCalendarPage.tsx`、`MyAchievementsPage.tsx`、`MyInsightsPage.tsx` |

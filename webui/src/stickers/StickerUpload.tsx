@@ -1,11 +1,11 @@
 // 上传表情包（AI 标注版）：选图后自动让识图模型看一遍，把建议的名字/标签填进还空着的格子；
 // 名字可以留空，上传时由后端让 AI 补（识图不可用时退回文件名）。库里已有的同一张图会提前标出来。
 import { CloudUploadOutlined, PictureOutlined, RobotOutlined } from "@ant-design/icons";
-import { Alert, Button, Input, Modal, Switch, Tag, Tooltip } from "antd";
+import { Alert, Button, Input, Modal, Select, Switch, Tag, Tooltip } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { previewLabel, uploadSticker } from "./stickers-api";
 import { applySuggestion, cleanName, confidenceText, formatBytes, looksLikePlaceholder, nameFromFile, parseTags } from "./stickers-meta";
-import type { StickerLabel } from "./types";
+import type { StickerLabel, StickerPack } from "./types";
 
 type ItemStatus = "waiting" | "uploading" | "done" | "duplicate" | "failed";
 type LabelState = "idle" | "labeling" | "ready" | "failed";
@@ -39,6 +39,7 @@ export function UploadModal({
   maxBytes,
   aiReady,
   aiEnabled,
+  packs = [],
 }: {
   open: boolean;
   onClose: () => void;
@@ -46,7 +47,9 @@ export function UploadModal({
   maxBytes: number;
   aiReady: boolean;
   aiEnabled: boolean;
+  packs?: StickerPack[];
 }): React.JSX.Element {
+  const [pack, setPack] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<UploadItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [autoLabel, setAutoLabel] = useState(aiReady && aiEnabled);
@@ -120,6 +123,7 @@ export function UploadModal({
           tags: parseTags(item.tags),
           auto: canLabel,
           fallback: nameFromFile(item.file.name) || item.file.name.slice(0, 16),
+          pack,
         });
         patch(item.key, {
           status: result.created ? "done" : "duplicate",
@@ -198,6 +202,12 @@ export function UploadModal({
           }}
         />
       </div>
+      {packs.length > 0 && (
+        <label className="sbx-field">
+          <span className="sbx-field-label">这批直接放进合集（可不选）</span>
+          <Select allowClear value={pack} onChange={(value: string | undefined) => setPack(value)} options={packs.map((item) => ({ value: item.id, label: item.name }))} placeholder="不放进合集" aria-label="上传到合集" />
+        </label>
+      )}
       {items.length > 0 && (
         <ul className="stk-upload-list" aria-label="待上传">
           {items.map((item) => (
