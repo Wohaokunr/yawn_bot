@@ -1,4 +1,4 @@
-# ruff: noqa: ARG001, C901, E501, PLW2901, RUF001, SIM105, TRY300
+# ruff: noqa: ARG001, C901, E501, PLR2004, PLW2901, RUF001, SIM105, TRY300
 """好感等级的实际作用：权益计算、额度加成、每日任务、升级记录、衰减、提示词视图。
 
 策略在 :mod:`affinity_policy`，个人数据在 :mod:`affinity_store`，好感余额的唯一写入口
@@ -109,6 +109,7 @@ BONUS_FIELDS: dict[str, str] = {
     "sticker_collect_bonus": "群里每天收藏表情包张数",
     "persona_edit_bonus": "每天自己改私聊人设次数",
     "memory_bonus": "爱好/喜好这类记忆每类多记几样",
+    "private_task_bonus": "私聊后台小助手每天多派几件活",
     "checkin_points_pct": "签到积分",
 }
 
@@ -209,6 +210,10 @@ def dynamic_daily_cap(source: str) -> int | bool | None:
         return int(pol.interact_affinity_daily_cap)
     if source == "quest":
         return int(pol.quests.reward_affinity) * int(pol.quests.per_day)
+    if source == "moment":
+        return int(pol.moments.daily_up)
+    if source == "fortune":
+        return int(pol.fortune.reward_affinity) * 2
     return False
 
 
@@ -345,7 +350,10 @@ async def settle_quests(session: Any, user_id: int, *, now: datetime) -> dict[st
 
     pol = load_policy()
     result: dict[str, Any] = {"claimed": [], "affinity": 0, "bonus_item": None}
-    if not (pol.enabled and pol.quests.enabled):
+    if not pol.enabled:
+        return result
+    if not pol.quests.enabled:
+        await _settle_bond_into(session, user_id, now, result)
         return result
     claim: list[str] = []
     bonus: str | None = None
@@ -374,19 +382,42 @@ async def settle_quests(session: Any, user_id: int, *, now: datetime) -> dict[st
         result["claimed"].append(QUEST_BY_KEY[key].title)
     if bonus:
         result["bonus_item"] = pol.item_name(bonus)
+    await _settle_bond_into(session, user_id, now, result)
     return result
+
+
+async def _settle_bond_into(session: Any, user_id: int, now: datetime, result: dict[str, Any]) -> None:
+    """顺手结算羁绊（连续来往、周任务、纪念日、徽章）；失败不影响每日任务。"""
+
+    try:
+        from .affinity_bond import settle_bond
+
+        bond_result = await settle_bond(session, user_id, now=now)
+    except Exception:  # noqa: BLE001
+        from nonebot import logger
+
+        logger.opt(exception=True).debug(f"羁绊结算失败(忽略) user={user_id}")
+        return
+    if bond_result:
+        result["bond"] = bond_result
 
 
 def quest_reply(settled: dict[str, Any]) -> str:
     """命令回复里追加的一句；没东西领时为空。"""
 
-    if not settled.get("claimed"):
-        return ""
-    text = f"✅ 完成任务：{'、'.join(settled['claimed'])}"
-    if settled.get("affinity"):
-        text += f"，好感 +{settled['affinity']}"
-    if settled.get("bonus_item"):
-        text += f"；今天的任务全做完啦，送你一张{settled['bonus_item']}"
+    text = ""
+    if settled.get("claimed"):
+        text = f"✅ 完成任务：{'、'.join(settled['claimed'])}"
+        if settled.get("affinity"):
+            text += f"，好感 +{settled['affinity']}"
+        if settled.get("bonus_item"):
+            text += f"；今天的任务全做完啦，送你一张{settled['bonus_item']}"
+    if settled.get("bond"):
+        from .affinity_bond import settle_reply
+
+        extra = settle_reply(settled["bond"])
+        if extra:
+            text = f"{text}\n{extra}" if text else extra
     return text
 
 
@@ -402,13 +433,18 @@ def after_grant(change: Any, *, user_id: int, source: str, group_id: int | None,
         pol = load_policy()
         if not pol.enabled:
             return
+        from .affinity_bond import ACTIVE_SOURCES, on_grant
+
         quest_source = source in {"checkin", "private_chat", "group_chat", "gift", "interact"} and change.requested > 0
         level_changed = change.applied and change.level_after.index != change.level_before.index
         private_seen = source == "private_chat" and change.requested > 0
-        if not (quest_source and pol.quests.enabled) and not level_changed and not private_seen:
+        bond_event = (source in ACTIVE_SOURCES and change.requested > 0) or change.applied > 0
+        if not (quest_source and pol.quests.enabled) and not level_changed and not private_seen and not bond_event:
             return
 
         def apply(record: dict[str, Any]) -> None:
+            if bond_event:
+                on_grant(record, change, user_id=user_id, source=source, now=now, pol=pol)
             if quest_source and pol.quests.enabled:
                 _advance_quests(record, user_id, source, now, pol)
             if private_seen:
@@ -442,6 +478,13 @@ def _record_level_change(record: dict[str, Any], change: Any, now: datetime, pol
         for key, count in perks.levelup_items.items():
             gifts[key] = gifts.get(key, 0) + count
     added = store.add_items(record, gifts, cap=cap) if gifts else {}
+    # Bot 来信：新到的这一级解锁了“来信”就排一封（每级只写一次）
+    from .affinity_bond import queue_letter
+
+    for index in range(before.index + 1, after.index + 1):
+        perks = pol.levels[index]
+        if "letter" in perks.unlocks and perks.level not in reached:
+            queue_letter(record, perks.level, now)
     record["pending_levelup"] = {
         "level": after.name,
         "at": stamp,
@@ -479,10 +522,12 @@ def nickname_for(record: dict[str, Any], points: int | None, pol: AffinityPolicy
     return name if has_unlock(points, "nickname", pol) else ""
 
 
-def speaker_view(user_id: int, points: int | None, now: datetime, *, channel: str) -> dict[str, Any]:
+def speaker_view(user_id: int, points: int | None, now: datetime, *, channel: str, include_bond: bool = True) -> dict[str, Any]:
     """给 Agent 发言人层的字段（只有词语）：称呼、分寸、刚升级、今天的礼物。
 
     ``channel`` 为 ``group`` / ``private``：刚升级的提示每个渠道各出现一次就标记掉。
+    ``include_bond`` 时再并上羁绊字段（头衔、说话风格、主动性、心情、氛围……，见
+    :mod:`affinity_bond`）；私聊自己拆成稳定/本轮两份，传 False。
     """
 
     pol = load_policy()
@@ -519,6 +564,14 @@ def speaker_view(user_id: int, points: int | None, now: datetime, *, channel: st
     gifts = record.get("gifts_today") or {}
     if gifts.get("day") == _day(now) and gifts.get("names"):
         view["gifts_today"] = f"他今天送了你：{'、'.join(list(gifts['names'])[-3:])}"
+    if include_bond:
+        from .affinity_bond import GROUP_VOLATILE_LIMIT, stable_view, volatile_view
+
+        try:
+            view.update(stable_view(points, pol))
+            view.update(volatile_view(user_id, points, record, now, pol, limit=GROUP_VOLATILE_LIMIT if channel == "group" else None))
+        except Exception:  # noqa: BLE001
+            pass
     return view
 
 
@@ -615,6 +668,13 @@ _CARE = (
     "突然想起{name}了，这几天过得怎么样？",
     "{name}～好久没聊了，有什么新鲜事要分享吗？",
 )
+# 好朋友/挚友的久别问候更亲昵，会带上认识的天数或连续来往断掉的事
+_CARE_CLOSE = (
+    "{name}！好几天没见你了，我有点想你（小声）",
+    "{name}，最近是不是很忙呀？忙完记得来找我，{detail}",
+    "喂喂{name}，再不来我要把你的旧梗都忘光啦～",
+    "{name}～今天的我{mood}，就差你来聊聊了",
+)
 CARE_HOURS = range(10, 22)
 
 
@@ -637,6 +697,12 @@ def care_message(user_id: int, record: dict[str, Any], points: int | None, now: 
     record["care_for"] = last
     call = nickname_for(record, points, pol) or name
     digest = hashlib.sha256(f"care:{user_id}:{last}".encode()).digest()
+    if level_for(points).index >= 4:
+        from .affinity_bond import days_together, mood_for
+
+        together = days_together(record, now.date())
+        detail = f"我们都认识 {together} 天了呢" if together and together > 7 else "我在这儿等你"
+        return _CARE_CLOSE[digest[0] % len(_CARE_CLOSE)].format(name=call, detail=detail, mood=mood_for(record, now).label)
     return _CARE[digest[0] % len(_CARE)].format(name=call)
 
 
@@ -655,6 +721,11 @@ async def private_nudges(user_id: int, now: datetime, *, name: str = "") -> list
         texts: list[str] = []
 
         def plan(record: dict[str, Any]) -> None:
+            from .affinity_bond import take_letters
+
+            # Bot 来信：升级后排好的信，白天发出（和久别问候同一套时段/免打扰）
+            if now.hour in CARE_HOURS:
+                texts.extend(f"💌 {text}" for text in take_letters(record, name=nickname_for(record, points) or name, now=now))
             text = care_message(user_id, record, points, now, name=name)
             if text:
                 texts.append(text)

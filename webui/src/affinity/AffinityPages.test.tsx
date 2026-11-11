@@ -30,7 +30,13 @@ const STATS: AffinityStats = {
   top: [{ userId: "10001", nickname: "小明", level: "熟人", points: 70 }],
   gifts: [{ key: "milk_tea", name: "奶茶", count: 3 }],
   items: [{ key: "shield", name: "好感护盾", count: 2 }],
-  nicknames: 1, questsDoneToday: 4, activeShields: 1, favoriteToday: "蛋糕",
+  nicknames: 1, questsDoneToday: 4, activeShields: 1, favoriteToday: "蛋糕", moodToday: "元气满满",
+  bond: {
+    badges: [{ key: "week_streak", name: "一周之约", emoji: "🔥", count: 3 }],
+    moments30d: { up: 5, down: 1 },
+    streakTop: [{ userId: "10001", nickname: "小明", days: 12 }],
+    fortunesToday: 2, lettersSent: 1, weeklyDoneThisWeek: 4,
+  },
 };
 
 function renderAt(path: string, element: React.ReactNode): void {
@@ -85,6 +91,21 @@ describe("好感度管理页", () => {
     expect(body.policy.levels).toHaveLength(6);
   });
 
+  it("羁绊玩法标签能改里程碑，概览显示羁绊统计", async () => {
+    state.api.mockImplementation((path: string) => (path === "/affinity/stats" ? ok(STATS) : ok(policy)));
+    renderAt("/affinity", <AffinityAdminPage />);
+    expect(await screen.findByText(/近 30 天心动瞬间/)).toBeInTheDocument();
+    expect(screen.getByText(/一周之约 ×3/)).toBeInTheDocument();
+    expect(screen.getByText("元气满满")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /羁绊玩法/ }));
+    expect(await screen.findByText("连续来往")).toBeInTheDocument();
+    expect(screen.getByText(/心动瞬间（Agent 工具/)).toBeInTheDocument();
+    const save = screen.getByRole("button", { name: /保\s*存/ });
+    expect(save).toBeDisabled();
+    fireEvent.click(screen.getByRole("switch", { name: "今日缘分" }));
+    await waitFor(() => expect(save).not.toBeDisabled());
+  });
+
   it("从 URL 直接打开礼物与商店标签", async () => {
     state.api.mockImplementation((path: string) => (path === "/affinity/stats" ? ok(STATS) : ok(policy)));
     renderAt("/affinity?aff.tab=economy", <AffinityAdminPage />);
@@ -116,5 +137,32 @@ describe("我的空间 · 好感玩法", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /兑\s*换/ })[0]);
     await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/affinity/buy", expect.objectContaining({ method: "POST" })));
     await waitFor(() => expect(screen.getAllByRole("button", { name: /使\s*用/ }).length).toBe(perks.bag.items.length + 1));
+  });
+
+  it("羁绊页显示关系称号、连续来往、徽章，能抽今日缘分", async () => {
+    const drawn: PerksState = { ...perks, bond: { ...perks.bond, fortune: { day: "2026-11-11", tier: "大吉", lucky_gift: "🍬糖果", yi: "早点睡", ji: "熬夜", advice: "今天适合说谢谢。" } } };
+    const noFortune: PerksState = { ...perks, bond: { ...perks.bond, fortune: null } };
+    state.api.mockImplementation((path: string) => {
+      if (path === "/me/affinity/perks") return ok(noFortune);
+      if (path === "/me/affinity/fortune") return ok({ result: { ...drawn.bond.fortune, first_today: true, affinity_up: true, message: "🔮" }, quests: { claimed: [], affinity: 0, bonus_item: null }, state: drawn });
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    renderAt("/me/affinity?tab=bond", <MyAffinityPlay view="bond" />);
+    expect(await screen.findByText(perks.bond.title)).toBeInTheDocument();
+    expect(screen.getByText("羁绊徽章")).toBeInTheDocument();
+    expect(screen.getByText("陪我聊到半夜")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /升到「熟人」那天/ }));
+    expect(screen.getByText(/谢谢你常来找我/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /抽一签/ }));
+    await waitFor(() => expect(state.api).toHaveBeenCalledWith("/me/affinity/fortune", expect.objectContaining({ method: "POST" })));
+    expect(await screen.findByText("大吉")).toBeInTheDocument();
+  });
+
+  it("玩法页把没解锁的礼物锁住", async () => {
+    state.api.mockImplementation(() => ok(perks));
+    renderAt("/me/affinity?tab=play", <MyAffinityPlay view="play" />);
+    expect(await screen.findByText("流星")).toBeInTheDocument();
+    expect(screen.getByText("流星").closest("button")).toBeDisabled();
+    expect(screen.getAllByText(/「好朋友」解锁/).length).toBeGreaterThan(0);
   });
 });

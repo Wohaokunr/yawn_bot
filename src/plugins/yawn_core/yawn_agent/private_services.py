@@ -366,9 +366,10 @@ def _task_stats(now: Any) -> dict[str, int]:
 def _task_and_computer_quota(
     record: dict[str, Any], ctx: PrivateToolContext
 ) -> dict[str, Any]:
+    from .private_tasks import _daily_limit  # pyright: ignore[reportPrivateUsage]
     from .sandbox_policy import private_usage
 
-    daily = int(private_agent_config.private_agent_task_daily)
+    daily = _daily_limit(ctx.user_id)
     flags = record.get("flags") or {}
     used = (
         int(flags.get("task_used") or 0)

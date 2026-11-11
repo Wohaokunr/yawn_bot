@@ -65,6 +65,19 @@ def empty_record() -> dict[str, Any]:
         "interact_totals": {},
         # 道具使用记录 [{key, at, note}]
         "item_log": [],
+        # ── 3.0 羁绊（affinity_bond） ──
+        # 认识第一天、每日涨幅、连续来往、心动瞬间计数、心情糖、回礼、纪念日、统计
+        "bond": {},
+        # 心动瞬间 [{kind: up/down, reason, at, channel, changed}]
+        "moments": [],
+        # Bot 来信 [{level, at, sent, text, sent_at}]
+        "letters": [],
+        # 周任务 {"week": "2026-W46", "items": [...], "bonus_claimed": bool}
+        "weekly": {},
+        # 今日缘分 {"day", "tier", "lucky_gift", "yi", "ji", "advice"}
+        "fortune": {},
+        # 已获得的徽章 {key: 日期}
+        "badges": {},
     }
 
 

@@ -71,6 +71,14 @@ SOURCE_RULES: dict[str, SourceRule] = {
     "interact": SourceRule("互动", 3),
     # 长时间没有来往的衰减（只扣不加，默认只扣到当前等级下限）。
     "decay": SourceRule("久未来往", None, allow_negative=True),
+    # Bot 自己记下的心动瞬间（+）/ 被冒犯（-）；上下限由 affinity_policy.moments 决定。
+    "moment": SourceRule("心动瞬间", 3, allow_negative=True),
+    # 连续来往的里程碑奖励（同一段连续每档一次，天然不可刷）。
+    "streak": SourceRule("连续来往", None),
+    # /今日缘分 每天第一次抽。
+    "fortune": SourceRule("今日缘分", 2),
+    # 周任务奖励；实际上限 = 每个奖励 × 每周任务数（按周不按天，这里不设日上限）。
+    "weekly": SourceRule("周任务", None),
 }
 
 

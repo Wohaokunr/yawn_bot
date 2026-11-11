@@ -53,6 +53,9 @@ ChatMessage = importlib.import_module(f"{_M}.chat_message").ChatMessage
 GroupFeature = importlib.import_module(f"{_M}.group_feature").GroupFeature
 
 NOW = datetime(2026, 10, 31, 20, 0)
+# 种子记忆的过期时间：有些读路径（如群聊 get_person_profile）按真实当前时间过滤，
+# 固定成 NOW 之后几天会在日历走过去后让测试失效，所以放远一点。
+SEED_EXPIRES = NOW + timedelta(days=3650)
 USER = 42
 OTHER = 43
 BOT = 9
@@ -143,7 +146,7 @@ async def maker():
                     salience=0.8,
                     confidence=0.8,
                     visibility="group",
-                    expires_at=NOW + timedelta(days=10),
+                    expires_at=SEED_EXPIRES,
                 )
             )
         session.add(
@@ -159,7 +162,7 @@ async def maker():
                 salience=0.9,
                 confidence=0.9,
                 visibility="group",
-                expires_at=NOW + timedelta(days=10),
+                expires_at=SEED_EXPIRES,
             )
         )
         session.add(
@@ -175,7 +178,7 @@ async def maker():
                 salience=0.5,
                 confidence=0.5,
                 visibility="group",
-                expires_at=NOW + timedelta(days=10),
+                expires_at=SEED_EXPIRES,
             )
         )
         session.add(

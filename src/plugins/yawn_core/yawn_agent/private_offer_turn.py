@@ -108,7 +108,21 @@ async def gather_facts(bot: Any, user_id: int, settings: OfferSettings) -> po.Fa
         paused=auto_paused(user_id),
         busy=user_turn_lock(user_id).locked(),
         affinity_locked=await _offers_locked(user_id),
+        interval_factor=_interval_factor(user_id),
     )
+
+
+def _interval_factor(user_id: int) -> float:
+    """好感主动性决定的提议间隔倍数（读余额缓存，没缓存按 1）。"""
+
+    try:
+        from ..affinity_bond import offer_interval_factor
+        from ..affinity_perks import cached_points
+
+        points = cached_points(user_id)
+        return 1.0 if points is None else offer_interval_factor(points)
+    except Exception:  # noqa: BLE001
+        return 1.0
 
 
 async def _offers_locked(user_id: int) -> bool:

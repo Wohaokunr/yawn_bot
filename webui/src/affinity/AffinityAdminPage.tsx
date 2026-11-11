@@ -1,6 +1,6 @@
-// 管理台「好感度」页：好感玩法的全站策略（每级权益、礼物、商店、任务、衰减、问候）与统计。
+// 管理台「好感度」页：好感玩法的全站策略（每级权益与说话方式、礼物、商店、任务、衰减、问候、羁绊玩法）与统计。
 // 标签在 URL aff.tab；策略整份编辑、整份保存（后端会补齐/校验），离开前有未保存提示。
-import { DashboardOutlined, GiftOutlined, HeartOutlined, ReloadOutlined, SaveOutlined, SettingOutlined, UndoOutlined } from "@ant-design/icons";
+import { DashboardOutlined, FireOutlined, GiftOutlined, HeartOutlined, ReloadOutlined, SaveOutlined, SettingOutlined, UndoOutlined } from "@ant-design/icons";
 import {
   Alert,
   App as AntApp,
@@ -24,13 +24,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PageHeader, QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "../shared";
 import { affinityAdminApi } from "./affinity-api";
-import { ITEM_NAMES, itemsText, LEVEL_NUMBER_FIELDS, policyEqual, toggleUnlock, validatePolicy } from "./affinity-meta";
+import { ITEM_NAMES, itemsText, LEVEL_NUMBER_FIELDS, milestoneRows, policyEqual, toggleUnlock, validatePolicy } from "./affinity-meta";
 import type { AffinityPolicy, AffinityStats, GiftPolicy, LevelPerksPolicy, PolicyMeta, ShopPolicy } from "./types";
 import "./affinity.css";
 
 const { Text } = Typography;
-type AffTab = "overview" | "levels" | "economy" | "rules";
-const TABS: AffTab[] = ["overview", "levels", "economy", "rules"];
+type AffTab = "overview" | "levels" | "economy" | "rules" | "bond";
+const TABS: AffTab[] = ["overview", "levels", "economy", "rules", "bond"];
 
 function pickTab(value: string | null): AffTab {
   return TABS.includes(value as AffTab) ? (value as AffTab) : "overview";
@@ -46,6 +46,8 @@ export function StatsView({ stats, onDecay, decaying }: { stats: AffinityStats; 
       <Card size="small"><Statistic title="设了专属称呼" value={stats.nicknames} /></Card>
       <Card size="small"><Statistic title="护盾生效中" value={stats.activeShields} /></Card>
       <Card size="small"><Statistic title="今日心仪礼物" value={stats.favoriteToday ?? "—"} /></Card>
+      {stats.moodToday && <Card size="small"><Statistic title="Bot 今天的心情" value={stats.moodToday} /></Card>}
+      {stats.bond && <Card size="small"><Statistic title="今天抽缘分的人" value={stats.bond.fortunesToday} /></Card>}
     </div>
     <div className="aff-grid">
       <Card size="small" title="等级分布">
@@ -70,6 +72,17 @@ export function StatsView({ stats, onDecay, decaying }: { stats: AffinityStats; 
         <Text type="secondary">大家背包里的道具</Text>
         <div className="aff-tags">{stats.items.length ? stats.items.map((g) => <Tag key={g.key}>{g.name} ×{g.count}</Tag>) : <Text type="secondary">—</Text>}</div>
       </Card>
+      {stats.bond && <Card size="small" title="羁绊" className="aff-span">
+        <div className="aff-form-row" style={{ marginBottom: 8 }}>
+          <Text>近 30 天心动瞬间 <strong>{stats.bond.moments30d.up}</strong> 次、被冒犯 <strong>{stats.bond.moments30d.down}</strong> 次</Text>
+          <Text>本周做完周任务 <strong>{stats.bond.weeklyDoneThisWeek}</strong> 个</Text>
+          <Text>寄出的来信 <strong>{stats.bond.lettersSent}</strong> 封</Text>
+        </div>
+        <Text type="secondary">徽章（得到的人数）</Text>
+        <div className="aff-admin-bond-grid">{stats.bond.badges.map((b) => <Tag key={b.key}>{b.emoji} {b.name} ×{b.count}</Tag>)}</div>
+        <Text type="secondary">连续来往最长的人</Text>
+        <div className="aff-tags">{stats.bond.streakTop.length ? stats.bond.streakTop.map((row) => <Tag key={row.userId}>{row.nickname ?? row.userId} · {row.days} 天</Tag>) : <Text type="secondary">—</Text>}</div>
+      </Card>}
       {stats.daily.length > 0 && <Card size="small" title="近 30 天每天涨了多少" className="aff-span">
         <Table size="small" rowKey="day" pagination={{ pageSize: 10 }} dataSource={[...stats.daily].reverse()} columns={[{ title: "日期", dataIndex: "day" }, { title: "好感合计", dataIndex: "gained" }, { title: "人数", dataIndex: "users" }]} />
       </Card>}
@@ -81,6 +94,12 @@ export function LevelEditor({ level, floor, meta, onChange }: { level: LevelPerk
   return <Card size="small" className="aff-level-card" title={<span><HeartOutlined /> {level.level} <Text type="secondary">（{floor}+）</Text></span>}>
     <label>相处提示（给模型）<Input maxLength={80} value={level.tone} onChange={(e) => onChange({ ...level, tone: e.target.value })} aria-label={`${level.level} 相处提示`} /></label>
     <label>这一级 Bot 能做到什么程度<Input maxLength={120} value={level.behavior} onChange={(e) => onChange({ ...level, behavior: e.target.value })} aria-label={`${level.level} 分寸`} /></label>
+    <div className="aff-form-row">
+      <label>关系称号<Input maxLength={12} value={level.title} onChange={(e) => onChange({ ...level, title: e.target.value })} aria-label={`${level.level} 关系称号`} style={{ width: 140 }} /></label>
+      <label>主动程度<Select size="small" style={{ minWidth: 220 }} value={level.initiative} onChange={(v: number) => onChange({ ...level, initiative: v })} aria-label={`${level.level} 主动程度`}
+        options={(meta.initiative ?? []).map((row) => ({ value: row.value, label: `${row.value} · ${row.text}` }))} /></label>
+    </div>
+    <label>说话方式（给模型，群聊和私聊都会用）<Input maxLength={120} value={level.speech_style} onChange={(e) => onChange({ ...level, speech_style: e.target.value })} aria-label={`${level.level} 说话方式`} /></label>
     <div className="aff-number-grid">
       {LEVEL_NUMBER_FIELDS.map((field) => <label key={field.key}>{field.label}（{field.suffix}）
         <InputNumber min={0} max={field.max} value={Number(level[field.key])} onChange={(value) => onChange({ ...level, [field.key]: Number(value) || 0 })} aria-label={`${level.level} ${field.label}`} />
@@ -115,19 +134,20 @@ function EconomyEditor({ policy, meta, onChange }: { policy: AffinityPolicy; met
   const missing = meta.items.filter((item) => !usedItems.has(item.key));
   return <div className="aff-grid">
     <Card size="small" title={<span><GiftOutlined /> 礼物</span>} className="aff-span" extra={
-      <Button size="small" disabled={policy.gifts.length >= 20} onClick={() => onChange({ ...policy, gifts: [...policy.gifts, { key: `gift_${policy.gifts.length + 1}`, name: "新礼物", emoji: "🎁", price: 50, affinity: 2, enabled: true }] })}>加一种</Button>
+      <Button size="small" disabled={policy.gifts.length >= 20} onClick={() => onChange({ ...policy, gifts: [...policy.gifts, { key: `gift_${policy.gifts.length + 1}`, name: "新礼物", emoji: "🎁", price: 50, affinity: 2, enabled: true, min_level: meta.levels[0]?.name ?? "陌生" }] })}>加一种</Button>
     }>
       <div className="aff-form-row" style={{ marginBottom: 8 }}>
         <label>礼物每天最多加好感 <InputNumber min={0} max={500} value={policy.gift_affinity_daily_cap} onChange={(v) => onChange({ ...policy, gift_affinity_daily_cap: Number(v) || 0 })} aria-label="礼物好感日上限" /></label>
         <label>今日心仪倍数 <InputNumber min={1} max={5} value={policy.favorite_multiplier} onChange={(v) => onChange({ ...policy, favorite_multiplier: Number(v) || 1 })} aria-label="心仪倍数" /></label>
       </div>
-      <Table size="small" rowKey={(_row, index) => String(index)} pagination={false} dataSource={policy.gifts} scroll={{ x: 620 }} columns={[
+      <Table size="small" rowKey={(_row, index) => String(index)} pagination={false} dataSource={policy.gifts} scroll={{ x: 740 }} columns={[
         { title: "开", width: 56, render: (_: unknown, row: GiftPolicy, i: number) => <Switch size="small" checked={row.enabled} onChange={(v) => setGift(i, { enabled: v })} aria-label="启用" /> },
         { title: "图标", width: 72, render: (_: unknown, row: GiftPolicy, i: number) => <Input maxLength={8} value={row.emoji} onChange={(e) => setGift(i, { emoji: e.target.value })} aria-label="图标" /> },
         { title: "名字", render: (_: unknown, row: GiftPolicy, i: number) => <Input maxLength={12} value={row.name} onChange={(e) => setGift(i, { name: e.target.value })} aria-label="礼物名" /> },
         { title: "标识", render: (_: unknown, row: GiftPolicy, i: number) => <Input maxLength={24} value={row.key} onChange={(e) => setGift(i, { key: e.target.value.toLowerCase() })} aria-label="礼物标识" /> },
         { title: "价格（积分）", width: 120, render: (_: unknown, row: GiftPolicy, i: number) => <InputNumber min={0} max={100000} value={row.price} onChange={(v) => setGift(i, { price: Number(v) || 0 })} aria-label="价格" /> },
         { title: "好感", width: 90, render: (_: unknown, row: GiftPolicy, i: number) => <InputNumber min={1} max={100} value={row.affinity} onChange={(v) => setGift(i, { affinity: Number(v) || 1 })} aria-label="好感" /> },
+        { title: "最低等级", width: 120, render: (_: unknown, row: GiftPolicy, i: number) => <Select size="small" value={row.min_level || meta.levels[0]?.name} style={{ width: 100 }} onChange={(v: string) => setGift(i, { min_level: v })} options={meta.levels.map((l) => ({ value: l.name, label: l.name }))} aria-label="礼物最低等级" /> },
         { title: "", width: 64, render: (_: unknown, _row: GiftPolicy, i: number) => <Button size="small" type="link" danger onClick={() => onChange({ ...policy, gifts: policy.gifts.filter((_g, j) => j !== i) })}>删</Button> },
       ]} />
     </Card>
@@ -179,6 +199,87 @@ function RulesEditor({ policy, meta, onChange }: { policy: AffinityPolicy; meta:
         <label>互动每天最多加好感 <InputNumber min={0} max={50} value={policy.interact_affinity_daily_cap} onChange={(v) => onChange({ ...policy, interact_affinity_daily_cap: Number(v) || 0 })} aria-label="互动日上限" /></label>
         <label><Switch checked={policy.announce_levelup} onChange={(v) => onChange({ ...policy, announce_levelup: v })} aria-label="升级提醒" />升级后让 Agent 自然提一句</label>
       </div>
+    </Card>
+  </div>;
+}
+
+function DayTable<T>({ label, table, render, make, onChange }: {
+  label: string;
+  table: Record<string, T>;
+  render: (value: T, set: (next: T) => void, day: number) => React.ReactNode;
+  make: () => T;
+  onChange: (next: Record<string, T>) => void;
+}): React.JSX.Element {
+  const rows = milestoneRows(table);
+  const [day, setDay] = useState<number | null>(null);
+  const setValue = (key: number, value: T) => onChange({ ...table, [String(key)]: value });
+  return <div className="aff-milestones">
+    {rows.length === 0 && <Text type="secondary">还没有</Text>}
+    {rows.map((row) => <div key={row.day} className="aff-form-row">
+      <Text strong style={{ minWidth: 56 }}>{row.day} 天</Text>
+      {render(row.value, (next) => setValue(row.day, next), row.day)}
+      <Button size="small" type="link" danger onClick={() => { const next = { ...table }; delete next[String(row.day)]; onChange(next); }}>删</Button>
+    </div>)}
+    <div className="aff-form-row">
+      <InputNumber size="small" min={1} max={3650} value={day} placeholder="天数" onChange={(v) => setDay(v == null ? null : Number(v))} aria-label={`${label}天数`} />
+      <Button size="small" disabled={!day || String(day) in table} onClick={() => { if (day) { setValue(day, make()); setDay(null); } }}>加一档</Button>
+    </div>
+  </div>;
+}
+
+export function BondRulesEditor({ policy, meta, onChange }: { policy: AffinityPolicy; meta: PolicyMeta; onChange: (next: AffinityPolicy) => void }): React.JSX.Element {
+  const itemOptions = meta.items.map((item) => ({ value: item.key, label: ITEM_NAMES[item.key] ?? item.key }));
+  const { moments, streak, weekly, fortune, anniversary } = policy;
+  return <div className="aff-grid">
+    <Card size="small" title="Bot 怎么和你相处">
+      <div className="aff-form-row">
+        <label><Switch checked={policy.prompt_bond_enabled} onChange={(v) => onChange({ ...policy, prompt_bond_enabled: v })} aria-label="羁绊进提示词" />把关系称号、说话方式、主动程度、在一起的天数这些告诉 Agent</label>
+        <label><Switch checked={policy.bot_mood_enabled} onChange={(v) => onChange({ ...policy, bot_mood_enabled: v })} aria-label="Bot 每日心情" />Bot 每天有自己的心情</label>
+        <label><Switch checked={policy.badges_enabled} onChange={(v) => onChange({ ...policy, badges_enabled: v })} aria-label="羁绊徽章" />羁绊徽章（共 {meta.badges?.length ?? 0} 枚）</label>
+      </div>
+      <Text type="secondary" className="me-hint">关掉第一项后，等级仍决定语气，但 Agent 看不到称号、心情、纪念日等细节。</Text>
+    </Card>
+    <Card size="small" title="心动瞬间（Agent 工具 affinity_moment）">
+      <div className="aff-form-row">
+        <label><Switch checked={moments.enabled} onChange={(v) => onChange({ ...policy, moments: { ...moments, enabled: v } })} aria-label="心动瞬间" />开启</label>
+        <label>每天最多加 <InputNumber min={0} max={20} value={moments.daily_up} onChange={(v) => onChange({ ...policy, moments: { ...moments, daily_up: Number(v) || 0 } })} aria-label="心动每天上限" /></label>
+        <label><Switch checked={moments.allow_down} onChange={(v) => onChange({ ...policy, moments: { ...moments, allow_down: v } })} aria-label="允许被冒犯扣好感" />被冒犯会扣</label>
+        <label>每天最多扣 <InputNumber min={0} max={20} value={moments.daily_down} disabled={!moments.allow_down} onChange={(v) => onChange({ ...policy, moments: { ...moments, daily_down: Number(v) || 0 } })} aria-label="冒犯每天上限" /></label>
+        <label>两次间隔（分钟）<InputNumber min={0} max={1440} value={moments.cooldown_minutes} onChange={(v) => onChange({ ...policy, moments: { ...moments, cooldown_minutes: Number(v) || 0 } })} aria-label="心动冷却" /></label>
+        <label><Checkbox checked={moments.keep_level} onChange={(e) => onChange({ ...policy, moments: { ...moments, keep_level: e.target.checked } })}>扣分不掉级</Checkbox></label>
+      </div>
+      <Text type="secondary" className="me-hint">模型只能为调用者本人记，每次 ±1，原因过记忆卫生；不会告诉成员具体数值。</Text>
+    </Card>
+    <Card size="small" title="连续来往">
+      <label className="aff-form-row" style={{ marginBottom: 8 }}><Switch checked={streak.enabled} onChange={(v) => onChange({ ...policy, streak: { ...streak, enabled: v } })} aria-label="连续来往" />开启（签到、聊天、互动、送礼任一都算来往）</label>
+      <Text type="secondary">里程碑奖励好感</Text>
+      <DayTable label="连续来往" table={streak.milestones} make={() => 1} onChange={(next) => onChange({ ...policy, streak: { ...streak, milestones: next } })}
+        render={(value, set) => <InputNumber size="small" min={0} max={50} value={value} onChange={(v) => set(Number(v) || 0)} aria-label="里程碑好感" />} />
+      <Text type="secondary">里程碑另送道具</Text>
+      <DayTable label="连续来往道具" table={streak.milestone_items} make={() => "lucky_card"} onChange={(next) => onChange({ ...policy, streak: { ...streak, milestone_items: next } })}
+        render={(value, set) => <Select size="small" style={{ minWidth: 130 }} value={value} onChange={set} options={itemOptions} aria-label="里程碑道具" />} />
+    </Card>
+    <Card size="small" title="周任务">
+      <div className="aff-form-row">
+        <label><Switch checked={weekly.enabled} onChange={(v) => onChange({ ...policy, weekly: { ...weekly, enabled: v } })} aria-label="周任务" />开启</label>
+        <label>每周几个 <InputNumber min={1} max={5} value={weekly.per_week} onChange={(v) => onChange({ ...policy, weekly: { ...weekly, per_week: Number(v) || 1 } })} aria-label="每周任务数" /></label>
+        <label>每个奖励好感 <InputNumber min={0} max={50} value={weekly.reward_affinity} onChange={(v) => onChange({ ...policy, weekly: { ...weekly, reward_affinity: Number(v) || 0 } })} aria-label="周任务奖励" /></label>
+        <label>全做完送 <Select size="small" style={{ minWidth: 130 }} value={weekly.all_done_item} onChange={(v: string) => onChange({ ...policy, weekly: { ...weekly, all_done_item: v } })}
+          options={[{ value: "", label: "不送" }, ...itemOptions]} aria-label="周任务全做完送" /></label>
+      </div>
+      <Text type="secondary" className="me-hint">任务池：{(meta.weekly ?? []).map((q) => q.title).join("、")}</Text>
+    </Card>
+    <Card size="small" title="今日缘分">
+      <div className="aff-form-row">
+        <label><Switch checked={fortune.enabled} onChange={(v) => onChange({ ...policy, fortune: { ...fortune, enabled: v } })} aria-label="今日缘分" />开启</label>
+        <label>每天第一次抽加好感 <InputNumber min={0} max={10} value={fortune.reward_affinity} onChange={(v) => onChange({ ...policy, fortune: { ...fortune, reward_affinity: Number(v) || 0 } })} aria-label="缘分奖励" /></label>
+      </div>
+      <Text type="secondary" className="me-hint">签级：{(meta.fortuneTiers ?? []).join("、")}；大吉翻倍，关系越好越容易抽到好签。</Text>
+    </Card>
+    <Card size="small" title="认识纪念日">
+      <label className="aff-form-row" style={{ marginBottom: 8 }}><Switch checked={anniversary.enabled} onChange={(v) => onChange({ ...policy, anniversary: { ...anniversary, enabled: v } })} aria-label="纪念日" />开启（当天 Agent 会知道，并送道具）</label>
+      <DayTable label="纪念日" table={anniversary.items} make={() => "lucky_card"} onChange={(next) => onChange({ ...policy, anniversary: { ...anniversary, items: next } })}
+        render={(value, set) => <Select size="small" style={{ minWidth: 130 }} value={value} onChange={set} options={itemOptions} aria-label="纪念日道具" />} />
     </Card>
   </div>;
 }
@@ -242,7 +343,7 @@ export function AffinityAdminPage(): React.JSX.Element {
 
   const editor = !draft || !meta ? <Skeleton active paragraph={{ rows: 8 }} /> : null;
   return <div className="page-stack">
-    <PageHeader title="好感度" subtitle="让好感真正有用：每个等级多给哪些额度、解锁什么玩法，礼物、商店、每日任务和长期不来往的衰减。"
+    <PageHeader title="好感度" subtitle="让好感真正有用：每个等级多给哪些额度、Bot 怎么说话和多主动，礼物、商店、每日/周任务、连续来往、纪念日、徽章和长期不来往的衰减。"
       onRefresh={() => { policyQuery.reload(); statsQuery.reload(); }} refreshing={policyQuery.refreshing || statsQuery.refreshing}
       status={draft ? <Tag color={draft.enabled ? "success" : "default"}>{draft.enabled ? "玩法开启" : "玩法关闭"}</Tag> : undefined} />
     {policyQuery.error && !draft && <QueryErrorAlert error={policyQuery.error} onRetry={policyQuery.reload} />}
@@ -260,6 +361,7 @@ export function AffinityAdminPage(): React.JSX.Element {
       { key: "levels", label: <span><HeartOutlined /> 等级权益</span>, children: editor ?? <div className="aff-grid">{draft!.levels.map((level, index) => <LevelEditor key={level.level} level={level} floor={meta!.levels[index]?.floor ?? 0} meta={meta!} onChange={(next) => setDraft({ ...draft!, levels: draft!.levels.map((row, i) => (i === index ? next : row)) })} />)}</div> },
       { key: "economy", label: <span><GiftOutlined /> 礼物与商店</span>, children: editor ?? <EconomyEditor policy={draft!} meta={meta!} onChange={setDraft} /> },
       { key: "rules", label: <span><SettingOutlined /> 任务·衰减·问候</span>, children: editor ?? <RulesEditor policy={draft!} meta={meta!} onChange={setDraft} /> },
+      { key: "bond", label: <span><FireOutlined /> 羁绊玩法</span>, children: editor ?? <BondRulesEditor policy={draft!} meta={meta!} onChange={setDraft} /> },
     ]} />
   </div>;
 }

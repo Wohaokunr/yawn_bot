@@ -14,7 +14,7 @@ import "./me-space.css";
 import "./me-v3.css";
 
 const { Text } = Typography;
-const TAB_KEYS = ["overview", "perks", "play"] as const;
+const TAB_KEYS = ["overview", "bond", "perks", "play"] as const;
 
 export function MyAffinityPage(): React.JSX.Element {
   const { query, data } = useResource<AffinityState>(["me", "affinity"], () => spaceApi.affinity());
@@ -96,6 +96,7 @@ export function MyAffinityPage(): React.JSX.Element {
       })()}
       <UrlTabs keys={TAB_KEYS} fallback="overview" items={[
         { key: "overview", label: "来源与签到", children: <AffinityOverview data={data} breakdown={breakdown} events={events} groupNames={groupNames} eventFilter={eventFilter} setEventFilter={setEventFilter} busy={busy} onCheckin={(groupId) => void checkin(groupId)} /> },
+        { key: "bond", label: "羁绊", children: <MyAffinityPlay view="bond" /> },
         { key: "perks", label: "等级权益", children: <MyAffinityPlay view="perks" /> },
         { key: "play", label: "任务·送礼·商店", children: <MyAffinityPlay view="play" /> },
       ]} />
