@@ -1,11 +1,16 @@
-# ruff: noqa: E501, TRY003, PLR2004
+# ruff: noqa: E501, TRY003, PLR2004, PLR0911
 """私聊工具 ``stickers``：私聊里也能“偷”他发来的表情包、查表情包库、看他贡献过哪些。
 
 - ``steal``：把他本轮（或 10 分钟内）发来的一张图存进表情包库。可以是他让你收藏，
   也可以是你自己喜欢就偷——两种都走这一个动作；名字/标签不写就让识图模型起；
 - ``search``：按名字/情绪/图上的字在私聊能用的（所有群可用的）表情包里找，返回名字，
   正文写 ``[表情:名字]`` 就能发；
-- ``mine``：他收藏/被偷过的表情包（只列名字和状态）。
+- ``mine``：他收藏/被偷过的表情包（名字、状态、发过几次），以及他在不在“别偷我的图”名单里；
+- ``rename`` / ``remove``：改他自己收藏的那张的名字、把他名下的某一张从库里拿掉；
+- ``protect`` / ``unprotect``：以后别偷（存）他发的图 / 取消；
+- ``stats``：表情包库概况（多少张能用、最近常发哪些、他贡献了几张）。
+
+后四类和群聊 ``my_stickers`` 共用 ``sticker_self_service``，只作用于他本人。
 
 闸门：表情包总开关、``private_steal_enabled``、``steal_mode``、每人每日 ``private_daily_steals``、
 冷却；默认只收 QQ 标成表情包的图（``steal_photos`` 打开才收照片），私聊来的照片一律待审核；
@@ -17,18 +22,20 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from .sticker_intake import intake_image
+from .sticker_intake import check_image_shape, intake_image
 from .sticker_library import (
     STATUS_ACTIVE,
     STATUS_PENDING,
     StickerError,
     all_stickers,
     available_stickers,
+    is_available,
     search_text,
 )
 from .sticker_policy import (
     load_settings,
     note_steal,
+    stats_snapshot,
     steal_cooldown_remaining,
     steal_key,
     steals_today,
@@ -45,15 +52,17 @@ from .tool_args import (
 if TYPE_CHECKING:
     from .private_tools import PrivateToolContext
 
-ACTIONS = ("steal", "search", "mine")
+ACTIONS = ("steal", "search", "mine", "rename", "remove", "protect", "unprotect", "stats")
 RECENT_SECONDS = 10 * 60
 RECENT_PER_USER = 4
 SEARCH_LIMIT = 8
 DESCRIPTION = (
     "表情包：steal 把他发来的一张图存进你的表情包库（他让你收藏，或者你自己喜欢就偷，都用它；"
     "默认取他这条消息里的图，没有就取 10 分钟内他发的最近一张，index 指定第几张；name/tags 不写就让识图模型看图起）；"
-    "search 按名字/情绪找能发的表情包（query），正文写 [表情:名字] 发；mine 看他收藏/被你偷过的表情包。"
-    "没有本轮成功的 steal 不能说“偷到了/收藏好了”"
+    "search 按名字/别名/情绪/图上的字找能发的表情包（query），正文写 [表情:名字] 发；mine 看他收藏/被你偷过的表情包；"
+    "rename 给他自己收藏的那张改名（name → new_name）；remove 把他名下的某一张从库里拿掉（name）；"
+    "protect 以后不存他发的图，unprotect 取消；stats 看表情包库概况。"
+    "没有本轮成功的 steal 不能说“偷到了/收藏好了”，没有成功的 remove/rename/protect 不能说“删掉了/改好了/不存了”"
 )
 PROPERTIES: dict[str, Any] = {
     "action": {"type": "string", "enum": list(ACTIONS)},
@@ -62,6 +71,7 @@ PROPERTIES: dict[str, Any] = {
     "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10}, "maxItems": 6},
     "description": {"type": "string", "maxLength": 120},
     "query": {"type": "string", "minLength": 1, "maxLength": 20},
+    "new_name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "rename 时的新名字"},
 }
 
 _recent: dict[int, list[tuple[float, dict[str, Any]]]] = {}
@@ -145,6 +155,10 @@ async def _steal(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any
         fetched = await fetch_bytes(ctx.bot, 0, attachment, max_bytes=settings.max_bytes)
     except InboxError as exc:
         raise ToolError("没取到这张图", code=ERROR_UPSTREAM, hint="图可能过期了，让他重新发一次；别说存好了") from exc
+    try:
+        check_image_shape(fetched.data, settings)
+    except StickerError as exc:
+        raise ToolError(str(exc), code=ERROR_PERMISSION, hint="如实说这张存不了") from exc
     # 私聊来的照片一律待审核；表情包看偷图模式（超级管理员发的直接可用）。
     auto = settings.steal_mode == "auto" and qq_sticker
     status = STATUS_ACTIVE if auto or ctx.is_superuser else STATUS_PENDING
@@ -166,7 +180,7 @@ async def _steal(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any
     except StickerError as exc:
         raise ToolError(
             str(exc),
-            code=ERROR_INVALID_ARGS,
+            code=ERROR_PERMISSION if exc.reason in {"trashed", "blocked"} else ERROR_INVALID_ARGS,
             hint="自己看图起个名字，name 再调用一次" if exc.reason == "no_name" else "别说存好了",
         ) from exc
     if result.created:
@@ -179,7 +193,7 @@ async def _steal(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any
         "name": sticker.name,
         "tags": list(sticker.tags),
     }
-    if sticker.available_in(None):
+    if is_available(sticker, None):
         payload["status"] = "可用"
         payload["next"] = f"私聊和群里都能写 [表情:{sticker.name}] 发它"
     elif sticker.usable:
@@ -198,12 +212,19 @@ def _search(args: dict[str, Any]) -> dict[str, Any]:
     query = str(args.get("query") or "").strip().casefold()
     if not query:
         raise ToolError("search 要写 query", code=ERROR_INVALID_ARGS)
-    rows = []
-    for item in available_stickers(None):
-        if query in search_text(item).casefold():
-            rows.append({"name": item.name, "tags": list(item.tags[:3])})
-        if len(rows) >= SEARCH_LIMIT:
-            break
+    # 名字/别名正好对上的排前面，其次标签，再其次说明和图上的字；同名只留一条。
+    scored: list[tuple[int, int, str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    for position, item in enumerate(available_stickers(None)):
+        key = "".join(item.name.split()).casefold()
+        if key in seen or query not in search_text(item).casefold():
+            continue
+        seen.add(key)
+        names = [item.name.casefold(), *(alias.casefold() for alias in item.aliases)]
+        rank = 0 if query in names else 1 if any(query in name for name in names) else 2 if any(query in tag.casefold() for tag in item.tags) else 3
+        scored.append((rank, position, item.name, item.tags[:3]))
+    scored.sort()
+    rows = [{"name": name, "tags": list(tags)} for _rank, _position, name, tags in scored[:SEARCH_LIMIT]]
     return {
         "action": "search",
         "found": rows,
@@ -212,12 +233,47 @@ def _search(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mine(ctx: PrivateToolContext) -> dict[str, Any]:
+    stats = stats_snapshot()
     rows = []
     for item in all_stickers():
         origin = item.origin
         if item.added_by == ctx.user_id or str(origin.get("sender_id") or "") == str(ctx.user_id):
-            rows.append({"name": item.name, "status": "可用" if item.usable else ("待审核" if item.status == STATUS_PENDING else "停用"), "stolen": item.source == "stolen"})
-    return {"action": "mine", "count": len(rows), "stickers": rows[-20:]}
+            row = stats.get(item.sticker_id)
+            rows.append(
+                {
+                    "name": item.name,
+                    "status": "可用" if item.usable else ("待审核" if item.status == STATUS_PENDING else "停用"),
+                    "stolen": item.source == "stolen",
+                    "sent_times": int(row.get("uses", 0)) if isinstance(row, dict) else 0,
+                }
+            )
+    return {
+        "action": "mine",
+        "count": len(rows),
+        "stickers": rows[-20:],
+        "protected": ctx.user_id in load_settings().steal_protected_users,
+    }
+
+
+def _stats(ctx: PrivateToolContext) -> dict[str, Any]:
+    """库概况：只给数量和名字，不给来源、不给别人的信息。"""
+
+    usable = available_stickers(None)
+    stats = stats_snapshot()
+
+    def uses(sticker_id: str) -> int:
+        row = stats.get(sticker_id)
+        return int(row.get("uses", 0)) if isinstance(row, dict) else 0
+
+    top = sorted(usable, key=lambda item: -uses(item.sticker_id))[:5]
+    mine = [item for item in all_stickers() if item.added_by == ctx.user_id or str(item.origin.get("sender_id") or "") == str(ctx.user_id)]
+    return {
+        "action": "stats",
+        "usable_here": len(usable),
+        "most_sent": [item.name for item in top if uses(item.sticker_id) > 0],
+        "from_him": len(mine),
+        "newest": [item.name for item in usable[-3:]],
+    }
 
 
 async def stickers_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[str, Any]:
@@ -228,6 +284,16 @@ async def stickers_tool(args: dict[str, Any], ctx: PrivateToolContext) -> dict[s
         return _search(args)
     if action == "mine":
         return _mine(ctx)
+    if action == "stats":
+        return _stats(ctx)
+    from . import sticker_self_service as service
+
+    if action == "rename":
+        return {"action": action, "done": True, **service.rename_own(ctx.user_id, None, str(args.get("name") or ""), str(args.get("new_name") or ""))}
+    if action == "remove":
+        return {"action": action, "done": True, **service.remove_own(ctx.user_id, None, str(args.get("name") or ""))}
+    if action in {"protect", "unprotect"}:
+        return {"action": action, "done": True, **service.protect(ctx.user_id, on=action == "protect")}
     raise ToolError(f"不认识的动作 {action}", code=ERROR_INVALID_ARGS)
 
 

@@ -1,4 +1,4 @@
-# ruff: noqa: E501, C901, PLR0912, PLR0913, PLR0915, PLR2004, PERF401, PLW2901, ARG001, TRY301
+# ruff: noqa: E501, C901, PLR0912, PLR0913, PLR0915, PLR2004, PERF401, PLW2901, TRY301
 """私聊回复的发送：节奏分条 + 表情包 + 虚拟电脑里的图片/文件。
 
 与群聊同一套发言节奏（``speech_rhythm``）：模型开头写【节奏:整段/分条/连发/蹦字】，
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import re
 import time
 from dataclasses import dataclass
@@ -51,7 +52,13 @@ from .sticker_library import (
 from .sticker_markup import _MARKER_RE as _STICKER_RE
 from .sticker_markup import sticker_instruction
 from .sticker_policy import load_settings as load_sticker_settings
-from .sticker_policy import menu_entries, pick_sticker
+from .sticker_policy import (
+    menu_entries,
+    note_miss,
+    note_private_sent,
+    pick_sticker,
+    private_scope,
+)
 
 MAX_MESSAGES = 6
 MEDIA_PAUSE_SECONDS = 0.6
@@ -144,14 +151,17 @@ def private_sticker_instruction(user_id: int, today: str, *, allow: bool = True)
     if not stickers:
         return ""
     settings = load_sticker_settings()
+    # 轮换按人记（private_scope）：他刚收到过的那几张往后排。
     menu = menu_entries(
-        PRIVATE_STICKER_SCOPE, stickers, size=settings.menu_size, seed=str(user_id)
+        private_scope(user_id), stickers, size=settings.menu_size, seed=str(user_id), settings=settings
     )
     tags = [
         (tag, count)
         for tag, count in tag_counts(PRIVATE_STICKER_SCOPE, stickers=stickers)
         if count >= 2
     ][:12]
+    if not settings.menu_show_tags:
+        tags = []
     return sticker_instruction(
         menu,
         tags,
@@ -278,13 +288,20 @@ Sender = Any  # async (Message) -> None
 
 
 async def _sticker_segment(
-    user_id: int, name: str, budget: list[int]
+    user_id: int, name: str, budget: list[int], sent_ids: list[str] | None = None
 ) -> MessageSegment | None:
     if budget[0] <= 0:
         return None
     stickers = available_stickers(None)
     _how, candidates = match_stickers(name, None, stickers=stickers)
-    picked = pick_sticker(PRIVATE_STICKER_SCOPE, candidates) if candidates else None
+    if not candidates:
+        # 模型写了库里没有的名字：记下来给管理员补图/设别名（不记是谁的私聊）。
+        with contextlib.suppress(Exception):
+            note_miss(name, None)
+        return None
+    # 同一次回复里不重复发同一张；轮换按人记。
+    pool = [item for item in candidates if item.sticker_id not in (sent_ids or [])] or candidates
+    picked = pick_sticker(private_scope(user_id), pool)
     if picked is None:
         return None
     try:
@@ -292,6 +309,8 @@ async def _sticker_segment(
     except Exception:  # noqa: BLE001
         return None
     budget[0] -= 1
+    if sent_ids is not None:
+        sent_ids.append(picked.sticker_id)
     image = MessageSegment.image(data)
     image.data["sub_type"] = 1
     image.data["summary"] = f"[{picked.name}]"
@@ -320,6 +339,8 @@ async def deliver(
     plan, items = plan_private_reply(text)
     result = Delivery([], rhythm=plan.rhythm, planned=len(items))
     budget = [private_sticker_left(user_id, today) if today else 0]
+    picked_ids: list[str] = []
+    delivered_ids: list[str] = []
     keep_media = keep_media_on_interrupt()
     for index, item in enumerate(items):
         if index and interrupt is not None and not result.interrupted:
@@ -345,7 +366,7 @@ async def deliver(
         if item.kind == "text":
             message = Message(MessageSegment.text(item.value))
         elif item.kind == "sticker":
-            segment = await _sticker_segment(user_id, item.value, budget)
+            segment = await _sticker_segment(user_id, item.value, budget, picked_ids)
             if segment is None:
                 result.dropped += 1
                 continue
@@ -394,11 +415,15 @@ async def deliver(
             result.text_parts += 1
         elif item.kind == "sticker":
             result.stickers += 1
+            if picked_ids:
+                delivered_ids.append(picked_ids[-1])
         elif item.kind == "image" and note is None:
             result.images += 1
     if result.stickers and today:
         try:
             _note_sticker_sent(user_id, today, result.stickers)
+            # 库的使用次数和“这张刚发过”也记上（以前私聊发的不计数，统计里看不到）。
+            note_private_sent(user_id, delivered_ids)
         except Exception:  # noqa: BLE001
             dbg_exc("私聊表情包计数失败(忽略)")
     if result.dropped:

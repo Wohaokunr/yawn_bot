@@ -500,6 +500,21 @@ TOOL_DEFINITIONS = (
         keywords=("偷图", "偷表情", "偷走", "这张归我", "表情包"),
     ),
     ToolDefinition(
+        "my_stickers",
+        "成员管他自己的表情包（只作用于说话的这个人）：list 看他在本群收藏过哪些、哪些是你从他那偷的、他在不在“别偷我的图”名单里；"
+        "rename 给他自己收藏的改名；remove 把他收藏的或从他那偷的某一张从库里拿掉；"
+        "protect 以后不偷他发的图，unprotect 取消。没有本轮成功的 remove/rename/protect 不能说“删掉了/改好了/不偷了”",
+        {
+            "action": {"type": "string", "enum": ["list", "rename", "remove", "protect", "unprotect"]},
+            "name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "rename/remove 时：是哪一张（list 里的名字）"},
+            "new_name": {"type": "string", "minLength": 1, "maxLength": 16, "description": "rename 时的新名字"},
+        },
+        required=("action",),
+        permission_level=TOOL_PERMISSION_STATE_WRITE,
+        family="reaction",
+        keywords=("我的表情包", "别偷我的图", "不要偷我", "删掉我的表情", "表情包改名", "我收藏的表情"),
+    ),
+    ToolDefinition(
         "send_message",
         "发送当前群的结构化消息；text 里用 ||| 隔开的部分会像真人一样依次发成几条，"
         "rhythm 选节奏（block 整段/split 分条/burst 连发/pop 蹦字）；成功后不要重复发送同样最终文本",

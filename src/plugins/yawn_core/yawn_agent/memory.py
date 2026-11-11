@@ -1991,6 +1991,10 @@ async def delete_member_memories(session: Any, group_id: int, user_id: int) -> i
 
     try:
         forget_sticker_owner(group_id, user_id)
+        # 今天“被偷了几张”的计数键里有他的号码，一起抹掉。
+        from .sticker_policy import forget_member_usage
+
+        forget_member_usage(user_id)
     except Exception:  # noqa: BLE001
         dbg_exc(f"群 {group_id} 清除成员 {user_id} 的表情包收藏记录失败(忽略)")
     return removed

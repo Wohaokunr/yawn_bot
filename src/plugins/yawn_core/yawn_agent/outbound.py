@@ -60,6 +60,7 @@ from .speech_rhythm import (
 )
 from .sticker_library import get_sticker
 from .sticker_markup import has_sticker_markup, sticker_names, strip_sticker_markup
+from .sticker_policy import note_plain as note_plain_sent
 from .sticker_policy import note_sent as note_stickers_sent
 from .sticker_send import resolve_plan_stickers
 
@@ -1231,10 +1232,12 @@ def _note_sent_stickers(group_id: int, prepared: PreparedOutboundMessage) -> Non
         for item in prepared.media_refs
         if isinstance(item, dict) and item.get("reaction_id")
     ]
-    if not ids:
-        return
     try:
-        note_stickers_sent(group_id, ids)
+        if ids:
+            note_stickers_sent(group_id, ids)
+        else:
+            # “两次表情包之间至少隔几条文字”闸门靠它数数（进程内，不写盘）。
+            note_plain_sent(group_id)
     except Exception:  # noqa: BLE001
         dbg(f"群 {group_id} 表情包使用统计写入失败(忽略)")
 

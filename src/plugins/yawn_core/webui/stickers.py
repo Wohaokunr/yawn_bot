@@ -1,4 +1,4 @@
-# ruff: noqa: TID252,FAST002,E501,PERF203
+# ruff: noqa: TID252, FAST002, E501, PERF203, FBT001
 """「表情包」管理页的后端：表情包库（上传、改名打标签、审核、启停、删除）、
 发送策略与频率、今日用量、本群提示词菜单预览。
 
@@ -9,10 +9,14 @@
 AI 标注（``yawn_agent.sticker_labeler``）：上传前逐张预览、上传时自动补全、单张重新
 识别（先预览再应用）、批量任务（``sticker_label_jobs``，进度可轮询、可取消）、撤销。
 偷图来源（群、发图的人）只在这里给管理员看，成员要求忘掉时会被抹掉。
+
+3.0 的统计、体检、合集、回收站、拉黑、标签整理、导入导出、换图在
+``sticker_admin_routes.py``（同一个 ``/stickers`` 前缀）；这里保留库、策略、标注和预览。
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
@@ -24,34 +28,48 @@ from sqlalchemy import select
 from ..data_models.bot_group import BotGroup
 from ..yawn_agent import sticker_label_jobs as label_jobs
 from ..yawn_agent.sticker_intake import intake_image
+from ..yawn_agent.sticker_labeler import MOODS, label_image, merge_label, vision_status
 from ..yawn_agent.sticker_labeler import REASON_TEXT as LABEL_REASON_TEXT
-from ..yawn_agent.sticker_labeler import label_image, merge_label, vision_status
 from ..yawn_agent.sticker_library import (
+    BULK_OPS,
     SOURCE_LABELS,
     STATUS_ACTIVE,
     STATUS_PENDING,
+    WEIGHT_LABELS,
     Sticker,
     StickerError,
+    all_packs,
     all_stickers,
+    blocked_hashes,
+    bulk_update,
     delete_sticker,
     digest_of,
     find_by_sha256,
     get_sticker,
     known_names,
+    library_health,
     library_root,
+    match_stickers,
     sticker_path,
     tag_counts,
+    trash_sticker,
+    trashed_stickers,
     undo_label,
     update_sticker,
 )
+from ..yawn_agent.sticker_meta import describe_dimensions, shape_label
 from ..yawn_agent.sticker_policy import (
     FREQUENCY_LABELS,
+    MENU_STRATEGY_LABELS,
     REASON_TEXT,
+    GroupOverride,
     StickerSettings,
     cooldown_remaining,
     exposure,
     forget_stats,
+    in_quiet_hours,
     load_settings,
+    menu_plan,
     note_labeled,
     save_settings,
     stats_snapshot,
@@ -77,6 +95,10 @@ def _settings_payload(settings: StickerSettings) -> dict[str, Any]:
     data["allowedGroups"] = [str(item) for item in settings.allowed_groups]
     data["blockedGroups"] = [str(item) for item in settings.blocked_groups]
     data["stealProtectedUsers"] = [str(item) for item in settings.steal_protected_users]
+    data["stealBlockedGroups"] = [str(item) for item in settings.steal_blocked_groups]
+    data["groupOverrides"] = {
+        group: {_camel(key): value for key, value in override.model_dump().items()} for group, override in settings.group_overrides.items()
+    }
     return data
 
 
@@ -93,10 +115,28 @@ async def _group_names(group_ids: set[int]) -> dict[str, str]:
         return {}
 
 
-def _sticker_payload(item: Sticker, stats: dict[str, Any]) -> dict[str, Any]:
-    row = stats.get(item.sticker_id) if isinstance(stats.get(item.sticker_id), dict) else {}
+def _sticker_payload(item: Sticker, stats: dict[str, Any], sent_today: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw_row = stats.get(item.sticker_id)
+    row: dict[str, Any] = raw_row if isinstance(raw_row, dict) else {}
     file_ok = (library_root() / item.file_name).is_file()
+    raw_uses = row.get("groups")
+    group_uses: dict[str, Any] = raw_uses if isinstance(raw_uses, dict) else {}
     return {
+        "aliases": list(item.aliases),
+        "pinned": item.pinned,
+        "weight": item.weight,
+        "packs": list(item.packs),
+        "note": item.note,
+        "width": item.width,
+        "height": item.height,
+        "frames": item.frames,
+        "animated": item.animated,
+        "dimensions": describe_dimensions(item.width, item.height, item.frames),
+        "shape": shape_label(item.width, item.height),
+        "dailyCap": item.daily_cap,
+        "sentToday": int((sent_today or {}).get(item.sticker_id, 0)),
+        "groupUses": [{"groupId": None if key == "private" else str(key), "uses": int(value)} for key, value in sorted(group_uses.items(), key=lambda pair: -int(pair[1]))][:8],
+        "deletedAt": item.deleted_at or None,
         "id": item.sticker_id,
         "name": item.name,
         "tags": list(item.tags),
@@ -131,6 +171,8 @@ def _ai_payload(item: Sticker) -> dict[str, Any] | None:
         "kind": ai.get("kind") or None,
         "safe": ai.get("safe") is not False,
         "text": ai.get("text") or "",
+        "mood": ai.get("mood") or None,
+        "imported": bool(ai.get("imported")),
         "labeledAt": ai.get("labeled_at") or None,
         "undone": bool(ai.get("undone")),
     }
@@ -161,6 +203,23 @@ def _usage_payload(settings: StickerSettings) -> dict[str, Any]:
         "totals": {key: int(value) for key, value in (usage.get("totals") or {}).items()},
         "groups": groups[:50],
         "groupLimit": settings.group_daily_limit,
+        "drops": {key: int(value) for key, value in (usage.get("drops") or {}).items()},
+        "quietNow": in_quiet_hours(settings),
+    }
+
+
+def _pack_payload(pack: Any, stickers: list[dict[str, Any]]) -> dict[str, Any]:
+    members = [row for row in stickers if pack.pack_id in row["packs"]]
+    return {
+        "id": pack.pack_id,
+        "name": pack.name,
+        "description": pack.description,
+        "enabled": pack.enabled,
+        "groups": [str(group) for group in pack.groups],
+        "createdAt": pack.created_at or None,
+        "count": len(members),
+        "uses": sum(int(row["uses"]) for row in members),
+        "cover": [row["id"] for row in members[:4]],
     }
 
 
@@ -170,9 +229,13 @@ async def stickers_overview(_session: AdminReadSession) -> dict[str, Any]:
 
     settings = load_settings()
     stats = stats_snapshot()
-    stickers = [_sticker_payload(item, stats) for item in all_stickers()]
+    sent_today = usage_snapshot().get("stickers", {})
+    stickers = [_sticker_payload(item, stats, sent_today) for item in all_stickers()]
     usage = _usage_payload(settings)
+    packs = all_packs()
     ids = {int(row["addedGroup"]) for row in stickers if row["addedGroup"]}
+    ids |= {int(group) for group in settings.group_overrides}
+    ids |= {group for pack in packs for group in pack.groups}
     ids |= {int(row["groupId"]) for row in usage["groups"] if str(row["groupId"]).isdigit()}
     ids |= {int(group) for row in stickers for group in row["groups"]}
     ids |= {int(row["origin"]["groupId"]) for row in stickers if row["origin"] and row["origin"]["groupId"]}
@@ -187,6 +250,11 @@ async def stickers_overview(_session: AdminReadSession) -> dict[str, Any]:
         "stolen": sum(1 for row in stickers if row["source"] == "stolen"),
         "aiLabeled": sum(1 for row in stickers if row["ai"] and not row["ai"]["undone"]),
         "unlabeled": sum(1 for row in stickers if not row["ai"] or row["ai"]["undone"]),
+        "pinned": sum(1 for row in stickers if row["pinned"]),
+        "animated": sum(1 for row in stickers if row["animated"]),
+        "trash": len(trashed_stickers()),
+        "blocked": len(blocked_hashes()),
+        "packs": len(packs),
     }
     return ok(
         {
@@ -201,6 +269,12 @@ async def stickers_overview(_session: AdminReadSession) -> dict[str, Any]:
             "sourceLabels": SOURCE_LABELS,
             "vision": vision_status(),
             "labelJobs": label_jobs.list_jobs(),
+            "packs": [_pack_payload(pack, stickers) for pack in packs],
+            "menuStrategyLabels": MENU_STRATEGY_LABELS,
+            "weightLabels": {str(key): value for key, value in WEIGHT_LABELS.items()},
+            "moods": list(MOODS),
+            "index": library_health(),
+            "labelScopes": label_jobs.SCOPE_LABELS,
         }
     )
 
@@ -209,7 +283,8 @@ async def stickers_overview(_session: AdminReadSession) -> dict[str, Any]:
 async def sticker_image(
     sticker_id: str, _session: AdminReadSession
 ) -> Response:
-    item = get_sticker(sticker_id)
+    # 回收站里的也要能预览（管理员得看着图决定恢复还是彻底删）。
+    item = get_sticker(sticker_id, include_trashed=True)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "表情包不存在")
     try:
@@ -221,6 +296,8 @@ async def sticker_image(
         content=path.read_bytes(),
         headers={
             "Content-Type": mime,
+            # 图片按内容哈希命名：换图会换哈希，浏览器可以放心长缓存。
+            **({"ETag": f'"{item.sha256[:32]}"'} if item.sha256 else {}),
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox; default-src 'none'; img-src 'self' data:",
             "Cache-Control": "private, max-age=300",
@@ -253,8 +330,9 @@ async def sticker_upload(  # noqa: PLR0913, PLR0917
     name: str = Query(default="", max_length=40),
     tags: str = Query(default="", max_length=200),
     description: str = Query(default="", max_length=300),
-    auto: bool = Query(default=True),  # noqa: FBT001
+    auto: bool = Query(default=True),
     fallback: str = Query(default="", max_length=60),
+    pack: str = Query(default="", max_length=16),
 ) -> dict[str, Any]:
     """原始请求体上传（不依赖 multipart），一次一张；同一张图重复上传返回已有记录。
 
@@ -279,6 +357,7 @@ async def sticker_upload(  # noqa: PLR0913, PLR0917
             hint=f"文件名：{fallback}" if fallback else "",
             use_ai=use_ai,
             settings=settings,
+            packs=[pack] if isinstance(pack, str) and pack else [],
         )
     except StickerError as exc:
         code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE if exc.reason == "too_large" else status.HTTP_422_UNPROCESSABLE_ENTITY
@@ -288,6 +367,7 @@ async def sticker_upload(  # noqa: PLR0913, PLR0917
         {
             "sticker": _sticker_payload(result.sticker, stats_snapshot()),
             "created": result.created,
+            "restored": result.restored,
             "namedBy": result.named_by,
             "heldForReview": result.held_for_review,
             "label": _label_payload(result.label) if result.label is not None else None,
@@ -305,17 +385,17 @@ async def sticker_label_preview(
 
     body = await _read_body(request)
     hint = hint if isinstance(hint, str) else ""
-    existing = find_by_sha256(digest_of(body)) if body else None
+    existing = find_by_sha256(digest_of(body), include_trashed=True) if body else None
     settings = load_settings()
     if not settings.ai_label_enabled:
         raise HTTPException(status.HTTP_409_CONFLICT, LABEL_REASON_TEXT["disabled"])
-    label = await label_image(body, hint=f"文件名：{hint}" if hint else "", known_names=known_names(), style=settings.ai_label_style)
+    label = await label_image(body, hint=f"文件名：{hint}" if hint else "", known_names=known_names(), style=settings.ai_label_style, retry=settings.ai_label_retry)
     if label.ok:
         note_labeled(1)
     return ok(
         {
             "label": _label_payload(label),
-            "duplicate": {"id": existing.sticker_id, "name": existing.name} if existing else None,
+            "duplicate": {"id": existing.sticker_id, "name": existing.name, "trashed": existing.deleted} if existing else None,
         }
     )
 
@@ -345,6 +425,7 @@ async def sticker_label(sticker_id: str, body: LabelBody, _session: AdminWriteSe
             fields=tuple(body.fields),
             hold_unsafe=settings.ai_label_review_unsafe,
             style=settings.ai_label_style,
+            retry=settings.ai_label_retry,
         )
         if not row.get("ok"):
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(row.get("reasonText") or "标注失败"))
@@ -357,10 +438,10 @@ async def sticker_label(sticker_id: str, body: LabelBody, _session: AdminWriteSe
     except StickerError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     hint = "" if item.placeholder_name else f"现在叫“{item.name}”"
-    label = await label_image(data, hint=hint, known_names=[name for name in known_names() if name != item.name], style=settings.ai_label_style)
+    label = await label_image(data, hint=hint, known_names=[name for name in known_names() if name != item.name], style=settings.ai_label_style, retry=settings.ai_label_retry)
     if label.ok:
         note_labeled(1)
-    current = {"name": item.name, "tags": list(item.tags), "description": item.description, "name_is_placeholder": item.placeholder_name}
+    current = {"name": item.name, "tags": list(item.tags), "description": item.description, "aliases": list(item.aliases), "name_is_placeholder": item.placeholder_name}
     return ok({"label": _label_payload(label), "changes": merge_label(current, label, mode=body.mode, fields=tuple(body.fields))})
 
 
@@ -378,8 +459,9 @@ async def sticker_undo_label(sticker_id: str, _session: AdminWriteSession) -> di
 class LabelJobBody(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-    scope: Literal["selected", "unlabeled", "all"] = "selected"
+    scope: Literal["selected", "unlabeled", "all", "placeholder", "low_confidence", "retry_failed"] = "selected"
     ids: list[str] = Field(default_factory=list, max_length=500)
+    retry_of: str = Field(default="", max_length=16)
     mode: Literal["fill", "merge", "replace"] = "fill"
     fields: list[Literal["name", "tags", "description"]] = Field(default_factory=lambda: ["name", "tags", "description"], max_length=3)
 
@@ -391,14 +473,9 @@ async def sticker_label_jobs(_session: AdminReadSession) -> dict[str, Any]:
 
 @router.post("/label-jobs")
 async def sticker_label_job_start(body: LabelJobBody, _session: AdminWriteSession) -> dict[str, Any]:
-    if body.scope == "unlabeled":
-        ids = label_jobs.unlabeled_ids()
-    elif body.scope == "all":
-        ids = [item.sticker_id for item in all_stickers()]
-    else:
-        ids = body.ids
+    ids = label_jobs.scope_ids(body.scope, body.ids, retry_of=body.retry_of)
     try:
-        job = label_jobs.start_job(ids, mode=body.mode, fields=tuple(body.fields))
+        job = label_jobs.start_job(ids, mode=body.mode, fields=tuple(body.fields), scope=body.scope)
     except label_jobs.LabelJobError as exc:
         code = status.HTTP_409_CONFLICT if exc.reason in {"busy", "disabled", "no_vision"} else status.HTTP_422_UNPROCESSABLE_ENTITY
         raise HTTPException(code, str(exc)) from exc
@@ -431,6 +508,12 @@ class StickerPatch(BaseModel):
     enabled: bool | None = None
     status: Literal["active", "pending"] | None = None
     groups: list[str] | None = Field(default=None, max_length=200)
+    aliases: list[str] | None = Field(default=None, max_length=10)
+    pinned: bool | None = None
+    weight: int | None = Field(default=None, ge=0, le=3)
+    packs: list[str] | None = Field(default=None, max_length=10)
+    note: str | None = Field(default=None, max_length=300)
+    daily_cap: int | None = Field(default=None, ge=0, le=1000)
 
 
 @router.patch("/{sticker_id}")
@@ -449,42 +532,83 @@ async def sticker_patch(
     return ok({"sticker": _sticker_payload(item, stats_snapshot())})
 
 
+def remove_sticker(sticker_id: str, *, purge: bool = False, block: bool = False) -> tuple[Sticker, bool]:
+    """删一张：策略留了回收站天数就先进回收站（``purge`` / ``block`` 时直接删）。返回 ``(记录, 进了回收站)``。"""
+
+    if not purge and not block and load_settings().trash_days > 0:
+        return trash_sticker(sticker_id), True
+    item = delete_sticker(sticker_id, block=block)
+    forget_stats(item.sticker_id)
+    return item, False
+
+
 @router.delete("/{sticker_id}")
-async def sticker_delete(sticker_id: str, _session: AdminWriteSession) -> dict[str, Any]:
+async def sticker_delete(
+    sticker_id: str,
+    _session: AdminWriteSession,
+    purge: bool = Query(default=False),
+    block: bool = Query(default=False),
+) -> dict[str, Any]:
+    """删除：默认进回收站；``purge=true`` 彻底删，``block=true`` 彻底删并拉黑（以后不再收这张图）。"""
+
+    purge = purge if isinstance(purge, bool) else False
+    block = block if isinstance(block, bool) else False
     try:
-        item = delete_sticker(sticker_id)
+        item, trashed = remove_sticker(sticker_id, purge=purge, block=block)
     except StickerError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    forget_stats(item.sticker_id)
     await hub.notify_change("stickers")
-    return ok({"deleted": item.sticker_id})
+    return ok({"deleted": item.sticker_id, "trashed": trashed, "blocked": block})
+
+
+_LIBRARY_BULK = {"pin", "unpin", "enable", "disable", "approve", "hold", "add_tags", "remove_tags", "set_groups", "add_pack", "remove_pack", "set_weight"}
 
 
 class BulkBody(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-    ids: list[str] = Field(min_length=1, max_length=500)
-    action: Literal["approve", "enable", "disable", "delete", "undo_label"]
+    ids: list[str] = Field(min_length=1, max_length=2000)
+    action: Literal[
+        "approve", "enable", "disable", "delete", "undo_label", "hold", "pin", "unpin",
+        "add_tags", "remove_tags", "set_groups", "add_pack", "remove_pack", "set_weight", "purge", "block",
+    ]
+    tags: list[str] = Field(default_factory=list, max_length=8)
+    groups: list[str] = Field(default_factory=list, max_length=200)
+    pack: str = Field(default="", max_length=16)
+    weight: int = Field(default=1, ge=0, le=3)
 
 
 @router.post("/bulk")
 async def sticker_bulk(body: BulkBody, _session: AdminWriteSession) -> dict[str, Any]:
+    """批量操作。启停/审核/置顶/权重/标签/适用群/合集一次写盘；删除、撤销标注逐张做。"""
+
     done: list[str] = []
     missing: list[str] = []
-    for sticker_id in dict.fromkeys(body.ids):
+    ids = list(dict.fromkeys(body.ids))
+    if body.action in _LIBRARY_BULK and body.action in BULK_OPS:
+        value: Any = None
+        if body.action in {"add_tags", "remove_tags"}:
+            value = body.tags
+        elif body.action == "set_groups":
+            value = _group_list(body.groups, "适用的群")
+        elif body.action in {"add_pack", "remove_pack"}:
+            value = body.pack
+        elif body.action == "set_weight":
+            value = body.weight
         try:
-            if body.action == "delete":
-                delete_sticker(sticker_id)
-                forget_stats(sticker_id)
-            elif body.action == "approve":
-                update_sticker(sticker_id, status=STATUS_ACTIVE, enabled=True)
-            elif body.action == "undo_label":
-                undo_label(sticker_id)
-            else:
-                update_sticker(sticker_id, enabled=body.action == "enable")
-            done.append(sticker_id)
-        except StickerError:
-            missing.append(sticker_id)
+            done, missing = bulk_update(ids, body.action, value)
+        except StickerError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    else:
+        for sticker_id in ids:
+            try:
+                if body.action in {"delete", "purge", "block"}:
+                    remove_sticker(sticker_id, purge=body.action == "purge", block=body.action == "block")
+                else:
+                    undo_label(sticker_id)
+                done.append(sticker_id)
+            except StickerError:
+                missing.append(sticker_id)
     await hub.notify_change("stickers")
     return ok({"done": done, "missing": missing})
 
@@ -525,9 +649,56 @@ class SettingsBody(BaseModel):
     private_steal_enabled: bool | None = None
     private_daily_steals: int | None = None
     steal_protected_users: list[str] | None = Field(default=None, max_length=500)
+    # 3.0 新增：不带时沿用当前值。
+    group_hourly_limit: int | None = None
+    min_messages_between: int | None = None
+    sticker_cooldown_minutes: int | None = None
+    quiet_enabled: bool | None = None
+    quiet_start: str | None = Field(default=None, max_length=5)
+    quiet_end: str | None = Field(default=None, max_length=5)
+    menu_strategy: Literal["fresh", "popular", "explore", "balanced"] | None = None
+    new_boost_days: int | None = None
+    menu_hint_chars: int | None = None
+    menu_show_tags: bool | None = None
+    steal_scope: Literal["all", "origin"] | None = None
+    collect_scope: Literal["all", "origin"] | None = None
+    steal_animated: bool | None = None
+    steal_min_side: int | None = None
+    steal_sender_daily: int | None = None
+    steal_blocked_groups: list[str] | None = Field(default=None, max_length=500)
+    review_below_confidence: float | None = None
+    member_self_protect: bool | None = None
+    member_manage_own: bool | None = None
+    ai_label_retry: bool | None = None
+    ai_label_concurrency: int | None = None
+    ai_label_aliases: bool | None = None
+    trash_days: int | None = None
+    group_overrides: dict[str, dict[str, Any]] | None = None
 
 
 _PRIVATE_FIELDS = (
+    "group_hourly_limit",
+    "min_messages_between",
+    "sticker_cooldown_minutes",
+    "quiet_enabled",
+    "quiet_start",
+    "quiet_end",
+    "menu_strategy",
+    "new_boost_days",
+    "menu_hint_chars",
+    "menu_show_tags",
+    "steal_scope",
+    "collect_scope",
+    "steal_animated",
+    "steal_min_side",
+    "steal_sender_daily",
+    "review_below_confidence",
+    "member_self_protect",
+    "member_manage_own",
+    "ai_label_retry",
+    "ai_label_concurrency",
+    "ai_label_aliases",
+    "trash_days",
     "private_enabled",
     "private_daily_limit",
     "private_cooldown_seconds",
@@ -557,6 +728,27 @@ def _user_list(values: list[str]) -> list[int]:
         if value not in result:
             result.append(value)
     return result
+
+
+_SNAKE_RE = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def _override_map(values: dict[str, dict[str, Any]]) -> dict[str, GroupOverride]:
+    """前端的 ``{群号: {camelCase 字段}}`` → 校验过的群覆盖；空的不留。"""
+
+    output: dict[str, GroupOverride] = {}
+    for group, raw in values.items():
+        gid = _group_list([group], "单独设置的群")
+        if not gid or not isinstance(raw, dict):
+            continue
+        try:
+            override = GroupOverride.model_validate({_SNAKE_RE.sub("_", key).lower(): value for key, value in raw.items()})
+        except ValidationError as exc:
+            detail = "；".join(f"{_camel(str(item['loc'][0]))}: {item['msg']}" for item in exc.errors() if item["loc"])
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"群 {gid[0]} 的单独设置不合法：{detail}") from exc
+        if not override.empty:
+            output[str(gid[0])] = override
+    return output
 
 
 def _group_list(values: list[str], field: str) -> list[int]:
@@ -589,6 +781,10 @@ async def sticker_update_settings(body: SettingsBody, _session: AdminWriteSessio
                 "steal_protected_users": _user_list(body.steal_protected_users)
                 if body.steal_protected_users is not None
                 else current.steal_protected_users,
+                "steal_blocked_groups": _group_list(body.steal_blocked_groups, "不偷图的群")
+                if body.steal_blocked_groups is not None
+                else current.steal_blocked_groups,
+                "group_overrides": _override_map(body.group_overrides) if body.group_overrides is not None else current.group_overrides,
             }
         )
     except ValidationError as exc:
@@ -602,16 +798,25 @@ async def sticker_update_settings(body: SettingsBody, _session: AdminWriteSessio
     return ok({"settings": _settings_payload(saved)})
 
 
+_PREVIEW_SCENES = {"conversation": "对话", "active_interject": "主动插话", "warmup": "冷场暖场", "followup": "续聊"}
+
+
 @router.get("/prompt-preview")
 async def sticker_prompt_preview(
     _session: AdminReadSession,
     group_id: str = Query(alias="groupId", pattern=r"^\d{4,12}$"),
+    scene: str = Query(default="conversation", max_length=24),
 ) -> dict[str, Any]:
-    """这个群现在一轮对话里，模型会看到的表情包说明（不含人设与场景的影响）。"""
+    """这个群现在一轮里，模型会看到的表情包说明（不含人设的影响），以及菜单每一项为什么在这。"""
 
     gid = int(group_id)
-    gate = exposure(gid)
-    text = sticker_turn_instruction(gid, scene="conversation")
+    scene = scene if isinstance(scene, str) and scene in _PREVIEW_SCENES else "conversation"
+    proactive = scene != "conversation"
+    gate = exposure(gid, proactive=proactive)
+    text = sticker_turn_instruction(gid, scene=scene)
+    base = load_settings()
+    override = base.override_for(gid)
+    plan = menu_plan(gid, gate.stickers, size=gate.settings.menu_size, settings=gate.settings) if gate.open else []
     return ok(
         {
             "open": gate.open,
@@ -619,10 +824,48 @@ async def sticker_prompt_preview(
             "reasonText": REASON_TEXT.get(gate.reason or "", None),
             "available": len(gate.stickers),
             "leftToday": gate.left_today,
+            "leftHour": gate.left_hour,
             "cooldownSeconds": round(cooldown_remaining(gid), 1),
             "text": text,
+            "chars": len(text),
+            "scene": scene,
+            "scenes": _PREVIEW_SCENES,
+            "menu": plan,
+            "overridden": sorted(_camel(key) for key in override.changes()) if override is not None else [],
+            "effective": {
+                "frequency": gate.settings.frequency,
+                "groupCooldownSeconds": gate.settings.group_cooldown_seconds,
+                "groupDailyLimit": gate.settings.group_daily_limit,
+                "groupHourlyLimit": gate.settings.group_hourly_limit,
+                "maxPerMessage": gate.settings.max_per_message,
+                "menuSize": gate.settings.menu_size,
+                "menuStrategy": gate.settings.menu_strategy,
+            },
         }
     )
 
 
-__all__ = ["router"]
+@router.get("/resolve")
+async def sticker_resolve(
+    _session: AdminReadSession,
+    group_id: str = Query(alias="groupId", pattern=r"^\d{4,12}$"),
+    name: str = Query(min_length=1, max_length=24),
+) -> dict[str, Any]:
+    """试一下：模型在这个群写 ``[表情:name]`` 会对上哪几张（和发送层同一个对照函数，不发送）。"""
+
+    gid = int(group_id)
+    gate = exposure(gid)
+    how, candidates = match_stickers(name, gid, stickers=gate.stickers) if gate.stickers else ("none", [])
+    return ok(
+        {
+            "match": how,
+            "matchText": {"id": "按编号", "name": "按名字", "alias": "按别名", "tag": "按情绪标签", "none": "对不上"}[how],
+            "candidates": [{"id": item.sticker_id, "name": item.name} for item in candidates[:12]],
+            "count": len(candidates),
+            "gateOpen": gate.open,
+            "reasonText": REASON_TEXT.get(gate.reason or "", None),
+        }
+    )
+
+
+__all__ = ["remove_sticker", "router"]

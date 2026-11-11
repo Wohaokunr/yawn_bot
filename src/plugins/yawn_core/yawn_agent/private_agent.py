@@ -139,6 +139,11 @@ _CLAIM_ALIASES: dict[str, tuple[str, ...]] = {
     "my_data.wipe": ("forget_about_me",),
     # 私聊偷图/收藏表情包：只有 stickers.steal 真的入库了才能说“偷到了/收藏好了”
     "stickers.steal": ("steal_sticker", "save_sticker"),
+    # 改名 / 删掉自己的表情包、“别存我的图”：真的办成了才能说
+    "stickers.rename": ("my_stickers",),
+    "stickers.remove": ("my_stickers",),
+    "stickers.protect": ("my_stickers",),
+    "stickers.unprotect": ("my_stickers",),
     # 群管代办：只有真正执行了（group_manage.<动作>）才允许说“禁言好了/公告发了”
     "group_manage.mute": ("mute_member",),
     "group_manage.unmute": ("unmute_member",),

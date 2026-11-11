@@ -1,4 +1,4 @@
-# ruff: noqa: E501,TC001,PLR2004
+# ruff: noqa: E501,TC001,PLR2004,C901
 """发送前把 SpeechPlan 里的 ``sticker`` 伪段换成真正的表情包。
 
 模型写的 ``[表情:名字]`` 在 :mod:`speech` 里已经拆成伪段；这里按当前群的策略
@@ -6,9 +6,11 @@
 
 - 功能关了 / 本群没开放 / 冷却中 / 今日额度用完 → 去掉；
 - 一条发言里超过 ``max_per_message`` 张 → 多出来的去掉；
-- 名字或情绪在本群可用的库里对不上 → 去掉（不猜、不模糊匹配）；
+- 名字、别名或情绪在本群可用的库里对不上 → 去掉（不猜、不模糊匹配），并把这个
+  名字记进“没对上的名字”给管理员看（可以一键设成某张的别名）；
+- 对上了但候选全在“同图间隔 / 单张每日上限”里 → 去掉（``repeat``）；
 - 对上了 → 换成 ``{"type": "reaction", "reaction_id": …}``，同名/同情绪多张时
-  按“避开最近发过的、优先用得少的”挑一张。
+  按“避开最近发过的、优先用得少的、看权重”挑一张；同一条发言里不重复发同一张。
 
 去掉表情包只会收回它两侧自动插的 break，不会让整句失败；整句只剩一个被去掉
 的表情时，退回成文字 ``[名字]``（QQ 群里常见的文字表情写法），保证明确叫到
@@ -31,6 +33,7 @@ from .sticker_policy import (
     exposure,
     menu_entries,
     note_dropped,
+    note_miss,
     pick_sticker,
 )
 
@@ -71,26 +74,39 @@ def resolve_plan_stickers(plan: SpeechPlan, *, group_id: int | None) -> SpeechPl
     gate, max_count = _send_gate(plan, group_id)
     decisions: list[dict[str, Any]] = []
     dropped: set[int] = set()
+    reasons: dict[str, int] = {}
+    used_ids: set[str] = set()
     chosen = 0
+
+    def drop(index: int, name: str, reason: str) -> None:
+        dropped.add(index)
+        reasons[reason] = reasons.get(reason, 0) + 1
+        decisions.append({"name": name, "status": "dropped", "reason": reason})
+
     for index, item in enumerate(segments):
         if item.get("type") != STICKER_SEGMENT_TYPE:
             continue
         name = str(item.get("name") or "").strip()
         if not gate.open:
-            dropped.add(index)
-            decisions.append({"name": name, "status": "dropped", "reason": gate.reason})
+            drop(index, name, str(gate.reason))
             continue
         if chosen >= max_count:
-            dropped.add(index)
-            decisions.append({"name": name, "status": "dropped", "reason": "too_many"})
+            drop(index, name, "too_many")
             continue
         how, candidates = match_stickers(name, group_id, stickers=gate.stickers)
-        picked = pick_sticker(int(group_id or 0), candidates) if candidates else None
+        if not candidates:
+            drop(index, name, "unknown")
+            # 只记模型自己写的名字（不是成员的话），给管理员补图/设别名用。
+            note_miss(name, group_id)
+            continue
+        # 一条发言里两个标记对上同一张图时，第二个换一张；没得换就去掉。
+        pool = [item for item in candidates if item.sticker_id not in used_ids]
+        picked = pick_sticker(int(group_id or 0), pool, settings=gate.settings, strict=True) if pool else None
         if picked is None:
-            dropped.add(index)
-            decisions.append({"name": name, "status": "dropped", "reason": "unknown"})
+            drop(index, name, "repeat")
             continue
         chosen += 1
+        used_ids.add(picked.sticker_id)
         segments[index] = {"type": "reaction", "reaction_id": picked.sticker_id}
         decisions.append(
             {
@@ -109,7 +125,7 @@ def resolve_plan_stickers(plan: SpeechPlan, *, group_id: int | None) -> SpeechPl
         fallback = next((item for item in names if item), None)
         if fallback:
             resolved = [*resolved, {"type": "text", "text": f"[{fallback}]"}]
-    note_dropped(len(dropped))
+    note_dropped(len(dropped), reasons)
     reason_text = REASON_TEXT.get(gate.reason or "", "") if gate.reason else ""
     trace_event(
         "speech",
@@ -154,12 +170,16 @@ def sticker_turn_instruction(
     if not gate.open:
         return ""
     settings = gate.settings
-    menu = menu_entries(int(group_id), gate.stickers, size=settings.menu_size)
-    tags = [
-        (tag, count)
-        for tag, count in tag_counts(int(group_id), stickers=gate.stickers)
-        if count >= 2
-    ][:MAX_MENU_TAGS]
+    menu = menu_entries(int(group_id), gate.stickers, size=settings.menu_size, settings=settings)
+    tags = (
+        [
+            (tag, count)
+            for tag, count in tag_counts(int(group_id), stickers=gate.stickers)
+            if count >= 2
+        ][:MAX_MENU_TAGS]
+        if settings.menu_show_tags
+        else []
+    )
     return sticker_instruction(
         menu,
         tags,
@@ -175,10 +195,10 @@ def sticker_turn_instruction(
 def can_steal(group_id: int) -> bool:
     """本群现在能不能偷图（只看策略和今日次数，不看聊天内容）。"""
 
-    from .sticker_policy import load_settings, steal_key, steals_today
+    from .sticker_policy import effective_settings, steal_key, steals_today
 
-    settings = load_settings()
-    if settings.steal_mode == "off" or settings.group_daily_steals <= 0:
+    settings = effective_settings(group_id)
+    if not settings.steal_open(group_id) or settings.group_daily_steals <= 0:
         return False
     return steals_today(steal_key(group_id)) < settings.group_daily_steals
 
