@@ -295,9 +295,14 @@ class LLMRequestConfig:
 
     @property
     def extra_body(self) -> dict[str, Any] | None:
-        if self.thinking == "auto":
-            return None
-        return {"thinking": {"type": self.thinking}}
+        from .deepseek import PROVIDER
+
+        body: dict[str, Any] = {}
+        if self.thinking != "auto":
+            body["thinking"] = {"type": self.thinking}
+        if self.provider == PROVIDER:
+            body["safety_check"] = {"level": "high"}
+        return body or None
 
     @property
     def reasoning_kwargs(self) -> dict[str, Any]:
@@ -324,6 +329,19 @@ def _configured_text(field_name: str) -> str:
 
 def resolve_llm_request(task: LLMTask = "core_chat") -> LLMRequestConfig:
     """按任务解析模型档位、推理策略和多模态能力。"""
+
+    from .deepseek import MODEL, PROVIDER, in_qq_turn
+
+    if task == "agent_dialogue" and in_qq_turn():
+        thinking = ai_config.agent_dialogue_thinking
+        return LLMRequestConfig(
+            task=task,
+            profile="default",
+            provider=PROVIDER,
+            model=MODEL,
+            thinking="disabled" if thinking == "inherit" else thinking,
+            multimodal="supported",
+        )
 
     task_effort: TaskReasoningEffort = "inherit"
     if task == "core_chat":
@@ -414,6 +432,10 @@ def vision_model_configured() -> bool:
 def resolve_provider(provider_id: str = "default") -> tuple[str, str | None]:
     """解析提供商的 Base URL 和密钥；密钥缺失时返回 ``None``。"""
 
+    from .deepseek import BASE_URL, PROVIDER, api_key
+
+    if provider_id == PROVIDER:
+        return BASE_URL, api_key()
     if provider_id == "default":
         return ai_config.ai_base_url, _secret_value(ai_config.ai_api_key)
     provider = next(
@@ -437,7 +459,14 @@ def get_client(provider_id: str = "default") -> Optional[AsyncOpenAI]:
     pooled = _client_pool.get(pool_key)
     if pooled is not None:
         return pooled
-    created = AsyncOpenAI(api_key=resolved_key, base_url=resolved_base_url)
+    from .deepseek import PROVIDER
+
+    if provider_id == PROVIDER:
+        created = AsyncOpenAI(
+            api_key=resolved_key, base_url=resolved_base_url, max_retries=0
+        )
+    else:
+        created = AsyncOpenAI(api_key=resolved_key, base_url=resolved_base_url)
     _client_pool[pool_key] = created
     return created
 
@@ -945,6 +974,8 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
     失效。端点拒收 ``tool_choice`` 时记住这个模型，本次和以后都退回旧做法
     （``"none"`` → 不带工具；指定函数 → 只带那一个工具）。
     """
+    from .deepseek import PROVIDER, REFUSAL, is_input_refusal
+
     started = time.perf_counter()
     outcome = "error"
     error_kind = ""
@@ -999,12 +1030,22 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
             logger.warning(
                 f"LLM 工具补全超时（task={task}, model={request.model}, "
                 f"timeout={timeout}s）",
-                exc_info=True,
+                exc_info=request.provider != PROVIDER,
             )
             return _tool_completion_result(
                 message=None, outcome=outcome, started=started
             )
         except OpenAIError as exc:
+            if request.provider == PROVIDER and is_input_refusal(
+                getattr(exc, "status_code", None), str(exc)
+            ):
+                outcome = "refused"
+                return _tool_completion_result(
+                    message=ChatCompletionMessage(role="assistant", content=REFUSAL),
+                    finish_reason="content_filter",
+                    outcome=outcome,
+                    started=started,
+                )
             if multimodal and _looks_like_multimodal_unsupported(exc):
                 outcome = "unsupported_multimodal"
                 if raise_on_unsupported:
@@ -1032,7 +1073,7 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
             logger.warning(
                 f"LLM 工具补全失败（task={task}, model={request.model}, "
                 f"timeout={timeout}s, 原因={error_kind or outcome}）",
-                exc_info=True,
+                exc_info=request.provider != PROVIDER,
             )
             return _tool_completion_result(
                 message=None, outcome=outcome, started=started, error_kind=error_kind
@@ -1045,6 +1086,15 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
         choice = response.choices[0]
         message = choice.message
+        if request.provider == PROVIDER and choice.finish_reason == "content_filter":
+            outcome = "refused"
+            return _tool_completion_result(
+                message=ChatCompletionMessage(role="assistant", content=REFUSAL),
+                finish_reason=choice.finish_reason,
+                response=response,
+                outcome=outcome,
+                started=started,
+            )
         content = (message.content or "").strip()
         if not content and not message.tool_calls:
             outcome = "empty"
@@ -1092,7 +1142,7 @@ async def complete_with_tools_result(  # noqa: C901, PLR0911, PLR0912, PLR0915
             task=task,
             request=request,
             create_kwargs=create_kwargs,
-            response=response,
+            response=None if outcome == "refused" else response,
             outcome=outcome,
             started=started,
             timeout=timeout,

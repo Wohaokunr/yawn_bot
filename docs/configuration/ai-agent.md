@@ -375,6 +375,22 @@ Agent 可以在一个独立、无网络的 Python 容器里运行代码：数据
 - 隐私：只给开放沙箱的群放附件；退出 Agent 记忆的成员发的附件不会被放入，删除成员记忆时也会抹掉他的入箱记录。
 - 入箱记录在 `data/agent_sandbox/inbox_log.jsonl`（最多 1000 条，不含 URL 和本机路径），WebUI「代码沙箱 → 附件收件箱」展示今日统计、失败原因（谁来修）、取文件链路自检和每条记录。
 
+## DeepSeek 应用 API
+
+在 WebUI 的「环境配置」设置 `DEEPSEEK_API_KEY`，或复用已配置的官方 DeepSeek 模型提供商密钥。保存后重启 Bot。
+
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `DEEPSEEK_WEBUI_ENABLED` | `false` | 为管理员打开「网页搜索」下的「DeepSeek 对话」和「文件与语音」 |
+| `DEEPSEEK_QQ_GROUP` | `false` | QQ 群聊主对话使用 `deepseek-flash` |
+| `DEEPSEEK_QQ_PRIVATE` | `false` | QQ 私聊主对话使用 `deepseek-flash` |
+| `DEEPSEEK_QQ_DOCUMENTS` | `true` | 启用的 QQ 入口读取本轮文件 |
+| `DEEPSEEK_QQ_ASR` | `true` | 启用的 QQ 入口转写本轮语音，需要 OneBot 提供可识别的 WAV 或 Ogg Opus |
+| `DEEPSEEK_QQ_TTS` | `false` | 允许启用的 QQ 入口由 Agent 自行选择口述回复 |
+| `DEEPSEEK_DOCUMENT_MODE` | `text_recognition` | 设为 `rich_layout_recognition` 时，PDF、Word、PowerPoint 等保留可识别的图文布局 |
+
+QQ 联网继续使用下节的权限与次数预算。WebUI 管理员可以按本轮开启 DeepSeek 的内建联网、读链接和深度思考，相关用量在回复下方显示。工作台一次可添加三个文件，每个最大 16 MiB。会话闲置 30 分钟后过期，最长保留 45 分钟。进程重启会清空工作台会话。OCR、ASR 和 TTS 可以在「文件与语音」单独调用。
+
 ## Agent 网页搜索
 
 Agent 用 DeepSeek 官方的 Search / Fetch API 联网：查最新消息、实时信息和不确定的事实，打开网页或成员发来的链接读正文。接口由 DeepSeek 自己的搜索引擎提供，按 ¥5 / 千次**成功**请求计费，失败和无结果不收费，每个账号每个接口 5 QPS。

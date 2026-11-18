@@ -76,6 +76,7 @@ _GROUP_OF: dict[str, str] = {
     "private.turn_context": "context",
     "private.time_note": "context",
     "private.turn_style": "context",
+    "private.deepseek": "context",
     "private.rhythm": "rules",
     "private.reply_cut": "context",
     "private.rhythm_mix": "rules",
@@ -175,6 +176,7 @@ PIPELINES: tuple[Pipeline, ...] = (
         "用户私聊发消息",
         (
             *_CORE_STEPS,
+            _S("private.deepseek", "system#3", "启用 DeepSeek 且本轮有附件或语音能力"),
             _S("private.files_hint", "system#2", "发了文件且小助手任务开启"),
             _S("private.attachments_unread", "system#2", "附件没进电脑但读出了文字"),
             _S("private.attachments_missing", "system#2", "附件没能放进电脑"),

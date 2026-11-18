@@ -766,10 +766,10 @@ async def _refresh_ref(bot: Any, attachment: Attachment) -> dict[str, Any] | Non
     return None
 
 
-async def fetch_bytes(bot: Any, group_id: int, attachment: Attachment, *, max_bytes: int) -> _Fetch:
+async def fetch_bytes(bot: Any, group_id: int, attachment: Attachment, *, max_bytes: int, record_formats: tuple[str | None, ...] = ("mp3", None)) -> _Fetch:
     """取附件内容并读进内存（小文件用：表情包收藏等）。全部失败时抛 ``InboxError``。"""
 
-    fetched = await fetch_file(bot, group_id, attachment, max_bytes=max_bytes)
+    fetched = await fetch_file(bot, group_id, attachment, max_bytes=max_bytes, record_formats=record_formats)
     try:
         _ = fetched.data
     finally:
@@ -780,7 +780,7 @@ async def fetch_bytes(bot: Any, group_id: int, attachment: Attachment, *, max_by
     return fetched
 
 
-async def fetch_file(bot: Any, group_id: int, attachment: Attachment, *, max_bytes: int) -> _Fetch:
+async def fetch_file(bot: Any, group_id: int, attachment: Attachment, *, max_bytes: int, record_formats: tuple[str | None, ...] = ("mp3", None)) -> _Fetch:
     """按文件开头说明的顺序取附件到本机临时文件；调用方用完要 ``close()``。
 
     ``group_id=0`` 表示私聊：文件走 NapCat 的 ``get_private_file_url``。
@@ -804,7 +804,7 @@ async def fetch_file(bot: Any, group_id: int, attachment: Attachment, *, max_byt
             if result:
                 return _tag(result, "segment:base64")  # type: ignore[return-value]
         if bot is not None:
-            result = await _fetch_via_api(bot, group_id, attachment.media_type, ref, max_bytes, attempts, big=big)
+            result = await _fetch_via_api(bot, group_id, attachment.media_type, ref, max_bytes, attempts, big=big, record_formats=record_formats)
             if result is not None:
                 return result
         url = str(ref.get("url") or "")
@@ -842,12 +842,13 @@ async def _fetch_via_api(
     attempts: _Attempts,
     *,
     big: bool = False,
+    record_formats: tuple[str | None, ...] = ("mp3", None),
 ) -> _Fetch | None:
     file_value = str(ref.get("file") or "")
     file_id = str(ref.get("file_id") or "")
     if media_type == "record" and (file_value or file_id) and not big:
         # 让协议端把 silk/amr 转成 mp3，沙箱里就能直接用 soundfile 读。
-        for out_format in ("mp3", None):
+        for out_format in record_formats:
             params: dict[str, Any] = {"file": file_value or file_id}
             if file_id:
                 params["file_id"] = file_id

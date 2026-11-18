@@ -14,12 +14,13 @@ import mimetypes
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
+from nonebot.adapters.onebot.v11.exception import NetworkError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -64,6 +65,9 @@ from .sticker_policy import note_plain as note_plain_sent
 from .sticker_policy import note_sent as note_stickers_sent
 from .sticker_send import resolve_plan_stickers
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 MAX_OUTBOUND_SEGMENTS = 12
 MAX_OUTBOUND_TEXT_CHARS = 4_000
 MAX_OUTBOUND_MEDIA_SEGMENTS = 3
@@ -105,6 +109,7 @@ class PreparedOutboundMessage:
     temporary_files: tuple[Path, ...] = ()
     speech_scene: str = "conversation"
     quality_issues: tuple[str, ...] = ()
+    synthesized_voice: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1327,6 +1332,39 @@ def _build_degraded_message(
     )
 
 
+def prepare_record_reply(
+    prepared: PreparedOutboundMessage, text: str, audio: bytes
+) -> PreparedOutboundMessage:
+    """Use trusted TTS bytes and retain checked text for outbound fallback."""
+    message = Message(
+        [segment for segment in prepared.message if segment.type == "reply"]
+    )
+    message += MessageSegment.record(audio)
+    return PreparedOutboundMessage(
+        message=message,
+        normalized_text=text,
+        segment_records=(
+            *(row for row in prepared.segment_records if row["type"] == "reply"),
+            _segment_record("record", {"file": "[redacted]"}),
+        ),
+        reply_chain=prepared.reply_chain,
+        speech_scene=prepared.speech_scene,
+        quality_issues=prepared.quality_issues,
+        synthesized_voice=True,
+    )
+
+
+async def send_private_record(send: Callable[..., Any], audio: bytes) -> str:
+    """Return the delivery state for confirmed and ambiguous sends."""
+    try:
+        await send(Message(MessageSegment.record(audio)))
+    except Exception as exc:  # noqa: BLE001
+        if _is_ambiguous_delivery_error(exc) or isinstance(exc, NetworkError):
+            return DELIVERY_UNKNOWN
+        return DELIVERY_CONFIRMED_FAILURE
+    return DELIVERY_CONFIRMED_SUCCESS
+
+
 async def _call_group_send(bot: Any, group_id: int, message: Message) -> Any:
     return await asyncio.wait_for(
         bot.call_api("send_group_msg", group_id=group_id, message=message),
@@ -1373,7 +1411,9 @@ async def send_prepared_outbound(
             try:
                 raw_result = await _call_group_send(bot, group_id, prepared.message)
             except Exception as exc:
-                if _is_ambiguous_delivery_error(exc):
+                if _is_ambiguous_delivery_error(exc) or (
+                    prepared.synthesized_voice and isinstance(exc, NetworkError)
+                ):
                     trace_event(
                         "outbound",
                         "OneBot 发送",
@@ -1409,7 +1449,7 @@ async def send_prepared_outbound(
                         reply_chain=prepared.reply_chain,
                         media_refs=prepared.media_refs,
                     )
-                if not _is_unsupported_error(exc):
+                if not _is_unsupported_error(exc) and not prepared.synthesized_voice:
                     trace_event(
                         "outbound",
                         "OneBot 发送",
@@ -1428,7 +1468,10 @@ async def send_prepared_outbound(
                         detail=type(exc).__name__,
                     )
                     raise
-                candidate = infer_unsupported_segment(exc, original_types)
+                candidate = (
+                    infer_unsupported_segment(exc, original_types)
+                    if _is_unsupported_error(exc) else None
+                )
                 trace_event(
                     "outbound",
                     "协议段不兼容",

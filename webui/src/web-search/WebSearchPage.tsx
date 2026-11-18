@@ -34,6 +34,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { QueryErrorAlert, SaveStatus, useApiQuery, useUnsavedChanges } from "../shared";
 import { formatEpoch, relativeEpoch, updateSearchParams } from "../sandbox/sandbox-meta";
+import { DeepSeekWorkbench } from "./DeepSeekWorkbench";
 import { webSearchApi } from "./web-search-api";
 import {
   cacheHitRate,
@@ -60,8 +61,8 @@ import type {
   WebSearchUsageRow,
 } from "./types";
 
-type WebTab = "overview" | "recent" | "test" | "policy";
-const TABS: WebTab[] = ["overview", "recent", "test", "policy"];
+type WebTab = "overview" | "recent" | "test" | "policy" | "deepseek" | "media";
+const TABS: WebTab[] = ["overview", "recent", "test", "policy", "deepseek", "media"];
 
 function parseTab(value: string | null): WebTab {
   return TABS.includes(value as WebTab) ? (value as WebTab) : "overview";
@@ -601,6 +602,8 @@ export function WebSearchPage(): React.JSX.Element {
           { key: "recent", label: <span><HistoryOutlined /> 最近调用</span>, children: <RecentTab /> },
           { key: "test", label: <span><ExperimentOutlined /> 试搜</span>, children: <TestTab status={status} /> },
           { key: "policy", label: <span><SafetyCertificateOutlined /> 策略与限额</span>, children: <PolicyTab status={status} onSaved={statusQuery.reload} /> },
+          { key: "deepseek", destroyOnHidden: false, label: "DeepSeek 对话", children: <DeepSeekWorkbench /> },
+          { key: "media", label: "文件与语音", children: <DeepSeekWorkbench media /> },
         ]}
       />
     </div>

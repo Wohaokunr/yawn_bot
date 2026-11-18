@@ -29,11 +29,12 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot_plugin_orm import get_session
 from sqlalchemy import func, select
 
+from .. import deepseek
+from ..data_models.agent_memory import AgentPrivacy
 from ..data_models.group_agent_config import GroupAgentConfig
 from ..data_models.group_agent_message import GroupAgentMessage
 from ..llm import (
     NO_OUTPUT_LIMIT,
-    LLMMultimodalUnsupportedError,
     complete_with_tools_result,
     resolve_llm_request,
     vision_model_configured,
@@ -101,7 +102,6 @@ from .media_caption import describe_images as _describe_images
 from .turn_media import (
     effective_multimodal_mode,
     load_turn_media,
-    remember_multimodal_unsupported,
 )
 from .media_context import (
     project_context_for_llm,
@@ -138,7 +138,7 @@ from .tools import (
     select_dialogue_message_segment_types,
 )
 from .tool_execution import ToolExecutionContext
-from . import turn_budget, turn_completion
+from . import deepseek_turn, turn_budget, turn_completion
 from .progress_notice import begin_progress, clean_preamble, current_progress
 from .sandbox_inbox import prepare_turn_inbox
 from .tool_preload import resolve_tool_plan, start_tool_plan
@@ -352,6 +352,7 @@ async def _finalize_reply(
     after_tool: bool = False,
     reply_to_message_id: int | None = None,
     verified_tools: frozenset[str] | None = None,
+    speak: bool = False,
 ) -> None:
     """Compatibility wrapper; stateful finalization now lives in speech_finalize.py."""
 
@@ -385,6 +386,7 @@ async def _finalize_reply(
         duplicate_func=_is_recent_duplicate,
         emotion_state=(context or {}).get("emotion_state"),
         actor_user_id=current_turn.user_id if current_turn is not None else None,
+        speak=speak,
     )
 
 
@@ -428,6 +430,7 @@ class _DialogueTurn:
     deadline: float = 0.0
     last_finish_reason: str | None = None
     suggested_toolpacks: tuple[str, ...] = ()
+    deepseek_media: deepseek_turn.TurnMedia | None = None
     # 本轮真实成功的工具；最终发言据此核验“已完成”声明。
     succeeded_tools: set[str] = field(default_factory=set)
 
@@ -463,6 +466,13 @@ class _DialogueTurn:
             bot_role=cached_bot_role(self.bot, self.group_id),
             suggested_toolpacks=self.suggested_toolpacks,
         )
+        if self.deepseek_media is not None:
+            deepseek_turn.add_to_messages(
+                self.messages,
+                self.deepseek_media,
+                section="speech.deepseek",
+                voice_allowed=deepseek.config.deepseek_qq_tts,
+            )
         return fingerprint
 
     async def send_notice(self, text: str, *, label: str) -> None:
@@ -498,6 +508,7 @@ async def _prepare_turn(
     config: GroupAgentConfig,
     *,
     enqueued_at: float | None,
+    deepseek_media: deepseek_turn.TurnMedia | None = None,
 ) -> _DialogueTurn:
     group_id = int(event.group_id)
     bot_id = int(bot.self_id)
@@ -704,6 +715,7 @@ async def _prepare_turn(
         media_digests=media_digests,
         user_prompt=user_prompt,
         current_turn=current_turn,
+        deepseek_media=deepseek_media,
     )
     turn.suggested_toolpacks = preload.suggested
     turn.rebuild_tools()
@@ -817,45 +829,10 @@ def _trace_prompt(turn: _DialogueTurn, fingerprint: str, *, duration_ms: float) 
         _PROMPT_CACHE_KEYS.popitem(last=False)
 
 
-_REBUILT = object()
-
-
 async def _request_completion(turn: _DialogueTurn) -> Any:
-    """请求一次模型（抖动时重试一次）；多模态不兼容时改走视觉转述重建 Prompt 并返回 ``_REBUILT``。"""
-
-    llm_started = time.monotonic()
-    try:
-        return await turn_completion.request_completion(complete_with_tools_result, turn)
-    except LLMMultimodalUnsupportedError:
-        trace_event(
-            "llm",
-            "模型多模态请求",
-            status="degraded",
-            output={"model": turn.model, "fallback": "vision_caption"},
-            detail="模型不支持当前多模态输入，改用视觉转述后重建 Prompt",
-            duration_ms=(time.monotonic() - llm_started) * 1000,
-            round_index=turn.rounds + 1,
-        )
-        dbg(f"群 {turn.group_id} 模型不支持多模态,降级为视觉转述重建提示词(不占轮次)")
-        remember_multimodal_unsupported(resolve_llm_request("agent_dialogue"))
-        turn.fallback_attempted = True
-        described = await _describe_images(
-            turn.group_id,
-            turn.normalized,
-            turn.media_inputs,
-            turn.session,
-            turn.config,
-            turn.cached_captions,
-            turn.media_digests,
-            diagnostics=turn.media_diagnostics,
-        )
-        turn.user_prompt = f"{turn.query_text}\n{described}"
-        turn.current_turn = CurrentTurn(
-            **{**turn.current_turn.as_dict(), "content": turn.user_prompt}
-        )
-        turn.media_blocks = []
-        turn.rebuild_messages()
-        return _REBUILT
+    return await turn_completion.request_dialogue_completion(
+        complete_with_tools_result, turn, describe_images=_describe_images
+    )
 
 
 async def _wrap_up_turn(turn: _DialogueTurn, reason: str) -> None:
@@ -881,7 +858,7 @@ async def _run_turn(turn: _DialogueTurn) -> None:
             turn.messages.extend(turn_budget.final_round_messages())
         llm_started = time.monotonic()
         completion = await _request_completion(turn)
-        if completion is _REBUILT:
+        if completion is turn_completion.REBUILT:
             # 多模态降级重建提示词，不占用工具轮次。
             continue
         turn.rounds += 1
@@ -941,7 +918,8 @@ async def _run_turn(turn: _DialogueTurn) -> None:
                 await _finalize_turn_reply(turn, content)
             return
         try:
-            if await _run_tool_round(turn, content, tool_calls):
+            reasoning = getattr(response, "reasoning_content", None)
+            if await _run_tool_round(turn, content, tool_calls, reasoning=reasoning):
                 return
         except _TurnAbortedError:
             return
@@ -954,6 +932,10 @@ async def _run_turn(turn: _DialogueTurn) -> None:
 
 
 async def _finalize_turn_reply(turn: _DialogueTurn, content: str) -> None:
+    content, speak = deepseek_turn.split_voice(content)
+    if not content:
+        await turn.send_notice(_fallback_notice(turn.group_id), label="兜底回复")
+        return
     reply_to = await _quote_target(
         turn.session,
         group_id=turn.group_id,
@@ -984,6 +966,7 @@ async def _finalize_turn_reply(turn: _DialogueTurn, content: str) -> None:
         after_tool=turn.had_tool_results,
         reply_to_message_id=reply_to,
         verified_tools=frozenset(turn.succeeded_tools),
+        speak=speak,
     )
 
 
@@ -1233,7 +1216,11 @@ async def _apply_discovery(turn: _DialogueTurn, state: _RoundState) -> None:
 
 
 async def _run_tool_round(
-    turn: _DialogueTurn, content: str, tool_calls: Sequence[Any]
+    turn: _DialogueTurn,
+    content: str,
+    tool_calls: Sequence[Any],
+    *,
+    reasoning: str | None = None,
 ) -> bool:
     """执行一轮模型给出的 tool_calls；返回本轮对话是否已经结束。"""
 
@@ -1242,6 +1229,8 @@ async def _run_tool_round(
         "content": content or None,
         "tool_calls": [],
     }
+    if deepseek.in_qq_turn() and reasoning is not None:
+        assistant["reasoning_content"] = reasoning
     turn.messages.append(assistant)
     state = _RoundState()
     progress = current_progress()
@@ -1390,10 +1379,25 @@ async def _process_group_message(
             # 处理本身由回合时限兜底。
             begin_progress(self_name=persona_self_name(config))
             _start_wait_notice(bot, group_id, None, message_id)
-            turn = await _prepare_turn(
-                bot, event, normalized, session, config, enqueued_at=None
-            )
-            await _run_turn(turn)
+            actor_id = int(event.get_user_id())
+            use_deepseek = deepseek.config.deepseek_qq_group and bool(deepseek.api_key())
+            if use_deepseek:
+                privacy = await session.get(AgentPrivacy, (group_id, actor_id))
+                use_deepseek = not (privacy and privacy.opted_out)
+            with deepseek.qq_turn(enabled=use_deepseek):
+                async with deepseek_turn.attachments(
+                    bot, group_id, normalized.media_refs, actor_id=actor_id
+                ) as media:
+                    turn = await _prepare_turn(
+                        bot,
+                        event,
+                        normalized,
+                        session,
+                        config,
+                        enqueued_at=None,
+                        **({"deepseek_media": media} if use_deepseek else {}),
+                    )
+                    await _run_turn(turn)
 
 
 async def process_group_message(

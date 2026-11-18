@@ -101,6 +101,37 @@ describe("WebSearchPage", () => {
     state.api.mockReset();
   });
 
+  it("shows approved DeepSeek replies and citations through the workbench", async () => {
+    let finish: ((value: unknown) => void) | undefined;
+    state.api.mockImplementation(async (path: string) => {
+      if (path === "/web-search/status") return { data: status() };
+      if (path === "/deepseek/status") return { data: { enabled: true, configured: true } };
+      if (path === "/deepseek/sessions") return { data: { id: "workspace" } };
+      if (path === "/deepseek/sessions/workspace/chat") {
+        return new Promise((resolve) => { finish = resolve; });
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+
+    renderPage("/web-search?web.tab=deepseek");
+    fireEvent.change(await screen.findByRole("textbox", { name: "对话消息" }), { target: { value: "请联网查一下" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "联网搜索" }));
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await screen.findByText("DeepSeek 正在处理和审核回复…")).toBeInTheDocument();
+    await waitFor(() => expect(finish).toBeDefined());
+    const [, request] = state.api.mock.calls.find(([path]) => path.endsWith("/chat")) ?? [];
+    expect(JSON.parse(String(request.body))).toMatchObject({ text: "请联网查一下", search: true });
+
+    finish?.({ data: {
+      text: "已审核的回复", title: "联网结果", refused: false, truncated: false,
+      citations: [{ url: "https://example.com", title: "资料来源" }],
+      usage: { tool_search: 1 },
+    } });
+    expect(await screen.findByText("已审核的回复")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "资料来源" })).toHaveAttribute("href", "https://example.com");
+    expect(screen.getByText("搜索 1")).toBeInTheDocument();
+  });
+
   it("shows status, masked key and today's cost", async () => {
     state.api.mockImplementation(async (path: string) => {
       if (path.startsWith("/web-search/status")) return { data: status() };

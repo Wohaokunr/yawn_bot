@@ -278,6 +278,7 @@ class Delivery:
     text_parts: int = 0
     rhythm: str = ""
     planned: int = 0
+    delivery_unknown: bool = False
 
     @property
     def text(self) -> str:
@@ -327,6 +328,7 @@ async def deliver(
     sleep: Any = asyncio.sleep,
     interrupt: InterruptWatch | None = None,
     pipeline: str = "turn",
+    speak: bool = False,
 ) -> Delivery:
     """规划并依次发送；某条发送失败就停（后面的不发），返回已送达的部分。
 
@@ -338,6 +340,25 @@ async def deliver(
 
     plan, items = plan_private_reply(text)
     result = Delivery([], rhythm=plan.rhythm, planned=len(items))
+    if speak and items and all(item.kind == "text" for item in items):
+        from .deepseek_turn import synthesize
+        from .outbound import (
+            DELIVERY_CONFIRMED_SUCCESS,
+            DELIVERY_UNKNOWN,
+            send_private_record,
+        )
+
+        body = "\n".join(item.value for item in items)
+        if audio := await synthesize(body):
+            state = await send_private_record(send, audio)
+            if state == DELIVERY_UNKNOWN:
+                result.delivery_unknown = True
+                return result
+            if state == DELIVERY_CONFIRMED_SUCCESS:
+                result.delivered.append(body)
+                _after_delivery(user_id, result, pipeline)
+                return result
+
     budget = [private_sticker_left(user_id, today) if today else 0]
     picked_ids: list[str] = []
     delivered_ids: list[str] = []
