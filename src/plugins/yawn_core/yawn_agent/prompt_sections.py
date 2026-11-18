@@ -621,6 +621,11 @@ SECTIONS: tuple[PromptSection, ...] = (
         tasks=_DP,
     ),
     PromptSection(
+        "speech.deepseek", "DeepSeek 本轮附件与语音", "speech", "realtime",
+        KIND_GENERATED, "附件处理状态和按本轮内容选择语音回复的说明。",
+        tasks=_DP,
+    ),
+    PromptSection(
         "speech.sticker",
         "表情包",
         "speech",
@@ -906,6 +911,11 @@ SECTIONS: tuple[PromptSection, ...] = (
         default_ref="private_prompt:PRIVATE_RHYTHM_MIX",
         description="最近几次回复条数一模一样（如连着三次三条）或每次都分条时追加：这次按内容来，一条也行（PRIVATE_AGENT_RHYTHM_MIX_HINT）。",
         when="最近几次回复条数套了模板时",
+        tasks=_PV,
+    ),
+    PromptSection(
+        "private.deepseek", "DeepSeek 本轮附件与语音", "private", "private_system",
+        KIND_GENERATED, "附件处理状态和按本轮内容选择语音回复的说明。",
         tasks=_PV,
     ),
     PromptSection(

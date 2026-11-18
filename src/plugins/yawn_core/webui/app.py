@@ -36,6 +36,7 @@ from .audits import router as audits_router
 from .auth import Session, verify_session, websocket_session
 from .auth_routes import router as auth_router
 from .config import API_PATH, BASE_PATH, COOKIE_NAME, DIST_DIR
+from .deepseek_routes import router as deepseek_router
 from .environment_routes import router as environment_router
 from .fanqie import router as fanqie_router
 from .games import router as games_router
@@ -152,6 +153,7 @@ def register(app: FastAPI, *, include_spa: bool = True) -> None:
     app.include_router(rpg_modules_router)
     app.include_router(sandbox_router)
     app.include_router(web_search_router)
+    app.include_router(deepseek_router)
     app.include_router(sticker_admin_router)
     app.include_router(stickers_router)
     app.include_router(schedules_router)

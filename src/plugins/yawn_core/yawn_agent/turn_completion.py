@@ -11,11 +11,17 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..llm import NO_OUTPUT_LIMIT
-from . import turn_budget
+from ..llm import (
+    NO_OUTPUT_LIMIT,
+    LLMMultimodalUnsupportedError,
+    resolve_llm_request,
+)
+from . import deepseek_turn, turn_budget
+from .context import CurrentTurn
 from .execution_trace import trace_event
 from .llm_retry import complete_with_retry, error_kind
 from .log import dbg
+from .turn_media import remember_multimodal_unsupported
 
 
 async def request_completion(
@@ -64,6 +70,61 @@ async def request_completion(
     )
 
 
+REBUILT = object()
+
+
+async def request_dialogue_completion(
+    complete: Callable[..., Awaitable[Any]],
+    turn: Any,
+    *,
+    describe_images: Callable[..., Awaitable[str]],
+) -> Any:
+    """请求一次模型（抖动时重试一次）；多模态不兼容时改走视觉转述重建 Prompt 并返回 ``REBUILT``。"""
+
+    llm_started = time.monotonic()
+    try:
+        completion = await request_completion(complete, turn)
+        if deepseek_turn.drop_rejected_files(
+            turn.messages,
+            turn.deepseek_media,
+            error_kind(completion),
+            section="speech.deepseek",
+        ):
+            completion = await request_completion(complete, turn)
+    except LLMMultimodalUnsupportedError:
+        trace_event(
+            "llm",
+            "模型多模态请求",
+            status="degraded",
+            output={"model": turn.model, "fallback": "vision_caption"},
+            detail="模型不支持当前多模态输入，改用视觉转述后重建 Prompt",
+            duration_ms=(time.monotonic() - llm_started) * 1000,
+            round_index=turn.rounds + 1,
+        )
+        dbg(f"群 {turn.group_id} 模型不支持多模态,降级为视觉转述重建提示词(不占轮次)")
+        remember_multimodal_unsupported(resolve_llm_request("agent_dialogue"))
+        turn.fallback_attempted = True
+        described = await describe_images(
+            turn.group_id,
+            turn.normalized,
+            turn.media_inputs,
+            turn.session,
+            turn.config,
+            turn.cached_captions,
+            turn.media_digests,
+            diagnostics=turn.media_diagnostics,
+        )
+        turn.user_prompt = f"{turn.query_text}\n{described}"
+        turn.current_turn = CurrentTurn(
+            **{**turn.current_turn.as_dict(), "content": turn.user_prompt}
+        )
+        turn.media_blocks = []
+        turn.rebuild_messages()
+        return REBUILT
+    else:
+        return completion
+
+
 async def wrap_up_reply(
     complete: Callable[..., Awaitable[Any]], turn: Any, reason: str
 ) -> str:
@@ -96,4 +157,10 @@ async def wrap_up_reply(
     return content
 
 
-__all__ = ["error_kind", "request_completion", "wrap_up_reply"]
+__all__ = [
+    "REBUILT",
+    "error_kind",
+    "request_completion",
+    "request_dialogue_completion",
+    "wrap_up_reply",
+]

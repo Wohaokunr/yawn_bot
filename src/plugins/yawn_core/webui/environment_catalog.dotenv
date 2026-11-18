@@ -241,6 +241,24 @@ AGENT_WEB_SEARCH_API_KEY=
 # DeepSeek Search / Fetch API 的 Base URL（一般不用改）
 AGENT_WEB_SEARCH_BASE_URL=https://api.deepseek.com
 
+# ── DeepSeek 应用 API ────────────────────────────────────────────────────────
+# 官方 DeepSeek 密钥；留空则复用指向 https://api.deepseek.com 的模型提供商密钥
+DEEPSEEK_API_KEY=
+# 开放 WebUI 管理员对话、文档与语音工作台
+DEEPSEEK_WEBUI_ENABLED=false
+# QQ 群聊主对话选用 deepseek-flash
+DEEPSEEK_QQ_GROUP=false
+# QQ 私聊主对话选用 deepseek-flash
+DEEPSEEK_QQ_PRIVATE=false
+# 启用 DeepSeek 的 QQ 入口允许发送本轮文档给模型
+DEEPSEEK_QQ_DOCUMENTS=true
+# 启用 DeepSeek 的 QQ 入口允许转写本轮语音
+DEEPSEEK_QQ_ASR=true
+# 启用 DeepSeek 的 QQ 入口允许 Agent 自行选择语音回复
+DEEPSEEK_QQ_TTS=false
+# 文档解析方式：text_recognition（文字）或 rich_layout_recognition（图文）
+DEEPSEEK_DOCUMENT_MODE=text_recognition
+
 # ── 私聊 Agent ─────────────────────────────────────────────────────────────────
 
 # 私聊交给 Agent（同一份人设、跨群关系、签到/记忆工具）；关闭后私聊退回原来的纯对话

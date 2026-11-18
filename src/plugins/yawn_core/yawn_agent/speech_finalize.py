@@ -20,6 +20,7 @@ from .outbound import (
     PreparedOutboundMessage,
     PreparedSpeechParts,
     SendResult,
+    prepare_record_reply,
     prepare_speech_parts,
 )
 from .persona import persona_behavior
@@ -70,6 +71,7 @@ async def finalize_reply(  # noqa: PLR0913
     duplicate_func: DuplicateFunc,
     emotion_state: object = None,
     actor_user_id: int | None = None,
+    speak: bool = False,
 ) -> None:
     if isinstance(content, SpeechPlan):
         recent_speech = tuple(
@@ -130,6 +132,16 @@ async def finalize_reply(  # noqa: PLR0913
             for path in item.temporary_files:
                 path.unlink(missing_ok=True)
         return
+
+    if speak and prepared.messages and reply_text and all(
+        row.get("type") in {"text", "reply"}
+        for item in prepared.messages for row in item.segment_records
+    ):
+        from .deepseek_turn import synthesize
+
+        if audio := await synthesize(reply_text):
+            voice = prepare_record_reply(prepared.messages[0], reply_text, audio)
+            prepared = PreparedSpeechParts((voice,), single_rhythm(reply_text, source="voice"))
 
     async def send_one(part: PreparedOutboundMessage, index: int) -> SendResult:
         # 只有第一条做触发过期检查：已经开口了就把话说完。

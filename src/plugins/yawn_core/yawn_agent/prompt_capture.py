@@ -28,6 +28,8 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
+from src.plugins.yawn_core.deepseek import TRANSCRIPT_PREFIX
+
 from .context import now_beijing
 from .context_budget import estimate_tokens
 from .execution_trace import ExecutionTrace, current_execution_trace
@@ -54,7 +56,7 @@ _POSIX_PATH_RE = re.compile(
     r"(?<![\w:./])/(?:home|root|mnt|tmp|var|opt|usr|etc|srv|data|app|Users)/[^\s\]\[\)\(\}\{<>\"'，。]+"
 )
 _DATA_URL_RE = re.compile(r"^data:([\w/+.-]+)?;base64,", re.IGNORECASE)
-_MEDIA_KEYS = frozenset({"url", "image_url", "file_data", "data", "input_audio"})
+_MEDIA_KEYS = frozenset({"url", "image_url", "file_data", "file_id", "data", "input_audio"})
 
 _lock = threading.Lock()
 _holders: OrderedDict[str, ExecutionTrace] = OrderedDict()
@@ -92,6 +94,11 @@ class _Redactor:
         text = _WINDOWS_PATH_RE.sub(path, text)
         return _POSIX_PATH_RE.sub(path, text)
 
+    def text_part(self, value: str) -> str:
+        if value.startswith(TRANSCRIPT_PREFIX):
+            return self.media(value)
+        return self.text(value)
+
     def media(self, value: Any) -> str:
         """图片/文件块：只留类型、大小和哈希。"""
 
@@ -123,7 +130,7 @@ def _jsonable(value: Any, redactor: _Redactor, *, depth: int = 0, key: str = "")
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return redactor.text(value)
+        return redactor.text(value) if key != "text" else redactor.text_part(value)
     if isinstance(value, Mapping):
         part_type = str(value.get("type") or "")
         output: dict[str, Any] = {}

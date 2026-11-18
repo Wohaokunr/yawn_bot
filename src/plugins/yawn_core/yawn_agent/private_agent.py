@@ -22,19 +22,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import AsyncExitStack
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
-from .. import affinity, llm
+from .. import affinity, deepseek, llm
 from ..private_chat_bridge import (
     PrivateTurnRequest,
     private_agent_config,
     turns_today,
 )
-from . import llm_retry, private_rhythm
+from . import deepseek_turn, llm_retry, private_rhythm
 from . import private_turn_taking as turn_taking
 from .context import now_beijing
 from .log import dbg, dbg_exc
@@ -664,7 +665,11 @@ async def _run_tools(
 ) -> None:
     from .private_tool_catalog import inner_name, record_call
 
-    messages.append(_assistant_with_calls(message))
+    assistant = _assistant_with_calls(message)
+    reasoning = getattr(message, "reasoning_content", None)
+    if deepseek.in_qq_turn() and reasoning is not None:
+        assistant["reasoning_content"] = reasoning
+    messages.append(assistant)
     for call in messages[-1]["tool_calls"]:
         name = call["function"]["name"]
         args = _parse_args(call["function"]["arguments"])
@@ -782,6 +787,7 @@ async def _deliver_text(
     now: datetime,
     *,
     pipeline: str = "turn",
+    speak: bool = False,
 ) -> Delivery:
     """依次发出去；分条期间他发来新消息就停（``PRIVATE_AGENT_INTERRUPT``）。
 
@@ -801,10 +807,13 @@ async def _deliver_text(
         sleep=asyncio.sleep,
         interrupt=InterruptWatch.start(user_id),
         pipeline=pipeline,
+        speak=speak,
     )
 
 
-async def _send_parts(request: PrivateTurnRequest, text: str, now: datetime) -> Delivery:
+async def _send_parts(
+    request: PrivateTurnRequest, text: str, now: datetime, *, speak: bool = False
+) -> Delivery:
     async def send(message: Any) -> None:
         if request.event is None:
             # 没有触发事件的回合（等他说完后自己接话）：直接发私聊。
@@ -812,7 +821,9 @@ async def _send_parts(request: PrivateTurnRequest, text: str, now: datetime) -> 
             return
         await request.bot.send(request.event, message)
 
-    return await _deliver_text(request.bot, request.user_id, text, send, now)
+    return await _deliver_text(
+        request.bot, request.user_id, text, send, now, speak=speak
+    )
 
 
 def _is_superuser(user_id: int) -> bool:
@@ -833,11 +844,23 @@ async def handle_private_turn(request: PrivateTurnRequest) -> str | None:
         pipeline = "offer"
     else:
         pipeline = "turn"
-    with use_private_user(request.user_id, pipeline=pipeline):
-        return await _handle_private_turn(request)
+    use_deepseek = (
+        deepseek.config.deepseek_qq_private
+        and request.event is not None
+        and pipeline == "turn"
+        and not request.extra.get("handoff")
+    )
+    with (
+        use_private_user(request.user_id, pipeline=pipeline),
+        deepseek.qq_turn(enabled=use_deepseek),
+    ):
+        async with AsyncExitStack() as stack:
+            return await _handle_private_turn(request, stack=stack)
 
 
-async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
+async def _handle_private_turn(
+    request: PrivateTurnRequest, *, stack: AsyncExitStack
+) -> str | None:
     session = request.session
     user_id = request.user_id
     now = now_beijing()
@@ -875,6 +898,15 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         bot_id: int | None = int(request.bot.self_id)
     except (TypeError, ValueError):
         bot_id = None
+
+    deepseek_media = await stack.enter_async_context(
+        deepseek_turn.attachments(
+            request.bot,
+            0,
+            request.media if private_agent_config.private_agent_accept_media else [],
+            actor_id=user_id,
+        )
+    )
 
     from .private_computer import computer_status, import_media
     from .private_tasks import tasks_enabled
@@ -1047,6 +1079,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         if message.get("role") == "user"
     }
     private_vision.attach_to_messages(messages, vision)
+    if deepseek_media is not None:
+        deepseek_turn.add_to_messages(
+            messages, deepseek_media, section="private.deepseek",
+            voice_allowed=deepseek.config.deepseek_qq_tts,
+        )
     is_superuser = _is_superuser(user_id)
     from .group_manage import refresh_manager_hint
 
@@ -1145,12 +1182,32 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             for index, content in original_users.items():
                 messages[index]["content"] = content
             private_vision.attach_to_messages(messages, vision)
+            if deepseek_media is not None:
+                deepseek_turn.add_to_messages(
+                    messages,
+                    deepseek_media,
+                    section="private.deepseek",
+                    voice_allowed=False,
+                    include_hint=False,
+                    user_index=max(original_users, default=None),
+                )
             result = await llm.complete_with_tools_result(
                 messages,  # pyright: ignore[reportArgumentType]
                 **_round_tools(tools, final=final),
                 task="agent_dialogue",
                 max_tokens=llm.NO_OUTPUT_LIMIT,
                 timeout=COMPLETION_TIMEOUT,
+            )
+        if deepseek_turn.drop_rejected_files(
+            messages, deepseek_media, llm_retry.error_kind(result), section="private.deepseek"
+        ):
+            result = await llm.complete_with_tools_result(
+                messages,  # pyright: ignore[reportArgumentType]
+                **_round_tools(tools, final=final),
+                task="agent_dialogue",
+                max_tokens=llm.NO_OUTPUT_LIMIT,
+                timeout=COMPLETION_TIMEOUT,
+                multimodal=bool(vision.blocks),
             )
         _record_usage("turn", result, user_id, round_index, changed)
         if not retried and llm_retry.should_retry(result):
@@ -1199,6 +1256,7 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
             [*private_vision.history_notes(vision), *attachment_notes(attachments)],
         )
     wrote = has_write_result(ctx.succeeded)
+    text, speak = deepseek_turn.split_voice(text.strip())
     silence = turn_taking.parse_silence(text)
     text = silence.text
     if offer is not None:
@@ -1250,7 +1308,11 @@ async def _handle_private_turn(request: PrivateTurnRequest) -> str | None:
         return None
     # 这一轮要开口了：上一条被打断的记录用过了（这轮自己被打断会重新记）。
     private_rhythm.clear_cut(user_id)
-    sent = await _send_parts(request, text, now)
+    sent = await _send_parts(
+        request, text, now, **({"speak": True} if speak else {})
+    )
+    if sent.delivery_unknown:
+        return ""
     delivered = sent.delivered
     if not delivered:
         return None
